@@ -29,7 +29,7 @@ const PIECES: {
   title: string;
   blurb: ReactNode;
   replaces: string[];
-  lines: { cmd?: string; comment?: string; out?: string; bright?: boolean }[];
+  lines: { cmd?: string; comment?: string; out?: string }[];
 }[] = [
   {
     accent: 'ember',
@@ -77,7 +77,7 @@ const PIECES: {
     title: 'A 20× faster npx',
     blurb: (
       <>
-        Resolves <Mono>node_modules/.bin</Mono> in Rust and execs the binary directly; no
+        Resolves <Mono>node_modules/.bin</Mono> in Rust and execs the binary directly — no
         Node process in the wrapper.
       </>
     ),
@@ -110,25 +110,22 @@ const PIECES: {
   },
   {
     accent: 'pink',
-    command: 'nub pm',
-    label: 'Package manager manager',
-    title: 'A package manager manager',
+    command: 'nub install',
+    label: 'Package manager',
+    title: 'A built-in package manager',
     blurb: (
       <>
-        Not a new package manager: Nub provisions and runs the one your project pins.{' '}
-        Corepack&rsquo;s job, in native Rust. <Mono>nub pm shim</Mono> makes even bare{' '}
-        <Mono>pnpm</Mono> run the pinned version (fetched, verified, and cached on demand)
-        and refuses the wrong manager before it can write a competing lockfile.
+        A pnpm-compatible package manager, built in. <Mono>nub install</Mono>{' '}reads the lockfile
+        your project already has — pnpm, npm, or bun, with yarn honored read-only — writes the same
+        format back, and configures itself from your <Mono>.npmrc</Mono>{' '}and workspaces.
       </>
     ),
-    replaces: ['corepack'],
+    replaces: ['pnpm install', 'npm install', 'corepack'],
     lines: [
-      { cmd: 'nub pm shim', comment: 'opt-in, one-time' },
-      { cmd: 'pnpm --version' },
-      { out: '✓ Installed pnpm 9.15.4 in 0.7s' },
-      { out: '9.15.4', bright: true },
-      { cmd: 'npm install' },
-      { out: 'nub: this project pins pnpm — refusing to run npm.', bright: true },
+      { out: '# a real install, against your lockfile' },
+      { cmd: 'nub install' },
+      { out: '# frozen + clean, for CI' },
+      { cmd: 'nub ci' },
     ],
   },
 ];

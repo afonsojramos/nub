@@ -151,9 +151,15 @@ fn target_node_version() -> (u32, u32, u32) {
         // Prefer the exact binary nub would pick (`nub node which`); fall back to
         // PATH `node`. Either resolves the same version the spawned-nub tests use.
         // (`nub node which` prints the path to stdout, the explainer to stderr —
-        // capturing stdout gives just the path.)
+        // capturing stdout gives just the path.) Resolved FROM the fixtures dir so
+        // the answer goes through the same pin-free project boundary
+        // (tests/fixtures/package.json) the fixture tests run under — from the
+        // crate dir the walk-up hits the repo-root engines.node (>=22.15.0) and
+        // can report a store/nvm Node instead of the PATH-matrix Node the
+        // fixture tests actually spawn.
         let node = Command::new(nub_binary())
             .args(["node", "which"])
+            .current_dir(fixtures_dir())
             .output()
             .ok()
             .filter(|o| o.status.success())
@@ -2726,11 +2732,9 @@ fn run_npm_aliases_map_to_canonical_flags() {
 
 // ── PM-management verbs (A2 passthrough disabled) ────────────────────────────
 
-/// `nub add -D foo` is not a nub command: the A2 pure-passthrough frontend is
-/// disabled (pending the normalized standard surface — see
-/// wiki/research/package-manager-normalized-surface.md), so a PM verb errors
-/// non-zero and names the project's real PM with the exact command to paste.
-/// Nothing is dispatched — stdout stays empty.
+/// A deliberately-excluded engine verb (`deploy`) errors non-zero with its
+/// honest status ("not yet supported") and a real-PM fallback. Nothing is
+/// dispatched — stdout stays empty.
 #[test]
 fn bareword_pm_verb_errors_with_the_real_pm_command() {
     let dir = unique_test_cache();
@@ -2738,19 +2742,19 @@ fn bareword_pm_verb_errors_with_the_real_pm_command() {
     std::fs::write(dir.join("package.json"), r#"{"name":"app"}"#).unwrap();
     std::fs::write(dir.join("pnpm-lock.yaml"), "").unwrap(); // lockfile → pnpm
     let out = Command::new(nub_binary())
-        .args(["add", "-D", "foo"])
+        .args(["deploy", "out"])
         .current_dir(&dir)
         .output()
-        .expect("spawn nub add");
+        .expect("spawn nub deploy");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("pnpm add -D foo"),
-        "the error must carry the pasteable command for the project's PM: {stderr}"
+        stderr.contains("not yet supported") && stderr.contains("pnpm deploy"),
+        "the error must state the status and the real-PM fallback: {stderr}"
     );
     assert_ne!(
         out.status.code(),
         Some(0),
-        "a PM verb is an error, not a dispatch"
+        "an excluded PM verb is an error, not a dispatch"
     );
     assert!(
         out.stdout.is_empty(),
@@ -2780,7 +2784,7 @@ fn bareword_unknown_verb_errors() {
 }
 
 /// `nub pm which` with no pin errors clearly (names the unpinned state + the
-/// `nub pm pin` remedy) and exits non-zero — exercised through the binary so
+/// `nub pm use` remedy) and exits non-zero — exercised through the binary so
 /// the dispatch routing (`pm` → `run_pm` → `which`) is covered end-to-end.
 #[test]
 fn pm_which_without_a_pin_errors_through_the_binary() {
@@ -2800,7 +2804,7 @@ fn pm_which_without_a_pin_errors_through_the_binary() {
         "no-pin which must exit non-zero"
     );
     assert!(
-        stderr.contains("no package manager is pinned") && stderr.contains("nub pm pin"),
+        stderr.contains("no package manager is pinned") && stderr.contains("nub pm use"),
         "the error must name the unpinned state and the remedy: {stderr}"
     );
 }

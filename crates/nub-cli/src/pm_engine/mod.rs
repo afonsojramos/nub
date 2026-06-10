@@ -1,0 +1,1294 @@
+//! Package-manager verbs through the embedded aube engine (vendor/aube,
+//! linked as a library; no subprocess).
+//!
+//! This module is the shared plumbing; the verbs themselves live in four
+//! per-family modules:
+//!
+//! - [`install_family`] — dependency-graph mutation and linking (`install`,
+//!   `ci`, `add`, `remove`, `update`, `link`, `patch*`, …). `install`/`ci`
+//!   are live (slice 2); the rest are registered stubs.
+//! - [`info_family`] — read-only project/graph/registry queries (`list`,
+//!   `why`, `outdated`, `audit`, `view`, …).
+//! - [`publish_family`] — registry writes, packaging, and auth (`publish`,
+//!   `pack`, `version`, `login`, `dist-tag`, …).
+//! - [`store_config_family`] — store/cache forensics and settings
+//!   (`store`, `cache`, `config`, `cat-file`, …).
+//!
+//! All engine output flows through [`present`]: miette reports are rendered
+//! with the `ERR_AUBE_*` → `ERR_NUB_*` / `WARN_AUBE_*` → `WARN_NUB_*`
+//! rewrite, engine doc URLs stripped, message-level `aube` verb spellings
+//! rebranded, and exit codes mapped via the engine's own exit table.
+//!
+//! # Verb registry
+//!
+//! [`ENGINE_VERBS`] registers the complete aube verb surface (read from
+//! `vendor/aube/crates/aube/src/lib.rs::Commands`) minus two exclusion sets:
+//!
+//! - **nub-reserved** (collision policy: nub verbs win): `run`
+//!   (+`run-script`), `exec` (+`x`), `test` (+`t`), `start`, `stop`,
+//!   `restart`, `install-test` (+`it`) — the script-runner family routes to
+//!   nub's own runner or stays an error, exactly as today; `node`, `pm`,
+//!   `watch`, `upgrade` are nub-native namespaces (so aube's `upgrade`
+//!   alias on `update` is dropped — `nub update`/`up` is dependency update,
+//!   `nub upgrade` is self-update). The `External` bare-script catch-all is
+//!   also out: bare `nub <script>` stays banned.
+//! - **tool-identity** (they describe the aube tool, not the project):
+//!   `sponsors`, `diag`, `doctor`, `completion`, `usage`. The internal
+//!   `__node-gyp-bootstrap` re-entry verb is also outside the registry but
+//!   IS wired — as an early intercept in cli.rs dispatching to
+//!   [`run_node_gyp_bootstrap`], because the engine's lazy node-gyp shims
+//!   re-invoke `current_exe()` (= nub) with it mid-lifecycle-script.
+//!
+//! `install`/`i`/`ci` are *not* in the registry: they are live clap verbs
+//! in `cli.rs` (SUBCOMMANDS) dispatching straight to
+//! [`install_family::run_install`] / [`install_family::run_ci`]. `init` is
+//! not in the registry either — the spelling is reserved for nub's own
+//! project init; cli.rs's bareword arm answers it with a "coming" note.
+//! Every other registered verb is wired to the engine through its family
+//! module, except the deliberate exclusions — `recursive` (no meta-verb;
+//! use `-r`/`--filter` on the verb), `clean`/`purge` (nub doesn't delete
+//! node_modules for you), `deploy` (not yet wired), and `sbom` (engine
+//! branding in the document body — info_family module doc) — which error
+//! with honest per-verb messages in their family dispatchers.
+
+pub mod info_family;
+pub mod install_family;
+pub mod log;
+pub mod present;
+pub mod publish_family;
+pub mod store_config_family;
+pub mod use_align;
+pub mod use_nub;
+
+pub use install_family::{CiFlags, InstallFlags, run_ci, run_install};
+
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result};
+use aube_lockfile::LockfileKind;
+
+/// The four engine verb families. One module per family; each family module
+/// owns the wiring (args parsing, options construction, output routing) for
+/// its verbs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Family {
+    Install,
+    Info,
+    Publish,
+    StoreConfig,
+}
+
+/// One registered engine verb: its canonical spelling, accepted aliases
+/// (mirroring aube's clap aliases), owning family, and — documentation for
+/// the Surface phase — the aube args type the wired implementation parses.
+pub struct VerbSpec {
+    pub canonical: &'static str,
+    pub aliases: &'static [&'static str],
+    pub family: Family,
+    /// The `aube::commands::…` args type this verb will parse when wired.
+    /// Doc-only today (stubs never parse); kept in the table so the family
+    /// fill-in work is self-describing. Read by tests only until then.
+    #[allow(dead_code)]
+    pub aube_args: &'static str,
+}
+
+/// The complete not-yet-wired aube verb surface, per the module doc's
+/// exclusion rules. Spellings must be unique across canonicals + aliases and
+/// disjoint from cli.rs's SUBCOMMANDS and PM_VERBS (asserted in tests here
+/// and in cli.rs).
+pub const ENGINE_VERBS: &[VerbSpec] = &[
+    // ── install family: dependency-graph mutation + linking ────────────
+    VerbSpec {
+        canonical: "add",
+        aliases: &["a"],
+        family: Family::Install,
+        aube_args: "commands::add::AddArgs",
+    },
+    VerbSpec {
+        canonical: "remove",
+        aliases: &["rm", "uninstall", "un", "uni"],
+        family: Family::Install,
+        aube_args: "commands::remove::RemoveArgs",
+    },
+    // aube also aliases `upgrade` here; that spelling is nub's self-update.
+    VerbSpec {
+        canonical: "update",
+        aliases: &["up"],
+        family: Family::Install,
+        aube_args: "commands::update::UpdateArgs",
+    },
+    VerbSpec {
+        canonical: "import",
+        aliases: &[],
+        family: Family::Install,
+        aube_args: "commands::import::ImportArgs",
+    },
+    VerbSpec {
+        canonical: "dedupe",
+        aliases: &[],
+        family: Family::Install,
+        aube_args: "commands::dedupe::DedupeArgs",
+    },
+    VerbSpec {
+        canonical: "prune",
+        aliases: &[],
+        family: Family::Install,
+        aube_args: "commands::prune::PruneArgs",
+    },
+    VerbSpec {
+        canonical: "rebuild",
+        aliases: &["rb"],
+        family: Family::Install,
+        aube_args: "commands::rebuild::RebuildArgs",
+    },
+    VerbSpec {
+        canonical: "fetch",
+        aliases: &[],
+        family: Family::Install,
+        aube_args: "commands::fetch::FetchArgs",
+    },
+    VerbSpec {
+        canonical: "link",
+        aliases: &["ln"],
+        family: Family::Install,
+        aube_args: "commands::link::LinkArgs",
+    },
+    VerbSpec {
+        canonical: "unlink",
+        aliases: &["dislink"],
+        family: Family::Install,
+        aube_args: "commands::unlink::UnlinkArgs",
+    },
+    VerbSpec {
+        canonical: "approve-builds",
+        aliases: &[],
+        family: Family::Install,
+        aube_args: "commands::approve_builds::ApproveBuildsArgs",
+    },
+    VerbSpec {
+        canonical: "ignored-builds",
+        aliases: &[],
+        family: Family::Install,
+        aube_args: "commands::ignored_builds::IgnoredBuildsArgs",
+    },
+    VerbSpec {
+        canonical: "patch",
+        aliases: &[],
+        family: Family::Install,
+        aube_args: "commands::patch::PatchArgs",
+    },
+    VerbSpec {
+        canonical: "patch-commit",
+        aliases: &[],
+        family: Family::Install,
+        aube_args: "commands::patch_commit::PatchCommitArgs",
+    },
+    VerbSpec {
+        canonical: "patch-remove",
+        aliases: &[],
+        family: Family::Install,
+        aube_args: "commands::patch_remove::PatchRemoveArgs",
+    },
+    VerbSpec {
+        canonical: "clean",
+        aliases: &[],
+        family: Family::Install,
+        aube_args: "commands::clean::CleanArgs",
+    },
+    // `purge` is aube's alias-shaped variant of clean (commands::clean::run_purge).
+    VerbSpec {
+        canonical: "purge",
+        aliases: &[],
+        family: Family::Install,
+        aube_args: "commands::clean::CleanArgs",
+    },
+    VerbSpec {
+        canonical: "deploy",
+        aliases: &[],
+        family: Family::Install,
+        aube_args: "commands::deploy::DeployArgs",
+    },
+    VerbSpec {
+        canonical: "dlx",
+        aliases: &[],
+        family: Family::Install,
+        aube_args: "commands::dlx::DlxArgs",
+    },
+    VerbSpec {
+        canonical: "create",
+        aliases: &[],
+        family: Family::Install,
+        aube_args: "commands::create::CreateArgs",
+    },
+    // `init` is deliberately NOT registered: the spelling is reserved for
+    // nub's own project init (the maintainer owns the verb), not the engine's
+    // npm-style manifest scaffold. cli.rs answers `nub init` with a
+    // "nub's own init is coming" note instead of a PM redirect.
+    // Workspace fanout meta-verb. Registered so it errors with the honest
+    // "use -r on the verb" message rather than the generic not-a-command
+    // fallback (install_family::run_verb).
+    VerbSpec {
+        canonical: "recursive",
+        aliases: &["multi", "m"],
+        family: Family::Install,
+        aube_args: "commands::recursive::RecursiveArgs",
+    },
+    // ── info family: read-only queries ──────────────────────────────────
+    VerbSpec {
+        canonical: "list",
+        aliases: &["ls"],
+        family: Family::Info,
+        aube_args: "commands::list::ListArgs",
+    },
+    // `la`/`ll` are aube's hidden list-long variants (ListArgs + long=true).
+    VerbSpec {
+        canonical: "la",
+        aliases: &[],
+        family: Family::Info,
+        aube_args: "commands::list::ListArgs",
+    },
+    VerbSpec {
+        canonical: "ll",
+        aliases: &[],
+        family: Family::Info,
+        aube_args: "commands::list::ListArgs",
+    },
+    VerbSpec {
+        canonical: "why",
+        aliases: &["w"],
+        family: Family::Info,
+        aube_args: "commands::why::WhyArgs",
+    },
+    VerbSpec {
+        canonical: "outdated",
+        aliases: &[],
+        family: Family::Info,
+        aube_args: "commands::outdated::OutdatedArgs",
+    },
+    VerbSpec {
+        canonical: "audit",
+        aliases: &[],
+        family: Family::Info,
+        aube_args: "commands::audit::AuditArgs",
+    },
+    VerbSpec {
+        canonical: "licenses",
+        aliases: &[],
+        family: Family::Info,
+        aube_args: "commands::licenses::LicensesArgs",
+    },
+    VerbSpec {
+        canonical: "deprecations",
+        aliases: &[],
+        family: Family::Info,
+        aube_args: "commands::deprecations::DeprecationsArgs",
+    },
+    VerbSpec {
+        canonical: "peers",
+        aliases: &[],
+        family: Family::Info,
+        aube_args: "commands::peers::PeersArgs",
+    },
+    VerbSpec {
+        canonical: "query",
+        aliases: &[],
+        family: Family::Info,
+        aube_args: "commands::query::QueryArgs",
+    },
+    VerbSpec {
+        canonical: "check",
+        aliases: &[],
+        family: Family::Info,
+        aube_args: "commands::check::CheckArgs",
+    },
+    VerbSpec {
+        canonical: "bin",
+        aliases: &[],
+        family: Family::Info,
+        aube_args: "commands::bin::BinArgs",
+    },
+    VerbSpec {
+        canonical: "root",
+        aliases: &[],
+        family: Family::Info,
+        aube_args: "commands::root::RootArgs",
+    },
+    VerbSpec {
+        canonical: "sbom",
+        aliases: &[],
+        family: Family::Info,
+        aube_args: "commands::sbom::SbomArgs",
+    },
+    VerbSpec {
+        canonical: "view",
+        aliases: &["info", "show", "v"],
+        family: Family::Info,
+        aube_args: "commands::view::ViewArgs",
+    },
+    // hidden npm-fallback upstream ("not implemented — use npm search").
+    VerbSpec {
+        canonical: "search",
+        aliases: &[],
+        family: Family::Info,
+        aube_args: "commands::npm_fallback::FallbackArgs",
+    },
+    // ── publish family: registry writes, packaging, auth ────────────────
+    VerbSpec {
+        canonical: "publish",
+        aliases: &[],
+        family: Family::Publish,
+        aube_args: "commands::publish::PublishArgs",
+    },
+    VerbSpec {
+        canonical: "pack",
+        aliases: &[],
+        family: Family::Publish,
+        aube_args: "commands::pack::PackArgs",
+    },
+    VerbSpec {
+        canonical: "version",
+        aliases: &[],
+        family: Family::Publish,
+        aube_args: "commands::version::VersionArgs",
+    },
+    VerbSpec {
+        canonical: "deprecate",
+        aliases: &[],
+        family: Family::Publish,
+        aube_args: "commands::deprecate::DeprecateArgs",
+    },
+    VerbSpec {
+        canonical: "undeprecate",
+        aliases: &[],
+        family: Family::Publish,
+        aube_args: "commands::undeprecate::UndeprecateArgs",
+    },
+    VerbSpec {
+        canonical: "dist-tag",
+        aliases: &["dist-tags"],
+        family: Family::Publish,
+        aube_args: "commands::dist_tag::DistTagArgs",
+    },
+    VerbSpec {
+        canonical: "unpublish",
+        aliases: &[],
+        family: Family::Publish,
+        aube_args: "commands::unpublish::UnpublishArgs",
+    },
+    VerbSpec {
+        canonical: "login",
+        aliases: &["adduser"],
+        family: Family::Publish,
+        aube_args: "commands::login::LoginArgs",
+    },
+    VerbSpec {
+        canonical: "logout",
+        aliases: &[],
+        family: Family::Publish,
+        aube_args: "commands::logout::LogoutArgs",
+    },
+    // hidden npm-fallbacks upstream (whoami/owner/token/stage).
+    VerbSpec {
+        canonical: "whoami",
+        aliases: &[],
+        family: Family::Publish,
+        aube_args: "commands::npm_fallback::FallbackArgs",
+    },
+    VerbSpec {
+        canonical: "owner",
+        aliases: &[],
+        family: Family::Publish,
+        aube_args: "commands::npm_fallback::FallbackArgs",
+    },
+    VerbSpec {
+        canonical: "token",
+        aliases: &[],
+        family: Family::Publish,
+        aube_args: "commands::npm_fallback::FallbackArgs",
+    },
+    VerbSpec {
+        canonical: "stage",
+        aliases: &[],
+        family: Family::Publish,
+        aube_args: "commands::npm_fallback::FallbackArgs",
+    },
+    // ── store/config family: store + cache forensics, settings ──────────
+    VerbSpec {
+        canonical: "store",
+        aliases: &[],
+        family: Family::StoreConfig,
+        aube_args: "commands::store::StoreArgs",
+    },
+    VerbSpec {
+        canonical: "cache",
+        aliases: &[],
+        family: Family::StoreConfig,
+        aube_args: "commands::cache::CacheArgs",
+    },
+    VerbSpec {
+        canonical: "cat-file",
+        aliases: &[],
+        family: Family::StoreConfig,
+        aube_args: "commands::cat_file::CatFileArgs",
+    },
+    VerbSpec {
+        canonical: "cat-index",
+        aliases: &[],
+        family: Family::StoreConfig,
+        aube_args: "commands::cat_index::CatIndexArgs",
+    },
+    VerbSpec {
+        canonical: "find-hash",
+        aliases: &[],
+        family: Family::StoreConfig,
+        aube_args: "commands::find_hash::FindHashArgs",
+    },
+    VerbSpec {
+        canonical: "config",
+        aliases: &["c"],
+        family: Family::StoreConfig,
+        aube_args: "commands::config::ConfigArgs",
+    },
+    // hidden config get/set shorthands upstream.
+    VerbSpec {
+        canonical: "get",
+        aliases: &[],
+        family: Family::StoreConfig,
+        aube_args: "commands::config::GetArgs",
+    },
+    VerbSpec {
+        canonical: "set",
+        aliases: &[],
+        family: Family::StoreConfig,
+        aube_args: "commands::config::SetArgs",
+    },
+    // hidden npm-fallbacks upstream (pkg/set-script).
+    VerbSpec {
+        canonical: "pkg",
+        aliases: &[],
+        family: Family::StoreConfig,
+        aube_args: "commands::npm_fallback::FallbackArgs",
+    },
+    VerbSpec {
+        canonical: "set-script",
+        aliases: &[],
+        family: Family::StoreConfig,
+        aube_args: "commands::npm_fallback::FallbackArgs",
+    },
+];
+
+/// Resolve a typed verb (canonical or alias) to its registry entry.
+pub fn lookup_verb(name: &str) -> Option<&'static VerbSpec> {
+    ENGINE_VERBS
+        .iter()
+        .find(|spec| spec.canonical == name || spec.aliases.contains(&name))
+}
+
+/// Dispatch a registered engine verb to its family module. `typed` is the
+/// spelling the user actually wrote (echoed in errors and the PM-fallback
+/// hint); `pm_hint` is the project's detected package manager.
+pub fn dispatch_verb(
+    spec: &'static VerbSpec,
+    typed: &str,
+    args: &[String],
+    pm_hint: &str,
+) -> Result<i32> {
+    match spec.family {
+        Family::Install => install_family::run_verb(spec, typed, args, pm_hint),
+        Family::Info => info_family::run_verb(spec, typed, args, pm_hint),
+        Family::Publish => publish_family::run_verb(spec, typed, args, pm_hint),
+        Family::StoreConfig => store_config_family::run_verb(spec, typed, args, pm_hint),
+    }
+}
+
+/// The engine's hidden node-gyp re-entry verb: `__node-gyp-bootstrap
+/// <project-dir>` resolves (bootstrapping on first use) the cached
+/// node-gyp and prints its executable path on stdout. The lazy shims the
+/// engine drops into a project's `.bin` re-invoke `current_exe()` with
+/// this verb mid-lifecycle-script — and under nub, `current_exe()` IS
+/// nub — so cli.rs intercepts the spelling before clap and lands here.
+/// The printed path is data for the shim (it lands under nub's own cache
+/// root via the `set_cache_root` registration), so stdout is passed
+/// through; failures route through the brand rewrite like every other
+/// engine report.
+pub(crate) fn run_node_gyp_bootstrap(args: &[String]) -> Result<i32> {
+    let [project_dir] = args else {
+        anyhow::bail!("usage: nub __node-gyp-bootstrap <project-dir>");
+    };
+    let session = engine_session(None)?;
+    let result = session.runtime.block_on(
+        aube::commands::install::node_gyp_bootstrap::print_bootstrapped_binary(Path::new(
+            project_dir,
+        )),
+    );
+    match result {
+        Ok(()) => Ok(0),
+        Err(report) => Ok(present::emit_report(&report)),
+    }
+}
+
+/// The shared stub error for registered-but-unwired verbs: names the verb
+/// and gives the user's real-PM command so nobody is left stranded. Every
+/// *current* registration has an explicit arm (wired or an honest per-verb
+/// exclusion message), so this only fires for a future verb added to the
+/// registry before its family arm — a safety net, not a backlog marker.
+pub(crate) fn stub_error(typed: &str, args: &[String], pm_hint: &str) -> anyhow::Error {
+    let mut fallback = format!("{pm_hint} {typed}");
+    for arg in args {
+        fallback.push(' ');
+        fallback.push_str(arg);
+    }
+    anyhow::anyhow!(
+        "nub {typed}: not wired to the embedded engine yet\n\
+         \x20\x20run it with your package manager for now:\n\
+         \x20\x20\x20\x20{fallback}"
+    )
+}
+
+/// One prepared engine invocation: the project's resolved PM identity
+/// (layout-policy input) plus the tokio runtime the command runs on. Every
+/// family verb starts by calling [`engine_session`] instead of re-deriving
+/// the preflight/runtime recipe.
+pub(crate) struct EngineSession {
+    pub(crate) detected: Option<DetectedLockfile>,
+    pub(crate) runtime: tokio::runtime::Runtime,
+}
+
+/// Build the shared engine context for one verb invocation: apply `--dir`,
+/// register the brand/seam toggles, resolve the project's PM identity
+/// (declared-first, walking up), push the embedder setting defaults, and
+/// construct the runtime. Idempotent at the seam level (every seam is a
+/// `OnceLock`), which fits nub's one-command-per-process CLI shape.
+///
+/// Identity resolution is the engine's declaration-aware policy
+/// (`aube_lockfile::resolve_project_lockfile_kind` — pin-over-inference per
+/// wiki/commands/pm/identity-policy.md, Axiom 1), so a declared PM outranks
+/// stray lockfiles, a declared-but-contradicted project errors loudly here
+/// (rendered through [`present`], with the `nub pm use` remedy), and an
+/// undeclared multi-lockfile project errors as ambiguous instead of
+/// silently picking by filename precedence.
+///
+/// Ordering is load-bearing: the brand preflight must run before *any*
+/// engine code touches project config — even identity resolution reads the
+/// workspace yaml transitively (`resolve_project_lockfile_kind` →
+/// `aube_lock_filename` → `git_branch_lockfile_enabled` → workspace-config
+/// load), and the toggled getters freeze on first read. The embedder
+/// defaults are the one seam that *needs* the resolution result, so they
+/// land after it (they feed settings resolution, which no detection-path
+/// code consults).
+pub(crate) fn engine_session(dir: Option<&Path>) -> Result<EngineSession> {
+    apply_dir(dir)?;
+    engine_brand_preflight();
+    let cwd = std::env::current_dir()?;
+    let detected = resolve_identity_walk_up(&cwd)?;
+    // Role-first lifecycle UA (two-mode model, the maintainer 2026-06-10): in compat
+    // mode nub plays the incumbent PM's role completely, so the UA dep
+    // postinstalls sniff leads with that PM's token (`pnpm/<ver> nub/<ver>
+    // node/v<ver> …`, nub always second); under nub identity or in a fresh
+    // project the first token is nub's. Lifecycle-only — the registry UA and
+    // stream-time tool naming stay on the `nub/<ver>` product identity set in
+    // [`engine_brand_preflight`] (telemetry never lies).
+    aube::set_lifecycle_user_agent_product(lifecycle_ua_product(detected.as_ref(), &cwd));
+    // Set-unless-user-set: ranks below CLI flags, env vars, and every
+    // config file in the engine's settings precedence.
+    aube::set_embedder_defaults(nub_setting_defaults(detected.as_ref()));
+    Ok(EngineSession {
+        detected,
+        runtime: build_runtime()?,
+    })
+}
+
+/// The pnpm version the role-first UA advertises for a pnpm-role project with
+/// no pinned version — the engine's parity claim (full pnpm-v11 settings
+/// catalog + v11 build-policy posture; see the pnpm-11 compat decision,
+/// epics/v0.2-aube). A `packageManager`/`devEngines` pin always outranks this:
+/// the UA impersonates the pinned version when one exists.
+pub(crate) const PNPM_PARITY_VERSION: &str = "11.3.0";
+
+/// Compose the lifecycle-script UA product tokens for the resolved role —
+/// everything before the `<os> <arch>` tail the engine appends. The dialect is
+/// the runner's (`crates/nub-core/src/workspace/scripts.rs`): pnpm's UA shape,
+/// `node/v<ver>` included, so postinstall sniffers parse one format whether a
+/// script ran under `nub run` or an engine verb.
+///
+/// Role resolution mirrors identity (declaration first, lockfile kind second,
+/// fresh last): the declared name wins even when its pin is unusable for
+/// provisioning — the project *said* who manages it — and the version token is
+/// the pinned version when declared, else the engine's parity version for
+/// pnpm and `?` (pnpm's own convention for an unknown version) for the roles
+/// whose real tool nub does not embed.
+fn lifecycle_ua_product(detected: Option<&DetectedLockfile>, cwd: &Path) -> String {
+    let node_version = nub_core::node::discovery::discover_node(cwd)
+        .map(|n| n.version.to_string())
+        .unwrap_or_else(|_| "?".to_string());
+    compose_lifecycle_ua(
+        nub_core::pm::resolve::declared_pm_raw(cwd),
+        detected.map(|d| d.kind),
+        &node_version,
+    )
+}
+
+/// Pure core of [`lifecycle_ua_product`] (unit-tested without a fixture).
+fn compose_lifecycle_ua(
+    declared: Option<(String, Option<String>)>,
+    kind: Option<LockfileKind>,
+    node_version: &str,
+) -> String {
+    let nub_version = env!("CARGO_PKG_VERSION");
+    // The declared name is the role when it names an identity nub recognizes;
+    // an unknown tool name (vlt, deno, …) falls through to the lockfile kind,
+    // exactly like identity resolution does.
+    let declared_role = declared
+        .as_ref()
+        .filter(|(name, _)| matches!(name.as_str(), "npm" | "pnpm" | "yarn" | "bun" | "nub"))
+        .map(|(name, version)| (name.clone(), version.clone()));
+    let role = declared_role
+        .as_ref()
+        .map(|(name, _)| name.clone())
+        .or_else(|| {
+            kind.map(|k| {
+                match k {
+                    LockfileKind::Pnpm => "pnpm",
+                    LockfileKind::Npm | LockfileKind::NpmShrinkwrap => "npm",
+                    LockfileKind::Yarn | LockfileKind::YarnBerry => "yarn",
+                    LockfileKind::Bun => "bun",
+                    // The generically named lock.yaml (the engine's `Aube` slot
+                    // under nub's filename toggle) is nub identity.
+                    LockfileKind::Aube => "nub",
+                }
+                .to_string()
+            })
+        });
+    match role.as_deref() {
+        // Compat mode: the incumbent's token first, nub always second. The
+        // version is the pin when the declaration supplied one, else the
+        // engine's parity version (pnpm) or `?` (roles nub doesn't embed).
+        Some(other) if other != "nub" => {
+            let version = declared_role
+                .and_then(|(_, version)| version)
+                .unwrap_or_else(|| match other {
+                    "pnpm" => PNPM_PARITY_VERSION.to_string(),
+                    _ => "?".to_string(),
+                });
+            format!("{other}/{version} nub/{nub_version} node/v{node_version}")
+        }
+        // Nub identity or a fresh project: nub first, byte-identical to the
+        // runner's dialect (`nub/<v> npm/? node/v<ver>`).
+        _ => format!("nub/{nub_version} npm/? node/v{node_version}"),
+    }
+}
+
+/// `--dir` / `-C` (and the global `--cwd`, which dispatch applies earlier):
+/// chdir before anything reads the project. Mirrors aube's global `-C`.
+/// `pub(crate)` for the verbs that deliberately skip [`engine_session`]'s
+/// identity resolution (`import` — see its module note).
+pub(crate) fn apply_dir(dir: Option<&Path>) -> Result<()> {
+    if let Some(dir) = dir {
+        std::env::set_current_dir(dir)
+            .with_context(|| format!("failed to change directory to {}", dir.display()))?;
+    }
+    Ok(())
+}
+
+pub(crate) struct DetectedLockfile {
+    pub(crate) kind: LockfileKind,
+    /// Directory the identity resolved in (project / workspace root).
+    pub(crate) dir: PathBuf,
+    /// True when the kind comes from the manifest declaration alone
+    /// (`ResolvedLockfileKind::DeclaredFresh`) — no lockfile exists on disk
+    /// yet. The yarn write gate branches on this: a fresh declared-yarn
+    /// install would *create* yarn.lock, which is gated.
+    pub(crate) fresh: bool,
+}
+
+/// Resolve the project's PM identity, walking up like the PM-redirect
+/// detector does (a member dir inside a workspace has no lockfile or
+/// declaration of its own; the root's governs the layout). Per level the
+/// engine's declaration-aware policy applies — declaration first, lockfile
+/// inference second; contradiction/ambiguity are loud errors carrying the
+/// `nub pm use` remedy.
+fn resolve_identity_walk_up(cwd: &Path) -> Result<Option<DetectedLockfile>> {
+    use aube_lockfile::ResolvedLockfileKind;
+    let mut dir = cwd.to_path_buf();
+    for _ in 0..16 {
+        match aube_lockfile::resolve_project_lockfile_kind(&dir) {
+            Ok(ResolvedLockfileKind::Existing(kind)) => {
+                return Ok(Some(DetectedLockfile {
+                    kind,
+                    dir,
+                    fresh: false,
+                }));
+            }
+            Ok(ResolvedLockfileKind::DeclaredFresh(kind)) => {
+                return Ok(Some(DetectedLockfile {
+                    kind,
+                    dir,
+                    fresh: true,
+                }));
+            }
+            // Nothing at this level decides the identity — keep walking.
+            Ok(ResolvedLockfileKind::Fresh) => {}
+            Err(err) => return Err(identity_error(err)),
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    Ok(None)
+}
+
+/// Render the engine's structured identity errors (contradiction /
+/// ambiguity) for nub's surface: same message and stable code (rewritten
+/// `ERR_AUBE_*` → `ERR_NUB_*` by [`present`]), with nub's remedy in place
+/// of the engine's (`aube import` is not the verb nub users reach for —
+/// `nub pm use` is the one-command fix for both states). Exit code is the
+/// generic 1 (the session-build path has no per-code exit channel); the
+/// stable code string in the output is the contract scripts can branch on.
+fn identity_error(err: aube_lockfile::Error) -> anyhow::Error {
+    use aube_lockfile::Error as E;
+    const REMEDY: &str = "set the declaration: nub pm use <pm> — or remove the stale lockfile";
+    let report = match &err {
+        E::DeclarationMismatch {
+            declared,
+            field,
+            expected,
+            found,
+        } => miette::miette!(
+            code = aube_codes::errors::ERR_AUBE_LOCKFILE_DECLARATION_MISMATCH,
+            help = REMEDY,
+            "package.json declares `{declared}` (via `{field}`), but {expected} is missing — \
+             found {found} instead"
+        ),
+        E::AmbiguousLockfiles { found } => miette::miette!(
+            code = aube_codes::errors::ERR_AUBE_LOCKFILE_AMBIGUOUS,
+            help = REMEDY,
+            "multiple lockfiles found: {found} — cannot tell which package manager owns this \
+             project"
+        ),
+        // Any other detection failure (unreadable lockfile, parse error)
+        // renders as-is through the same brand rewrite.
+        other => miette::miette!("{other}"),
+    };
+    anyhow::anyhow!("{}", present::render_report(&report))
+}
+
+/// Register nub's brand/seam toggles on the engine's process-wide embedder
+/// seams. Called once per command (via [`engine_session`]) **before any
+/// engine code reads project state** — the getters behind these setters are
+/// freeze-on-first-read `OnceLock`s, and even lockfile detection reads the
+/// workspace config transitively (see the ordering note on
+/// [`engine_session`]). Every seam is idempotent.
+pub(crate) fn engine_brand_preflight() {
+    // Env surface: npm-compatible (`npm_config_*`) + ecosystem-neutral
+    // (`CI`, proxies, …). `AUBE_*` stays invisible — nub's config contract
+    // is the npm ecosystem's, not another tool's branded variables.
+    aube::set_env_families(aube::EnvFamilies::NPM.union(aube::EnvFamilies::EXTERNAL));
+    // Lifecycle scripts (npm_config_user_agent) and registry requests
+    // identify the running tool: `nub/<ver> …`.
+    aube::set_user_agent_product(format!("nub/{}", env!("CARGO_PKG_VERSION")));
+    // Config surface follows role (two-mode model, the maintainer 2026-06-10): under
+    // NUB identity the pnpm surface is OFF — `pnpm-workspace.yaml` unread
+    // (empty yaml-name list) and the `package.json#pnpm.*` namespace swapped
+    // for the manifest ROOT (`""`), so top-level `workspaces` (+ catalogs),
+    // `overrides`, `patchedDependencies`, and the three-state `allowBuilds`
+    // map are the config homes (and `approve-builds` writes top-level). In
+    // compat mode (any other role, incl. fresh) nub plays the incumbent
+    // completely: `pnpm-workspace.yaml` + `pnpm.*` stay live exactly as
+    // before. The probe is engine-free (plain manifest/lockfile-presence
+    // reads) because these getters freeze before identity resolution runs.
+    let nub_identity = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| nub_identity_dir(&cwd));
+    if let Some(dir) = &nub_identity {
+        aube::set_workspace_yaml_names(&[]);
+        aube::set_manifest_config_namespaces(&[""]);
+        // A stray pnpm-workspace.yaml under nub identity (branch merge,
+        // tutorial copy-paste) is ignore-with-warning, never read and never
+        // silent: deterministic nub-pure behavior, one warning, remedies
+        // named (the maintainer 2026-06-10, supersedes read-with-warning).
+        if dir.join("pnpm-workspace.yaml").is_file() {
+            eprintln!(
+                "nub: pnpm-workspace.yaml is not read under nub identity — migrate it \
+                 (`nub pm use nub`), delete it, or return to pnpm (`nub pm use pnpm`)."
+            );
+        }
+    } else {
+        // Workspace yamls: `pnpm-workspace.yaml` only. An `aube-workspace.yaml`
+        // some other tool left on disk is neither read nor chosen as the
+        // fresh-write target (`approve-builds` writes its allowlist there).
+        aube::set_workspace_yaml_names(&["pnpm-workspace.yaml"]);
+        // package.json config namespace: `pnpm` only — an `aube` object in a
+        // manifest is another tool's state; nub neither consults nor mutates
+        // it (`remove`'s sidecar pruning, `--allow-build`'s fallback writes).
+        aube::set_manifest_config_namespaces(&["pnpm"]);
+    }
+    // The engine's canonical-lockfile slot carries nub's generic `lock.yaml`
+    // (two-mode model: nub identity = lock.yaml, pnpm-v9 bytes, deliberately
+    // unbranded name). An `aube-lock.yaml` left by another tool is invisible,
+    // exactly like `aube-workspace.yaml` above.
+    aube_lockfile::set_aube_lock_base_filename(use_align::NUB_LOCKFILE);
+    // Identity detection under nub's strict model (decision-table rows,
+    // identity-policy.md): a declared `nub` is the self-name (accepts every
+    // preservable format; fresh writes lock.yaml), and lock.yaml NEVER
+    // silently outranks a foreign lockfile sitting beside it — that state is
+    // the loud ambiguity/contradiction error, with `nub pm use` as the
+    // remedy. (Upstream keeps the always-wins carve-out for its post-import
+    // flow; nub has no import-style dual-lockfile state.)
+    aube_lockfile::set_detection_self_names(&["nub"]);
+    aube_lockfile::set_canonical_lockfile_always_wins(false);
+    // `engines.aube` pins gate a tool nub's users aren't running; skip
+    // them like the engine already skips `engines.pnpm`. `engines.node`
+    // stays validated.
+    aube::set_aube_engine_check(false);
+    // `packageManager` acceptance: nub is the running tool, pnpm the
+    // compatible drop-in. Inert through nub's dispatch today (the
+    // guardrail runs in aube's own CLI entry, which nub bypasses), but any
+    // future engine path that consults the registered names must see
+    // nub's, never the engine's.
+    aube::set_package_manager_names(aube::PackageManagerNames {
+        self_names: vec!["nub".to_string()],
+        self_version: env!("CARGO_PKG_VERSION").to_string(),
+        compatible_names: vec!["pnpm".to_string()],
+    });
+    // Engine cache root: `$XDG_CACHE_HOME/nub/pm` (a sibling of nub's own
+    // runtime caches under `<cache_dir>/`, namespaced so engine state never
+    // mixes with nub's Node store / discovery cache). Covers the packument
+    // caches, git clone cache, node-gyp tool cache, resolver primer, and
+    // adaptive state — everything that previously landed at the engine's
+    // hard-named `<XDG_CACHE_HOME>/aube`. An explicit `cache-dir` in
+    // `.npmrc` still wins for the settings-routed consumers. Skipped when
+    // no cache base resolves — the engine then falls back to its own
+    // default, which fails the same way nub would.
+    if let Some(cache) = nub_core::node::discovery::cache_dir() {
+        aube::set_cache_root(cache.join("pm"));
+    }
+}
+
+/// Engine-free probe: is the project at `cwd` (walking up, same 16-level
+/// budget as identity resolution) under NUB identity? Drives the role-gated
+/// config surface in [`engine_brand_preflight`], which must decide BEFORE
+/// any engine code reads project state (the config getters freeze on first
+/// read — full identity resolution itself reads workspace config
+/// transitively, so it can't be the input here). Plain `package.json` and
+/// lockfile-presence reads only.
+///
+/// Per level: a declaration decides (`nub` → nub identity, anything else →
+/// compat); undeclared, a lone `lock.yaml` decides nub; any foreign lockfile
+/// decides compat (a `lock.yaml` BESIDE a foreign one is the ambiguity state
+/// — compat surface here, and resolution errors loudly right after).
+/// Nothing anywhere = fresh = compat surface (a pnpm-workspace.yaml with no
+/// lockfile is still a pnpm-shaped project; Axiom 4 gives fresh projects
+/// pnpm-format artifacts). Returns the deciding directory so the caller can
+/// warn about a stray yaml sitting next to it.
+fn nub_identity_dir(cwd: &Path) -> Option<PathBuf> {
+    const FOREIGN: &[&str] = &[
+        "pnpm-lock.yaml",
+        "package-lock.json",
+        "npm-shrinkwrap.json",
+        "yarn.lock",
+        "bun.lock",
+        "bun.lockb",
+    ];
+    let mut dir = cwd.to_path_buf();
+    for _ in 0..16 {
+        if let Some(decl) = aube_lockfile::declared_package_manager(&dir) {
+            return (decl.name == "nub").then_some(dir);
+        }
+        let nub_lock = dir.join(use_align::NUB_LOCKFILE).is_file();
+        let foreign = FOREIGN.iter().any(|f| dir.join(f).is_file());
+        match (nub_lock, foreign) {
+            (true, false) => return Some(dir),
+            (false, false) => {}
+            _ => return None,
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    None
+}
+
+/// Nub's replacement setting defaults, fed to the engine's embedder-defaults
+/// tier (below all user sources — a user's `--node-linker`,
+/// `npm_config_node_linker`, `.npmrc`, or workspace yaml all win):
+///
+/// - `defaultLockfileFormat=pnpm` — fresh projects write `pnpm-lock.yaml`.
+/// - `virtualStoreDir` / `stateDir` = `node_modules/.nub` — the isolated
+///   store (and the engine's install-state sidecar) live under `.nub`.
+///   Corner: this replaces the engine's `<modulesDir>/.aube` derivation, so
+///   a project that renames `modulesDir` without setting `virtualStoreDir`
+///   gets the store at `node_modules/.nub` rather than `<modulesDir>/.nub`.
+/// - `storeDir` = `$XDG_DATA_HOME/nub/store` (else `~/.local/share/nub/store`)
+///   — the global CAS store lives in nub's own XDG namespace, not aube's
+///   (the engine appends its `v1` schema suffix, so content lands at
+///   `…/nub/store/v1`). Skipped when no home directory resolves — the
+///   engine then falls back to its own default, which fails the same way
+///   nub would.
+/// - `cacheDir` is still NOT set here — the engine cache moves through the
+///   `aube::set_cache_root` registration in [`engine_brand_preflight`]
+///   instead. The settings accessor (`resolved_cache_dir`) only consults
+///   the setting when `.npmrc` sets it *explicitly* (the embedder-defaults
+///   tier never reaches it, verified empirically 2026-06-09), and the
+///   non-settings consumers (git clone cache, node-gyp tool cache, primer,
+///   adaptive state) never read the setting at all; the process-global
+///   cache root covers every one of them.
+/// - `defaultTrust=true` — the gated default-trust floor (curated list ∧
+///   registry-resolved ∧ OSV MAL-* gate active ∧ past the cooling window)
+///   is ON under nub in both modes; upstream aube keeps it off. Precedence
+///   stays the settled chain (explicit `allowBuilds` true/false always wins
+///   — `false` carves a package OUT of the floor; the map's *existence*
+///   never disables it). Off-switch: `.npmrc default-trust=false` /
+///   `npm_config_default_trust=false` — this is the embedder tier, below
+///   every user source.
+/// - Layout policy: flat-layout lockfile kinds (npm/yarn/bun) default
+///   `nodeLinker` to `hoisted`; pnpm/aube kinds and fresh projects keep the
+///   engine's `isolated` default (no entry pushed, so user/env settings
+///   resolve exactly as in stock aube).
+fn nub_setting_defaults(detected: Option<&DetectedLockfile>) -> Vec<(String, String)> {
+    let mut defaults = vec![
+        ("defaultLockfileFormat".to_string(), "pnpm".to_string()),
+        ("defaultTrust".to_string(), "true".to_string()),
+        (
+            "virtualStoreDir".to_string(),
+            "node_modules/.nub".to_string(),
+        ),
+        ("stateDir".to_string(), "node_modules/.nub".to_string()),
+    ];
+    if let Some(data) = nub_data_dir() {
+        defaults.push((
+            "storeDir".to_string(),
+            data.join("store").to_string_lossy().into_owned(),
+        ));
+    }
+    let hoisted_kind = matches!(
+        detected.map(|d| d.kind),
+        Some(
+            LockfileKind::Npm
+                | LockfileKind::NpmShrinkwrap
+                | LockfileKind::Yarn
+                | LockfileKind::YarnBerry
+                | LockfileKind::Bun
+        )
+    );
+    if hoisted_kind {
+        defaults.push(("nodeLinker".to_string(), "hoisted".to_string()));
+    }
+    defaults
+}
+
+/// Nub's XDG data root (`$XDG_DATA_HOME/nub` or `~/.local/share/nub`), the
+/// data-dir sibling of `nub_core::node::discovery::cache_dir`.
+fn nub_data_dir() -> Option<PathBuf> {
+    let base = std::env::var("XDG_DATA_HOME")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| dirs_next::home_dir().map(|h| h.join(".local/share")))?;
+    Some(base.join("nub"))
+}
+
+/// Process-env snapshot for `InstallOptions::env_snapshot` — same content as
+/// `aube_settings::values::capture_env()` (a clone of `std::env::vars()`),
+/// built locally because aube-settings isn't a direct nub dep.
+pub(crate) fn env_snapshot() -> Vec<(String, String)> {
+    std::env::vars().collect()
+}
+
+/// Multi-thread runtime mirroring aube's own `cli_main` shape
+/// (`vendor/aube/crates/aube/src/lib.rs`): workers capped at 8 (the install
+/// semaphore already gates network), blocking pool at 128 (tarball decode +
+/// linker fan-out). The AUBE_TOKIO_* benchmark overrides are not honored here.
+fn build_runtime() -> Result<tokio::runtime::Runtime> {
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(8);
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(workers)
+        .max_blocking_threads(128)
+        .enable_all()
+        .build()
+        .context("failed to build the install engine's tokio runtime")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn get<'a>(defaults: &'a [(String, String)], key: &str) -> Option<&'a str> {
+        defaults
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+    }
+
+    #[test]
+    fn setting_defaults_pick_the_layout_from_the_lockfile_kind() {
+        let dir = tempfile::tempdir().unwrap();
+        let detected = |kind| DetectedLockfile {
+            kind,
+            dir: dir.path().to_path_buf(),
+            fresh: false,
+        };
+
+        // Flat-layout kinds ⇒ nodeLinker defaults to hoisted.
+        for kind in [
+            LockfileKind::Npm,
+            LockfileKind::YarnBerry,
+            LockfileKind::Bun,
+        ] {
+            assert_eq!(
+                get(&nub_setting_defaults(Some(&detected(kind))), "nodeLinker"),
+                Some("hoisted"),
+                "{kind:?} must default to the hoisted layout"
+            );
+        }
+
+        // pnpm-shaped kinds and no lockfile ⇒ no entry (engine's isolated
+        // default applies, user/env settings resolve as in stock aube).
+        for kind in [LockfileKind::Pnpm, LockfileKind::Aube] {
+            assert_eq!(
+                get(&nub_setting_defaults(Some(&detected(kind))), "nodeLinker"),
+                None,
+                "{kind:?} must not inject a nodeLinker default"
+            );
+        }
+        assert_eq!(
+            get(&nub_setting_defaults(None), "nodeLinker"),
+            None,
+            "no lockfile must not inject a nodeLinker default"
+        );
+    }
+
+    #[test]
+    fn setting_defaults_always_carry_the_nub_identity_settings() {
+        // Every engine command gets the pnpm lockfile default, the `.nub`
+        // store/state location, and the nub-namespaced global dirs,
+        // regardless of detection. (These ride the engine's
+        // embedder-defaults tier, so any user source overrides them —
+        // precedence is covered by the engine's own tests and the
+        // install_engine integration tests.)
+        for detected in [None, Some(LockfileKind::Npm), Some(LockfileKind::Pnpm)] {
+            let dir = tempfile::tempdir().unwrap();
+            let detected = detected.map(|kind| DetectedLockfile {
+                kind,
+                dir: dir.path().to_path_buf(),
+                fresh: false,
+            });
+            let defaults = nub_setting_defaults(detected.as_ref());
+            assert_eq!(get(&defaults, "defaultLockfileFormat"), Some("pnpm"));
+            assert_eq!(get(&defaults, "virtualStoreDir"), Some("node_modules/.nub"));
+            assert_eq!(get(&defaults, "stateDir"), Some("node_modules/.nub"));
+            // The global store lands in nub's XDG data namespace (dev boxes
+            // always resolve a home dir, so the entry is present here).
+            let store = get(&defaults, "storeDir").expect("storeDir default");
+            // Normalize separators: on Windows the default resolves with
+            // `\` components (and a mixed `/` from the XDG-style fallback).
+            let store = store.replace('\\', "/");
+            assert!(
+                store.ends_with("nub/store") && !store.contains("aube"),
+                "storeDir must live under nub's data namespace: {store}"
+            );
+            // `cacheDir` must NOT be pushed: the engine's cache paths bypass
+            // the settings tier at the pinned API, so the entry would be a
+            // silent no-op — see the KNOWN GAP note on nub_setting_defaults.
+            assert_eq!(get(&defaults, "cacheDir"), None);
+        }
+    }
+
+    // The brand-surface toggles (workspace-yaml list, manifest config
+    // namespace, engines.aube check, packageManager acceptance set) are
+    // process-global OnceLocks that freeze on first read, so in-process
+    // assertions here would race other tests in this binary. They are
+    // covered behaviorally through the spawned binary instead:
+    // `tests/info_engine.rs::aube_workspace_yaml_is_not_consulted` and the
+    // engines.aube case in `tests/install_engine.rs`.
+
+    #[test]
+    fn nub_identity_probe_follows_declaration_then_lone_lock_yaml() {
+        let root = |files: &[(&str, &str)]| {
+            let dir = tempfile::tempdir().unwrap();
+            for (name, body) in files {
+                std::fs::write(dir.path().join(name), body).unwrap();
+            }
+            dir
+        };
+
+        // Declaration decides, both ways.
+        let d = root(&[("package.json", r#"{"packageManager":"nub@0.1.0"}"#)]);
+        assert!(nub_identity_dir(d.path()).is_some());
+        let d = root(&[
+            ("package.json", r#"{"packageManager":"pnpm@10.0.0"}"#),
+            ("lock.yaml", "lockfileVersion: '9.0'\n"),
+        ]);
+        assert!(
+            nub_identity_dir(d.path()).is_none(),
+            "a pnpm declaration beats a lock.yaml for the config surface"
+        );
+
+        // Undeclared: a lone lock.yaml is nub; beside a foreign lockfile it
+        // is the ambiguity state (compat surface, resolution errors loudly).
+        let d = root(&[
+            ("package.json", "{}"),
+            ("lock.yaml", "lockfileVersion: '9.0'\n"),
+        ]);
+        assert!(nub_identity_dir(d.path()).is_some());
+        let d = root(&[
+            ("package.json", "{}"),
+            ("lock.yaml", "lockfileVersion: '9.0'\n"),
+            ("pnpm-lock.yaml", "lockfileVersion: '9.0'\n"),
+        ]);
+        assert!(nub_identity_dir(d.path()).is_none());
+
+        // Fresh (nothing anywhere within the walk) = compat surface; and the
+        // probe walks up from a member dir to the deciding root.
+        let d = root(&[("package.json", "{}")]);
+        assert!(nub_identity_dir(d.path()).is_none());
+        let d = root(&[
+            ("package.json", r#"{"packageManager":"nub@0.1.0"}"#),
+            ("lock.yaml", "lockfileVersion: '9.0'\n"),
+        ]);
+        let member = d.path().join("packages/a");
+        std::fs::create_dir_all(&member).unwrap();
+        assert_eq!(nub_identity_dir(&member).as_deref(), Some(d.path()));
+    }
+
+    #[test]
+    fn lifecycle_ua_is_role_first_in_compat_and_nub_first_otherwise() {
+        let nub = env!("CARGO_PKG_VERSION");
+        let pin = |name: &str, v: Option<&str>| Some((name.to_string(), v.map(str::to_string)));
+
+        // Compat, pinned: the incumbent's token first with the PINNED version,
+        // nub always second, runner dialect (node/v token present).
+        assert_eq!(
+            compose_lifecycle_ua(
+                pin("pnpm", Some("9.1.0")),
+                Some(LockfileKind::Pnpm),
+                "22.15.0"
+            ),
+            format!("pnpm/9.1.0 nub/{nub} node/v22.15.0")
+        );
+        // Compat, unpinned pnpm (lockfile-inferred): the engine's parity version.
+        assert_eq!(
+            compose_lifecycle_ua(None, Some(LockfileKind::Pnpm), "22.15.0"),
+            format!("pnpm/{PNPM_PARITY_VERSION} nub/{nub} node/v22.15.0")
+        );
+        // npm/bun roles: pnpm's own `?` convention when no version is declared.
+        assert_eq!(
+            compose_lifecycle_ua(None, Some(LockfileKind::Npm), "22.15.0"),
+            format!("npm/? nub/{nub} node/v22.15.0")
+        );
+        assert_eq!(
+            compose_lifecycle_ua(
+                pin("bun", Some("1.2.0")),
+                Some(LockfileKind::Bun),
+                "22.15.0"
+            ),
+            format!("bun/1.2.0 nub/{nub} node/v22.15.0")
+        );
+        // Declaration outranks a stray foreign lockfile for the role, exactly
+        // like identity resolution.
+        assert_eq!(
+            compose_lifecycle_ua(
+                pin("npm", Some("11.0.0")),
+                Some(LockfileKind::Npm),
+                "22.15.0"
+            ),
+            format!("npm/11.0.0 nub/{nub} node/v22.15.0")
+        );
+        // Unknown declared tool falls through to the lockfile kind.
+        assert_eq!(
+            compose_lifecycle_ua(pin("vlt", None), Some(LockfileKind::Yarn), "22.15.0"),
+            format!("yarn/? nub/{nub} node/v22.15.0")
+        );
+
+        // Nub identity (declared, or the lock.yaml kind) and fresh projects:
+        // nub first, byte-identical to the runner's dialect.
+        let nub_first = format!("nub/{nub} npm/? node/v22.15.0");
+        assert_eq!(
+            compose_lifecycle_ua(
+                pin("nub", Some("0.1.0")),
+                Some(LockfileKind::Aube),
+                "22.15.0"
+            ),
+            nub_first
+        );
+        assert_eq!(
+            compose_lifecycle_ua(None, Some(LockfileKind::Aube), "22.15.0"),
+            nub_first
+        );
+        assert_eq!(compose_lifecycle_ua(None, None, "22.15.0"), nub_first);
+    }
+
+    #[test]
+    fn verb_registry_spellings_are_unique_and_resolvable() {
+        use std::collections::HashSet;
+        let mut seen = HashSet::new();
+        for spec in ENGINE_VERBS {
+            for spelling in std::iter::once(&spec.canonical).chain(spec.aliases) {
+                assert!(
+                    seen.insert(*spelling),
+                    "duplicate engine verb spelling: {spelling}"
+                );
+                assert_eq!(
+                    lookup_verb(spelling).map(|s| s.canonical),
+                    Some(spec.canonical),
+                    "{spelling} must resolve to {}",
+                    spec.canonical
+                );
+            }
+        }
+        assert!(lookup_verb("definitely-not-a-verb").is_none());
+    }
+
+    #[test]
+    fn verb_registry_excludes_reserved_and_tool_identity_verbs() {
+        // nub-reserved spellings (collision policy) and aube tool-identity
+        // verbs must never enter the registry — `upgrade` in particular is
+        // nub's self-update, not aube's update alias.
+        for verb in [
+            "run",
+            "run-script",
+            "exec",
+            "x",
+            "test",
+            "t",
+            "start",
+            "stop",
+            "restart",
+            "install-test",
+            "it",
+            "node",
+            "pm",
+            "watch",
+            "upgrade",
+            "install",
+            "i",
+            "ci",
+            "init", // reserved for nub's own project init (cli.rs answers it)
+            "sponsors",
+            "diag",
+            "doctor",
+            "completion",
+            "usage",
+            "__node-gyp-bootstrap",
+        ] {
+            assert!(
+                lookup_verb(verb).is_none(),
+                "{verb} must not be a registered engine verb"
+            );
+        }
+    }
+
+    #[test]
+    fn stub_error_names_the_verb_and_the_pm_fallback() {
+        let err = stub_error("rm", &["lodash".to_string()], "pnpm");
+        let msg = err.to_string();
+        assert!(msg.contains("nub rm"), "{msg}");
+        assert!(
+            msg.contains("not wired to the embedded engine yet"),
+            "{msg}"
+        );
+        assert!(msg.contains("pnpm rm lodash"), "{msg}");
+    }
+}

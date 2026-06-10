@@ -926,20 +926,20 @@ const RULES = [
 
 /* -------------------------------------------------------------- Final CTA */
 
-/* ----------------------------------------------------------- Package hypermanager */
+/* ----------------------------------------------------------- Built-in package manager */
 
 function HypermanagerBand() {
   return (
     <section className="border-b border-fd-border">
       <Container className="py-32 md:py-[180px]">
         <BandHeader
-          command="nub pm"
-          title="A package manager manager"
+          command="nub install"
+          title="A built-in package manager"
           subhead={
             <>
-              Not a new package manager: Nub provisions and runs the one your project pins.
-              Corepack&rsquo;s job, in native Rust: the exact npm, pnpm, or yarn is fetched, verified,
-              cached, and run on the project&rsquo;s Node.
+              Nub ships a pnpm-compatible package manager — powered by the embedded{' '}
+              <Mono>aube</Mono>{' '}engine, built in partnership with jdx. It reads the lockfile your
+              project already has and writes the same format back.
             </>
           }
           accent="pink"
@@ -948,26 +948,25 @@ function HypermanagerBand() {
         <div className="mt-10 divide-y divide-fd-border/60">
           <Feature
             accent="pink"
-            eyebrow="Pin + provision"
-            title="Pin a version, get it everywhere"
+            eyebrow="Your lockfile"
+            title="Keeps the lockfile you already have"
             body={
               <>
-                <Mono>nub pm pin</Mono>{' '}takes an exact version, a range, or a tag. It resolves
-                the version, fetches and integrity-verifies the tarball, and writes the pin to{' '}
-                <Mono>package.json</Mono>. Every machine and CI runner provisions the same manager on
-                demand; a cached pin runs fully offline.
+                <Mono>nub install</Mono>{' '}detects your existing lockfile and writes the same format
+                back — <Mono>pnpm-lock.yaml</Mono>, <Mono>package-lock.json</Mono>, and{' '}
+                <Mono>bun.lock</Mono>{' '}are read and written in place, never replaced with a foreign
+                file. Fresh projects get a standard <Mono>pnpm-lock.yaml</Mono>. <Mono>yarn.lock</Mono>{' '}
+                is honored read-only for now: an install that would rewrite it is refused, with the
+                exact yarn command to run instead.
               </>
             }
             visual={
               <Terminal
                 lines={[
-                  { cmd: 'nub pm pin pnpm@^9' },
-                  { out: 'Fetching pnpm 9.15.4 (4 MB)...' },
-                  { out: '✓ Installed pnpm 9.15.4 in 0.7s' },
-                  { out: 'pinned pnpm@9.15.4 → package.json' },
-                  { cmd: 'nub pm which' },
-                  { out: '~/.cache/nub/pm/pnpm/9.15.4/package/bin/pnpm.cjs' },
-                  { out: '» resolved from packageManager (pnpm@9.15.4)' },
+                  { cmd: 'nub install', comment: 'pnpm-lock.yaml → read, written back' },
+                  { cmd: 'nub install', comment: 'package-lock.json → read, written back' },
+                  { cmd: 'nub install', comment: 'bun.lock → read, written back' },
+                  { cmd: 'nub install', comment: 'yarn.lock → honored read-only' },
                 ]}
               />
             }
@@ -976,24 +975,23 @@ function HypermanagerBand() {
           <Feature
             accent="pink"
             reverse
-            eyebrow="nub pm shim"
-            title="Bare commands, pinned versions"
+            eyebrow="Layout"
+            title="Isolated installs, hoisted where you expect them"
             body={
               <>
-                Opt-in shims make <em>bare</em>{' '}<Mono>npm</Mono>, <Mono>pnpm</Mono>, and{' '}
-                <Mono>yarn</Mono>{' '}(typed from muscle memory, or spawned by tools you don&rsquo;t
-                control) run the pinned version. The wrong manager is refused before it can write a
-                competing lockfile.
+                pnpm projects and fresh ones get strict, symlinked, pnpm-style installs, with the
+                virtual store tucked under <Mono>node_modules/.nub</Mono>. Projects with an npm,
+                yarn, or bun lockfile default to the flat hoisted layout those tools produce — so
+                nothing about your tree surprises the code that walks it. One{' '}
+                <Mono>.npmrc</Mono>{' '}line (<Mono>node-linker</Mono>) overrides either default.
               </>
             }
             visual={
               <Terminal
                 lines={[
-                  { cmd: 'nub pm shim', comment: 'opt-in, one-time' },
-                  { cmd: 'pnpm --version' },
-                  { out: '9.15.4' },
-                  { cmd: 'npm install' },
-                  { out: 'nub: this project pins pnpm — refusing to run npm.', bright: true },
+                  { cmd: 'nub install' },
+                  { out: 'node_modules/express → .nub/express@5.1.0/…' },
+                  { cmd: 'nub install --node-linker=hoisted', comment: 'or one .npmrc line' },
                 ]}
               />
             }
@@ -1001,22 +999,25 @@ function HypermanagerBand() {
 
           <Feature
             accent="pink"
-            eyebrow="vs Corepack"
-            title="Corepack, without the Node tax"
+            eyebrow="Config"
+            title="Reads .npmrc, honors your workspaces"
             body={
               <>
-                Every Corepack shim boots a whole Node process just to decide which pnpm to run. A Nub
-                shim <em>is</em>{' '}the native binary: resolution costs zero Node boots, then it
-                execs the real manager. Unpinned projects fall through to the manager already on your{' '}
-                <Mono>PATH</Mono>{' '}(Corepack never does), and there&rsquo;s no baked version table to
-                go stale.
+                Configuration comes from the files you already maintain: <Mono>.npmrc</Mono>{' '}
+                (registry, auth, flags), <Mono>pnpm-workspace.yaml</Mono>, and{' '}
+                <Mono>package.json#workspaces</Mono>. Nub&rsquo;s own defaults rank below every user
+                source — a CLI flag, env var, <Mono>.npmrc</Mono>{' '}entry, or workspace yaml always
+                wins. No new config file, no <Mono>&quot;nub&quot;</Mono>{' '}field in{' '}
+                <Mono>package.json</Mono>.
               </>
             }
             visual={
               <Terminal
                 lines={[
-                  { cmd: 'corepack enable', comment: 'every call boots Node to resolve' },
-                  { cmd: 'nub pm shim', comment: 'native resolution, then exec' },
+                  { cmd: 'cat .npmrc' },
+                  { out: 'registry=https://npm.example.com' },
+                  { out: 'node-linker=hoisted' },
+                  { cmd: 'nub install', comment: 'your config wins, always' },
                 ]}
               />
             }
@@ -1025,22 +1026,27 @@ function HypermanagerBand() {
           <Feature
             accent="pink"
             reverse
-            eyebrow="nub pm"
-            title="Take control when you want it"
+            eyebrow="Keep your tools"
+            title="Your package manager still works"
             body={
               <>
-                The <Mono>nub pm</Mono>{' '}commands surface it all explicitly: see what resolves and
-                why, pin or switch managers, bump within your range, or inspect the binary cache.
+                Because Nub writes the same lockfile your package manager does, pnpm, npm, and bun
+                keep working side by side — run either tool, commit the same file, switch back any
+                time. Registry, scoped, peer-heavy, and platform-specific dependency trees all
+                round-trip through the real tools today — <Mono>workspace:</Mono>{' '}links and git
+                dependencies included. And when you want
+                the original tool itself, <Mono>nub pm use</Mono>{' '}declares and provisions the
+                exact version for the whole team — Corepack&rsquo;s job, without the PATH shims.
               </>
             }
             visual={
               <Terminal
                 lines={[
-                  { cmd: 'nub pm update' },
-                  { out: 'pinned pnpm@9.15.9 → package.json' },
-                  { cmd: 'nub pm cache' },
-                  { out: 'pnpm@9.15.9' },
-                  { out: 'yarn@1.22.22' },
+                  { cmd: 'nub install', comment: 'or pnpm install — same lockfile' },
+                  { cmd: 'nub pm use pnpm@^9' },
+                  { out: 'using pnpm@9.15.9' },
+                  { out: '  package.json: packageManager = pnpm@9.15.9 (+sha512)' },
+                  { out: "  pnpm-lock.yaml: kept (already pnpm's format)" },
                 ]}
               />
             }

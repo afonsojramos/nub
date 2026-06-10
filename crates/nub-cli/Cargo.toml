@@ -12,12 +12,47 @@ path = "src/main.rs"
 
 [dependencies]
 nub-core = { path = "../nub-core" }
+# Vendored aube (vendor/aube git submodule, nubjs/aube fork). aube-lockfile
+# is a pure library crate (no CLI/tokio surface); `aube` is the command layer
+# as a library (lib target landed in nubjs/aube@b15cdcb) — `nub install` /
+# `nub ci` route through `aube::commands::install::run` in-process instead of
+# shelling out. See vendor/aube/AGENTS.md and src/pm_engine/.
+aube-lockfile = { path = "../../vendor/aube/crates/aube-lockfile" }
+aube-manifest = { path = "../../vendor/aube/crates/aube-manifest" }
+aube = { path = "../../vendor/aube/crates/aube" }
+# `EffectiveFilter` for the workspace-aware engine verbs (`nub publish
+# --filter/-r`); same type aube's own dispatch passes to publish/list/etc.
+aube-workspace = { path = "../../vendor/aube/crates/aube-workspace" }
+# Settings metadata (`meta::SETTINGS`): drives the npmrc-first config write
+# routing in pm_engine/store_config_family.rs (npmShared flag, alias
+# spellings, scalar-vs-map types).
+aube-settings = { path = "../../vendor/aube/crates/aube-settings" }
+# Engine error-code constants + the bespoke exit-code table; consumed by the
+# presentation layer (src/pm_engine/present.rs) for the ERR_AUBE_→ERR_NUB_
+# rewrite and the cli_main-compatible exit mapping.
+aube-codes = { path = "../../vendor/aube/crates/aube-codes" }
+# Same major + `fancy` as vendor/aube — present.rs renders the engine's
+# miette::Report exactly as aube's own cli_main would, then rewrites it.
+miette = { version = "7", features = ["fancy"] }
 anyhow.workspace = true
 clap.workspace = true
+dirs-next.workspace = true
 dotenvy = "0.15"
 serde_json.workspace = true
 semver = "1"
+# pnpm-workspace.yaml read + regeneration for `nub pm use nub` / `use pnpm`
+# (pm_engine/use_nub.rs). Same 0.9 line vendor/aube already pins.
+serde_yaml = "0.9"
 sha2.workspace = true
 tracing.workspace = true
 tempfile = "3"
+# Multi-thread runtime for the embedded aube install engine (pm_engine.rs).
+# Mirrors aube's own cli_main runtime shape; tokio is dormant on every other
+# nub code path.
+tokio = { version = "1", features = ["rt-multi-thread"] }
 tracing-subscriber.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+# fd-level capture of the engine's raw println/eprintln hint lines so the
+# brand rewrite can reach them (pm_engine/install_family.rs::with_fd_captured).
+libc.workspace = true
