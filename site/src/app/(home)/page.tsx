@@ -6,7 +6,7 @@ import { Terminal, Source, BenchBars } from '@/components/code';
 import { ToolkitTabs } from '@/components/toolkit-tabs';
 
 export const metadata: Metadata = {
-  title: 'Nub — a fast runner CLI for Node.js',
+  title: 'Nub — an all-in-one toolkit for Node.js',
 };
 
 export default function HomePage() {
@@ -172,7 +172,7 @@ function HeroH1({ className = '' }: { className?: string }) {
     <h1
       className={`text-balance font-display font-medium leading-[1.05] tracking-tight text-fd-foreground ${className}`}
     >
-      The unified JavaScript toolkit that{' '}
+      The all-in-one JavaScript toolkit that{' '}
       <span className="italic text-ember">augments</span> Node.js instead of trying
       to replace it
     </h1>
@@ -234,7 +234,7 @@ function Toolkit() {
         <div className="mx-auto max-w-2xl text-center">
           <p className="eyebrow text-fd-muted-foreground">The toolchain</p>
           <h2 className="mt-3 text-balance font-display text-3xl font-medium leading-tight md:text-4xl">
-            A unified toolchain for Node.js
+            An all-in-one toolkit for Node.js
           </h2>
           <p className="mt-4 text-balance text-lg leading-relaxed text-fd-muted-foreground">
             One Rust binary that runs your files, scripts, and local CLIs — and manages
