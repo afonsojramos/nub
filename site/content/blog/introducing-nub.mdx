@@ -31,12 +31,12 @@ Bun and Deno proved there's enormous appetite for an all-in-one toolkit that rep
 
 | Runtime | Pass rate | Tests passing |
 |---|---|---|
-| Node 25.8 | 100% | 4,366 / 4,366 |
-| **Nub** | **98.7%** | **4,308 / 4,366** |
-| Deno 2.8 | 76.7% | 3,347 / 4,366 |
-| Bun 1.3.14 | 40.2% | 1,756 / 4,366 |
+| Node 25.8 | 100% | 4,375 / 4,375 |
+| **Nub** | **98.7%** | **4,318 / 4,375** |
+| Deno 2.8 | 76.6% | 3,351 / 4,375 |
+| Bun 1.3.14 | 40.1% | 1,756 / 4,375 |
 
-*Deno's Node-compat suite, node-relative. Nub's gap is unavoidable divergence from its module-hook preload, unflagging of experimental features, and native addons. [Reproduce →](https://github.com/nubjs/nub/tree/main/tests/cross-runtime)*
+*Deno's Node-compat suite, node-relative. Nub's gap is 57 documented deltas — module-hook and native-addon visibility, plus three intended divergences from default-on Web Storage and compile caching. [Reproduce →](https://github.com/nubjs/nub/tree/main/tests/cross-runtime)*
 
 The "next-generation" runtimes share a fundamental flaw: **they're trying to replace Node.js.** Nub embraces it instead. It's a single Rust binary that transpiles your code and executes it on the stock `node` you already have installed — Nub passes Node's test suite because it *is* Node. It combines:
 

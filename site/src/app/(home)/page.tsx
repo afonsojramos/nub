@@ -845,10 +845,10 @@ function NubxBand() {
 /* ------------------------------------------------------------ Compatibility */
 
 const COMPAT = [
-  { name: 'Node 25.8', rate: 100, tests: '4,366 / 4,366', us: false, dim: false },
-  { name: 'Nub', rate: 98.7, tests: '4,308 / 4,366', us: true, dim: false },
-  { name: 'Deno 2.8', rate: 76.7, tests: '3,347 / 4,366', us: false, dim: true },
-  { name: 'Bun 1.3.14', rate: 40.2, tests: '1,756 / 4,366', us: false, dim: true },
+  { name: 'Node 25.8', rate: 100, tests: '4,375 / 4,375', us: false, dim: false },
+  { name: 'Nub', rate: 98.7, tests: '4,318 / 4,375', us: true, dim: false },
+  { name: 'Deno 2.8', rate: 76.6, tests: '3,351 / 4,375', us: false, dim: true },
+  { name: 'Bun 1.3.14', rate: 40.1, tests: '1,756 / 4,375', us: false, dim: true },
 ];
 
 function Compatibility() {
@@ -900,8 +900,8 @@ function Compatibility() {
           })}
         </div>
         <p className="mx-auto mt-6 max-w-lg text-center text-sm leading-relaxed text-fd-muted-foreground">
-          Deno&rsquo;s Node-compat suite, node-relative. The 1% gap is unavoidable divergence due
-          to Nub&rsquo;s module-hook preload, unflagging of experimental features, and use of native addons.{' '}
+          Deno&rsquo;s Node-compat suite, node-relative. The gap is 57 documented deltas —
+          module-hook and native-addon visibility, plus three intended divergences from default-on Web Storage and compile caching.{' '}
           <a
             href="https://github.com/nubjs/nub/tree/main/tests/cross-runtime"
             target="_blank"
