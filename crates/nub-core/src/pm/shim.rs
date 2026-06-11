@@ -171,7 +171,19 @@ impl fmt::Display for PinProvenance {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PinState {
     Unpinned,
-    Pinned { pm: Pm, provenance: PinProvenance },
+    Pinned {
+        pm: Pm,
+        provenance: PinProvenance,
+    },
+    /// The project pins nub itself (`packageManager: "nub@…"` /
+    /// `devEngines.packageManager` naming nub) — nub IS the active manager
+    /// here. A foreign-PM shim invocation must refuse and redirect to `nub`,
+    /// never provision a competing PM (the resolve layer can't classify `nub`
+    /// as a [`Pm`] — nub doesn't provision itself — so the shim carries this
+    /// state directly).
+    NubPinned {
+        provenance: PinProvenance,
+    },
 }
 
 /// What the shim does with an invocation — decision 1's matrix, encoded.
@@ -190,6 +202,11 @@ pub enum ShimDecision {
         pinned_pm: Pm,
         provenance: PinProvenance,
     },
+    /// The project pins nub itself: a foreign-PM shim invocation exits nonzero,
+    /// telling the user to run `nub` instead (`nub install`, …). Distinct from
+    /// [`Self::Refuse`] because the redirect is to nub, not to a sibling PM, and
+    /// nub never provisions a competing manager just to have it reject the pin.
+    RefuseNubPinned { provenance: PinProvenance },
     /// Transparent or unpinned: search PATH past the shim dir for the invoked
     /// binary ([`find_system_pm`]) and exec it; on a PATH miss provision a
     /// dynamic default of the INVOKED PM (`lockfile_version::infer`, else the
@@ -219,6 +236,21 @@ pub fn decide(
     first_arg: Option<&str>,
     nesting: Nesting,
 ) -> ShimDecision {
+    // A nub-pinned project: nub is the manager. Foreign-PM shims refuse and
+    // redirect to nub, with the same transparent/nested escapes a sibling-PM
+    // mismatch gets (a `npm create vite` or a nested lifecycle call still flows
+    // to the system PM rather than breaking).
+    if let PinState::NubPinned { provenance } = pin {
+        let transparent = invoked.always_transparent()
+            || first_arg.is_some_and(|verb| TRANSPARENT_VERBS.contains(&verb));
+        return if transparent || nesting == Nesting::Nested {
+            ShimDecision::FallThrough { invoked }
+        } else {
+            ShimDecision::RefuseNubPinned {
+                provenance: *provenance,
+            }
+        };
+    }
     let PinState::Pinned {
         pm: pinned,
         provenance,
@@ -1212,6 +1244,9 @@ mod tests {
             pm: Pm::Yarn,
             provenance: PackageManagerField,
         };
+        let nub = PinState::NubPinned {
+            provenance: PackageManagerField,
+        };
         let none = PinState::Unpinned;
 
         let cases: &[(ShimName, &PinState, Option<&str>, ShimDecision, &str)] = &[
@@ -1364,6 +1399,40 @@ mod tests {
                 Some("create"),
                 FallThrough { invoked: Npm },
                 "unpinned + transparent is still a plain fall-through",
+            ),
+            // nub-pinned (`pm use nub`) → a foreign-PM shim refuses to nub,
+            // never provisions a competing PM just to have it reject the pin.
+            (
+                Pnpm,
+                &nub,
+                Some("install"),
+                RefuseNubPinned {
+                    provenance: PackageManagerField,
+                },
+                "pnpm install in a nub-pinned project refuses and redirects to nub",
+            ),
+            (
+                Npm,
+                &nub,
+                None,
+                RefuseNubPinned {
+                    provenance: PackageManagerField,
+                },
+                "a bare `npm` in a nub-pinned project refuses (not transparent)",
+            ),
+            (
+                Npm,
+                &nub,
+                Some("create"),
+                FallThrough { invoked: Npm },
+                "`npm create vite` still escapes in a nub-pinned project",
+            ),
+            (
+                Npx,
+                &nub,
+                Some("cowsay"),
+                FallThrough { invoked: Npx },
+                "the npx binary is transparent in a nub-pinned project too",
             ),
         ];
         // Every row in this matrix is a TOP-LEVEL invocation (no PM running

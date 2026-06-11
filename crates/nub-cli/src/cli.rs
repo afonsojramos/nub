@@ -3749,6 +3749,18 @@ fn run_pm(args: &[String]) -> Result<i32> {
             // misleading diagnosis. Surface the parse failure (and its location)
             // before resolution silently swallows it.
             check_manifest_json(&cwd)?;
+            // A `nub@` self-pin (`pm use nub`) isn't a provisionable target, so
+            // `resolve_target_with_source` returns None — reporting "no PM
+            // pinned" there is wrong. nub IS the manager: name it and stop.
+            if resolve::project_pm_identity(&cwd).is_some_and(|id| id.name == "nub") {
+                let exe = nub_core::node::spawn::current_nub_binary()
+                    .unwrap_or_else(|_| PathBuf::from("nub"));
+                println!("{}", exe.display());
+                use std::io::Write as _;
+                std::io::stdout().flush().ok();
+                eprintln!("» this project uses nub (resolved from packageManager)");
+                return Ok(0);
+            }
             let res = resolve::resolve_target_with_source(&cwd)
                 .context("no package manager is pinned (no .yarnrc.yml yarnPath, packageManager, or devEngines.packageManager) — declare one with `nub pm use <pm>`")?;
             // Drain the structured advisories first (disagreement / range /
@@ -4511,6 +4523,9 @@ fn shim_plan(
         } => Ok(ShimPlan::Refuse {
             message: shim_refusal_message(invoked, pinned_pm, provenance, args),
         }),
+        ShimDecision::RefuseNubPinned { provenance } => Ok(ShimPlan::Refuse {
+            message: shim_nub_refusal_message(invoked, provenance, args),
+        }),
         // A Berry pin never provisions: exec the committed `yarnPath` release
         // under the project's Node, or surface the no-release error.
         ShimDecision::RunPinned {
@@ -4596,7 +4611,18 @@ fn shim_pin_state(
     use nub_core::pm::shim::{PinProvenance, PinState};
 
     match target {
-        None => PinState::Unpinned,
+        // `resolve_target` rejects a `nub@…` pin (nub isn't a provisionable
+        // `Pm` — it never provisions itself), so a nub-pinned project arrives
+        // here as `None`. Recognize it before falling through to `Unpinned`,
+        // else a foreign-PM shim would provision a competing PM in nub's own
+        // project. `project_pm_identity` reads the raw pin name with no
+        // allowlist filter, so `nub` flows through.
+        None => match nub_core::pm::resolve::project_pm_identity(cwd) {
+            Some(id) if id.name == "nub" => PinState::NubPinned {
+                provenance: field_pin_provenance(cwd),
+            },
+            _ => PinState::Unpinned,
+        },
         Some(PmTarget::YarnPath(_)) => PinState::Pinned {
             pm: Pm::YarnBerry,
             provenance: PinProvenance::YarnPath,
@@ -4662,6 +4688,33 @@ fn shim_refusal_message(
     format!(
         "nub: the nub package-manager shims on your PATH (installed via `nub pm shim`) intercepted this.\n\
          This project pins {pinned} (via {provenance}) — refusing to run {invoked}.\n\
+         A different package manager here would write a competing lockfile and node_modules.\n\
+         \n\
+         {run_instead}\
+         \x20 to bypass:    invoke the system {invoked} by absolute path, or remove the shims: nub pm unshim"
+    )
+}
+
+/// The refusal for a nub-pinned project (`pm use nub`): a foreign-PM shim was
+/// invoked where nub is the manager. Redirect to `nub <same args>` — nub is a
+/// full PM, so the verb carries over verbatim (no verb-absence dance). Never
+/// provisions the foreign PM. Exit code is the caller's (1).
+fn shim_nub_refusal_message(
+    invoked: nub_core::pm::shim::ShimName,
+    provenance: nub_core::pm::shim::PinProvenance,
+    args: &[String],
+) -> String {
+    let invoked = invoked.as_str();
+    // Flags-only / empty argv (e.g. `pnpm --version`) has no verb to carry —
+    // drop the redirect line rather than echoing argv back as advice, matching
+    // `shim_refusal_message`'s read-only handling.
+    let run_instead = match args.first().filter(|a| !a.starts_with('-')) {
+        Some(_) => format!("\x20 run instead:  nub {}\n", args.join(" ")),
+        None => String::new(),
+    };
+    format!(
+        "nub: the nub package-manager shims on your PATH (installed via `nub pm shim`) intercepted this.\n\
+         This project uses nub (via {provenance}) — refusing to run {invoked}.\n\
          A different package manager here would write a competing lockfile and node_modules.\n\
          \n\
          {run_instead}\
@@ -5968,6 +6021,25 @@ mod tests {
                 provenance: PinProvenance::YarnPath
             },
             "a committed yarnPath is a Berry pin with yarnrc provenance"
+        );
+
+        // `pm use nub` writes `packageManager: "nub@…"`. `resolve_target`
+        // rejects it (nub isn't a provisionable Pm), so it would arrive as
+        // `None`/Unpinned and a foreign shim would provision a competing PM —
+        // the bug. It must resolve to NubPinned instead.
+        let dir = pm_tmpdir("pinstate-nub");
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"packageManager":"nub@0.0.31"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            state(&dir),
+            PinState::NubPinned {
+                provenance: PinProvenance::PackageManagerField
+            },
+            "a nub@ self-pin is NubPinned, not Unpinned — a foreign shim must \
+             refuse to nub, never provision a competing PM"
         );
 
         let dir = pm_tmpdir("pinstate-none");
