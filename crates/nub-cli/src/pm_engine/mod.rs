@@ -596,6 +596,13 @@ pub(crate) fn engine_session(dir: Option<&Path>) -> Result<EngineSession> {
     // Set-unless-user-set: ranks below CLI flags, env vars, and every
     // config file in the engine's settings precedence.
     aube::set_embedder_defaults(nub_setting_defaults(detected.as_ref()));
+    // Route the engine's lifecycle scripts through nub's runtime augmentation
+    // (project-pinned + augmented Node, shim on PATH, preload) — the SAME
+    // augmentation `nub run` / `nub exec` apply, so run / exec / lifecycle
+    // share one source. Closes the ABI bug where dep build scripts (node-gyp)
+    // compiled against ambient Node instead of the project's. Default-empty
+    // overlay when augmentation can't engage ⇒ behavior preserved.
+    apply_lifecycle_augmentation(&cwd);
     Ok(EngineSession {
         detected,
         runtime: build_runtime()?,
@@ -680,6 +687,95 @@ fn compose_lifecycle_ua(
         // runner's dialect (`nub/<v> npm/? node/v<ver>`).
         _ => format!("nub/{nub_version} npm/? node/v{node_version}"),
     }
+}
+
+/// Convert nub's runtime augmentation into the generic `(env_overlay,
+/// path_prepends)` that aube applies to every lifecycle-script spawn. This is
+/// the ONE augmentation source `nub run` / `nub exec` already use — feeding it
+/// to the engine's lifecycle path makes run / exec / lifecycle scripts share
+/// identical augmentation and closes the ABI bug where dep build scripts
+/// (node-gyp) compiled against the *ambient* Node instead of the project's
+/// provisioned one.
+///
+/// `node_execpath` is the resolved/provisioned Node binary; it pins
+/// `npm_node_execpath` so node-gyp builds against the project's Node even when
+/// no shim is set up (re-entrant / broken install). The shim dir (when present)
+/// fronts PATH and backs `$NODE` so a bare `node` or `$NODE child.js` in a
+/// build script re-enters nub augmented — identical to `nub run`'s spawn env.
+fn augmentation_to_lifecycle_overlay(
+    aug: &nub_core::node::spawn::AugmentationEnv,
+    node_execpath: &str,
+) -> (Vec<(std::ffi::OsString, std::ffi::OsString)>, Vec<PathBuf>) {
+    use std::ffi::OsString;
+    let mut overlay: Vec<(OsString, OsString)> = Vec::new();
+    // $NODE → the shim (→ nub) so userland `$NODE child.js` / `spawn(env.NODE)`
+    // in a build script stays augmented, exactly as build_script_command sets it.
+    if let Some(node_shim) = aug.node_shim_exe() {
+        overlay.push((OsString::from("NODE"), node_shim));
+    }
+    if let Some(opts) = &aug.node_options {
+        overlay.push((OsString::from("NODE_OPTIONS"), OsString::from(opts)));
+    }
+    if let Some(node_path) = &aug.node_path {
+        overlay.push((OsString::from("NODE_PATH"), node_path.clone()));
+    }
+    // Pin npm_node_execpath to the provisioned Node — the ABI fix. Independent
+    // of the shim: it flows even on the no-shim path so node-gyp never falls
+    // back to ambient. (npm_node_execpath stays the REAL binary, not the shim:
+    // tooling derives Node's install prefix from it.)
+    overlay.push((
+        OsString::from("npm_node_execpath"),
+        OsString::from(node_execpath),
+    ));
+
+    let prepends = aug
+        .shim_dir
+        .as_deref()
+        .map(|d| vec![PathBuf::from(d)])
+        .unwrap_or_default();
+    (overlay, prepends)
+}
+
+/// Install nub's runtime augmentation onto the engine's lifecycle-script spawn
+/// env (via aube's generic [`aube::set_script_settings`] overlay), so dependency
+/// build scripts run under the project's provisioned + augmented Node — the same
+/// env `nub run` / `nub exec` give scripts. No-op (overlay stays default-empty,
+/// behavior preserved) when augmentation can't be computed (compat / re-entrant
+/// / broken install). Called once per command from [`engine_session`].
+fn apply_lifecycle_augmentation(cwd: &Path) {
+    let Ok(nub_binary) = nub_core::node::spawn::current_nub_binary() else {
+        return;
+    };
+    // The project's Node — pin-aware (`.nvmrc`/`.node-version`/`engines`), NOT
+    // the ambient PATH node. This resolved version drives flag injection and its
+    // path pins npm_node_execpath. Mirrors build_script_command's discovery.
+    let node = nub_core::node::discovery::discover_node(cwd)
+        .unwrap_or_else(|_| nub_core::node::discovery::ResolvedNode::fallback());
+    let project = nub_core::workspace::detect::detect_project(cwd);
+    let project_root = project.as_ref().map(|p| p.root.as_path());
+    let scope_root = project
+        .as_ref()
+        .map(|p| p.workspace_root.as_deref().unwrap_or(p.root.as_path()));
+    let pnp_ctx = nub_core::pnp::detect(cwd);
+    let Some(aug) = nub_core::node::spawn::compute_augmentation_env(
+        &nub_binary,
+        node.version,
+        // Lifecycle scripts are never compat: PM verbs run augmented (there is
+        // no `--node` lifecycle path).
+        false,
+        project_root,
+        scope_root,
+        pnp_ctx.as_ref().map(|c| c.pnp_cjs.as_path()),
+    ) else {
+        return;
+    };
+    let (env_overlay, path_prepends) = augmentation_to_lifecycle_overlay(&aug, node.path.as_str());
+    // Merge onto whatever ScriptSettings already hold (UA etc. set elsewhere),
+    // preserving the embedder fields the later .npmrc pass carries forward.
+    let mut settings = aube::script_settings_snapshot();
+    settings.env_overlay = env_overlay;
+    settings.path_prepends = path_prepends;
+    aube::set_script_settings(settings);
 }
 
 /// `--dir` / `-C` (and the global `--cwd`, which dispatch applies earlier):
@@ -1329,6 +1425,83 @@ mod tests {
             nub_first
         );
         assert_eq!(compose_lifecycle_ua(None, None, "22.15.0"), nub_first);
+    }
+
+    #[test]
+    fn lifecycle_overlay_carries_full_augmentation() {
+        use nub_core::node::spawn::AugmentationEnv;
+        use std::ffi::OsString;
+
+        // A populated augmentation (what `nub run`/`exec` compute) must convert
+        // into the generic overlay aube applies to every lifecycle spawn:
+        // NODE → the node shim (so a build script's `$NODE child.js` re-enters
+        // nub augmented), NODE_OPTIONS (preload + injected flags), NODE_PATH
+        // (vendored helper resolution), npm_node_execpath PINNED to the
+        // provisioned Node (the ABI fix — node-gyp must compile against the
+        // project's Node, not ambient), and the shim dir leading PATH.
+        let aug = AugmentationEnv {
+            node_options: Some("--require=/rt/preload.cjs".to_string()),
+            shim_dir: Some("/shim".to_string()),
+            node_path: Some(OsString::from("/rt/node_path")),
+        };
+        let (overlay, prepends) = augmentation_to_lifecycle_overlay(&aug, "/pinned/bin/node");
+
+        let find = |k: &str| {
+            overlay
+                .iter()
+                .find(|(key, _)| key == OsString::from(k).as_os_str())
+                .map(|(_, v)| v.to_string_lossy().into_owned())
+        };
+        assert_eq!(
+            find("NODE").as_deref(),
+            Some("/shim/node"),
+            "NODE must point at the shim, not the raw binary"
+        );
+        assert_eq!(
+            find("NODE_OPTIONS").as_deref(),
+            Some("--require=/rt/preload.cjs")
+        );
+        assert_eq!(find("NODE_PATH").as_deref(), Some("/rt/node_path"));
+        assert_eq!(
+            find("npm_node_execpath").as_deref(),
+            Some("/pinned/bin/node"),
+            "npm_node_execpath must pin the provisioned Node (ABI fix)"
+        );
+        assert_eq!(
+            prepends,
+            vec![std::path::PathBuf::from("/shim")],
+            "shim dir leads PATH so a bare `node` in a build script is augmented"
+        );
+    }
+
+    /// No shim set up (re-entrant / broken install) → no NODE override and no
+    /// PATH prepend, but the pinned npm_node_execpath still flows so the ABI
+    /// pin survives even when augmentation can't fully engage.
+    #[test]
+    fn lifecycle_overlay_without_shim_still_pins_execpath() {
+        use nub_core::node::spawn::AugmentationEnv;
+        use std::ffi::OsString;
+        let aug = AugmentationEnv {
+            node_options: None,
+            shim_dir: None,
+            node_path: None,
+        };
+        let (overlay, prepends) = augmentation_to_lifecycle_overlay(&aug, "/pinned/bin/node");
+        assert!(prepends.is_empty());
+        assert!(
+            !overlay
+                .iter()
+                .any(|(k, _)| k == OsString::from("NODE").as_os_str()),
+            "no shim ⇒ no NODE override (the inherited NODE_OPTIONS preload still augments)"
+        );
+        assert_eq!(
+            overlay
+                .iter()
+                .find(|(k, _)| k == OsString::from("npm_node_execpath").as_os_str())
+                .map(|(_, v)| v.to_string_lossy().into_owned())
+                .as_deref(),
+            Some("/pinned/bin/node")
+        );
     }
 
     #[test]
