@@ -74,11 +74,27 @@ remove() {
   if [ -e "$wt" ]; then
     # git refuses to `worktree remove` a tree containing an initialized submodule
     # (vendor/aube) without --force. So we ALWAYS pass --force to git — but first
-    # we enforce the real safety check ourselves: refuse if the tree has
-    # uncommitted changes and the caller didn't ask for --force. This preserves
-    # "don't silently discard WIP" while absorbing the submodule wrinkle.
-    if [ -n "$(git -C "$wt" status --porcelain 2>/dev/null)" ] && [ "$force" != "--force" ]; then
-      die "worktree '$name' has uncommitted changes; commit them first, or 'rm $name --force' to discard"
+    # we enforce the real safety checks ourselves. NEVER lose work: refuse unless
+    # --force if EITHER repo has unsaved work.
+    if [ "$force" != "--force" ]; then
+      # (1) main tree uncommitted.
+      if [ -n "$(git -C "$wt" status --porcelain 2>/dev/null)" ]; then
+        die "worktree '$name' has uncommitted changes; commit them first, or 'rm $name --force' to discard"
+      fi
+      # (2) vendor/aube — the submodule is an INDEPENDENT clone in this worktree.
+      # Two ways its work would vanish on remove, both checked:
+      local aube="$wt/vendor/aube"
+      if [ -d "$aube" ]; then
+        #  (a) uncommitted aube changes.
+        if [ -n "$(git -C "$aube" status --porcelain 2>/dev/null)" ]; then
+          die "vendor/aube in worktree '$name' has UNCOMMITTED changes — commit + push to nubjs/aube first, or 'rm $name --force' to discard them"
+        fi
+        #  (b) committed-but-UNPUSHED aube commits: HEAD not reachable from any
+        #  remote branch → the commit lives only in this throwaway clone.
+        if [ -z "$(git -C "$aube" branch -r --contains HEAD 2>/dev/null)" ]; then
+          die "vendor/aube in worktree '$name' has a LOCAL-ONLY commit ($(git -C "$aube" rev-parse --short HEAD)) not pushed to nubjs/aube — push it (and bump the pin) first, or 'rm $name --force' to discard it"
+        fi
+      fi
     fi
     run git -C "$REPO_ROOT" worktree remove --force "$wt"
   else
