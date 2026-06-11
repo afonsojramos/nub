@@ -695,7 +695,7 @@ fn apply_config_scope(
         // (npm/yarn/bun, pnpm<9) must mirror the real PM and refuse, rather
         // than silently mis-resolve. nub-branded, role-named.
         if !role_honors_catalog(role, major)
-            && let Some(spec) = first_catalog_specifier(&manifest)
+            && let Some(spec) = first_catalog_specifier(&manifest, root)
         {
             return Err(catalog_unsupported_error(role, &spec));
         }
@@ -716,11 +716,58 @@ fn role_honors_catalog(role: config_scope::Role, major: Option<u64>) -> bool {
     }
 }
 
-/// Find the first `catalog:`-prefixed dependency specifier in the root
-/// manifest's dependency maps, returning `"<name>: <spec>"` for the error
-/// message. Pre-resolve scan — the resolver would reach the same specifier
-/// later, but mirroring the PM means refusing up front with a clear message.
-fn first_catalog_specifier(manifest: &aube_manifest::PackageJson) -> Option<String> {
+/// Find the first `catalog:`-prefixed specifier anywhere the resolver would
+/// seed one, returning `"<name>: <spec>"` for the error message. Pre-resolve
+/// scan — the resolver would reach the same specifier later, but mirroring the
+/// PM means refusing up front with a clear, role-named message instead of
+/// silently dropping the dep from the written lockfile.
+///
+/// The resolver seeds `catalog:` refs from THREE places, all covered here:
+///   1. the root manifest's `dependencies` / `devDependencies` /
+///      `optionalDependencies` (NOT `peerDependencies` — the seed never reads a
+///      peer range, see `aube-resolver/src/resolve/seed.rs`);
+///   2. EVERY workspace-member manifest's same three dep maps (the seed iterates
+///      all importers);
+///   3. `overrides` VALUES like `{"pkg": "catalog:"}` (root-level; handled by the
+///      override path in `aube-resolver/src/catalog.rs`).
+fn first_catalog_specifier(manifest: &aube_manifest::PackageJson, root: &Path) -> Option<String> {
+    // (1) root manifest dep maps.
+    if let Some(hit) = first_catalog_in_dep_maps(manifest) {
+        return Some(hit);
+    }
+
+    // (3) override values (root only — npm/pnpm/bun read overrides from the root
+    // manifest). A `catalog:`-valued override is a real catalog reference.
+    for o in manifest.tagged_overrides() {
+        if o.value.starts_with("catalog:") {
+            return Some(format!("override {}: {}", o.key, o.value));
+        }
+    }
+
+    // (2) workspace-member manifests' dep maps. Each importer is seeded
+    // independently, so a member-only `catalog:` ref must refuse too.
+    if let Ok(members) = aube_workspace::find_workspace_packages(root) {
+        for dir in members {
+            let Ok(member) = aube_manifest::PackageJson::from_path(&dir.join("package.json"))
+            else {
+                continue;
+            };
+            if let Some(hit) = first_catalog_in_dep_maps(&member) {
+                let label = member.name.as_deref().unwrap_or_else(|| {
+                    dir.file_name().and_then(|n| n.to_str()).unwrap_or("member")
+                });
+                return Some(format!("{label} → {hit}"));
+            }
+        }
+    }
+
+    None
+}
+
+/// First `catalog:` specifier in a manifest's `dependencies` /
+/// `devDependencies` / `optionalDependencies` (peerDependencies excluded — the
+/// resolver never seeds catalog from it).
+fn first_catalog_in_dep_maps(manifest: &aube_manifest::PackageJson) -> Option<String> {
     let maps = [
         &manifest.dependencies,
         &manifest.dev_dependencies,
@@ -1839,5 +1886,109 @@ mod tests {
             "{msg}"
         );
         assert!(msg.contains("pnpm rm lodash"), "{msg}");
+    }
+
+    /// Build a workspace fixture on disk and return its root tempdir. Each
+    /// `(relpath, body)` writes a file (creating parent dirs), so members live
+    /// at e.g. `("pkgs/a/package.json", …)`.
+    fn workspace(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for (rel, body) in files {
+            let path = dir.path().join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        }
+        dir
+    }
+
+    fn root_manifest(root: &Path) -> aube_manifest::PackageJson {
+        aube_manifest::PackageJson::from_path(&root.join("package.json")).unwrap()
+    }
+
+    #[test]
+    fn catalog_preflight_covers_root_member_and_override_but_not_peers() {
+        // (1) Root dep map — the original, already-covered path: a `catalog:`
+        // in the root's dependencies is found.
+        let d = workspace(&[("package.json", r#"{"dependencies":{"debug":"catalog:"}}"#)]);
+        assert_eq!(
+            first_catalog_specifier(&root_manifest(d.path()), d.path()),
+            Some("debug: catalog:".to_string())
+        );
+
+        // (2) Workspace-MEMBER dep map — the bug: a `catalog:` only in a member
+        // manifest used to bypass the preflight and get silently dropped.
+        let d = workspace(&[
+            ("package.json", r#"{"name":"root","workspaces":["pkgs/*"]}"#),
+            (
+                "pkgs/a/package.json",
+                r#"{"name":"pkg-a","dependencies":{"debug":"catalog:"}}"#,
+            ),
+        ]);
+        let hit = first_catalog_specifier(&root_manifest(d.path()), d.path())
+            .expect("member catalog: must be found");
+        assert!(
+            hit.contains("pkg-a") && hit.contains("debug: catalog:"),
+            "member hit should name the member and the spec: {hit}"
+        );
+
+        // (3) Override VALUE — the other bug: `"overrides": {"pkg":"catalog:"}`.
+        let d = workspace(&[(
+            "package.json",
+            r#"{"name":"root","overrides":{"left-pad":"catalog:"}}"#,
+        )]);
+        let hit = first_catalog_specifier(&root_manifest(d.path()), d.path())
+            .expect("override catalog: value must be found");
+        assert!(
+            hit.contains("override") && hit.contains("left-pad") && hit.contains("catalog:"),
+            "override hit should name the key and the spec: {hit}"
+        );
+
+        // Exclusion: peerDependencies are NOT seeded with catalog refs by the
+        // resolver, so a `catalog:` peer must NOT trip the preflight (matches
+        // aube-resolver/src/resolve/seed.rs, which never reads peer ranges).
+        let d = workspace(&[(
+            "package.json",
+            r#"{"peerDependencies":{"react":"catalog:"}}"#,
+        )]);
+        assert_eq!(
+            first_catalog_specifier(&root_manifest(d.path()), d.path()),
+            None,
+            "a catalog: in peerDependencies must not trip the preflight"
+        );
+    }
+
+    #[test]
+    fn member_and_override_catalog_produce_the_role_named_hard_error() {
+        // Whatever the source (member dep or override value), the surfaced
+        // error must be the clean role-named refusal — NOT a silent drop and
+        // NOT a generic ERR_NUB_UNKNOWN_CATALOG. We assert the wiring:
+        // first_catalog_specifier → catalog_unsupported_error(npm, spec).
+        use config_scope::Role;
+
+        let d = workspace(&[
+            (
+                "package.json",
+                r#"{"name":"root","packageManager":"npm@10.0.0","workspaces":["pkgs/*"]}"#,
+            ),
+            (
+                "pkgs/a/package.json",
+                r#"{"name":"pkg-a","dependencies":{"debug":"catalog:"}}"#,
+            ),
+        ]);
+        let spec = first_catalog_specifier(&root_manifest(d.path()), d.path()).unwrap();
+        let err = catalog_unsupported_error(Role::Npm, &spec).to_string();
+        assert!(err.contains("npm"), "error must name the npm role: {err}");
+        assert!(
+            err.contains("catalog:") && err.contains("pnpm"),
+            "error must explain the catalog/pnpm remedy: {err}"
+        );
+
+        let d = workspace(&[(
+            "package.json",
+            r#"{"name":"root","packageManager":"npm@10.0.0","overrides":{"left-pad":"catalog:"}}"#,
+        )]);
+        let spec = first_catalog_specifier(&root_manifest(d.path()), d.path()).unwrap();
+        let err = catalog_unsupported_error(Role::Npm, &spec).to_string();
+        assert!(err.contains("npm") && err.contains("left-pad"), "{err}");
     }
 }
