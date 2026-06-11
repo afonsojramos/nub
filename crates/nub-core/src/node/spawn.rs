@@ -635,14 +635,12 @@ fn compile_cache_tmpdir_from(lookup: impl Fn(&str) -> Option<String>) -> PathBuf
         s
     };
     if cfg!(windows) {
-        let dir = lookup("TEMP")
-            .or_else(|| lookup("TMP"))
-            .unwrap_or_else(|| {
-                let root = lookup("SystemRoot")
-                    .or_else(|| lookup("windir"))
-                    .unwrap_or_default();
-                format!("{root}\\temp")
-            });
+        let dir = lookup("TEMP").or_else(|| lookup("TMP")).unwrap_or_else(|| {
+            let root = lookup("SystemRoot")
+                .or_else(|| lookup("windir"))
+                .unwrap_or_default();
+            format!("{root}\\temp")
+        });
         return PathBuf::from(strip_trailing(dir, '\\'));
     }
     let dir = lookup("TMPDIR")
@@ -1648,22 +1646,34 @@ mod tests {
         };
 
         // TMPDIR set → used verbatim.
-        assert_eq!(resolve(&[("TMPDIR", "/custom/tmp")]), PathBuf::from("/custom/tmp"));
+        assert_eq!(
+            resolve(&[("TMPDIR", "/custom/tmp")]),
+            PathBuf::from("/custom/tmp")
+        );
         // All unset → /tmp fallback (the case the clean `env -i` corpus harness hits).
         assert_eq!(resolve(&[]), PathBuf::from("/tmp"));
         // Trailing slash stripped (so the sentinel path doesn't double the separator).
-        assert_eq!(resolve(&[("TMPDIR", "/custom/tmp/")]), PathBuf::from("/custom/tmp"));
+        assert_eq!(
+            resolve(&[("TMPDIR", "/custom/tmp/")]),
+            PathBuf::from("/custom/tmp")
+        );
         // TMP fallback when TMPDIR is unset.
         assert_eq!(resolve(&[("TMP", "/from/tmp")]), PathBuf::from("/from/tmp"));
         // TEMP fallback when TMPDIR and TMP are both unset (lowest POSIX priority).
-        assert_eq!(resolve(&[("TEMP", "/from/temp")]), PathBuf::from("/from/temp"));
+        assert_eq!(
+            resolve(&[("TEMP", "/from/temp")]),
+            PathBuf::from("/from/temp")
+        );
         // Priority: TMPDIR wins over TMP/TEMP when several are set.
         assert_eq!(
             resolve(&[("TMPDIR", "/win"), ("TMP", "/lose"), ("TEMP", "/lose")]),
             PathBuf::from("/win"),
         );
         // An empty TMPDIR is treated as unset → falls through to TMP.
-        assert_eq!(resolve(&[("TMPDIR", ""), ("TMP", "/from/tmp")]), PathBuf::from("/from/tmp"));
+        assert_eq!(
+            resolve(&[("TMPDIR", ""), ("TMP", "/from/tmp")]),
+            PathBuf::from("/from/tmp")
+        );
     }
 
     #[test]
@@ -1682,11 +1692,17 @@ mod tests {
 
         // TEMP wins (highest Win32 priority).
         assert_eq!(
-            resolve(&[("TEMP", "C:\\Users\\me\\AppData\\Local\\Temp"), ("TMP", "C:\\lose")]),
+            resolve(&[
+                ("TEMP", "C:\\Users\\me\\AppData\\Local\\Temp"),
+                ("TMP", "C:\\lose")
+            ]),
             PathBuf::from("C:\\Users\\me\\AppData\\Local\\Temp"),
         );
         // TMP fallback when TEMP is unset.
-        assert_eq!(resolve(&[("TMP", "C:\\from\\tmp")]), PathBuf::from("C:\\from\\tmp"));
+        assert_eq!(
+            resolve(&[("TMP", "C:\\from\\tmp")]),
+            PathBuf::from("C:\\from\\tmp")
+        );
         // Neither TEMP nor TMP → SystemRoot\temp.
         assert_eq!(
             resolve(&[("SystemRoot", "C:\\Windows")]),
@@ -1698,7 +1714,10 @@ mod tests {
             PathBuf::from("D:\\WinDir\\temp"),
         );
         // Trailing backslash stripped, but a bare drive root `C:\` is preserved.
-        assert_eq!(resolve(&[("TEMP", "C:\\Temp\\")]), PathBuf::from("C:\\Temp"));
+        assert_eq!(
+            resolve(&[("TEMP", "C:\\Temp\\")]),
+            PathBuf::from("C:\\Temp")
+        );
         assert_eq!(resolve(&[("TEMP", "C:\\")]), PathBuf::from("C:\\"));
     }
 
