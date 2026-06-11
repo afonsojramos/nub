@@ -39,6 +39,9 @@
 //! this one file. The per-row `evidence` field and the doc comments on each
 //! [`Feature`] carry the citations (PR numbers, unflag versions); they were
 //! audited for exactness and must be corrected in place, never silently dropped.
+//! NOTE the site sync is MANUAL — nothing programmatic consumes this table for
+//! copy, so an edit to a row requires a matching pass over site/content (the
+//! Modern APIs tables) by hand.
 //!
 //! ## How to add a feature
 //!
@@ -222,6 +225,10 @@ pub static FEATURES: &[Feature] = &[
         mitigations: &[
             (
                 band((22, 4, 0), Some((25, 0, 0))),
+                // + StorageFile: the --localstorage-file is injected on this band
+                // too (the file is required on the whole >=22.4 range — see
+                // super::flags::webstorage_supported). The single-valued
+                // Mitigation enum records the flag intent; the file rides along.
                 Mitigation::Unflag("--experimental-webstorage"),
             ),
             (band((25, 0, 0), None), Mitigation::StorageFile),
@@ -360,21 +367,23 @@ pub static FEATURES: &[Feature] = &[
         evidence: "browser-shape Worker not in any Node; wraps node:worker_threads",
     },
     // ── navigator.locks (Web Locks API) ─────────────────────────────────────
-    // Native on Node 24+; missing on the 22.x floor, where nub installs a Web
-    // Locks polyfill onto `navigator.locks`.
+    // Native on Node 24.5+ (worker: add web locks api, #58666 — NOT 24.0: the
+    // global is undefined on 24.0–24.4); below that nub installs a Web Locks
+    // polyfill onto `navigator.locks` (typeof-gated, so the 24.0–24.4 gap is
+    // covered either way).
     Feature {
         name: "navigator.locks",
         mitigations: &[
             (
-                band((18, 19, 0), Some((24, 0, 0))),
+                band((18, 19, 0), Some((24, 5, 0))),
                 Mitigation::Polyfill {
                     runtime_file: "navigator-locks.mjs",
                     global: "globalThis.navigator.locks",
                 },
             ),
-            (band((24, 0, 0), None), Mitigation::Native),
+            (band((24, 5, 0), None), Mitigation::Native),
         ],
-        evidence: "native on Node 24+; polyfilled on the 22.x floor",
+        evidence: "native on Node 24.5+ (#58666); polyfilled below",
     },
 ];
 
