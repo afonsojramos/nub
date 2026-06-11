@@ -882,6 +882,10 @@ fn node_compat_flag_disables_augmentation() {
 /// `--localstorage-file` nub injects — so this proves the file is what makes it work.
 #[test]
 fn webstorage_persists_across_runs_and_is_off_under_node_flag() {
+    if !node_at_least((22, 4, 0)) {
+        eprintln!("skipping: webstorage needs Node >= 22.4 (target is older)");
+        return;
+    }
     let dir = std::env::temp_dir().join(format!("nub-ws-itest-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -981,6 +985,10 @@ fn webstorage_persists_across_runs_and_is_off_under_node_flag() {
 /// silently dropped persistence (exit 0, value gone) before quoting was added.
 #[test]
 fn webstorage_persists_through_node_options_with_spacey_cache_path() {
+    if !node_at_least((22, 4, 0)) {
+        eprintln!("skipping: webstorage needs Node >= 22.4 (target is older)");
+        return;
+    }
     let dir = std::env::temp_dir().join(format!("nub-ws-space-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -1056,6 +1064,10 @@ fn webstorage_persists_through_node_options_with_spacey_cache_path() {
 /// user's file gets the data; nub's cache dir stays empty of a webstorage store.
 #[test]
 fn user_node_options_localstorage_file_is_not_clobbered() {
+    if !node_at_least((22, 4, 0)) {
+        eprintln!("skipping: webstorage needs Node >= 22.4 (target is older)");
+        return;
+    }
     let dir = std::env::temp_dir().join(format!("nub-ws-userfile-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
