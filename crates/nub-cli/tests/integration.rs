@@ -2535,6 +2535,34 @@ fn print_without_argument_reads_stdin_like_node() {
 }
 
 #[test]
+fn piped_stdin_without_a_script_arg_executes_like_node() {
+    // `echo 'code' | nub` (no subcommand, no script positional, non-TTY stdin)
+    // must EXECUTE the piped program, exactly as `node` does — not print help.
+    // The implicit `-` reuses the explicit `nub -` stdin path. (Cargo's test
+    // harness already runs us with a non-TTY stdin, so the pipe is genuine.)
+    use std::io::Write as _;
+    let mut child = Command::new(nub_binary())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to spawn nub");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"console.log(40 + 2)")
+        .unwrap();
+    let output = child.wait_with_output().expect("failed to wait on nub");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(0), "piped stdin should exit 0");
+    assert!(
+        stdout.trim() == "42",
+        "piped stdin must run the program (expected `42`, not help): {stdout:?}"
+    );
+}
+
+#[test]
 fn lifecycle_hooks() {
     let fixture = fixtures_dir().join("lifecycle");
     let output = Command::new(nub_binary())

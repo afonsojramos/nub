@@ -954,6 +954,15 @@ fn run_nub() -> Result<i32> {
 
     // No subcommand — check if this is a file path or a bareword.
     if rest.is_empty() {
+        // Piped/redirected stdin with no script arg: execute stdin, like Node
+        // does (`echo 'code' | node` runs the code). This is the no-positional,
+        // non-TTY case only — reuse the existing `nub -` stdin path by injecting
+        // the `-` positional and routing to the same runner. The interactive-TTY
+        // case (bare `nub` at a terminal) still shows help; Node would start a
+        // REPL there, which nub deliberately does not implement yet.
+        if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            return run_file_with_compat(&["-".to_string()], compat);
+        }
         Cli::parse_from(["nub", "--help"]);
         Ok(0)
     } else {
