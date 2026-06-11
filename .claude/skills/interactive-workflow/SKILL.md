@@ -84,6 +84,16 @@ Read-only probes parallelize without limit and run alongside any landing work. M
 
 Git hygiene across parallel agents: do all work on `main`, no branches or worktrees (per this repo's top rule). Cross-staged commits across parallel agents are fine; committed work cannot be clobbered.
 
+## Parallelization budget — pace by cost, because you CANNOT read the quota
+
+**There is NO supported way for an agent to read the current Max-plan quota** (the rolling 5-hour balance or weekly limit). Verified 2026-06-11: no env var, no `claude` subcommand, no state/cache file, no hook payload carries it; the `/usage` slash command shows it in the human's TUI but is UI-only and not reachable programmatically. The API's `anthropic-ratelimit-*` headers are per-request rate-limit state (not subscription quota) and Claude Code agents have no direct API key anyway. So "throttle by remaining quota %" is impossible — pace by these PROXIES instead:
+
+- **Tier-weighted concurrency cap, not a flat agent count.** Opus/Fable agents are HEAVY, Sonnet MEDIUM, Haiku LIGHT. Cap concurrent *heavy* agents (≈3 Opus at once is a sane default) while cheap read-only Sonnet/Haiku probes fan wider. A round of "4 Opus investigations at once" is the thing to break up — stagger them, or run the cheap probes first and let the heavy ones trail.
+- **React to the only ground-truth signal: 429 / rate-limit errors.** On the first one, halve concurrency, serialize, back off. That's the sole real quota feedback an agent gets.
+- **The human's `/usage` readout is an EXPLICIT input — treat it as authoritative.** They can see the number; you can't. When they say "we're about to hit quota, hold off" or "go wide," that overrides your heuristic immediately.
+- **On a "hold off / about to hit quota" signal: STOP launching, but do NOT kill in-flight agents.** Killing a running agent mid-edit orphans its WIP (the cardinal sin). Let already-spawned agents reach their commit; just launch nothing new. Meanwhile, cheaply PERSIST state to the tracker (your own edits are negligible vs a sub-agent fan-out) so a quota wall or context reset loses nothing — the board, the just-returned findings, the held-but-not-launched queue. Resume the held queue when the human says quota reset.
+- **Persist-before-the-wall.** When quota is near, the highest-value use of your remaining budget is folding returned results into the tracker and recording what's queued — not squeezing in one more dispatch.
+
 ---
 
 ## The question channel — accumulate, then batch-ask
