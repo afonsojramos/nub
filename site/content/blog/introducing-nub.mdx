@@ -162,7 +162,7 @@ $ nub server.ts
 
 ### `nub node` — a version manager you should never need
 
-Nub resolves the right Node for every project implicitly — from `.node-version`, `.nvmrc`, or `package.json#engines` — every time it runs a file. If that version isn't installed, it's downloaded from nodejs.org (checksum-verified, cached under `~/.cache/nub`) and your code runs on it in the same breath. No pin? The `node` on your `PATH` is used, however you manage it. It's the [uv](https://docs.astral.sh/uv/) experience, for Node.
+Nub resolves the right Node for every project implicitly — from `.node-version`, `.nvmrc`, or `package.json#engines` — every time it runs a file. If that version isn't installed, it's downloaded from nodejs.org (checksum-verified, cached under `~/.cache/nub`) and your code runs on it. No pin? The `node` on your `PATH` is used, however you manage it. It's the [uv](https://docs.astral.sh/uv/) experience, for Node.
 
 ```sh
 $ echo 26 > .node-version
@@ -184,7 +184,7 @@ nub node uninstall 22   # remove a version
 
 ## Modern APIs
 
-These work on every Node version Nub supports — polyfilled where Node hasn't shipped them, unflagged where Node gates them. Credit where it's due: Node has been closing this gap itself. The table is a moving target by design — each row bridges the LTS you're on today to the LTS you'll be on tomorrow, and as your Node floor rises the polyfills feature-detect, defer, and disappear. Same code, no migration.
+These work on every Node version Nub supports — polyfilled where Node hasn't shipped them, unflagged where Node gates them. Credit where it's due: Node has been closing this gap itself. The table is a moving target by design: as your Node floor rises, the polyfills feature-detect and step aside. Same code, no migration.
 
 **Native** — Node ships it; Nub steps aside entirely. **Unflagged** — Node implements it behind an `--experimental-*` flag; Nub injects the flag. **Polyfilled** — Nub preloads an established community polyfill until your Node floor reaches the native line.
 
@@ -409,13 +409,13 @@ $ nub install   # yarn.lock → honored read-only
 
 There's no migration. `nub install` detects the lockfile your project already has — npm, pnpm, or bun — and writes the same format back, never a foreign file (`yarn.lock` is read-only: an install that would rewrite it is refused, with the exact yarn command to run instead). Fresh projects get a standard `pnpm-lock.yaml`. And your package manager keeps working, side by side: run either tool, commit the same file, switch back any time.
 
-If you haven't heard of aube, what it brings:
+What aube brings:
 
 - **Speed** — warm installs run ~6× faster than pnpm and ~7× faster than Bun on [aube's benchmarks](https://aube.jdx.dev/benchmarks).
 - **The tightest security defaults of any Node package manager** — lifecycle scripts wait for approval (with an opt-in build jail — the only one in the ecosystem), exotic transitive deps are blocked, and brand-new releases sit in a [24-hour cooling window](https://aube.jdx.dev/security).
 - **Less disk** — a global content-addressable store shares package files across projects instead of duplicating them per checkout.
 
-The install layout follows the lockfile too. pnpm projects and fresh ones get strict, symlinked, pnpm-style installs, with the virtual store tucked under `node_modules/.nub`; projects with an npm, yarn, or bun lockfile default to the flat hoisted layout those tools produce — nothing about your tree surprises the code that walks it. One `.npmrc` line (`node-linker`) overrides either default.
+The install layout follows the lockfile too. pnpm projects and fresh ones get strict, symlinked, pnpm-style installs, with the virtual store tucked under `node_modules/.nub`; projects with an npm, yarn, or bun lockfile default to the flat hoisted layout those tools produce, so tooling that walks `node_modules` sees the layout it expects. One `.npmrc` line (`node-linker`) overrides either default.
 
 ```sh
 $ nub install
