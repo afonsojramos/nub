@@ -225,12 +225,12 @@ Escape a literal dollar sign with `\$`. Watch the classic footgun: `PASSWORD=foo
 
 ## Modern globals
 
-Modern web-platform and TC39 APIs work on every supported Node version — polyfilled where Node hasn't shipped them, unflagged where Node hides them behind `--experimental-*`. As your Node floor rises, the polyfills feature-detect and step aside; same code, no migration.
+Modern web-platform and TC39 APIs work out of the box — polyfilled where Node hasn't shipped them (feature-detected on every supported version), unflagged in exact per-version bands where Node hides them behind `--experimental-*`. As your Node floor rises, the polyfills feature-detect and step aside; same code, no migration.
 
 ```ts
 const now = Temporal.Now.plainDateTimeISO();          // native in Node 26+, polyfilled below
 const route = new URLPattern({ pathname: "/u/:id" }); // native in Node 24+, polyfilled below
-const ws = new WebSocket("wss://api.example.com");     // native in Node 22.5+, polyfilled on 20.x
+const ws = new WebSocket("wss://api.example.com");     // on by default since 22.0, unflagged on 20.10+
 const stream = new EventSource("https://api/stream");  // auto-unflagged
 const worker = new Worker(new URL("./w.ts", import.meta.url), { type: "module" });
 ```
@@ -244,16 +244,16 @@ The storage globals — `localStorage` / `sessionStorage` — also work without 
 | `Worker` | — | polyfilled over `node:worker_threads` |
 | `Temporal` | Node 26 | polyfilled |
 | `URLPattern` | Node 24 | polyfilled |
-| `WebSocket` | Node 22.5 | unflagged on 22.0–22.4, polyfilled below |
-| `EventSource` | — | unflagged |
-| `localStorage` / `sessionStorage` | Node 25 | unflagged, plus a default `--localstorage-file` on every version |
-| `vm.Module` | — | unflagged |
-| `node:sqlite` | Node 22.13 | unflagged |
+| `WebSocket` | Node 22.0 | unflagged on 20.10–21.x; absent below 20.10 |
+| `EventSource` | — | unflagged on 20.18+ and 22.3+; absent below |
+| `localStorage` | Node 25 | unflagged on 22.4–24, plus a workspace-scoped `--localstorage-file` on every version ≥22.4 |
+| `sessionStorage` | Node 25 | unflagged on 22.4–24 — in-memory and per-process by design |
+| `vm.Module` | — | unflagged on the entire 18.19+ floor |
+| `node:sqlite` | Node 22.13 | unflagged on 22.5–22.12; absent below 22.5 |
 | `RegExp.escape` | Node 24 | polyfilled |
 | `Error.isError` | Node 24 | polyfilled |
 | `Promise.try` | Node 24 | polyfilled |
 | `Float16Array` | Node 24 | polyfilled |
-| Iterator helpers | Node 22 | polyfilled |
 
 ## The Node version
 

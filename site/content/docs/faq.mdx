@@ -33,8 +33,8 @@ Running `nub <file>` is flag-for-flag compatible with `node <file>` — same arg
 - **JSX support** — `.jsx` / `.tsx` files execute directly, runtime sourced from `compilerOptions.jsx` / `jsxImportSource`
 - **Env files** — `.env` and `.env.${NODE_ENV}` loaded eagerly with Vite-compatible precedence
 - **YAML / TOML / JSON5 / JSONC / text loaders** — `import config from "./config.yaml"` works the way `import data from "./data.json"` already does
-- **Automatic polyfills** — `Temporal`, `URLPattern`, `WebSocket`, browser-shape `Worker`, WinterTC gap globals, version-detected and feature-gated
-- **Unflagged experimentals** — `EventSource`, `localStorage` / `sessionStorage`, `vm.Module`, `import.meta.resolve`, `node:sqlite` — flags Node already ships but keeps gated, auto-injected on versions where they're still behind `--experimental-*`
+- **Automatic polyfills** — `Temporal`, `URLPattern`, browser-shape `Worker`, WinterTC gap globals, version-detected and feature-gated
+- **Unflagged experimentals** — `EventSource`, `WebSocket`, `localStorage` / `sessionStorage`, `vm.Module`, `node:sqlite` — flags Node already ships but keeps gated, auto-injected in exact per-version bands where each is still behind `--experimental-*`
 
 All of that comes for free when you type `nub` instead of `node`. For plain Node behavior, type `node` — the PATH shim is per-invocation, so shell `node` is always the user's real Node. For orchestration without runtime augmentation, `nub run --node` and `nubx --node` strip the hook/preload/flag-injection while keeping Nub's CLI work.
 

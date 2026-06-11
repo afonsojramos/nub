@@ -184,7 +184,7 @@ nub node uninstall 22   # remove a version
 
 ## Modern APIs
 
-These work on every Node version Nub supports — polyfilled where Node hasn't shipped them, unflagged where Node gates them. Node has been closing this gap itself. The table is a moving target by design: as your Node floor rises, the polyfills feature-detect and step aside. Same code, no migration.
+The polyfilled rows work on every Node version Nub supports — feature-detected, native wins. The unflagged rows are exact per-version bands; each maps to a named entry in Nub's flag table. Node has been closing this gap itself. The table is a moving target by design: as your Node floor rises, the polyfills feature-detect and step aside. Same code, no migration.
 
 **Native** — Node ships it; Nub steps aside entirely. **Unflagged** — Node implements it behind an `--experimental-*` flag; Nub injects the flag. **Polyfilled** — Nub preloads an established community polyfill until your Node floor reaches the native line.
 
@@ -193,16 +193,16 @@ These work on every Node version Nub supports — polyfilled where Node hasn't s
 | `Worker` | — | polyfilled over `node:worker_threads` |
 | `Temporal` | Node 26 | polyfilled |
 | `URLPattern` | Node 24 | polyfilled |
-| `WebSocket` | Node 22.5 | unflagged on 22.0–22.4, polyfilled below |
-| `EventSource` | — | unflagged |
-| `localStorage` / `sessionStorage` | Node 25 | unflagged, plus a default `--localstorage-file` on every version |
-| `vm.Module` | — | unflagged |
-| `node:sqlite` | Node 22.13 | unflagged |
+| `WebSocket` | Node 22.0 | unflagged on 20.10–21.x; absent below 20.10 |
+| `EventSource` | — | unflagged on 20.18+ and 22.3+; absent below |
+| `localStorage` | Node 25 | unflagged on 22.4–24, plus a workspace-scoped `--localstorage-file` on every version ≥22.4 |
+| `sessionStorage` | Node 25 | unflagged on 22.4–24 — in-memory and per-process by design |
+| `vm.Module` | — | unflagged on the entire 18.19+ floor |
+| `node:sqlite` | Node 22.13 | unflagged on 22.5–22.12; absent below 22.5 |
 | `RegExp.escape` | Node 24 | polyfilled |
 | `Error.isError` | Node 24 | polyfilled |
 | `Promise.try` | Node 24 | polyfilled |
 | `Float16Array` | Node 24 | polyfilled |
-| Iterator helpers | Node 22 | polyfilled |
 
 ### `Worker`
 
@@ -239,7 +239,7 @@ match?.pathname.groups.id; // "42"
 
 ### `WebSocket`
 
-Browser-standard WebSocket client. Native in Node 22.5+; flag-injected on 22.0–22.4; polyfilled via the already-bundled `node:undici` on Node 20 (zero new deps).
+Browser-standard WebSocket client. On by default since Node 22.0; on 20.10–21.x Nub injects `--experimental-websocket`. Below 20.10 Node has no WebSocket client, and Nub doesn't fake one.
 
 ```ts
 const ws = new WebSocket("wss://api.example.com/stream");
@@ -250,7 +250,7 @@ ws.addEventListener("open", () => ws.send("hello"));
 
 ### `EventSource`
 
-SSE client — handy for LLM streaming. Behind `--experimental-eventsource` on current Node; Nub auto-injects.
+SSE client — handy for LLM streaming. Behind `--experimental-eventsource` on every Node that ships it (20.18+, 22.3+); Nub injects the flag.
 
 ```ts
 const stream = new EventSource("https://api.example.com/llm/stream");
@@ -259,7 +259,7 @@ stream.addEventListener("message", (e) => process.stdout.write(e.data));
 
 ### `localStorage` / `sessionStorage`
 
-Native in Node 25+, flag-gated on 22 / 24 — and on every version, persistence silently fails unless you set `--localstorage-file` yourself. Nub injects the flag and defaults the storage file to `~/.cache/nub/<project-hash>/localstorage`, so `localStorage.setItem` just works.
+Native in Node 25+, flag-gated on 22.4–24 — and on every version, persistence silently fails unless you set `--localstorage-file` yourself. Nub injects the flag and defaults the storage file to `~/.cache/nub/webstorage/<workspace-hash>/localstorage.sqlite` — scoped to your workspace, so monorepo members share one store and it survives across runs. Your own `--localstorage-file`, set anywhere, always wins. `sessionStorage` is in-memory and per-process, by design.
 
 ```ts
 localStorage.setItem("auth.token", "abc123");
@@ -281,7 +281,7 @@ mod.namespace.answer; // 42
 
 ### `node:sqlite`
 
-Embedded SQLite. Unflagged in Node 22.13 / 23.4+; Nub injects `--experimental-sqlite` on older.
+Embedded SQLite. On by default since Node 22.13 / 23.4; Nub injects `--experimental-sqlite` on 22.5–22.12 and 23.0–23.3. It doesn't exist below 22.5.
 
 ```ts
 import { DatabaseSync } from "node:sqlite";
@@ -299,7 +299,6 @@ Finished TC39 methods — native on Node 24+, polyfilled on older lines, each on
 - [`Error.isError`](https://github.com/tc39/proposal-is-error) — cross-realm `Error` detection, where `instanceof` lies.
 - [`Promise.try`](https://github.com/tc39/proposal-promise-try) — start a chain from a sync-or-async function.
 - [`Float16Array`](https://github.com/tc39/proposal-float16array) — plus `DataView.getFloat16` / `setFloat16` and `Math.f16round`. One real caveat: the polyfill is ~3× slower than V8's hardware-FP16 path, so pin Node 24+ for ML-inference hot loops.
-- [Iterator helpers](https://github.com/tc39/proposal-iterator-helpers) — `Iterator.from` / `map` / `filter` / …, native on Node 22+.
 
 ## `nub watch` — built-in watch mode
 
