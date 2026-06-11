@@ -812,9 +812,24 @@ pub(crate) fn engine_brand_preflight() {
                  (`nub pm use nub`), delete it, or return to pnpm (`nub pm use pnpm`)."
             );
         }
+    } else if std::env::current_dir()
+        .ok()
+        .is_some_and(|cwd| non_pnpm_role(&cwd))
+    {
+        // Compat mode, but the incumbent is npm/yarn/bun — NOT pnpm. The
+        // pnpm-specific config surface is theirs to ignore: a stray
+        // `pnpm-workspace.yaml` or a `package.json#pnpm.*` object in an npm /
+        // yarn / bun project is another tool's state, exactly as it is under
+        // nub identity (a yarn repo someone copied a pnpm tutorial's workspace
+        // yaml into must not silently adopt its `packages`/`node-linker`). The
+        // ecosystem-neutral surface stays live: `.npmrc`, and top-level
+        // `workspaces`/`overrides`/`allowBuilds` via the manifest root.
+        aube::set_workspace_yaml_names(&[]);
+        aube::set_manifest_config_namespaces(&[""]);
     } else {
-        // Workspace yamls: `pnpm-workspace.yaml` only. An `aube-workspace.yaml`
-        // some other tool left on disk is neither read nor chosen as the
+        // pnpm role (or fresh): play the incumbent completely. Workspace
+        // yamls: `pnpm-workspace.yaml` only. An `aube-workspace.yaml` some
+        // other tool left on disk is neither read nor chosen as the
         // fresh-write target (`approve-builds` writes its allowlist there).
         aube::set_workspace_yaml_names(&["pnpm-workspace.yaml"]);
         // package.json config namespace: `pnpm` only — an `aube` object in a
@@ -906,6 +921,52 @@ fn nub_identity_dir(cwd: &Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Engine-free probe: is the project at `cwd` (walking up, same budget as
+/// [`nub_identity_dir`]) a NON-pnpm role — npm, yarn, or bun? Drives the
+/// role-gated config surface in [`engine_brand_preflight`]: a non-pnpm
+/// incumbent has the pnpm-specific surface (`pnpm-workspace.yaml`, the
+/// `package.json#pnpm.*` namespace) turned OFF, so its stray pnpm-shaped state
+/// is never read. Called only when [`nub_identity_dir`] already returned
+/// `None`, so nub identity is off the table here; the remaining outcomes are
+/// pnpm-role / non-pnpm-role / fresh.
+///
+/// Per level (engine-free, plain manifest/lockfile-presence reads, like the
+/// identity probe): a declaration decides by name — `npm`/`yarn`/`bun` →
+/// non-pnpm; `pnpm`/`nub`/anything else → pnpm-shaped surface (conservative:
+/// an unknown declared tool keeps the full compat surface). Undeclared, a lone
+/// foreign npm/yarn/bun lockfile decides non-pnpm; a `pnpm-lock.yaml` (alone or
+/// beside a foreign one — the ambiguity the engine errors on) keeps the pnpm
+/// surface. Nothing anywhere = fresh = pnpm-shaped (Axiom 4: fresh projects get
+/// pnpm-format artifacts).
+fn non_pnpm_role(cwd: &Path) -> bool {
+    const FOREIGN_NON_PNPM: &[&str] = &[
+        "package-lock.json",
+        "npm-shrinkwrap.json",
+        "yarn.lock",
+        "bun.lock",
+        "bun.lockb",
+    ];
+    let mut dir = cwd.to_path_buf();
+    for _ in 0..16 {
+        if let Some(decl) = aube_lockfile::declared_package_manager(&dir) {
+            return matches!(decl.name.as_str(), "npm" | "yarn" | "bun");
+        }
+        let pnpm_lock = dir.join("pnpm-lock.yaml").is_file();
+        let foreign = FOREIGN_NON_PNPM.iter().any(|f| dir.join(f).is_file());
+        match (pnpm_lock, foreign) {
+            // A pnpm-lock.yaml present (even beside a foreign one — the
+            // ambiguity state the engine errors on) keeps the pnpm surface.
+            (true, _) => return false,
+            (false, true) => return true,
+            (false, false) => {}
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    false
 }
 
 /// Nub's replacement setting defaults, fed to the engine's embedder-defaults
@@ -1151,6 +1212,52 @@ mod tests {
         let member = d.path().join("packages/a");
         std::fs::create_dir_all(&member).unwrap();
         assert_eq!(nub_identity_dir(&member).as_deref(), Some(d.path()));
+    }
+
+    #[test]
+    fn non_pnpm_role_gates_the_pnpm_surface_for_npm_yarn_bun_only() {
+        let root = |files: &[(&str, &str)]| {
+            let dir = tempfile::tempdir().unwrap();
+            for (name, body) in files {
+                std::fs::write(dir.path().join(name), body).unwrap();
+            }
+            dir
+        };
+
+        // Declaration decides by name. npm/yarn/bun → pnpm surface OFF.
+        for pm in ["npm@10.0.0", "yarn@4.0.0", "bun@1.1.0"] {
+            let d = root(&[("package.json", &format!(r#"{{"packageManager":"{pm}"}}"#))]);
+            assert!(non_pnpm_role(d.path()), "{pm} is a non-pnpm role");
+        }
+        // pnpm keeps the full compat surface; an unknown tool stays
+        // conservative (full surface), never gated off by mistake.
+        for pm in ["pnpm@9.0.0", "vlt@1.0.0"] {
+            let d = root(&[("package.json", &format!(r#"{{"packageManager":"{pm}"}}"#))]);
+            assert!(!non_pnpm_role(d.path()), "{pm} keeps the pnpm surface");
+        }
+
+        // Undeclared: a lone foreign npm/yarn/bun lockfile gates the surface.
+        let d = root(&[("package.json", "{}"), ("yarn.lock", "# yarn\n")]);
+        assert!(non_pnpm_role(d.path()));
+        // A pnpm-lock.yaml keeps the pnpm surface — even beside a foreign one
+        // (the ambiguity the engine errors on loudly right after).
+        let d = root(&[
+            ("package.json", "{}"),
+            ("pnpm-lock.yaml", "lockfileVersion: '9.0'\n"),
+            ("yarn.lock", "# yarn\n"),
+        ]);
+        assert!(!non_pnpm_role(d.path()));
+
+        // Fresh = pnpm-shaped (Axiom 4); the probe also walks up from a member.
+        let d = root(&[("package.json", "{}")]);
+        assert!(!non_pnpm_role(d.path()));
+        let d = root(&[
+            ("package.json", r#"{"packageManager":"yarn@4.0.0"}"#),
+            ("yarn.lock", "# yarn\n"),
+        ]);
+        let member = d.path().join("packages/a");
+        std::fs::create_dir_all(&member).unwrap();
+        assert!(non_pnpm_role(&member));
     }
 
     #[test]

@@ -266,6 +266,59 @@ fn aube_workspace_yaml_is_not_consulted_for_workspace_discovery() {
     );
 }
 
+/// Role-gating: the pnpm-specific config surface (`pnpm-workspace.yaml`, the
+/// `package.json#pnpm.*` namespace) is OFF for an npm/yarn/bun incumbent. A
+/// yarn project someone copied a pnpm tutorial's workspace yaml into must not
+/// silently adopt its `packages` glob — under nub identity that yaml is already
+/// ignored, and a non-pnpm compat role gets the same treatment. The same
+/// fixture keyed to a pnpm project still resolves the root (the pnpm surface is
+/// live for the pnpm role). Rides the workspace-root walk like the
+/// `aube-workspace.yaml` probe above: from a member with no lockfile, the
+/// member is standalone unless the yaml is honored.
+#[test]
+fn pnpm_workspace_yaml_is_gated_off_for_a_non_pnpm_role() {
+    // `(pm, lockfile_name, lockfile_body)` — the yarn role vs. the pnpm role,
+    // both carrying an otherwise-promoting `pnpm-workspace.yaml`.
+    let fixture = |pm: &str, lock_name: &str, lock_body: &str| {
+        let root = pm_tmpdir(&format!("rolegate-{}", &pm[..3]));
+        std::fs::write(
+            root.join("package.json"),
+            format!(r#"{{"name":"root","packageManager":"{pm}"}}"#),
+        )
+        .unwrap();
+        std::fs::write(root.join(lock_name), lock_body).unwrap();
+        std::fs::write(
+            root.join("pnpm-workspace.yaml"),
+            "packages:\n  - 'pkgs/*'\n",
+        )
+        .unwrap();
+        let member = root.join("pkgs/app");
+        std::fs::create_dir_all(&member).unwrap();
+        std::fs::write(member.join("package.json"), r#"{"name":"app"}"#).unwrap();
+        member
+    };
+
+    // Yarn role: the stray yaml is not read, so the member stands alone.
+    let (_, stderr, code) = run_nub(&fixture("yarn@4.0.0", "yarn.lock", "# yarn\n"), &["list"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        stderr.contains("No lockfile found"),
+        "a yarn project's stray pnpm-workspace.yaml must not promote the member: {stderr}"
+    );
+
+    // pnpm role: the yaml is live, so the member resolves the workspace root.
+    let pnpm_lock = "lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n\n  pkgs/app: {}\n";
+    let (_, stderr, code) = run_nub(
+        &fixture("pnpm@9.0.0", "pnpm-lock.yaml", pnpm_lock),
+        &["list"],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        !stderr.contains("No lockfile found"),
+        "a pnpm project's pnpm-workspace.yaml must still resolve the root: {stderr}"
+    );
+}
+
 /// Per-verb `--help` renders (engine verbs bypass nub's top-level clap), is
 /// named for nub, and carries no engine verb spellings.
 #[test]

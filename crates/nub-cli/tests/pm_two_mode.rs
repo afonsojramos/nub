@@ -125,6 +125,68 @@ fn use_nub_migrates_a_single_package_catalog_project_offline_and_idempotently() 
     );
 }
 
+/// Crash-recovery for the one half-migrated window `use nub` can be killed in:
+/// the manifest edit (atomic — packageManager flipped, the yaml's catalog
+/// already copied into `workspaces`, the `pnpm` namespace dropped) and the
+/// lockfile rename both completed, but the process died BEFORE the final
+/// `pnpm-workspace.yaml` deletion. The project then declares nub identity yet
+/// still carries the stray yaml. The recovery contract is re-run idempotence,
+/// not atomicity: a second `use nub` reads the leftover yaml, re-derives the
+/// (already-present) migration, deletes the yaml, and lands in clean nub
+/// identity with the catalog data intact — never silently dropped. We build
+/// the half-state directly rather than racing a real SIGKILL (the command is
+/// too fast to interrupt mid-write reliably).
+#[test]
+fn use_nub_recovers_from_a_crash_before_the_yaml_deletion() {
+    let nub_ver = env!("CARGO_PKG_VERSION");
+    let dir = project(
+        "use-nub-halfstate",
+        &[
+            // Manifest as the atomic edit would have left it: nub identity,
+            // catalog migrated into the workspaces object, no pnpm namespace.
+            (
+                "package.json",
+                &format!(
+                    r#"{{"name":"app","version":"1.0.0","packageManager":"nub@{nub_ver}",{}}}"#,
+                    r#""devEngines":{"packageManager":{"name":"nub","version":"^0.0.0","onFail":"warn"}},"workspaces":{"catalog":{"left-pad":"1.3.0"}}"#
+                ),
+            ),
+            // The rename already happened: lock.yaml present, no pnpm-lock.yaml.
+            ("lock.yaml", EMPTY_LOCK),
+            // The leftover the crash never got to delete — still carrying the
+            // catalog that the atomic manifest edit already preserved.
+            ("pnpm-workspace.yaml", "catalog:\n  left-pad: 1.3.0\n"),
+        ],
+    );
+
+    let (stdout, stderr, code) = run(&dir, &["pm", "use", "nub"]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+
+    // The leftover yaml is gone; lock.yaml is kept (not re-renamed); the
+    // project is now in clean, fully-migrated nub identity.
+    assert!(
+        !dir.join("pnpm-workspace.yaml").exists(),
+        "the recovery run must delete the stray yaml: {stdout}"
+    );
+    assert!(
+        dir.join("lock.yaml").is_file() && !dir.join("pnpm-lock.yaml").exists(),
+        "lock.yaml stays the lockfile, untouched: {stdout}"
+    );
+
+    // The migrated data survived the half-state — never silently dropped.
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("package.json")).unwrap()).unwrap();
+    assert_eq!(manifest["packageManager"], format!("nub@{nub_ver}"));
+    assert_eq!(
+        manifest["workspaces"]["catalog"]["left-pad"], "1.3.0",
+        "the catalog must remain in the manifest after recovery"
+    );
+    assert!(
+        manifest.get("pnpm").is_none(),
+        "the pnpm namespace stays removed"
+    );
+}
+
 /// Injected-deps state refuses the whole switch before anything is written —
 /// the engine has no injected-deps implementation, and `use` never silently
 /// changes install semantics.
