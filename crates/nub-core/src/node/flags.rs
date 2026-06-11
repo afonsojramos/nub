@@ -68,20 +68,43 @@ pub fn test_coverage_exclude_supported(node_version: &NodeVersion) -> bool {
     *node_version >= MIN_TEST_COVERAGE_EXCLUDE
 }
 
-/// Experimental flags to unflag per the v0.1 set.
-/// Each entry: (flag, min Node version where the flag exists, max
-/// version where it's still behind the flag — None means "still
-/// experimental on all supported versions").
+/// Experimental flags Nub unflags, keyed to the EXACT Node versions where the
+/// flag both (a) exists — passing it elsewhere is a hard "bad option" /
+/// "not allowed in NODE_OPTIONS" startup abort — and (b) is still needed (the
+/// feature is behind the flag, not yet default-on).
+///
+/// Each entry carries a list of `[lo, hi)` version bands (inclusive low,
+/// exclusive high; `hi: None` means "open-ended to infinity"). A single `min`
+/// can't express two of these flags: eventsource has a HOLE on the 21.x line
+/// (the flag never shipped there), and sqlite is needed in TWO disjoint bands
+/// (the 22.x and 23.x lines unflagged at different points). Over-injecting a
+/// still-experimental default-true bool (sqlite/websocket after unflag) is a
+/// harmless no-op; UNDER-injecting silently loses the feature; injecting where
+/// the flag DOESN'T EXIST crashes the process. The bands below are tuned so the
+/// flag is present exactly where it both exists and is required.
+///
+/// Every band cites its changelog evidence — do not re-derive; correct the
+/// citation if you find it wrong.
 const UNFLAG_TABLE: &[UnflagEntry] = &[
     UnflagEntry {
         flag: "--experimental-vm-modules",
-        min: NodeVersion::new(22, 15, 0),
-        unflagged_at: None,
+        // vm.Module / vm.SourceTextModule. Flag added in Node 9.6.0 (#14253) and
+        // NEVER unflagged through Node 26 — `vm.Module` stays experimental and the
+        // flag is always required. So inject across the ENTIRE supported floor
+        // (18.19+). (Previously min:22.15.0 left vm.Module broken on 18.19–22.14.)
+        bands: &[(NodeVersion::new(18, 19, 0), None)],
     },
     UnflagEntry {
         flag: "--experimental-eventsource",
-        min: NodeVersion::new(22, 15, 0),
-        unflagged_at: None,
+        // EventSource global (#51575, "add EventSource Client"). Landed on the 22.x
+        // line at 22.3.0 and was backported to the 20.x LTS line at 20.18.0. The
+        // 21.x line was already EOL when it landed, so the flag NEVER existed there
+        // — injecting it on any 21.x is a "bad option" startup crash. Never unflagged
+        // through 26. Injection set: [20.18.0, 21.0.0) ∪ [22.3.0, ∞).
+        bands: &[
+            (NodeVersion::new(20, 18, 0), Some(NodeVersion::new(21, 0, 0))),
+            (NodeVersion::new(22, 3, 0), None),
+        ],
     },
     // webstorage is NOT in this static table on purpose. It needs a runtime-computed
     // `--localstorage-file=<path>` injected alongside the flag (the path is keyed on
@@ -91,17 +114,46 @@ const UNFLAG_TABLE: &[UnflagEntry] = &[
     // + `compute_localstorage_path`. See wiki/runtime/webstorage-unflag.md.
     UnflagEntry {
         flag: "--experimental-sqlite",
-        min: NodeVersion::new(22, 15, 0),
-        unflagged_at: None,
+        // node:sqlite. Flag added in Node 22.5.0 (#57752). Module unflagged (default
+        // import, no flag needed) at 22.13.0 on the 22.x line and at 23.4.0 on the
+        // 23.x line. The flag survives as a default-true bool after unflagging, so
+        // over-injecting in the unflagged range would be a harmless no-op — but it
+        // doesn't EXIST below 22.5.0, so injecting there crashes. Inject only where
+        // the flag both exists and is still required: [22.5.0, 22.13.0) ∪ [23.0.0, 23.4.0).
+        bands: &[
+            (NodeVersion::new(22, 5, 0), Some(NodeVersion::new(22, 13, 0))),
+            (NodeVersion::new(23, 0, 0), Some(NodeVersion::new(23, 4, 0))),
+        ],
+    },
+    UnflagEntry {
+        flag: "--experimental-websocket",
+        // WebSocket global. Flag-gated on [20.10.0, 22.0.0) — the global exists on
+        // 20.10+ and all of the 21.x line behind `--experimental-websocket`, then
+        // becomes default-on at 22.0.0 (the flag persists as a default-true bool but
+        // is no longer required; below 20.10.0 it doesn't exist and is a "bad option").
+        // The experimental warning emitted on 22.0–22.3 is already silenced by nub's
+        // `--disable-warning=ExperimentalWarning` (injected ≥20.11). Injection set:
+        // [20.10.0, 22.0.0).
+        bands: &[(NodeVersion::new(20, 10, 0), Some(NodeVersion::new(22, 0, 0)))],
     },
 ];
 
 struct UnflagEntry {
     flag: &'static str,
-    min: NodeVersion,
-    /// If Some, the flag was unflagged at this version and injection
-    /// is unnecessary from this version onward.
-    unflagged_at: Option<NodeVersion>,
+    /// Inclusive-low / exclusive-high version bands where the flag is injected.
+    /// `hi: None` is open-ended (inject from `lo` to infinity). A version is in
+    /// the injection set iff it falls in ANY band.
+    bands: &'static [(NodeVersion, Option<NodeVersion>)],
+}
+
+impl UnflagEntry {
+    /// Whether this flag should be injected for `node_version` — true iff the
+    /// version lands in any `[lo, hi)` band.
+    fn applies_to(&self, node_version: &NodeVersion) -> bool {
+        self.bands.iter().any(|(lo, hi)| {
+            *node_version >= *lo && hi.as_ref().map_or(true, |hi| node_version < hi)
+        })
+    }
 }
 
 /// Compute the flags Nub should inject for the given Node version,
@@ -129,12 +181,7 @@ pub fn compute_inject_flags(
     }
 
     for entry in UNFLAG_TABLE {
-        if node_version >= entry.min {
-            if let Some(ref unflagged_at) = entry.unflagged_at {
-                if node_version >= *unflagged_at {
-                    continue;
-                }
-            }
+        if entry.applies_to(&node_version) {
             flags.push(entry.flag);
         }
     }
@@ -204,7 +251,60 @@ mod tests {
         // webstorage is NOT in this static set — it needs a runtime-computed
         // --localstorage-file and version-banded flag logic, handled in spawn.rs.
         assert!(!flags.contains(&"--experimental-webstorage"));
-        assert!(flags.contains(&"--experimental-sqlite"));
+        // sqlite is unflagged on 22.13.0+ (the 22.x line), so 22.15 does NOT inject it.
+        assert!(!flags.contains(&"--experimental-sqlite"));
+    }
+
+    #[test]
+    fn vm_modules_injected_across_entire_floor() {
+        // vm.Module is never unflagged — inject from the 18.19 floor through 26.x.
+        // (Regression: the old min:22.15.0 left vm.Module broken on 18.19–22.14.)
+        assert!(compute_inject_flags(v(18, 19, 0), &[], None, false)
+            .contains(&"--experimental-vm-modules"));
+        assert!(compute_inject_flags(v(26, 2, 0), &[], None, false)
+            .contains(&"--experimental-vm-modules"));
+    }
+
+    #[test]
+    fn eventsource_skips_the_21x_hole() {
+        // EventSource landed at 22.3.0 + 20.18.0 backport; never shipped on 21.x.
+        // Injecting on 21.x is a "bad option" crash — the highest-stakes boundary here.
+        let yes = "--experimental-eventsource";
+        assert!(!compute_inject_flags(v(20, 17, 0), &[], None, false).contains(&yes));
+        assert!(compute_inject_flags(v(20, 18, 0), &[], None, false).contains(&yes));
+        // The hole: must NOT inject anywhere on the 21.x line.
+        assert!(
+            !compute_inject_flags(v(21, 0, 0), &[], None, false).contains(&yes),
+            "must NOT inject --experimental-eventsource on 21.0 (flag never existed there → crash)"
+        );
+        assert!(!compute_inject_flags(v(22, 2, 0), &[], None, false).contains(&yes));
+        assert!(compute_inject_flags(v(22, 3, 0), &[], None, false).contains(&yes));
+        assert!(compute_inject_flags(v(26, 2, 0), &[], None, false).contains(&yes));
+    }
+
+    #[test]
+    fn sqlite_injected_only_in_the_two_flagged_bands() {
+        // node:sqlite: flag added 22.5.0, unflagged 22.13.0 (22.x) and 23.4.0 (23.x).
+        // Inject only where the flag exists AND is still required.
+        let sql = "--experimental-sqlite";
+        assert!(!compute_inject_flags(v(22, 4, 0), &[], None, false).contains(&sql)); // flag absent
+        assert!(compute_inject_flags(v(22, 5, 0), &[], None, false).contains(&sql)); // band 1 floor
+        assert!(compute_inject_flags(v(22, 12, 0), &[], None, false).contains(&sql));
+        assert!(!compute_inject_flags(v(22, 13, 0), &[], None, false).contains(&sql)); // unflagged on 22.x
+        assert!(compute_inject_flags(v(23, 3, 0), &[], None, false).contains(&sql)); // band 2
+        assert!(!compute_inject_flags(v(23, 4, 0), &[], None, false).contains(&sql)); // unflagged on 23.x
+        assert!(!compute_inject_flags(v(24, 0, 0), &[], None, false).contains(&sql)); // unflagged everywhere after
+    }
+
+    #[test]
+    fn websocket_injected_only_on_flag_gated_band() {
+        // WebSocket global is flag-gated on [20.10.0, 22.0.0): exists on 20.10+ and all
+        // 21.x, default-on from 22.0.0. Below 20.10 the flag doesn't exist ("bad option").
+        let ws = "--experimental-websocket";
+        assert!(!compute_inject_flags(v(20, 9, 0), &[], None, false).contains(&ws));
+        assert!(compute_inject_flags(v(20, 10, 0), &[], None, false).contains(&ws));
+        assert!(compute_inject_flags(v(21, 5, 0), &[], None, false).contains(&ws)); // all of 21.x
+        assert!(!compute_inject_flags(v(22, 0, 0), &[], None, false).contains(&ws)); // default-on
     }
 
     #[test]
@@ -212,14 +312,15 @@ mod tests {
         let argv = vec!["--no-experimental-vm-modules".to_string()];
         let flags = compute_inject_flags(v(22, 15, 0), &argv, None, false);
         assert!(!flags.contains(&"--experimental-vm-modules"));
-        // Other flags still present.
-        assert!(flags.contains(&"--experimental-sqlite"));
+        // Other flags still present (eventsource is in-band at 22.15).
+        assert!(flags.contains(&"--experimental-eventsource"));
     }
 
     #[test]
     fn user_opt_out_via_node_options() {
+        // Use 22.12.0 where sqlite IS injected (first band), so the opt-out is observable.
         let flags = compute_inject_flags(
-            v(22, 15, 0),
+            v(22, 12, 0),
             &[],
             Some("--no-experimental-sqlite --max-old-space-size=4096"),
             false,
@@ -236,14 +337,17 @@ mod tests {
     }
 
     #[test]
-    fn no_flags_below_minimum() {
-        // Below 22.15 there should be no unflag entries (they have min 22.15).
-        // But ALWAYS_INJECT still applies if the version check were bypassed.
-        // In practice, we reject too-old versions in discovery, so this
-        // tests the table logic in isolation.
+    fn floor_injects_only_universally_safe_flags() {
+        // At 20.0.0: --enable-source-maps and vm-modules (whole-floor) inject, but the
+        // version-gated entries do not — sqlite/eventsource/websocket flags don't exist
+        // here ("bad option"), and --disable-warning is below its 20.11 floor.
         let flags = compute_inject_flags(v(20, 0, 0), &[], None, false);
         assert!(flags.contains(&"--enable-source-maps"));
-        assert!(!flags.contains(&"--experimental-vm-modules"));
+        assert!(flags.contains(&"--experimental-vm-modules"));
+        assert!(!flags.contains(&"--experimental-sqlite"));
+        assert!(!flags.contains(&"--experimental-eventsource"));
+        assert!(!flags.contains(&"--experimental-websocket")); // below 20.10 floor
+        assert!(!flags.contains(&"--disable-warning=ExperimentalWarning"));
     }
 
     #[test]
