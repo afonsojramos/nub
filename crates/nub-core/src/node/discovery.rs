@@ -250,21 +250,11 @@ pub fn discover_or_provision_node(cwd: &Path) -> Result<ResolvedNode, DiscoveryE
         }
     }
 
-    // Download + install it. Provenance names the pin source — and the pin text,
-    // when it isn't already the concrete version (".node-version (26)" explains
-    // an install of 26.x.y; ".node-version (26.2.0)" would just repeat it).
-    let resolved_from = if raw == concrete.to_string() {
-        pin_source.clone()
-    } else {
-        format!("{pin_source} ({raw})")
-    };
-    let version_dir = crate::version_management::provision_node(
-        &concrete,
-        &host,
-        &store_root,
-        Some(&resolved_from),
-    )
-    .map_err(|e| fail(format!("{e:#}")))?;
+    // Download + install it. Provenance names the pin source; the resolved
+    // version is on the same `Using` line, so the raw pin text isn't repeated.
+    let version_dir =
+        crate::version_management::provision_node(&concrete, &host, &store_root, Some(&pin_source))
+            .map_err(|e| fail(format!("{e:#}")))?;
     let bin = store_node_binary(&version_dir).ok_or_else(|| {
         fail("installed, but no node binary was found in the extracted tree".to_string())
     })?;

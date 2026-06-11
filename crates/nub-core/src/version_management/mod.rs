@@ -221,13 +221,21 @@ impl Drop for WorkGuard {
 }
 
 /// Download + verify + extract a stock Node into nub's store, returning the
-/// version dir `<store_root>/node/<version>/`. uv-style output on STDERR (never
-/// stdout), no prompt, matching the PM provisioner in `pm::provision`: the
-/// `Installing…` announce appears BEFORE the download (a slow fetch isn't
-/// silence) and on a TTY the `✓ Installed…` line OVERWRITES it — a finished
-/// session shows one line. Non-TTY (CI logs, pipes) keeps both lines.
-/// `resolved_from` is preformatted pin provenance (e.g. `.node-version (26)`)
-/// appended to the announce so logs say WHY this version was chosen; `None` for
+/// version dir `<store_root>/node/<version>/`. Install output on STDERR (never
+/// stdout), no prompt, matching the PM provisioner in `pm::provision`:
+///
+/// ```text
+/// Using Node.js 26.3.0 (resolved from .node-version)
+/// Installing from nodejs.org... (29 MB)
+/// Installed in 6.8s
+/// ```
+///
+/// The `Using` line states the resolved version + pin provenance up front; the
+/// `Installing` announce appears BEFORE the download (a slow fetch isn't
+/// silence) and on a TTY the `Installed` line OVERWRITES it — a finished
+/// session shows two lines. Non-TTY (CI logs, pipes) keeps all three.
+/// `resolved_from` is preformatted pin provenance (e.g. `.node-version`) for
+/// the `Using` line so logs say WHY this version was chosen; `None` for
 /// explicit installs (`nub node install`), where the user just typed it. The
 /// SHA-256 is verified BEFORE extraction (executables landing on disk), and the
 /// install is atomic — extract into a sibling temp dir, then `rename` into
@@ -260,10 +268,10 @@ pub fn provision_node(
     let started = Instant::now();
     let tarball = work.join(&art.tarball_filename);
     let tty = std::io::IsTerminal::is_terminal(&std::io::stderr());
-    let provenance = match resolved_from {
-        Some(p) => format!(" — resolved from {p}"),
-        None => String::new(),
-    };
+    match resolved_from {
+        Some(p) => eprintln!("Using Node.js {version} (resolved from {p})"),
+        None => eprintln!("Using Node.js {version}"),
+    }
     let mut announced = false;
     let sha = download::download_to_file(&art.tarball_url, &tarball, |_done, total| {
         if !announced {
@@ -273,9 +281,9 @@ pub fn provision_node(
                 None => String::new(),
             };
             if tty {
-                eprint!("Installing Node {version} from nodejs.org{size}{provenance}...");
+                eprint!("Installing from nodejs.org...{size}");
             } else {
-                eprintln!("Installing Node {version} from nodejs.org{size}{provenance}...");
+                eprintln!("Installing from nodejs.org...{size}");
             }
         }
     })
@@ -298,11 +306,11 @@ pub fn provision_node(
         }
     }
 
-    // \r + clear-to-EOL rewrites the announce line on a TTY (it was printed
-    // without a newline there); non-TTY just gets the second line.
+    // \r + clear-to-EOL rewrites the Installing line on a TTY (it was printed
+    // without a newline there); non-TTY just gets a third line.
     let rewrite = if tty { "\r\x1b[K" } else { "" };
     eprintln!(
-        "{rewrite}✓ Installed Node {version} in {:.1}s",
+        "{rewrite}Installed in {:.1}s",
         started.elapsed().as_secs_f64()
     );
     Ok(final_dir)

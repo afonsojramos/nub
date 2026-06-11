@@ -50,7 +50,7 @@ pub struct ProvisionedPm {
 ///      pin's embedded hash when present (the registry-independent trust
 ///      anchor), then the registry's dist integrity,
 ///   7. extract the `.tgz` and atomically `rename` into place,
-///   8. uv-style `Installing…` / `✓ Installed…` on STDERR.
+///   8. `Using…` / `Installing…` / `Installed…` on STDERR (see [`install`]).
 ///
 /// `pin.version` must be present — a [`PmPin`] with no version can't be
 /// provisioned (the caller resolves the spec from a lockfile / `packageManager`
@@ -197,16 +197,16 @@ fn install(
 
     let started = Instant::now();
     let tarball = work.join("package.tgz");
-    // uv/cargo-style progress: the announce line appears BEFORE the download (so
-    // a slow fetch isn't silence), and on a TTY the ✓ line OVERWRITES it — a
-    // finished session shows one line, not a redundant Installing/Installed
-    // pair. Non-TTY (CI logs, pipes) keeps both lines: there's no cursor to
-    // rewrite, and the announce timestamp is useful in a log.
+    // Same three-line shape as `provision_node`: `Using <pm> <version>` (with
+    // pin provenance when known) states what was resolved, the `Installing`
+    // announce appears BEFORE the download (so a slow fetch isn't silence), and
+    // on a TTY the `Installed` line OVERWRITES the announce — a finished session
+    // shows two lines. Non-TTY (CI logs, pipes) keeps all three.
     let tty = std::io::IsTerminal::is_terminal(&std::io::stderr());
-    let provenance = match resolved_from {
-        Some(p) => format!(" — resolved from {p}"),
-        None => String::new(),
-    };
+    match resolved_from {
+        Some(p) => eprintln!("Using {pm} {} (resolved from {p})", dist.version),
+        None => eprintln!("Using {pm} {}", dist.version),
+    }
     let mut announced = false;
     download::download_to_file_auth(&dist.tarball, &tarball, auth, |_done, total| {
         if !announced {
@@ -216,9 +216,9 @@ fn install(
                 None => String::new(),
             };
             if tty {
-                eprint!("Installing {pm} {}{size}{provenance}...", dist.version);
+                eprint!("Installing...{size}");
             } else {
-                eprintln!("Installing {pm} {}{size}{provenance}...", dist.version);
+                eprintln!("Installing...{size}");
             }
         }
     })
@@ -266,12 +266,11 @@ fn install(
         }
     }
 
-    // \r + clear-to-EOL rewrites the announce line on a TTY (it was printed
-    // without a newline there); non-TTY just gets the second line.
+    // \r + clear-to-EOL rewrites the Installing line on a TTY (it was printed
+    // without a newline there); non-TTY just gets a third line.
     let rewrite = if tty { "\r\x1b[K" } else { "" };
     eprintln!(
-        "{rewrite}✓ Installed {pm} {} in {:.1}s",
-        dist.version,
+        "{rewrite}Installed in {:.1}s",
         started.elapsed().as_secs_f64()
     );
     Ok(())
@@ -579,7 +578,10 @@ mod tests {
             pm: Pm::Pnpm,
             version: Some(format!("10.0.0+sha512.{}", "0".repeat(128))),
         };
-        let err = format!("{:#}", provision_pm(&bad, &fresh, &fresh, None).unwrap_err());
+        let err = format!(
+            "{:#}",
+            provision_pm(&bad, &fresh, &fresh, None).unwrap_err()
+        );
         assert!(
             err.contains("pin hash mismatch"),
             "a wrong pin hash must fail the download path closed, got: {err}"

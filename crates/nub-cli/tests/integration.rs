@@ -100,11 +100,15 @@ fn provisions_uncached_pinned_node_and_runs() {
         "script ran on the provisioned 22.12.0: stdout={stdout:?}"
     );
     assert!(
-        stderr.contains("Installing Node 22.12.0"),
-        "uv-style install on stderr: stderr={stderr:?}"
+        stderr.contains("Using Node.js 22.12.0 (resolved from .node-version)"),
+        "resolved version + provenance on stderr: stderr={stderr:?}"
     );
     assert!(
-        stderr.contains("✓ Installed Node 22.12.0"),
+        stderr.contains("Installing from nodejs.org"),
+        "install announce on stderr: stderr={stderr:?}"
+    );
+    assert!(
+        stderr.contains("Installed in"),
         "install-complete on stderr: stderr={stderr:?}"
     );
     assert!(
