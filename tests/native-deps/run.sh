@@ -117,6 +117,52 @@ echo "$LOAD_OUT" | grep -q "NATIVE-DEPS-OK" \
   || fail "native modules not loadable after install. verify-load output: $LOAD_OUT"
 pass "native modules loadable: $LOAD_OUT"
 
+# ── Fixture: frozen install from the lockfile (CI / teammate clone) ──────────
+# Regression guard for the default-trust floor's frozen-install bug
+# (wiki/commands/pm/supply-chain-posture.md Decision 2): on a frozen install
+# the per-install OSV gate is correctly skipped, so the floor used to fall
+# closed and silently NOT run trusted packages' build scripts — even though
+# they ran for whoever wrote the lockfile. A clone/CI run must reproduce the
+# fresh install's build behavior, inheriting the lockfile's resolution-time
+# vetting. We reuse the lockfile the fresh install above just produced,
+# simulate a clone (only package.json + lockfile, no node_modules), and run
+# a frozen install.
+echo ""
+echo "── frozen install runs trusted builds (Decision 2 regression) ────────────"
+LOCKFILE=""
+for cand in aube-lock.yaml pnpm-lock.yaml; do
+  [ -f "$PROJ_ALLOW/$cand" ] && { LOCKFILE="$cand"; break; }
+done
+[ -n "$LOCKFILE" ] \
+  || fail "fresh install produced no lockfile in $PROJ_ALLOW (expected aube-lock.yaml or pnpm-lock.yaml)"
+
+PROJ_FROZEN="$SANDBOX_ROOT/floor-frozen-clone"
+mkdir -p "$PROJ_FROZEN"
+cp "$PROJ_ALLOW/package.json" "$PROJ_ALLOW/verify-load.cjs" "$PROJ_FROZEN/"
+cp "$PROJ_ALLOW/$LOCKFILE" "$PROJ_FROZEN/"
+# No node_modules — this is the clone/CI starting state.
+
+frozen_out="$(cd "$PROJ_FROZEN" && "$NUB" install --frozen-lockfile 2>&1)" || frozen_rc=$?
+frozen_rc="${frozen_rc:-0}"
+
+if echo "$frozen_out" | grep -qiE 'aube|jdx\.dev'; then
+  echo "$frozen_out"
+  fail "engine-branded identity in frozen install output"
+fi
+
+# The floor must fire on the frozen install exactly as on the fresh one.
+echo "$frozen_out" | grep -q 'WARN_NUB_DEFAULT_TRUST_BUILDS' \
+  || fail "FROZEN INSTALL: defaultTrust disclosure missing — the floor fell closed on a frozen install (Decision 2 bug). Output: $frozen_out"
+echo "$frozen_out" | grep -q 'esbuild' \
+  || fail "FROZEN INSTALL: esbuild not named in defaultTrust disclosure. Output: $frozen_out"
+pass "frozen install: default-trust floor fired (build scripts trusted)"
+
+# And the postinstall must actually have run — esbuild binary materialized.
+FROZEN_ESBUILD_BIN="$PROJ_FROZEN/node_modules/.bin/esbuild"
+[ -e "$FROZEN_ESBUILD_BIN" ] \
+  || fail "FROZEN INSTALL: esbuild binary not materialized at $FROZEN_ESBUILD_BIN (postinstall did not run on the frozen install)"
+pass "frozen install: esbuild postinstall ran (binary present)"
+
 # ── Fixture: core-js only (NOT on the floor allowlist — default-deny side) ───
 echo ""
 echo "── floor-denied native build ─────────────────────────────────────────────"
