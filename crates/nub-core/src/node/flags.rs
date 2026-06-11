@@ -123,7 +123,7 @@ const UNFLAG_TABLE: &[UnflagEntry] = &[
     // + `compute_localstorage_path`. See wiki/runtime/webstorage-unflag.md.
     UnflagEntry {
         flag: "--experimental-sqlite",
-        // node:sqlite. Flag added in Node 22.5.0 (#57752). Module unflagged (default
+        // node:sqlite. Flag added in Node 22.5.0 (#53752). Module unflagged (default
         // import, no flag needed) at 22.13.0 on the 22.x line and at 23.4.0 on the
         // 23.x line. The flag survives as a default-true bool after unflagging, so
         // over-injecting in the unflagged range would be a harmless no-op — but it
