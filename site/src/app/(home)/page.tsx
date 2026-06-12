@@ -959,10 +959,6 @@ const PM_MATRIX: { field: ReactNode; cells: Record<(typeof PM_COLUMNS)[number], 
     field: <><Mono>.npmrc</Mono></>,
     cells: { npm: 'yes', pnpm: 'yes', yarn: 'yes', bun: 'yes', nub: 'yes' },
   },
-  {
-    field: <>PM-specific config</>,
-    cells: { npm: 'na', pnpm: 'yes', yarn: 'na', bun: 'yes', nub: 'no' },
-  },
 ];
 
 function PMMatrix() {
@@ -1059,50 +1055,23 @@ function HypermanagerBand() {
             }
           />
 
-          <Feature
-            accent="pink"
-            reverse
-            eyebrow="Performance"
-            title="As fast as pnpm warm, faster cold"
-            body={
-              <>
-                On a warm cache, <Mono>nub install</Mono>{' '}lands a statistical tie with{' '}
-                <Mono>pnpm</Mono>. On a cold cache Nub is faster, and the disk and link work is the
-                same — the comprehensive cross-PM benchmark lands next.
-              </>
-            }
-            visual={
-              <div className="rounded-xl border border-fd-border bg-[#0b0a08] p-6">
-                <p className="mb-5 font-mono text-[0.7rem] uppercase tracking-[0.14em] text-fd-muted-foreground">
-                  49-dep install · warm cache · hyperfine
-                </p>
-                {/* TODO(bench): swap in the monorepo number when the comprehensive
-                    bench lands — the stronger headline, NOT yet measured. Do not
-                    fabricate it; keep this single-project warm bench until then. */}
-                <BenchBars
-                  accent="pink"
-                  max={2.83}
-                  unit="s"
-                  rows={[
-                    { cmd: 'nub install', ms: 2.83, us: true },
-                    { cmd: 'pnpm install', ms: 2.75 },
-                  ]}
-                />
-              </div>
-            }
-          />
+          {/* TODO(bench): restore the Performance feature once the neutral
+              comprehensive benchmark lands. The prior "as fast as pnpm warm,
+              faster cold" claim was based on a non-neutral harness and is held
+              until real numbers are in. Do NOT assert a speed claim here until
+              then. */}
 
           <Feature
             accent="pink"
-            eyebrow="Config"
-            title="Round-trip lockfile compatibility"
+            eyebrow="Configuration compatibility"
+            title="Reads the config your project already has"
             body={
               <>
-                Nub installs faithfully from an npm, pnpm, yarn, or bun lockfile, and each of those
-                tools accepts a lockfile Nub wrote — verified both directions, so a teammate on
-                plain <Mono>pnpm</Mono>{' '}or <Mono>npm</Mono>{' '}sees the exact tree Nub produced. It
-                reads the config you already maintain in that tool&rsquo;s dialect, and never writes
-                a <Mono>&quot;nub&quot;</Mono>{' '}field or a new config file.
+                Nub reads the config fields your project already maintains — <Mono>overrides</Mono>,{' '}
+                <Mono>resolutions</Mono>, <Mono>catalog</Mono>, <Mono>workspaces</Mono>,{' '}
+                <Mono>.npmrc</Mono> — and never writes a <Mono>&quot;nub&quot;</Mono>{' '}field or a
+                new config file. Separately, Nub installs faithfully from an npm, pnpm, yarn, or bun
+                lockfile and writes the same format back — verified both directions.
               </>
             }
             visual={<PMMatrix />}
