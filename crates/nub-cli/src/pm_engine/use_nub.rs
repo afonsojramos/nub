@@ -815,6 +815,23 @@ pub(crate) fn run_use_nub(root: &Path) -> Result<i32> {
             ..
         }
     );
+    // Phantom-dependency warning gate (writeup §6): switching FROM a *hoisting*
+    // PM (npm or yarn — flat node_modules) changes the layout, so undeclared
+    // imports that only resolved via hoisting may break. pnpm/bun are already
+    // isolated (non-hoisting), so they get no warning; nor does a fresh project
+    // or a pnpm→nub rename. Bun is part of `hoisted_origin` above only for the
+    // layout-preservation note (it carries a flat-ish lockfile shape there), but
+    // it is NOT a hoisting PM for phantom-deps purposes — exclude it here.
+    let from_hoisting_pm = matches!(
+        &plan,
+        AlignPlan::Convert {
+            from_kind: aube_lockfile::LockfileKind::Npm
+                | aube_lockfile::LockfileKind::NpmShrinkwrap
+                | aube_lockfile::LockfileKind::Yarn
+                | aube_lockfile::LockfileKind::YarnBerry,
+            ..
+        }
+    );
     if hoisted_origin && !migration.npmrc.iter().any(|(k, _)| k == "node-linker") {
         migration
             .npmrc
@@ -945,7 +962,39 @@ pub(crate) fn run_use_nub(root: &Path) -> Result<i32> {
     println!("  - hosted update bots (Renovate/Dependabot) can't regenerate {NUB_LOCKFILE} yet");
     println!("  - lockfile-sniffing deploy platforms won't auto-detect a PM — run installs");
     println!("    with nub in CI");
+
+    // Phantom-dependency layout-change warning — only when switching FROM a
+    // hoisting PM (npm/yarn). See `from_hoisting_pm` above.
+    if from_hoisting_pm {
+        warn_phantom_dependencies();
+    }
     Ok(0)
+}
+
+/// The phantom-dependency warning emitted by `nub pm use nub` when the
+/// incumbent was a *hoisting* PM (npm or yarn). nub's default layout is an
+/// isolated, symlinked `node_modules` with no flat hoisting, so a package the
+/// project imported but never declared in `package.json` (a phantom
+/// dependency — visible only because npm/yarn's flat layout exposed it) may
+/// stop resolving. One clear notice to stderr; dim-styled when stderr is a
+/// terminal and `NO_COLOR` is unset (same gate as the rest of pm_engine).
+fn warn_phantom_dependencies() {
+    let dim = super::scope_warning_uses_dim();
+    let lines = [
+        "warning: nub uses an isolated node_modules (symlinked store, no hoisting);",
+        "  npm and yarn use a flat, hoisted layout. Packages you imported but never",
+        "  declared in package.json (\"phantom dependencies\") were only reachable via",
+        "  that hoisting and may no longer resolve. If an install or run fails on a",
+        "  missing module, add it to package.json explicitly.",
+    ];
+    eprintln!();
+    for line in lines {
+        if dim {
+            eprintln!("\x1b[2m{line}\x1b[0m");
+        } else {
+            eprintln!("{line}");
+        }
+    }
 }
 
 fn remove_strays(paths: &[std::path::PathBuf], why: &str) -> Result<()> {
