@@ -27,6 +27,8 @@ The tracker is extensible by design: new efforts get a new ID and a new row. You
 
 **Sub-agents are instruments, not deciders.** A probe returns *facts* — divergences, traces, measurements, file paths, exact error messages — not verdicts. No sub-agent autonomously lands a change to a default / security posture / product behavior / API-config-env surface / error-contract; those route back to the human as a question. Mechanical / clearly-a-bug fixes may land (you review the diff). Every sub-agent prompt is **self-contained**: embed the codebase map slice, the exact task, any relevant context — a model switch starts a fresh cache, so nothing carries over from the orchestrator's context.
 
+**Be proactive on obvious bugs — fix, don't surface-and-wait.** When an investigation/review turns up an obvious, clear-cut bug (a correctness failure, a false claim, a broken contract), just dispatch the fix and report it done — do NOT surface it and wait for the human to say "fix it." The line is bug-vs-decision, not big-vs-small: a hairy-but-clear correctness fix gets fixed; a one-line *posture/default* change still routes to the human. Asking permission to fix an obvious bug wastes the human's attention and stalls the work. (the maintainer, 2026-06-11: "be more proactive when you find obvious known bugs like this.")
+
 **CRITICAL: only the orchestrator edits the tracker/handoff doc.** Sub-agents must never directly modify it — they return results to you, and you update the doc. Parallel agents writing the same control surface clobber each other's updates, which is how efforts get lost. The tracker is yours; sub-agents speak to you.
 
 ---
@@ -60,6 +62,10 @@ When you launch or refer to a sub-agent, lead with a **sentence-case description
 
 **The internal tracker code (N3, CP-6, AC1, M11…) is bookkeeping for YOUR control surface — it is meaningless to the human and must NEVER be the identifier in a chat message or status update.** The human experiences the work as "the thing that does X," not "N3." Always name the agent/effort by what it is *doing* in plain words ("the investigation into store verification", "the npm-lockfile-reader fix"); keep the code in the tracker/ledger, or at most in parentheses at the very end as a cross-reference. Leaking codes into status reports makes them unreadable — a repeated, called-out mistake (the maintainer, 2026-06-11). See the user memory `refer-to-efforts-by-description`.
 
+## Delegate ALL project work — even one-off tasks — to sub-agents
+
+In interactive-workflow mode the orchestrator does NOT do project work hands-on in the main thread, no matter how small. A one-line CSS fix, a quick doc tweak, a tiny rename — all of it goes to a backgrounded sub-agent. The orchestrator's own actions are limited to **orchestration-intrinsic** ones: reading/assessing (read-only), dispatching, reviewing returns, and editing its OWN control surfaces (the tracker/ledger, this skill, memory) + the git commits that finalize reviewed work. The reasoning: hands-on work in the main thread blocks the orchestration loop, can be orphaned by a human interjection, and erodes the orchestrator's whole-picture role. If you catch yourself about to Edit a project file to "just quickly fix" something, stop and dispatch it instead. (the maintainer, 2026-06-11 — "these one-off tasks should always be spun up in a sub-agent because we're in interactive workflow mode.")
+
 ## Always background sub-agents
 
 In interactive-workflow mode, EVERY sub-agent runs backgrounded (`run_in_background`) — never in the foreground. A foreground sub-agent blocks the orchestrator's turn, so a message the human force-pushes interrupts it mid-flight and **orphans its work**. Backgrounded, the agent keeps running independently and the human can always reach you. Corollary: keep the orchestrator's OWN foreground actions short (quick reads/checks); never run a long or stateful operation (an agent, a build, an edit-then-commit) in the foreground where an interjection would orphan it.
@@ -80,9 +86,11 @@ Background sub-agents cannot drive a REPL, pipe into an interactive process, ans
 
 ---
 
-## Parallelize aggressively — one hard constraint
+## Parallelize aggressively — clobbering is NOT the worry it seems
 
-Read-only probes parallelize without limit and run alongside any landing work. Multiple landing agents may run at once too. **The ONE hard constraint: never have two agents compiling a source tree while one of them is editing it** — a torn read produces a spurious build/test failure the other agent misreads as a real bug. Concretely: serialize any pair of (agent-editing-source, agent-rebuilding-that-source); parallelize everything else.
+Read-only probes parallelize without limit. **Landing agents parallelize too — don't over-serialize on fear of clobbering.** The file tools prevent the actual dangerous failure: Edit/Write enforce read-before-write and REJECT a stale edit (a write to a file changed since you last read it fails, forcing a re-read), and writes are atomic — so two agents editing the same tree can NOT silently clobber each other, and a concurrent `cargo build` reads a consistent (old-or-new) file, never a half-written one. (the maintainer, 2026-06-11: "don't worry about clobbering — the file tools require the agent to read back the current value if it's writing to something that's changed.")
+
+The only residual risk is a **rare cross-file build inconsistency** — agent B's build catches the tree between two of agent A's related multi-file edits — and that just produces a spurious compile error B re-runs past. That cost (an occasional re-run) is far smaller than the cost of serializing all landing work, so **default to parallel.** Reserve serialization for the one case where it genuinely matters: when an agent's DELIVERABLE is a *trustworthy build/test result* on a tree another agent is concurrently mutating (e.g. a delicate merge + its verification suite, or a benchmark) — there, give that agent exclusive use of the tree so its green/red is real. Otherwise, fan out.
 
 Git hygiene across parallel agents: do all work on `main`, no branches or worktrees (per this repo's top rule). Cross-staged commits across parallel agents are fine; committed work cannot be clobbered.
 
