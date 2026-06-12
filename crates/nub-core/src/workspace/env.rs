@@ -67,6 +67,29 @@ pub fn discover_env_files(project_root: &Path) -> Vec<std::path::PathBuf> {
         .collect()
 }
 
+/// Expand `${VAR}` and `$VAR` references within all values of a map, in-place.
+/// Multi-pass (up to 10 rounds) to resolve nested chains like `A=hello`,
+/// `B=${A}_world`, `C=${B}_!`. Undefined references resolve to the empty string
+/// (consistent with [`load_env_files`]). Mutates `map` in-place and returns it
+/// for easy chaining.
+pub fn expand_env_map(map: &mut HashMap<String, String>) -> &mut HashMap<String, String> {
+    for _ in 0..10 {
+        let snapshot = map.clone();
+        let mut changed = false;
+        for value in map.values_mut() {
+            let expanded = expand_vars(value, &snapshot);
+            if expanded != *value {
+                *value = expanded;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    map
+}
+
 /// Load .env* files from the project root, returning the key-value
 /// pairs to inject into the child process environment. Shell env
 /// (from the parent process) always wins — values already set in
@@ -92,20 +115,7 @@ pub fn load_env_files(project_root: &Path) -> HashMap<String, String> {
 
     // Expand ${VAR} references within values. Multi-pass to handle
     // nested references like A=hello, B=${A}_world, C=${B}_!.
-    for _ in 0..10 {
-        let snapshot = result.clone();
-        let mut changed = false;
-        for value in result.values_mut() {
-            let expanded = expand_vars(value, &snapshot);
-            if expanded != *value {
-                *value = expanded;
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
+    expand_env_map(&mut result);
 
     result
 }
@@ -505,5 +515,51 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `load_env_files` must expand `${VAR}` cross-references, matching the
+    /// behavior the direct `nub <file>` path delivers. This is the regression
+    /// guard for the bug where `nub watch` / `--env-file` left `${VAR}` literal.
+    #[test]
+    fn load_env_files_expands_var_references() {
+        let dir = std::env::temp_dir().join(format!("nub-expand-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(".env"),
+            "DB_HOST=localhost\nDATABASE_URL=postgres://${DB_HOST}:5432/db\n",
+        )
+        .unwrap();
+
+        let vars = load_env_files(&dir);
+
+        assert_eq!(
+            vars.get("DATABASE_URL").map(String::as_str),
+            Some("postgres://localhost:5432/db"),
+            "`${{DB_HOST}}` must be expanded to its value; got {vars:?}"
+        );
+        assert_eq!(vars.get("DB_HOST").map(String::as_str), Some("localhost"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `expand_env_map` (used by the `--env-file` flag path) must apply the same
+    /// multi-pass expansion as `load_env_files`.
+    #[test]
+    fn expand_env_map_expands_var_references() {
+        let mut map = HashMap::new();
+        map.insert("DB_HOST".to_string(), "localhost".to_string());
+        map.insert(
+            "DATABASE_URL".to_string(),
+            "postgres://${DB_HOST}:5432/db".to_string(),
+        );
+
+        expand_env_map(&mut map);
+
+        assert_eq!(
+            map.get("DATABASE_URL").map(String::as_str),
+            Some("postgres://localhost:5432/db"),
+            "`${{DB_HOST}}` must be expanded; got {map:?}"
+        );
     }
 }

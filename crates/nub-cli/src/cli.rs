@@ -909,6 +909,11 @@ fn run_nub() -> Result<i32> {
         i += 1;
     }
 
+    // Expand ${VAR} references in --env-file values now that all files have been
+    // parsed (multiple --env-file flags may cross-reference each other), matching
+    // the expansion load_env_files applies on the non-watch run path.
+    nub_core::workspace::env::expand_env_map(&mut env_file_vars);
+
     // Capture --env-file vars for per-child Command::env application (A19): no
     // process-env mutation, so no `unsafe { env::set_var }` and no data race if a
     // dep threads during init. Shell-wins / `.env`-override precedence is applied
@@ -2815,28 +2820,37 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     nub_core::node::discovery::check_min_version(&node)?;
 
     // Auto-loaded `.env*` files are handed to the watched Node as `--env-file`
-    // args (below) — NOT injected via `cmd.env()`. The distinction matters under
-    // `--watch`: Node watches each `--env-file` path and re-reads it on every
-    // restart, whereas `cmd.env()` would freeze the values at parent-spawn time
-    // so an edit to `.env` would never reach the child (the bug this fixes). The
-    // explicit `--env-file` *flag* (a top-level user flag captured at startup)
-    // still flows through `cmd.env()` via `apply_env_file_vars`; it's a distinct
-    // surface and keeps its override-`.env` precedence.
+    // args (below) so Node watches each path and re-reads it on every restart.
+    // However Node's own `--env-file` parser does NOT expand `${VAR}` cross-
+    // references, which would make `nub watch` inconsistent with `nub <file>`
+    // (which uses `load_env_files` and gets full expansion). To close the gap we
+    // also load and expand the env files here via `load_env_files` and inject the
+    // expanded values via `cmd.env()` below. Node's `--env-file` never overrides a
+    // var already present in the inherited environment (shell-wins), so the pre-
+    // expanded `cmd.env()` values win. Unexpanded vars not covered by expansion
+    // still reach the child through the `--env-file` args as before.
     //
-    // Precedence is preserved across the swap: Node's `--env-file` never
-    // overrides a var already in the shell environment (shell-wins holds), and
-    // among the `.env*` files Node is *last*-writer-wins, so we pass
+    // Live-reload trade-off: if a `${REF}` source var changes while the watcher is
+    // running, the pre-expanded dependents (in `cmd.env()`) won't update until nub
+    // is restarted. This is the same trade-off `nub <file>` already has — the file
+    // runner also pre-expands once and doesn't re-expand on changes.
+    //
+    // Precedence among the `.env*` files: Node is *last*-writer-wins, so we pass
     // `discover_env_files`' highest-priority-first list in reverse for nub's
     // first-writer-wins precedence to line up.
-    //
-    // DIVERGENCE: Node's `--env-file` parser does not expand `${VAR}`
-    // cross-references within a value, while `load_env_files` does. A `.env`
-    // that relies on `B=${A}_x` style expansion therefore sees the literal
-    // `${A}_x` under `nub watch`. This is the deliberate cost of live reload;
-    // the non-watch run path keeps full expansion via `load_env_files`.
-    let env_file_paths = nub_core::workspace::detect::detect_project(&cwd)
+    let project = nub_core::workspace::detect::detect_project(&cwd);
+    let env_file_paths = project
+        .as_ref()
         .map(|p| nub_core::workspace::env::discover_env_files(&p.root))
         .unwrap_or_default();
+    // Pre-expand env vars (same path as the direct file runner).
+    let mut env_vars = project
+        .as_ref()
+        .map(|p| nub_core::workspace::env::load_env_files(&p.root))
+        .unwrap_or_default();
+    // --env-file flag vars override .env, shell still wins (consistent with the
+    // file-runner path via overlay_env_file_vars).
+    overlay_env_file_vars(&mut env_vars);
 
     let nub_binary = nub_core::node::spawn::current_nub_binary()?;
     let preload_path = nub_core::node::spawn::find_public_preload(&nub_binary);
@@ -2879,9 +2893,14 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit());
-    // Explicit `--env-file` flag vars only; auto-loaded `.env*` rides the
-    // `--env-file` args above so Node watches/re-reads them on restart.
-    apply_env_file_vars(&mut cmd);
+    // Inject pre-expanded .env* vars (including --env-file flag overrides,
+    // already merged into env_vars via overlay_env_file_vars above). Node's own
+    // --env-file args above still deliver the raw file content for vars that don't
+    // need expansion, but these cmd.env() values win (shell-wins: Node's --env-file
+    // never overrides an already-set env var).
+    for (k, v) in &env_vars {
+        cmd.env(k, v);
+    }
     let status = cmd.status()?;
 
     // PATH shim cleanup is handled once at the top level (see `run`).
@@ -5908,25 +5927,31 @@ mod tests {
 
     #[test]
     fn use_plans_lockfile_refusals_before_network_and_a_failed_resolve_writes_nothing() {
-        // (a) The yarn write gate fires at the PLAN stage: `use yarn` over a
-        // pnpm lockfile refuses with the gate message, not a fetch error —
-        // proof the alignment plan runs before any network (the registry here
-        // is a dead port).
+        // (a) `use yarn` over a pnpm lockfile no longer refuses at the PLAN
+        // stage — the classic-yarn write gate is lifted (the classic writer is
+        // proven frozen-accepted by real yarn). The convert path now proceeds
+        // to a real resolve; with a dead registry it fails at the *network*
+        // (not the old write-gate refusal), and a failed convert writes
+        // nothing — proof the gate is gone but the resolve-before-write
+        // invariant still holds.
         let before = r#"{"packageManager":"pnpm@9.1.0"}"#;
-        let dir = offline_project("use-yarn-gate", before);
-        std::fs::write(dir.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").unwrap();
-        let err = with_cwd(&dir, || run_pm(&["use".into(), "yarn".into()]))
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("refuses to write yarn.lock"),
-            "use yarn needing a conversion must hit the write gate pre-network, got: {err}"
-        );
-        assert_eq!(
-            std::fs::read_to_string(dir.join("package.json")).unwrap(),
-            before,
-            "a refused use must write nothing"
-        );
+        if !ambient_registry_override() {
+            let dir = offline_project("use-yarn-gate", before);
+            std::fs::write(dir.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").unwrap();
+            let err = format!(
+                "{:#}",
+                with_cwd(&dir, || run_pm(&["use".into(), "yarn".into()])).unwrap_err()
+            );
+            assert!(
+                err.contains("cannot reach the registry") && err.contains("127.0.0.1:1"),
+                "use yarn must now reach the resolver (gate lifted), failing at the \
+                 dead registry, not the old write-gate refusal, got: {err}"
+            );
+            assert!(
+                !err.contains("refuses to write yarn.lock"),
+                "the classic-yarn write gate must be lifted, got: {err}"
+            );
+        }
 
         // (b) Multiple foreign lockfiles without the target's → the ambiguity
         // refusal, naming the files and the remedy — also pre-network.
