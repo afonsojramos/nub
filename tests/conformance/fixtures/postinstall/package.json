@@ -1,0 +1,9 @@
+{
+  "name": "conform-postinstall",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Drop-in PM conformance fixture: package with a postinstall/build script. @parcel/watcher runs a prebuildt binary download in its postinstall, exercising the trust-floor interaction: nub must allow the postinstall to run and the resulting node_modules must be functional.",
+  "dependencies": {
+    "@parcel/watcher": "^2.5.1"
+  }
+}

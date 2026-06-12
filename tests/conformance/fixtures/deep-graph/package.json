@@ -1,0 +1,9 @@
+{
+  "name": "conform-deep-graph",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Drop-in PM conformance fixture: deep transitive dependency graph. express pulls in a large graph of transitive deps (finalhandler, send, serve-static, etag, fresh, mime, parseurl, qs, range-parser, etc.), exercising multi-level transitive resolution and hoisting in all lockfile formats.",
+  "dependencies": {
+    "express": "^4.21.0"
+  }
+}

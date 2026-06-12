@@ -1,0 +1,10 @@
+{
+  "name": "conform-peer-meta",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Drop-in PM conformance fixture: peerDependenciesMeta optional peers. @testing-library/dom declares several optional peerDependencies via peerDependenciesMeta; this exercises how PMs record optional-peer resolution in their lockfiles.",
+  "dependencies": {
+    "@testing-library/dom": "^10.4.0",
+    "ms": "^2.1.3"
+  }
+}

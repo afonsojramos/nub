@@ -1,0 +1,6 @@
+{
+  "name": "local-utils",
+  "version": "1.0.0",
+  "description": "Minimal local package for the file-dep conformance fixture.",
+  "main": "index.js"
+}

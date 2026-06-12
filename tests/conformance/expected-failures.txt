@@ -1,0 +1,14 @@
+# Known-red drop-in conformance scenarios: "<fixture> <direction> <pm> <reason>".
+# Same discipline as tests/aube-conformance/expected-failures.txt — this list
+# must SHRINK. A listed scenario that passes fails the run (XPASS-STALE) so the
+# green flip is recorded by deleting the entry in the same commit as the fix.
+# All entries are fixable lockfile-writer bugs (vendor/aube fork); scenarios
+# the ecosystem makes impossible are skip_reason() in run.sh instead.
+
+# nub's npm lockfile writer omits the file: dep's "link": true entry and the
+# local-pkg metadata block that npm ci requires. Real npm writes:
+#   "local-pkg": { "name": "local-utils", "version": "1.0.0" }
+#   "node_modules/local-utils": { "resolved": "local-pkg", "link": true }
+# nub writes neither; npm ci errors: "Missing: local-utils@1.0.0 from lock file".
+# Fix: aube npm lockfile serializer must emit link entries for file: deps.
+file-dep B npm aube npm lockfile omits file: dep link entries (npm ci: Missing local-utils@1.0.0)

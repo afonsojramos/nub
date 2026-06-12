@@ -1,0 +1,13 @@
+{
+  "name": "conform-scoped",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Drop-in PM conformance fixture: scoped packages (@scope/pkg), including scoped transitives. Exercises scoped-name handling in all lockfile formats.",
+  "dependencies": {
+    "@isaacs/string-locale-compare": "^1.1.0",
+    "@sindresorhus/is": "^7.1.0"
+  },
+  "devDependencies": {
+    "@babel/code-frame": "^7.26.2"
+  }
+}

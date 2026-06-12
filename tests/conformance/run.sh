@@ -36,7 +36,7 @@ NUB="$(cd "$(dirname "$NUB")" && pwd)/$(basename "$NUB")"
 NUB_VERSION="$("$NUB" --version 2>/dev/null || echo '?')"
 
 # Fixture list — each is a subdirectory of fixtures/
-ALL_FIXTURES=(simple peers)
+ALL_FIXTURES=(simple peers scoped optional-deps alias file-dep peer-meta deep-graph postinstall)
 FIXTURES=("$@")
 [ ${#FIXTURES[@]} -gt 0 ] || FIXTURES=("${ALL_FIXTURES[@]}")
 
@@ -98,6 +98,8 @@ stage_fixture() {
 }
 
 # assert_node_modules <proj> <log> — every direct dep from package.json must exist
+# Checks dependencies + devDependencies; skips optionalDependencies (platform-
+# conditional) since their presence is legitimately OS-dependent.
 assert_node_modules() {
   local proj="$1" log="$2"
   local pkg="$proj/package.json"
@@ -118,8 +120,32 @@ assert_node_modules() {
   return $failed
 }
 
+# skip_reason <fixture> <direction> <pm> — print a reason string if this combo
+# is a permanent ecosystem-level impossibility (not a fixable nub bug). Empty
+# output means "run it." These live here (not in expected-failures.txt) because
+# no lockfile nub could write would ever make them pass.
+skip_reason() {
+  local fixture="$1" dir="$2" pm="$3"
+  case "$fixture--$dir--$pm" in
+    # yarn v1 has no npm: alias syntax in its lockfile; it records the alias
+    # with a different key and bun rejects it. Both directions are ecosystem-
+    # mismatches, not nub bugs.
+    alias--A--yarn) echo "yarn v1 alias syntax diverges from npm: protocol" ;;
+    alias--B--yarn) echo "yarn v1 alias syntax diverges from npm: protocol" ;;
+  esac
+}
+
+# expected_reason <fixture> <direction> <pm> — look up a known-red entry.
+# Lines in expected-failures.txt: "<fixture> <dir> <pm> <reason...>"
+expected_reason() {
+  awk -v f="$1" -v d="$2" -v p="$3" \
+    '$1==f && $2==d && $3==p { $1=""; $2=""; $3=""; sub(/^  */,""); print; exit }' \
+    "$HERE/expected-failures.txt" 2>/dev/null
+}
+
 RESULTS=()
 FAILS=0
+XPASSES=0
 
 # ── Direction A (PM → nub): real PM writes lockfile, nub frozen-installs ────
 dir_a() {
@@ -267,6 +293,13 @@ for fixture in "${FIXTURES[@]}"; do
       label="$fixture × dir-$direction × $pm@$pm_version"
       echo "--- $label"
 
+      skip="$(skip_reason "$fixture" "$direction" "$pm")"
+      if [ -n "$skip" ]; then
+        echo "    skip (by design): $skip"
+        RESULTS+=("$fixture|dir-$direction|$pm|$pm_version|SKIP (by design)")
+        continue
+      fi
+
       proj="$SANDBOX_ROOT/runs/$fixture--$direction--$pm"
       log="$SANDBOX_ROOT/logs/$fixture--$direction--$pm.log"
       : >"$log"
@@ -279,9 +312,18 @@ for fixture in "${FIXTURES[@]}"; do
         dir_b "$fixture" "$pm" "$pm_version" "$proj" "$log" || ok=$?
       fi
 
-      if [ "$ok" -eq 0 ]; then
+      reason="$(expected_reason "$fixture" "$direction" "$pm")"
+      if [ "$ok" -eq 0 ] && [ -z "$reason" ]; then
         echo "    PASS"
         RESULTS+=("$fixture|dir-$direction|$pm|$pm_version|PASS")
+      elif [ "$ok" -eq 0 ] && [ -n "$reason" ]; then
+        # Stale expected-failure entry: fix landed without removing the entry.
+        echo "    XPASS-STALE: now passes — remove from expected-failures.txt: $reason"
+        XPASSES=$((XPASSES + 1))
+        RESULTS+=("$fixture|dir-$direction|$pm|$pm_version|XPASS-STALE")
+      elif [ -n "$reason" ]; then
+        echo "    expected red: $reason"
+        RESULTS+=("$fixture|dir-$direction|$pm|$pm_version|RED (expected)")
       else
         FAILS=$((FAILS + 1))
         echo "    FAIL — log: $log"
@@ -300,20 +342,20 @@ done
 
 echo ""
 echo "=== results ==="
-printf '%-10s %-8s %-6s %-12s %s\n' "fixture" "dir" "pm" "pm-version" "result"
+printf '%-14s %-8s %-6s %-12s %s\n' "fixture" "dir" "pm" "pm-version" "result"
 for row in "${RESULTS[@]}"; do
   IFS='|' read -r f d p v s <<<"$row"
-  printf '%-10s %-8s %-6s %-12s %s\n' "$f" "$d" "$p" "$v" "$s"
+  printf '%-14s %-8s %-6s %-12s %s\n' "$f" "$d" "$p" "$v" "$s"
 done
 echo ""
 
-if [ "$FAILS" -gt 0 ]; then
-  echo "RESULT: FAIL ($FAILS failure(s))"
+if [ "$FAILS" -gt 0 ] || [ "$XPASSES" -gt 0 ]; then
+  echo "RESULT: FAIL ($FAILS unexpected failure(s), $XPASSES stale expected-failure entry/entries)"
   echo "sandbox kept for forensics: $SANDBOX_ROOT"
   exit 1
 fi
 
-echo "RESULT: OK"
+echo "RESULT: OK (expected reds, if any, are listed above and tracked in expected-failures.txt)"
 if [ "$CREATED_SANDBOX" -eq 1 ] && [ "${KEEP:-0}" != "1" ]; then
   rm -rf "$SANDBOX_ROOT"
 else

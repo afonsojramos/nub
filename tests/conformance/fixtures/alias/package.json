@@ -1,0 +1,10 @@
+{
+  "name": "conform-alias",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Drop-in PM conformance fixture: npm: aliased dependencies. 'ms-v2' is an alias pointing at a different version of 'ms', exercising the npm: alias specifier in all lockfile formats.",
+  "dependencies": {
+    "ms": "^2.1.3",
+    "ms-v2": "npm:ms@2.0.0"
+  }
+}
