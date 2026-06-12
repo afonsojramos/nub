@@ -1225,6 +1225,22 @@ pub(crate) fn engine_brand_preflight() {
     // untouched by the engine and prevents a second (conflicting) Node
     // resolution — aube's runtime code stays compiled but inert.
     aube::set_runtime_switching_enabled(false);
+    // Warm-relink store verification: nub trusts the atomically-published
+    // store, so it skips the per-file stat sweep the engine runs on every
+    // warm install by default. aube publishes to its CAS atomically
+    // (O_TMPFILE+linkat / O_CREAT|O_EXCL per file; the index is written
+    // LAST as the completeness marker; a torn index is parse-rejected and
+    // re-fetched), so the full stat-per-file guard only catches external
+    // drift (Docker cache mounts, a manual `rm` in the store) that it
+    // already only partially catches and that lands on a clean re-fetch,
+    // never silent corruption. Disabling it uses the cheap first-file
+    // check (~150 ms saved on a large warm install) and re-enables the
+    // workspace `AlreadyLinked` fast path. This is the local-cache
+    // warm-relink stat ONLY — import-time tarball SHA-512 / SRI
+    // verification (`verifyStoreIntegrity`) is untouched and stays on.
+    // nub defaults this OFF (fast-trust); upstream aube defaults it ON.
+    // See `wiki/commands/pm/supply-chain-posture.md`.
+    aube::set_warm_store_verify(false);
     // `packageManager` acceptance: nub is the running tool, pnpm the
     // compatible drop-in. Inert through nub's dispatch today (the
     // guardrail runs in aube's own CLI entry, which nub bypasses), but any

@@ -212,7 +212,7 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
 name = "aube"
-version = "1.18.2"
+version = "1.19.0"
 dependencies = [
  "ambient-id",
  "aube-codes",
@@ -221,6 +221,7 @@ dependencies = [
  "aube-manifest",
  "aube-registry",
  "aube-resolver",
+ "aube-runtime",
  "aube-scripts",
  "aube-settings",
  "aube-store",
@@ -271,7 +272,7 @@ dependencies = [
 
 [[package]]
 name = "aube-codes"
-version = "1.18.2"
+version = "1.19.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -279,7 +280,7 @@ dependencies = [
 
 [[package]]
 name = "aube-linker"
-version = "1.18.2"
+version = "1.19.0"
 dependencies = [
  "aube-codes",
  "aube-lockfile",
@@ -305,7 +306,7 @@ dependencies = [
 
 [[package]]
 name = "aube-lockfile"
-version = "1.18.2"
+version = "1.19.0"
 dependencies = [
  "aube-codes",
  "aube-manifest",
@@ -327,7 +328,7 @@ dependencies = [
 
 [[package]]
 name = "aube-manifest"
-version = "1.18.2"
+version = "1.19.0"
 dependencies = [
  "aube-codes",
  "aube-util",
@@ -344,7 +345,7 @@ dependencies = [
 
 [[package]]
 name = "aube-registry"
-version = "1.18.2"
+version = "1.19.0"
 dependencies = [
  "aube-codes",
  "aube-manifest",
@@ -369,7 +370,7 @@ dependencies = [
 
 [[package]]
 name = "aube-resolver"
-version = "1.18.2"
+version = "1.19.0"
 dependencies = [
  "aube-codes",
  "aube-lockfile",
@@ -395,8 +396,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "aube-runtime"
+version = "1.19.0"
+dependencies = [
+ "aube-codes",
+ "aube-manifest",
+ "aube-util",
+ "base64",
+ "flate2",
+ "hex",
+ "node-semver",
+ "reqwest 0.13.4",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tar",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "xx",
+ "zip",
+]
+
+[[package]]
 name = "aube-scripts"
-version = "1.18.2"
+version = "1.19.0"
 dependencies = [
  "aube-codes",
  "aube-manifest",
@@ -414,7 +438,7 @@ dependencies = [
 
 [[package]]
 name = "aube-settings"
-version = "1.18.2"
+version = "1.19.0"
 dependencies = [
  "aube-util",
  "serde",
@@ -424,7 +448,7 @@ dependencies = [
 
 [[package]]
 name = "aube-store"
-version = "1.18.2"
+version = "1.19.0"
 dependencies = [
  "aube-util",
  "base64",
@@ -448,7 +472,7 @@ dependencies = [
 
 [[package]]
 name = "aube-util"
-version = "1.18.2"
+version = "1.19.0"
 dependencies = [
  "aube-codes",
  "blake3",
@@ -468,7 +492,7 @@ dependencies = [
 
 [[package]]
 name = "aube-workspace"
-version = "1.18.2"
+version = "1.19.0"
 dependencies = [
  "aube-codes",
  "aube-manifest",
