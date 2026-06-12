@@ -125,13 +125,13 @@ export function BenchBars({
 }: {
   rows: { cmd: string; ms: number; ratio?: number | null; us?: boolean }[];
   max: number;
-  accent?: 'ember' | 'acid' | 'sky';
+  accent?: 'ember' | 'acid' | 'sky' | 'pink';
   unit?: string;
 }) {
   const barAccent =
-    accent === 'acid' ? 'bg-acid' : accent === 'sky' ? 'bg-sky' : 'bg-ember';
+    accent === 'acid' ? 'bg-acid' : accent === 'sky' ? 'bg-sky' : accent === 'pink' ? 'bg-pink' : 'bg-ember';
   const textAccent =
-    accent === 'acid' ? 'text-acid' : accent === 'sky' ? 'text-sky' : 'text-ember';
+    accent === 'acid' ? 'text-acid' : accent === 'sky' ? 'text-sky' : accent === 'pink' ? 'text-pink' : 'text-ember';
 
   return (
     <div className="space-y-4">

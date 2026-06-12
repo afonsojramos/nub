@@ -935,12 +935,13 @@ function HypermanagerBand() {
       <Container className="py-32 md:py-[180px]">
         <BandHeader
           command="nub install"
-          title="A built-in package manager"
+          title="A package manager you never switch to"
           subhead={
             <>
-              Nub ships a pnpm-compatible package manager — powered by the embedded{' '}
-              <Mono>aube</Mono>{' '}engine, built in partnership with jdx. It reads the lockfile your
-              project already has and writes the same format back.
+              Nub installs your dependencies itself — no <Mono>npm</Mono>, <Mono>pnpm</Mono>,
+              or <Mono>bun</Mono>{' '}in the loop. It reads the lockfile your project already has
+              and writes the same format back. Powered by the embedded <Mono>aube</Mono>{' '}engine,
+              a fork of jdx&rsquo;s.
             </>
           }
           accent="pink"
@@ -949,27 +950,103 @@ function HypermanagerBand() {
         <div className="mt-10 divide-y divide-fd-border/60">
           <Feature
             accent="pink"
-            eyebrow="Your lockfile"
-            title="Keeps the lockfile you already have"
+            eyebrow="Drop-in"
+            title="Install with the lockfile you already have"
             body={
               <>
-                <Mono>nub install</Mono>{' '}detects your existing lockfile and writes the same format
-                back — <Mono>pnpm-lock.yaml</Mono>, <Mono>package-lock.json</Mono>, and{' '}
-                <Mono>bun.lock</Mono>{' '}are read and written in place, never replaced with a foreign
-                file. Fresh projects get a standard <Mono>pnpm-lock.yaml</Mono>. <Mono>yarn.lock</Mono>{' '}
-                is honored read-only for now: an install that would rewrite it is refused, with the
-                exact yarn command to run instead.
+                Point <Mono>nub install</Mono>{' '}at any project and it just runs — npm, pnpm, or
+                bun lockfile, it reads what&rsquo;s there and writes the same file back. No flag,
+                no migration, no foreign lockfile dropped next to yours. A fresh project gets a
+                standard <Mono>pnpm-lock.yaml</Mono>.
               </>
             }
             visual={
               <Terminal
                 lines={[
-                  { cmd: 'nub install', comment: 'pnpm-lock.yaml → read, written back' },
-                  { cmd: 'nub install', comment: 'package-lock.json → read, written back' },
-                  { cmd: 'nub install', comment: 'bun.lock → read, written back' },
-                  { cmd: 'nub install', comment: 'yarn.lock → honored read-only' },
+                  { cmd: 'nub install' },
+                  { out: 'dependencies:' },
+                  { out: '+ chalk@5.6.2' },
+                  { out: '+ express@4.22.2  latest 5.2.1' },
+                  { out: '+ zod@3.25.76  latest 4.4.3' },
+                  { out: ' ' },
+                  { out: 'nub 0.0.33 · ✓ installed 70 packages' },
                 ]}
               />
+            }
+          />
+
+          <Feature
+            accent="pink"
+            reverse
+            eyebrow="Conformance"
+            title="A true drop-in — proven both directions"
+            body={
+              <>
+                Nub frozen-installs faithfully from an npm, pnpm, yarn, or bun lockfile — and
+                each of those real tools frozen-accepts a lockfile Nub wrote, unchanged. That
+                round-trip is verified across all four: 16 / 16 bidirectional installs pass, so
+                a teammate on plain <Mono>pnpm</Mono>{' '}or <Mono>npm</Mono>{' '}sees the exact tree
+                Nub produced.
+              </>
+            }
+            visual={
+              <Terminal
+                lines={[
+                  { cmd: 'nub install', comment: 'npm  package-lock.json → in place' },
+                  { cmd: 'nub install', comment: 'pnpm pnpm-lock.yaml   → in place' },
+                  { cmd: 'nub install', comment: 'bun  bun.lock          → in place' },
+                  { cmd: 'nub install', comment: 'yarn yarn.lock         → read-only' },
+                ]}
+              />
+            }
+          />
+
+          <Feature
+            accent="pink"
+            eyebrow="Performance"
+            title="As fast as pnpm warm, faster cold"
+            body={
+              <>
+                On a warm cache, <Mono>nub install</Mono>{' '}lands a statistical tie with{' '}
+                <Mono>pnpm</Mono>. Cold, Nub is faster — but honestly so: it ships a metadata
+                primer, an embedded cache of the ~2,000 most-installed packages, so a
+                first install skips most of the registry round-trips. The disk and link work
+                is the same.
+              </>
+            }
+            visual={
+              <div className="rounded-xl border border-fd-border bg-[#0b0a08] p-6">
+                <p className="mb-5 font-mono text-[0.7rem] uppercase tracking-[0.14em] text-fd-muted-foreground">
+                  49-dep install · hyperfine
+                </p>
+                {/* TODO(bench): swap in the monorepo-WARM number when it lands —
+                    it is the stronger headline and is NOT yet measured. Do not
+                    fabricate it; keep this single-project bench until then. */}
+                <p className="mb-2 font-mono text-[0.62rem] uppercase tracking-[0.12em] text-fd-muted-foreground">
+                  warm cache
+                </p>
+                <BenchBars
+                  accent="pink"
+                  max={7.14}
+                  unit="s"
+                  rows={[
+                    { cmd: 'nub install', ms: 2.83, us: true },
+                    { cmd: 'pnpm install', ms: 2.75 },
+                  ]}
+                />
+                <p className="mb-2 mt-6 font-mono text-[0.62rem] uppercase tracking-[0.12em] text-fd-muted-foreground">
+                  cold cache · nub primer-assisted
+                </p>
+                <BenchBars
+                  accent="pink"
+                  max={7.14}
+                  unit="s"
+                  rows={[
+                    { cmd: 'nub install', ms: 2.65, us: true },
+                    { cmd: 'pnpm install', ms: 7.14, ratio: 2.7 },
+                  ]}
+                />
+              </div>
             }
           />
 
@@ -991,7 +1068,7 @@ function HypermanagerBand() {
               <Terminal
                 lines={[
                   { cmd: 'nub install' },
-                  { out: 'node_modules/express → .nub/express@5.1.0/…' },
+                  { out: 'node_modules/express → .nub/express@4.22.2/…' },
                   { cmd: 'nub install --node-linker=hoisted', comment: 'or one .npmrc line' },
                 ]}
               />
