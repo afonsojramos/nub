@@ -306,3 +306,143 @@ fn lifecycle_ua_is_pnpm_first_in_compat_and_nub_first_under_nub_identity() {
         "nub-identity UA must be nub-first in the runner dialect: {ua}"
     );
 }
+
+/// An empty-dependency, in-sync npm v3 package-lock — converts to lock.yaml
+/// offline (no graph to fetch), exercising the npm→nub `Convert` path.
+const EMPTY_NPM_LOCK: &str = r#"{
+  "name": "app",
+  "version": "1.0.0",
+  "lockfileVersion": 3,
+  "requires": true,
+  "packages": { "": { "name": "app", "version": "1.0.0" } }
+}
+"#;
+
+/// The phantom-dependency layout-change warning (writeup §6): switching a
+/// project FROM a hoisting PM (npm/yarn — flat node_modules) to nub's isolated
+/// layout can break undeclared imports, so `pm use nub` warns. The warning is
+/// gated to npm/yarn only — pnpm/bun are already isolated, and a fresh project
+/// has no incumbent layout to change. stderr is a pipe here, so the text is
+/// plain (no ANSI), matching a NO_COLOR / non-terminal shell.
+#[test]
+fn use_nub_warns_about_phantom_deps_only_when_leaving_a_hoisting_pm() {
+    let pkg = r#"{"name":"app","version":"1.0.0"}"#;
+
+    // npm incumbent → the layout-change warning fires.
+    let npm = project(
+        "phantom-npm",
+        &[("package.json", pkg), ("package-lock.json", EMPTY_NPM_LOCK)],
+    );
+    let (stdout, stderr, code) = run(&npm, &["pm", "use", "nub"]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains("isolated node_modules")
+            && stderr.contains("phantom dependencies")
+            && stderr.contains("npm and yarn"),
+        "npm→nub must warn that the isolated layout can break phantom deps: {stderr}"
+    );
+
+    // pnpm incumbent → already isolated, no phantom warning.
+    let pnpm = project(
+        "phantom-pnpm",
+        &[
+            (
+                "package.json",
+                r#"{"name":"app","version":"1.0.0","packageManager":"pnpm@10.0.0"}"#,
+            ),
+            ("pnpm-lock.yaml", EMPTY_LOCK),
+        ],
+    );
+    let (stdout, stderr, code) = run(&pnpm, &["pm", "use", "nub"]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        !stderr.contains("phantom dependencies"),
+        "pnpm is already non-hoisting — no phantom-deps warning: {stderr}"
+    );
+
+    // Fresh project (no lockfile) → no incumbent layout, no warning.
+    let fresh = project("phantom-fresh", &[("package.json", pkg)]);
+    let (stdout, stderr, code) = run(&fresh, &["pm", "use", "nub"]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        !stderr.contains("phantom dependencies"),
+        "a fresh project has no incumbent layout — no phantom-deps warning: {stderr}"
+    );
+}
+
+/// A `.pnpmfile.cjs` is pnpm-proprietary AND shapes resolution (its
+/// hooks rewrite the dep graph), so under a non-pnpm incumbent it's
+/// another tool's config and must not be honored. A `preResolution` hook
+/// writes a marker file when it runs — the cleanest cross-tool "did the
+/// hook fire?" signal. `--no-frozen-lockfile` forces the resolve so the
+/// hook actually gets a chance to run (a frozen/already-current install
+/// short-circuits before pnpmfile detection).
+///
+/// npm incumbent: the cwd-default `.pnpmfile` is gated off — the hook
+/// never runs and exactly one dim warning names the file + the incumbent.
+#[test]
+fn pnpmfile_ignored_under_npm_incumbent_with_one_warning() {
+    let hook = r#"module.exports = { hooks: { preResolution(ctx) { require('fs').writeFileSync('hook-ran.txt', 'yes'); return ctx; } } };"#;
+    let dir = project(
+        "pnpmfile-npm",
+        &[
+            (
+                "package.json",
+                r#"{"name":"app","version":"1.0.0","packageManager":"npm@10.0.0"}"#,
+            ),
+            (
+                "package-lock.json",
+                r#"{"name":"app","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{"":{"name":"app","version":"1.0.0"}}}"#,
+            ),
+            (".pnpmfile.cjs", hook),
+        ],
+    );
+    let (stdout, stderr, code) = run(&dir, &["install", "--no-frozen-lockfile"]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        !dir.join("hook-ran.txt").exists(),
+        "the cwd-default .pnpmfile must NOT run under an npm incumbent: {stderr}"
+    );
+    assert_eq!(
+        stderr.matches(".pnpmfile.cjs` ignored").count(),
+        1,
+        "exactly one ignore warning naming the file: {stderr}"
+    );
+    assert!(
+        stderr.contains("this project uses npm")
+            && stderr.contains("--pnpmfile")
+            && stderr.contains("nub pm use pnpm"),
+        "the warning names the incumbent and both escape hatches: {stderr}"
+    );
+}
+
+/// pnpm incumbent: the cwd-default `.pnpmfile` is honored exactly as
+/// upstream — the hook runs and there is no ignore warning. This is the
+/// pnpm "special relationship": its proprietary config stays live when
+/// pnpm is the incumbent.
+#[test]
+fn pnpmfile_honored_under_pnpm_incumbent_without_warning() {
+    let hook = r#"module.exports = { hooks: { preResolution(ctx) { require('fs').writeFileSync('hook-ran.txt', 'yes'); return ctx; } } };"#;
+    let dir = project(
+        "pnpmfile-pnpm",
+        &[
+            (
+                "package.json",
+                r#"{"name":"app","version":"1.0.0","packageManager":"pnpm@9.9.9"}"#,
+            ),
+            ("pnpm-lock.yaml", EMPTY_LOCK),
+            (".pnpmfile.cjs", hook),
+        ],
+    );
+    let (stdout, stderr, code) = run(&dir, &["install", "--no-frozen-lockfile"]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        dir.join("hook-ran.txt").is_file(),
+        "the cwd-default .pnpmfile must run under a pnpm incumbent: {stderr}"
+    );
+    assert_eq!(
+        stderr.matches("ignored").count(),
+        0,
+        "no ignore warning when pnpm is the incumbent: {stderr}"
+    );
+}

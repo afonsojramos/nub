@@ -849,7 +849,7 @@ fn emit_scope_warnings(role: config_scope::Role, ignored: &[config_scope::Ignore
 
 /// Whether the scoping warning should be dim-styled: stderr is a terminal
 /// (or `FORCE_COLOR` is set) AND `NO_COLOR` is unset.
-fn scope_warning_uses_dim() -> bool {
+pub(crate) fn scope_warning_uses_dim() -> bool {
     use std::io::IsTerminal;
     if std::env::var_os("NO_COLOR").is_some() {
         return false;
@@ -1166,6 +1166,12 @@ pub(crate) fn engine_brand_preflight() {
     if let Some(dir) = &nub_identity {
         aube::set_workspace_yaml_names(&[]);
         aube::set_manifest_config_namespaces(&[""]);
+        // pnpm's global `~/.config/pnpm/auth.ini` is a pnpm-NAMED path, so
+        // under nub identity (incumbent is not pnpm) it is not read at all —
+        // a name-based rule: anything with "pnpm" in the path is off unless
+        // pnpm is the incumbent, impact-irrelevant (the maintainer 2026-06-11). The
+        // `.npmrc` / `npmrcAuthFile` auth sources stay live.
+        aube::set_pnpm_auth_ini_enabled(false);
         // A stray pnpm-workspace.yaml under nub identity (branch merge,
         // tutorial copy-paste) is ignore-with-warning, never read and never
         // silent: deterministic nub-pure behavior, one warning, remedies
@@ -1176,9 +1182,9 @@ pub(crate) fn engine_brand_preflight() {
                  (`nub pm use nub`), delete it, or return to pnpm (`nub pm use pnpm`)."
             );
         }
-    } else if std::env::current_dir()
+    } else if let Some(cwd) = std::env::current_dir()
         .ok()
-        .is_some_and(|cwd| non_pnpm_role(&cwd))
+        .filter(|cwd| non_pnpm_role(cwd))
     {
         // Compat mode, but the incumbent is npm/yarn/bun — NOT pnpm. The
         // pnpm-specific config surface is theirs to ignore: a stray
@@ -1190,6 +1196,39 @@ pub(crate) fn engine_brand_preflight() {
         // `workspaces`/`overrides`/`allowBuilds` via the manifest root.
         aube::set_workspace_yaml_names(&[]);
         aube::set_manifest_config_namespaces(&[""]);
+        // The cwd-default `.pnpmfile.cjs`/`.mjs` is pnpm-proprietary too, and
+        // unlike a workspace-yaml *it shapes resolution* — its `readPackage` /
+        // `afterAllResolved` hooks rewrite the dep graph. Under a non-pnpm
+        // incumbent it's another tool's config: gate the default arm off so it
+        // isn't silently honored. Explicit `--pnpmfile`/`--global-pnpmfile`
+        // overrides still load (a path named on purpose). One dim warning when
+        // a present file is suppressed, matching the pnpm-workspace.yaml
+        // ignore-with-warning pattern.
+        aube::set_pnpmfile_default_enabled(false);
+        // pnpm's global `~/.config/pnpm/auth.ini` is a pnpm-NAMED path: under
+        // a non-pnpm incumbent (npm/yarn/bun) it is another tool's file and is
+        // not read at all. Name-based, impact-irrelevant — the earlier
+        // "auth.ini is exempt, cross-tool auth, no resolution impact" carve-out
+        // was reversed (the maintainer 2026-06-11): the rule keys on the pnpm name in
+        // the path, not on whether the read can change resolution. The
+        // ecosystem-neutral `.npmrc` / `npmrcAuthFile` auth sources stay live.
+        aube::set_pnpm_auth_ini_enabled(false);
+        if let Some(present) = aube::pnpmfile_default_path(&cwd) {
+            let name = present
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(".pnpmfile.cjs");
+            let line = format!(
+                "nub: `{name}` ignored — this project uses {}, which doesn't apply pnpmfile hooks. \
+                 Remove it, name it explicitly with `--pnpmfile`, or switch to pnpm (`nub pm use pnpm`).",
+                non_pnpm_role_display(&cwd),
+            );
+            if scope_warning_uses_dim() {
+                eprintln!("\x1b[2m{line}\x1b[0m");
+            } else {
+                eprintln!("{line}");
+            }
+        }
     } else {
         // pnpm role (or fresh): play the incumbent completely. Workspace
         // yamls: `pnpm-workspace.yaml` only. An `aube-workspace.yaml` some
@@ -1353,6 +1392,42 @@ fn non_pnpm_role(cwd: &Path) -> bool {
         }
     }
     false
+}
+
+/// The incumbent PM name for a non-pnpm-role project at `cwd` — `npm`,
+/// `yarn`, or `bun` — for user-facing warning text. Mirrors
+/// [`non_pnpm_role`]'s walk and decision order (declaration first,
+/// foreign lockfile second). Falls back to `"npm"` if the role flipped
+/// out from under us (should not happen: callers gate on `non_pnpm_role`
+/// first), so the warning always names a concrete tool.
+fn non_pnpm_role_display(cwd: &Path) -> &'static str {
+    const FOREIGN: &[(&str, &str)] = &[
+        ("package-lock.json", "npm"),
+        ("npm-shrinkwrap.json", "npm"),
+        ("yarn.lock", "yarn"),
+        ("bun.lock", "bun"),
+        ("bun.lockb", "bun"),
+    ];
+    let mut dir = cwd.to_path_buf();
+    for _ in 0..16 {
+        if let Some(decl) = aube_lockfile::declared_package_manager(&dir) {
+            return match decl.name.as_str() {
+                "yarn" => "yarn",
+                "bun" => "bun",
+                _ => "npm",
+            };
+        }
+        if dir.join("pnpm-lock.yaml").is_file() {
+            break;
+        }
+        if let Some((_, name)) = FOREIGN.iter().find(|(f, _)| dir.join(f).is_file()) {
+            return name;
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    "npm"
 }
 
 /// Nub's replacement setting defaults, fed to the engine's embedder-defaults
