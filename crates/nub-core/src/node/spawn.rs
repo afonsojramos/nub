@@ -201,6 +201,20 @@ pub struct SpawnResult {
 /// injection, no preloads, no PATH shim.
 pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
     let mut cmd = Command::new(config.node.path.as_str());
+    // Process-identity fidelity: set argv0 to "node" so the spawned process
+    // reports `process.title` and `process.argv0` as "node" — matching what
+    // plain `node` reports when invoked by PATH name — instead of the full
+    // resolved binary path that Rust passes by default. `process.execPath`
+    // is NOT affected: it is populated by Node from the resolved binary path
+    // (via `/proc/self/exe` on Linux, `_NSGetExecutablePath` on macOS) and
+    // ignores argv0 entirely. Unix-only: Windows has no stdlib argv0 API, and
+    // on Windows `process.title` / `process.argv0` already behave correctly
+    // because the CreateProcess image path is separate from argv construction.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.arg0("node");
+    }
     // Run the child in the configured cwd. For `nub <file>` this equals the
     // process cwd (a no-op); the workspace-bin path threads a member dir so a
     // node bin executes IN that member rather than inheriting the parent's cwd.
