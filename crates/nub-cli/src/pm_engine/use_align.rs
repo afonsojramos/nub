@@ -104,14 +104,18 @@ pub(crate) fn plan_alignment(root: &Path, target: &str) -> Result<AlignPlan> {
 
     if let Some((kept, _)) = target_files.into_iter().next() {
         // Same filename, different format: a Berry yarn.lock under a classic
-        // `use yarn` is a conversion in disguise — refuse via the gate.
+        // `use yarn` would silently downgrade the project's lockfile from
+        // Berry to v1 — a format change the user didn't ask for, not the
+        // declaration-only switch `use` promises. Refuse and point at the
+        // Berry-native path. (Classic-yarn *write* fidelity is proven — see
+        // the conformance yarn leg — so this is a format-preservation refusal,
+        // not a write-fidelity one.)
         if target == "yarn" && aube_lockfile::yarn::is_berry_path(&kept) {
             bail!(
                 "this project's yarn.lock is yarn Berry (2+) format — `nub pm use yarn` \
-                 pins classic yarn, and converting a Berry yarn.lock would rewrite \
-                 yarn.lock, which nub refuses (yarn.lock write fidelity is unproven \
-                 in the embedded engine). Use `yarn set version` to manage Berry, or \
-                 pick another manager: nub pm use pnpm | npm | bun."
+                 pins classic yarn, and converting a Berry yarn.lock to v1 would \
+                 silently downgrade the lockfile format. Use `yarn set version` to \
+                 manage Berry, or pick another manager: nub pm use pnpm | npm | bun."
             );
         }
         return Ok(AlignPlan::Keep { kept, remove });
@@ -139,20 +143,17 @@ pub(crate) fn plan_alignment(root: &Path, target: &str) -> Result<AlignPlan> {
         );
     }
 
-    if target == "yarn" {
-        bail!(
-            "`nub pm use yarn` would need to convert {} into yarn.lock, and nub \
-             refuses to write yarn.lock (write fidelity is unproven in the embedded \
-             engine). Generate it with yarn itself (`yarn install`), then rerun \
-             `nub pm use yarn` — with yarn.lock in place, only the declaration is written.",
-            foreign[0]
-                .0
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-        );
-    }
-
+    // `nub pm use yarn` pins *classic* (v1) yarn and writes a classic
+    // yarn.lock. The classic writer is proven against real yarn: a yarn.lock
+    // nub writes from any source (pnpm/npm/bun) is accepted by yarn 1.13 and
+    // 1.22 under `--frozen-lockfile` with zero churn and a correct
+    // node_modules (tests/conformance Direction-B yarn leg). yarn v1's frozen
+    // check validates that the manifest is satisfiable by the lockfile, not
+    // byte-identity, so the writer's lossy bits (no `resolved` URL, resolved
+    // versions in place of declared ranges) are tolerated. So a converting
+    // `use yarn` is allowed for classic. (The berry case never reaches here:
+    // an existing berry yarn.lock is the `Keep`-with-classic-conflict refusal
+    // above — `use yarn` does not convert *to* berry.)
     let (from, from_pm) = foreign
         .first()
         .cloned()
@@ -194,17 +195,21 @@ fn source_kind(path: &Path) -> LockfileKind {
     }
 }
 
-/// The target's write format. yarn never reaches here ([`plan_alignment`]
-/// refuses every converting `use yarn`); `nub` maps to the engine's
-/// canonical-lockfile slot, whose filename the brand preflight registers as
-/// [`NUB_LOCKFILE`] (pnpm-v9 bytes either way).
+/// The target's write format. `yarn` maps to *classic* (v1) yarn.lock — the
+/// proven, frozen-accepted writer ([`plan_alignment`] only ever converts *to*
+/// classic; an existing berry yarn.lock is the Keep-conflict refusal). `nub`
+/// maps to the engine's canonical-lockfile slot, whose filename the brand
+/// preflight registers as [`NUB_LOCKFILE`] (pnpm-v9 bytes either way).
 fn target_kind(target: &str) -> LockfileKind {
     match target {
         "npm" => LockfileKind::Npm,
         "pnpm" => LockfileKind::Pnpm,
         "bun" => LockfileKind::Bun,
         "nub" => LockfileKind::Aube,
-        other => unreachable!("conversion targets are npm/pnpm/bun/nub, got {other}"),
+        // `use yarn` pins and writes *classic* (v1) yarn.lock — the proven,
+        // frozen-accepted writer. Conversion never targets berry.
+        "yarn" => LockfileKind::Yarn,
+        other => unreachable!("conversion targets are npm/pnpm/bun/nub/yarn, got {other}"),
     }
 }
 
@@ -326,17 +331,22 @@ mod tests {
     }
 
     #[test]
-    fn yarn_gate_refuses_conversions_in_both_directions_of_the_same_filename() {
-        // use yarn over a foreign lockfile → refused (would write yarn.lock).
+    fn use_yarn_converts_to_classic_but_refuses_a_berry_target() {
+        // use yarn over a foreign lockfile → Convert to *classic* yarn.lock.
+        // The classic writer is proven frozen-accepted by real yarn (the gate
+        // that used to refuse this is lifted — see the conformance yarn leg).
         let dir = root(
             "yarn-conv",
             &[("pnpm-lock.yaml", "lockfileVersion: '9.0'\n")],
         );
-        let err = plan_alignment(&dir, "yarn").unwrap_err().to_string();
         assert!(
-            err.contains("refuses to write yarn.lock"),
-            "converting to yarn must hit the write gate, got: {err}"
+            matches!(
+                plan_alignment(&dir, "yarn").unwrap(),
+                AlignPlan::Convert { .. }
+            ),
+            "converting a foreign lockfile to classic yarn must be allowed"
         );
+        assert_eq!(target_kind("yarn"), LockfileKind::Yarn);
 
         // use yarn with a CLASSIC yarn.lock in place → fine (declaration-only).
         let dir = root("yarn-keep", &[("yarn.lock", "# yarn lockfile v1\n")]);

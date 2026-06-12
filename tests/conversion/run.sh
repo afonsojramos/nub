@@ -14,10 +14,10 @@
 #      The real PM is the honest judge — if it accepts the file, the conversion works.
 #   4. Asserts every direct dep exists in node_modules.
 #
-# yarn-as-target is a special leg: `nub pm use yarn` from any non-yarn source must
-# refuse (non-zero exit) because yarn write fidelity is unproven in the engine.
-# "yarn as source → yarn as target" is also tested (nub pm use yarn with an existing
-# yarn.lock) — it should succeed with the lockfile kept as-is.
+# yarn-as-target converts the source lockfile into a classic (v1) yarn.lock and
+# checks real yarn frozen-accepts it unchanged — the classic writer is proven
+# against real yarn, so this is the normal convert→frozen-accept leg (the old
+# "must refuse" contract was lifted). yarn→yarn keeps the existing yarn.lock.
 #
 # Usage:  run.sh [<path-to-nub>] [fixture ...]
 # Env:
@@ -181,30 +181,27 @@ leg() {
     pnpm) nub_pm_arg="pnpm@$PNPM_PIN" ;;
     bun)  nub_pm_arg="bun@$BUN_PIN"   ;;
     yarn)
-      # yarn-as-target: nub should REFUSE when the source lockfile is not yarn.
-      # (If source is also yarn the lockfile is kept as-is — that's a pass too.)
+      # yarn-as-target: nub converts the source lockfile into a classic (v1)
+      # yarn.lock (the classic writer is proven frozen-accepted by real yarn —
+      # the old refusal gate was lifted). yarn→yarn keeps the existing file.
       local nub_exit=0
       ( cd "$proj" && step "$log" "nub pm use yarn" \
         "$NUB" pm use yarn ) >>"$log" 2>&1 || nub_exit=$?
-      if [ "$src_pm" = "yarn" ]; then
-        # yarn→yarn: nub should keep yarn.lock as-is (exit 0).
-        if [ "$nub_exit" -eq 0 ]; then
-          echo "PASS: yarn->yarn: nub pm use yarn kept yarn.lock (exit 0)" >>"$log"
-          return 0
-        else
-          echo "FAILED: yarn->yarn: nub pm use yarn exited $nub_exit (expected 0)" >>"$log"
-          return 1
-        fi
-      else
-        # non-yarn→yarn: must refuse (exit non-zero).
-        if [ "$nub_exit" -ne 0 ]; then
-          echo "PASS: $src_pm->yarn: nub pm use yarn correctly refused (exit $nub_exit)" >>"$log"
-          return 0
-        else
-          echo "FAILED: $src_pm->yarn: nub pm use yarn did NOT refuse (exit 0)" >>"$log"
-          return 1
-        fi
+      if [ "$nub_exit" -ne 0 ]; then
+        echo "FAILED: $src_pm->yarn: nub pm use yarn exited $nub_exit" >>"$log"
+        return 1
       fi
+      [ -f "$proj/yarn.lock" ] \
+        || { echo "FAILED: $src_pm->yarn: nub pm use yarn wrote no yarn.lock" >>"$log"; return 1; }
+      cp "$proj/yarn.lock" "$log.converted-lock"
+      wipe_node_modules "$proj"
+      ( cd "$proj" && step "$log" "yarn install --frozen-lockfile (frozen accept)" \
+        yarn install --frozen-lockfile --non-interactive ) \
+        || { echo "FAILED: $src_pm->yarn: yarn rejected the converted yarn.lock (--frozen-lockfile)" >>"$log"; return 1; }
+      cmp -s "$log.converted-lock" "$proj/yarn.lock" \
+        || { echo "FAILED: $src_pm->yarn: yarn rewrote the converted yarn.lock (churn)" >>"$log"; return 1; }
+      assert_node_modules "$proj" "$log" || return 1
+      return 0
       ;;
   esac
 

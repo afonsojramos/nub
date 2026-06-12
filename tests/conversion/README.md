@@ -11,7 +11,7 @@ For each ordered pair (source, target) over {npm, pnpm, bun, yarn}:
 3. **Judge** — the target PM frozen-installs from the converted lockfile (the real PM is the honest judge).
 4. **Assert** — every direct dep from `package.json` exists in `node_modules`.
 
-**yarn-as-target** is a special leg: `nub pm use yarn` from any non-yarn source must refuse (non-zero exit) because yarn write fidelity is unproven in the engine. This is tested and the refusal is asserted as the PASS condition.
+**yarn-as-target** converts the source lockfile into a classic (v1) yarn.lock and checks real `yarn install --frozen-lockfile` accepts it unchanged (zero churn + correct node_modules) — the classic writer is proven against real yarn (1.13/1.22 both frozen-accept a nub-written yarn.lock from any source), so this is the normal convert→frozen-accept leg. (This replaced the old "must refuse" contract; the classic-yarn write gate was lifted on the empirical result.) `yarn→yarn` keeps the existing yarn.lock as-is.
 
 **yarn-as-source→yarn-as-target** exercises the "lockfile kept as-is" path — nub should succeed without converting anything.
 
