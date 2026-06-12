@@ -1022,8 +1022,8 @@ function HypermanagerBand() {
             <>
               Nub installs your dependencies itself — no <Mono>npm</Mono>, <Mono>pnpm</Mono>,{' '}
               <Mono>yarn</Mono>, or <Mono>bun</Mono>{' '}in the loop. It reads the lockfile your
-              project already has and writes the same format back. Powered by the embedded{' '}
-              <Mono>aube</Mono>{' '}engine. Powered by jdx&rsquo;s aube.
+              project already has and writes the same format back. Powered by{' '}
+              <Mono>aube</Mono>, jdx&rsquo;s Rust package manager.
             </>
           }
           accent="pink"
@@ -1036,11 +1036,12 @@ function HypermanagerBand() {
             title="Change package managers, keep your lockfile."
             body={
               <>
-                Point <Mono>nub install</Mono>{' '}at any project and it just runs — it detects the
-                package manager from the lockfile, installs in that tool&rsquo;s dialect, and
-                writes the same file back. No flag, no migration, no foreign lockfile dropped next
-                to yours. The flat hoisted layout for an npm/yarn/bun project, the strict symlinked
-                store for pnpm — whatever the code that walks <Mono>node_modules</Mono>{' '}expects.
+                Nub detects which package manager your project uses from its lockfile, then both
+                reads and writes that same lockfile in place — <Mono>package-lock.json</Mono>,{' '}
+                <Mono>pnpm-lock.yaml</Mono>, or <Mono>bun.lock</Mono>. The lockfile round-trips: nub
+                installs from it and writes the same format back, so there&rsquo;s no migration and
+                no foreign lockfile dropped next to yours. The <Mono>node_modules</Mono>{' '}layout
+                matches too — flat and hoisted for an npm/bun project, the symlinked store for pnpm.
               </>
             }
             visual={
@@ -1049,8 +1050,40 @@ function HypermanagerBand() {
                   { cmd: 'nub install', comment: 'npm  package-lock.json → in place' },
                   { cmd: 'nub install', comment: 'pnpm pnpm-lock.yaml    → in place' },
                   { cmd: 'nub install', comment: 'bun  bun.lock          → in place' },
-                  { cmd: 'nub install', comment: 'yarn yarn.lock         → read-only' },
                 ]}
+              />
+            }
+          />
+
+          <Feature
+            accent="pink"
+            reverse
+            eyebrow="pnpm compatibility"
+            title="Full pnpm support, proprietary config included"
+            body={
+              <>
+                When pnpm is your project&rsquo;s package manager, Nub reads its proprietary config —{' '}
+                <Mono>pnpm-workspace.yaml</Mono>, <Mono>.pnpmfile.cjs</Mono>, and the{' '}
+                <Mono>pnpm.*</Mono>{' '}fields in <Mono>package.json</Mono>{' '}(<Mono>pnpm.overrides</Mono>,{' '}
+                <Mono>onlyBuiltDependencies</Mono>, and the rest). The install engine is{' '}
+                <Mono>aube</Mono>, jdx&rsquo;s Rust package manager built for 1:1 pnpm compatibility,
+                so the lockfile and <Mono>node_modules</Mono>{' '}store it produces are the ones real
+                pnpm accepts unchanged.
+              </>
+            }
+            visual={
+              <Source
+                lang="yaml"
+                code={`# pnpm-workspace.yaml — read as-is
+packages:
+  - "packages/*"
+catalog:
+  react: ^18.3.1
+
+# package.json
+{ "pnpm": {
+    "overrides": { "axios": "^1.7.0" },
+    "onlyBuiltDependencies": ["esbuild"] } }`}
               />
             }
           />
@@ -1064,14 +1097,16 @@ function HypermanagerBand() {
           <Feature
             accent="pink"
             eyebrow="Configuration compatibility"
-            title="Reads the config your project already has"
+            title="Mirrors your package manager's config rules"
             body={
               <>
-                Nub reads the config fields your project already maintains — <Mono>overrides</Mono>,{' '}
-                <Mono>resolutions</Mono>, <Mono>catalog</Mono>, <Mono>workspaces</Mono>,{' '}
-                <Mono>.npmrc</Mono> — and never writes a <Mono>&quot;nub&quot;</Mono>{' '}field or a
-                new config file. Separately, Nub installs faithfully from an npm, pnpm, yarn, or bun
-                lockfile and writes the same format back — verified both directions.
+                Nub infers which package manager your project uses from its <Mono>package.json</Mono>{' '}
+                and lockfile, then honors or ignores exactly the same package-management config fields
+                that that tool would — <Mono>overrides</Mono>, <Mono>resolutions</Mono>,{' '}
+                <Mono>catalog</Mono>, <Mono>workspaces</Mono>, <Mono>.npmrc</Mono> — for total
+                compatibility. An npm project sees top-level <Mono>overrides</Mono>{' '}but not{' '}
+                <Mono>resolutions</Mono>; a pnpm project, the reverse. Nub never adds a{' '}
+                <Mono>&quot;nub&quot;</Mono>{' '}field or a config file of its own.
               </>
             }
             visual={<PMMatrix />}
