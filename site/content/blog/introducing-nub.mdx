@@ -406,10 +406,10 @@ Nub ships a full package manager, powered by the embedded [aube](https://aube.jd
 $ nub install   # pnpm-lock.yaml → read, written back
 $ nub install   # package-lock.json → read, written back
 $ nub install   # bun.lock → read, written back
-$ nub install   # yarn.lock → honored read-only
+$ nub install   # yarn.lock → read and written back
 ```
 
-There's no migration. `nub install` detects the lockfile your project already has — npm, pnpm, or bun — and writes the same format back, never a foreign file (`yarn.lock` is read-only: an install that would rewrite it is refused, with the exact yarn command to run instead). Fresh projects get a standard `pnpm-lock.yaml`. And your package manager keeps working, side by side: run either tool, commit the same file, switch back any time.
+There's no migration. `nub install` detects the lockfile your project already has — npm, pnpm, bun, or yarn — and writes the same format back, never a foreign file. Fresh projects get a standard `pnpm-lock.yaml`. And your package manager keeps working, side by side: run either tool, commit the same file, switch back any time.
 
 What aube brings:
 
