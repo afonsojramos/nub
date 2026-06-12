@@ -43,7 +43,11 @@ pub enum DiscoveryError {
     )]
     PinnedNotFound { pin: String, shell_version: String },
 
-    #[error("no Node binary found on PATH")]
+    #[error(
+        "no Node binary found on PATH\n\
+         \x20\x20Install one with: nub node install (or `nub node install <version>` to pick a version)\n\
+         \x20\x20(nub augments your Node — it doesn't bundle one; a pin in .node-version / .nvmrc / engines.node is provisioned automatically.)"
+    )]
     NoNodeOnPath,
 
     /// The discovered Node is older than `NodeVersion::MIN_SUPPORTED`
@@ -1388,6 +1392,22 @@ mod tests {
         assert!(
             msg.contains("ERR_NUB_NODE_PROVISION_FAILED"),
             "carries the branded error code: {msg}"
+        );
+    }
+
+    #[test]
+    fn no_node_on_path_offers_install_remedy() {
+        // A user who installed nub before any Node must be told the way out —
+        // nub augments Node, it doesn't bundle one — instead of a dead-end
+        // "no Node binary found on PATH".
+        let msg = DiscoveryError::NoNodeOnPath.to_string();
+        assert!(
+            msg.contains("nub node install"),
+            "points at nub's own provisioning: {msg}"
+        );
+        assert!(
+            msg.contains("doesn't bundle one"),
+            "explains nub augments rather than bundles Node: {msg}"
         );
     }
 

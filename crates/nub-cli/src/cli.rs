@@ -2883,12 +2883,14 @@ fn run_exec(bin: &str, compat_mode: bool, args: &[String]) -> Result<i32> {
     // block on an interactive install prompt in CI, the exact failure that
     // decision removed. Print the install / run-ad-hoc suggestion and exit
     // non-zero (127, the conventional "command not found").
-    let pm = detect_package_manager(&cwd);
+    let pm = suggest_package_manager(&cwd);
     let (add_cmd, dlx_cmd) = match pm.as_str() {
         "pnpm" => (format!("pnpm add -D {bin}"), format!("pnpm dlx {bin}")),
         "yarn" => (format!("yarn add -D {bin}"), format!("yarn dlx {bin}")),
         "bun" => (format!("bun add -d {bin}"), format!("bunx {bin}")),
-        _ => (format!("npm install -D {bin}"), format!("npx {bin}")),
+        "npm" => (format!("npm install -D {bin}"), format!("npx {bin}")),
+        // No lockfile and no foreign pin → suggest nub's own surface.
+        _ => (format!("nub add -D {bin}"), format!("nubx {bin}")),
     };
     eprintln!("nub: `{bin}` is not installed in node_modules/.bin.");
     eprintln!("     install it ({add_cmd}), or run it ad-hoc with: {dlx_cmd}");
@@ -3056,6 +3058,10 @@ fn apply_exec_augmentation(cmd: &mut std::process::Command, cwd: &Path) {
 // dlx removed per the maintainer 2026-05-26 (exec.md). nubx is local-bin-only; on a miss it
 // SUGGESTS the PM dlx command and exits non-zero (127) — it never runs a fetch.
 
+/// The package manager a redirect/hint should name, keyed off a committed
+/// lockfile (the strongest signal that the project genuinely *is* that PM). With
+/// no lockfile, falls back to npm. Callers that want the no-lockfile case to
+/// honor the *declared* pin (or default to nub) use [`suggest_package_manager`].
 fn detect_package_manager(cwd: &Path) -> String {
     let mut dir = cwd.to_path_buf();
     for _ in 0..16 {
@@ -3076,6 +3082,38 @@ fn detect_package_manager(cwd: &Path) -> String {
         }
     }
     "npm".to_string()
+}
+
+/// Like [`detect_package_manager`], but when there's no lockfile yet (a fresh
+/// project that has never installed) it prefers the *declared* PM identity
+/// (`packageManager` / `devEngines.packageManager` / a committed yarnPath) over a
+/// blind npm fallback, and defaults to `nub` when even the pin is absent (or names
+/// nub itself). Used by the `nubx` not-installed hint, where suggesting the wrong
+/// PM's `add`/`dlx` (npm in a nub/pnpm context) is the bug this fixes.
+fn suggest_package_manager(cwd: &Path) -> String {
+    let mut dir = cwd.to_path_buf();
+    for _ in 0..16 {
+        if dir.join("pnpm-lock.yaml").is_file() {
+            return "pnpm".to_string();
+        }
+        if dir.join("yarn.lock").is_file() {
+            return "yarn".to_string();
+        }
+        if dir.join("bun.lockb").is_file() || dir.join("bun.lock").is_file() {
+            return "bun".to_string();
+        }
+        if dir.join("package-lock.json").is_file() {
+            return "npm".to_string();
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    // No lockfile: prefer the explicitly declared PM, else nub itself.
+    match nub_core::pm::resolve::project_pm_identity(cwd).map(|id| id.name) {
+        Some(name) if name != "nub" => name,
+        _ => "nub".to_string(),
+    }
 }
 
 /// The GitHub repo that hosts Nub's release artifacts. The self-owned tarball

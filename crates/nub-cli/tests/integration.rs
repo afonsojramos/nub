@@ -2187,13 +2187,42 @@ fn exec_missing_bin_suggests_without_fetching() {
         stderr.contains("is not installed"),
         "should suggest installing: {stderr}"
     );
+    // No lockfile and no declared PM pin → suggest nub's own surface (nubx),
+    // not a blind `npx`. npx is the wrong tool to recommend in a nub context.
     assert!(
-        stderr.contains("npx definitely-not-a-real-bin-xyz"),
-        "should suggest the npx ad-hoc command: {stderr}"
+        stderr.contains("nubx definitely-not-a-real-bin-xyz"),
+        "should suggest the nubx ad-hoc command for an un-pinned project: {stderr}"
     );
     assert!(
         !stderr.to_lowercase().contains("delegating"),
         "must NOT delegate / run a network fetch: {stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// The not-installed-bin hint names the PM the project actually uses. With no
+/// lockfile yet, a declared `packageManager` pin (here pnpm) wins over npm — the
+/// fix for the old blind-npm fallback that suggested the wrong tool in a
+/// pnpm/nub context.
+#[test]
+fn exec_missing_bin_honors_declared_pm_without_lockfile() {
+    let tmp = std::env::temp_dir().join(format!("nub-exec-pin-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    std::fs::write(
+        tmp.join("package.json"),
+        r#"{"name":"x","packageManager":"pnpm@9.0.0"}"#,
+    )
+    .unwrap();
+    let output = Command::new(nub_binary())
+        .args(["exec", "definitely-not-a-real-bin-xyz"])
+        .current_dir(&tmp)
+        .output()
+        .expect("failed to spawn nub");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("pnpm dlx definitely-not-a-real-bin-xyz")
+            && stderr.contains("pnpm add -D definitely-not-a-real-bin-xyz"),
+        "a pnpm-pinned project (no lockfile) must get pnpm suggestions, not npm: {stderr}"
     );
     let _ = std::fs::remove_dir_all(&tmp);
 }
@@ -2744,6 +2773,28 @@ fn unreadable_package_json_surfaces_coded_permission_error() {
     assert!(
         !stderr.contains("no package.json found"),
         "must not misdiagnose an unreadable manifest as missing: {stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `nub run` with no package.json anywhere must carry the same `ERR_NUB_*`
+/// framing the install path surfaces for the same root cause — not a bare
+/// `Error: no package.json found`. (Error-format consistency between the run and
+/// install dispatch on the missing-manifest case.)
+#[test]
+fn run_missing_manifest_carries_branded_code() {
+    let dir = std::env::temp_dir().join(format!("nub-run-nomanifest-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let output = Command::new(nub_binary())
+        .args(["run", "build"])
+        .current_dir(&dir)
+        .output()
+        .expect("spawn nub run");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_ne!(output.status.code(), Some(0), "missing manifest must fail");
+    assert!(
+        stderr.contains("ERR_NUB_NO_MANIFEST"),
+        "a missing package.json must carry the branded code (matching the install path), got: {stderr}"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
