@@ -1219,6 +1219,12 @@ pub(crate) fn engine_brand_preflight() {
     // them like the engine already skips `engines.pnpm`. `engines.node`
     // stays validated.
     aube::set_aube_engine_check(false);
+    // Node version switching is nub's job, not the engine's. nub reads
+    // `.nvmrc`/`.node-version`/devEngines, provisions Node, and pins it on
+    // its own side. Disabling aube's #861 runtime resolver keeps PATH
+    // untouched by the engine and prevents a second (conflicting) Node
+    // resolution — aube's runtime code stays compiled but inert.
+    aube::set_runtime_switching_enabled(false);
     // `packageManager` acceptance: nub is the running tool, pnpm the
     // compatible drop-in. Inert through nub's dispatch today (the
     // guardrail runs in aube's own CLI entry, which nub bypasses), but any
