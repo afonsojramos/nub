@@ -4,5 +4,3 @@
 # is recorded by deleting the entry in the same commit as the fix.
 # All entries are fork-fixable lockfile-writer bugs (vendor/aube); scenarios
 # the ecosystem makes impossible are skip_reason() in run.sh instead.
-simple npm npm-writer emits engines/os/optional in a different field order than npm's package-lock.json (field-order fidelity; pre-existing, NOT a Q2/Q3/GVS/env regression — pnpm format is byte-green). Fix in the vendor/aube npm writer, then delete this line.
-peer-heavy npm same npm-writer field-order fidelity gap as simple/npm.
