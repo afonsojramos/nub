@@ -1176,10 +1176,7 @@ mod tests {
         std::fs::write(dir.join("package.json"), r#"{"name":"root"}"#).unwrap();
         std::fs::write(dir.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").unwrap();
 
-        let names: Vec<String> = discover_members(&dir)
-            .into_iter()
-            .map(|m| m.name)
-            .collect();
+        let names: Vec<String> = discover_members(&dir).into_iter().map(|m| m.name).collect();
         assert!(
             names.iter().any(|n| n == "@x/a"),
             "pnpm-workspace.yaml member must be discovered when pnpm-lock.yaml is present; got {names:?}"
