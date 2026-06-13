@@ -207,9 +207,22 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
     // resolved binary path that Rust passes by default. `process.execPath`
     // is NOT affected: it is populated by Node from the resolved binary path
     // (via `/proc/self/exe` on Linux, `_NSGetExecutablePath` on macOS) and
-    // ignores argv0 entirely. Unix-only: Windows has no stdlib argv0 API, and
-    // on Windows `process.title` / `process.argv0` already behave correctly
-    // because the CreateProcess image path is separate from argv construction.
+    // ignores argv0 entirely.
+    //
+    // Unix-only — and this is a hard platform boundary, not just a missing API:
+    //   * Rust's `CommandExt::arg0` exists only on Unix; Windows passes a single
+    //     command-line string whose token[0] is, by universal launcher
+    //     convention, the executable path — there is no separate argv0 channel
+    //     to override.
+    //   * Even if there were, Node's `process.title` on Windows is NOT
+    //     argv0-derived: libuv's `uv_get_process_title` reads
+    //     `GetModuleFileNameW(NULL)` (the OS image path), so it is always the
+    //     absolute `node.exe` path regardless of how the child was launched.
+    // Crucially, plain Windows `node` reports that same full path for both
+    // `process.title` and `process.argv0`, so nub does NOT diverge from Node on
+    // Windows — there is nothing to fix there, and nothing the spawner could do
+    // to force "node". (See crates/nub-cli/tests/process_identity.rs, which
+    // asserts the Unix "node" invariant and the Windows path-passthrough one.)
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
