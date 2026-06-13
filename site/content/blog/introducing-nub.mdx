@@ -27,21 +27,12 @@ Node is the gold standard for server-side JavaScript. It defines the stdlib the 
 - **`dotenv`** — `.env` file loading.
 - **`nodemon`** — restart on file changes.
 
-Bun and Deno proved there's enormous appetite for an all-in-one toolkit that replaces this pile. But neither has dented Node's production dominance — six years after Deno 1.0 and two and a half after Bun 1.0, neither is a first-class target on AWS, GCP, or Azure, and their Node.js conformance is poor:
+Bun and Deno proved there's enormous appetite for an all-in-one toolkit that replaces this pile. But neither has dented Node's production dominance — six years after Deno 1.0 and two and a half after Bun 1.0, neither is a first-class target on AWS, GCP, or Azure, and their Node.js conformance still trails the real thing by a wide margin. Both are from-scratch runtimes reimplementing Node's surface, and the gaps show up in production.
 
-| Runtime | Pass rate | Tests passing |
-|---|---|---|
-| Node 25.8 | 100% | 4,375 / 4,375 |
-| **Nub** | **98.7%** | **4,318 / 4,375** |
-| Deno 2.8 | 76.6% | 3,351 / 4,375 |
-| Bun 1.3.14 | 40.1% | 1,756 / 4,375 |
+The "next-generation" runtimes share a fundamental flaw: **they're trying to replace Node.js.** Nub embraces it instead. It's a single Rust binary that transpiles your code and executes it on the stock `node` you already have installed — so it passes the vast majority of Node's own test suite, because the runtime underneath *is* Node. It combines:
 
-*Deno's Node-compat suite, node-relative. Nub's gap is 57 documented deltas — module-hook and native-addon visibility, plus three intended divergences from default-on Web Storage and compile caching. [Reproduce →](https://github.com/nubjs/nub/tree/main/tests/cross-runtime)*
-
-The "next-generation" runtimes share a fundamental flaw: **they're trying to replace Node.js.** Nub embraces it instead. It's a single Rust binary that transpiles your code and executes it on the stock `node` you already have installed — Nub passes Node's test suite because it *is* Node. It combines:
-
-- **A file runner** — `nub index.ts`. Full TypeScript support (parity with Bun) with perfect Node compatibility.
-- **A script runner** — `nub run build`. An order of magnitude faster than `pnpm run`.
+- **A file runner** — `nub index.ts`. Full TypeScript support (parity with Bun), running on the stock `node` binary.
+- **A script runner** — `nub run build`. ~7× faster than `pnpm run`.
 - **A bin runner** — `nubx prisma generate`. An order of magnitude faster than `npx`.
 - **A watcher** — `nub watch`. The dependency graph drives the watch set; no globs to maintain.
 - **A Node version manager** — `nub node install 26`. Reads your `.node-version`, installs on demand.
@@ -316,9 +307,9 @@ The watch set is the resolved dependency graph of your entry file, plus the file
 
 The engine underneath is Node's own `--watch`. Nub's preload reports every file the load hook touches — including `.ts` files transpiled in memory, which Node never sees on disk — to Node's watcher over its dependency-report IPC channel. That report is what makes `--watch` work for TypeScript at all.
 
-## `nub run` — a 20× faster `pnpm run`
+## `nub run` — a 7× faster `pnpm run`
 
-A drop-in replacement for `npm run` and `pnpm run`, minus the ~300–350 ms Node bootstrap they pay on every invocation:
+A drop-in replacement for `npm run` and `pnpm run`, minus the Node bootstrap they pay on every invocation:
 
 ```sh
 $ nub run dev           # any package.json script
@@ -328,18 +319,18 @@ $ nub -r run build      # every workspace package, topo-ordered
 
 ### Performance
 
-`pnpm` and `npm` are themselves Node.js programs: every `pnpm run <script>` boots a Node process, loads the package manager, parses its config, walks the workspace, and finally shells out to your script. That's ~300–350 ms of overhead before your script's first byte runs — and in a 30-package monorepo, `pnpm -r run build` pays it 30 times.
+`pnpm` and `npm` are themselves Node.js programs: every `pnpm run <script>` boots a Node process, loads the package manager, parses its config, walks the workspace, and finally shells out to your script. That's hundreds of milliseconds of overhead before your script's first byte runs — and in a 30-package monorepo, `pnpm -r run build` pays it 30 times.
 
-**Script-runner overhead** — a trivial `echo hi` script, so the figure is pure wrapper cost:
+**Script-runner overhead** — a trivial `noop` script, so the figure is pure wrapper cost:
 
 <Bench
   label="run a package.json script · hyperfine, 100 runs"
   accent="acid"
-  max={365}
+  max={432}
   rows={[
-    { cmd: 'nub run echo', ms: 13, us: true },
-    { cmd: 'npm run echo', ms: 300, ratio: 23 },
-    { cmd: 'pnpm run echo', ms: 350, ratio: 27 },
+    { cmd: 'nub run noop', ms: 60, us: true },
+    { cmd: 'pnpm run noop', ms: 423, ratio: 7 },
+    { cmd: 'corepack pnpm run noop', ms: 432, ratio: 7 },
   ]}
 />
 
@@ -406,10 +397,10 @@ Nub ships a full package manager, powered by the embedded [aube](https://aube.jd
 $ nub install   # pnpm-lock.yaml → read, written back
 $ nub install   # package-lock.json → read, written back
 $ nub install   # bun.lock → read, written back
-$ nub install   # yarn.lock → read and written back
+$ nub install   # yarn.lock → read-only (installed from, never rewritten)
 ```
 
-There's no migration. `nub install` detects the lockfile your project already has — npm, pnpm, bun, or yarn — and writes the same format back, never a foreign file. Fresh projects get a standard `pnpm-lock.yaml`. And your package manager keeps working, side by side: run either tool, commit the same file, switch back any time.
+There's no migration. `nub install` detects the lockfile your project already has and never drops a foreign file. npm, pnpm, and bun round-trip — read and written back in their own format. yarn is read-only: nub installs from your `yarn.lock` but leaves it untouched, so commits stay clean and yarn stays the tool that writes it. Fresh projects get a standard `pnpm-lock.yaml`. And your package manager keeps working, side by side: run either tool, commit the same file, switch back any time.
 
 What aube brings:
 
@@ -467,7 +458,7 @@ That's the whole kit. No patched Node binary, no vendored `libnode`, no separate
 
 ### Is it faster than Node.js?
 
-**No.** Your code runs in Node itself — once it's executing, V8 is V8. What's dramatically faster is the CLI surface: `nub run` and `nubx` beat `pnpm run` and `npx` by an order of magnitude on cold start, because those tools pay a full Node bootstrap to do what amounts to a script lookup, and Nub — a native Rust binary — doesn't.
+**No.** Your code runs in Node itself — once it's executing, V8 is V8. What's dramatically faster is the CLI surface: `nub run` is ~7× faster than `pnpm run`, and `nubx` beats `npx` by an order of magnitude on cold start, because those tools pay a full Node bootstrap to do what amounts to a script lookup, and Nub — a native Rust binary — doesn't.
 
 Transpile output lands in a content-addressed on-disk cache keyed on `(source content, Nub version, resolved tsconfig)`. The first run transpiles; every run after pays roughly nothing, and entries dedupe across projects with identical files.
 

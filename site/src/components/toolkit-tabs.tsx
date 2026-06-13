@@ -55,7 +55,7 @@ const PIECES: {
     accent: 'acid',
     command: 'nub run',
     label: 'Script runner',
-    title: 'An 18× faster pnpm run',
+    title: 'A 7× faster pnpm run',
     blurb: (
       <>
         A drop-in for <Mono>npm run</Mono> and <Mono>pnpm run</Mono> with lifecycle hooks, env

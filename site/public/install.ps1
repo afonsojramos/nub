@@ -53,7 +53,15 @@ if (-not (Test-Path $Exe)) {
     exit 1
 }
 
-Write-Host "Installed nub to $Exe" -ForegroundColor Green
+# `nubx` is the same binary as `nub`, dispatched on argv[0] (cli.rs reads
+# args_os()[0].file_stem(): "nubx" -> exec). The release archive ships only
+# bin\nub.exe, so create the nubx alias. On Windows we COPY rather than symlink:
+# symlinks require admin/Developer Mode, and a copy reliably yields argv[0]
+# "nubx.exe". Re-extract on upgrade wipes bin\, so this is recreated each run.
+$Exex = "$BinDir\nubx.exe"
+Copy-Item -Path $Exe -Destination $Exex -Force
+
+Write-Host "Installed nub (with nubx) to $Exe" -ForegroundColor Green
 
 # --- PATH setup ---
 $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")

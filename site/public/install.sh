@@ -96,7 +96,14 @@ tar -xzf "$tmp_archive" -C "$install_dir" ||
 [[ -f "$exe" ]] || error "Archive did not contain bin/nub"
 chmod +x "$exe" || error "Failed to set permissions on $exe"
 
-success "Installed nub v${version} to $exe"
+# `nubx` is the same binary as `nub`, dispatched on argv[0] (cli.rs reads
+# args_os()[0].file_stem(): "nubx" -> exec). The release archive ships only
+# bin/nub, so create the nubx alias as a relative symlink alongside it. `-f`
+# makes this idempotent across reinstall/upgrade and harmless if a future
+# archive ever ships its own nubx. Relative target keeps it valid if ~/.nub moves.
+ln -sf nub "$bin_dir/nubx" || error "Failed to create nubx symlink in $bin_dir"
+
+success "Installed nub v${version} (with nubx) to $exe"
 
 # --- PATH setup ---
 

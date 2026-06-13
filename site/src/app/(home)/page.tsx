@@ -675,7 +675,7 @@ function RunScriptBand() {
       <Container className="py-32 md:py-[180px]">
         <BandHeader
           command="nub run"
-          title={<>A 20× faster <HeadingCode>pnpm run</HeadingCode></>}
+          title={<>A 7× faster <HeadingCode>pnpm run</HeadingCode></>}
           subhead={
             <>
               A drop-in for <Mono>npm run</Mono>{' '}and <Mono>pnpm run</Mono>{' '}with lifecycle
@@ -706,11 +706,11 @@ function RunScriptBand() {
                 </p>
                 <BenchBars
                   accent="acid"
-                  max={365}
+                  max={432}
                   rows={[
-                    { cmd: 'nub run', ms: 13, us: true },
-                    { cmd: 'npm run', ms: 300 },
-                    { cmd: 'pnpm run', ms: 350, ratio: 27 },
+                    { cmd: 'nub run', ms: 60, us: true },
+                    { cmd: 'pnpm run', ms: 423, ratio: 7 },
+                    { cmd: 'corepack pnpm run', ms: 432, ratio: 7 },
                   ]}
                 />
                 <a
@@ -844,73 +844,22 @@ function NubxBand() {
 
 /* ------------------------------------------------------------ Compatibility */
 
-const COMPAT = [
-  { name: 'Node 25.8', rate: 100, tests: '4,375 / 4,375', us: false, dim: false },
-  { name: 'Nub', rate: 98.7, tests: '4,318 / 4,375', us: true, dim: false },
-  { name: 'Deno 2.8', rate: 76.6, tests: '3,351 / 4,375', us: false, dim: true },
-  { name: 'Bun 1.3.14', rate: 40.1, tests: '1,756 / 4,375', us: false, dim: true },
-];
-
 function Compatibility() {
   return (
     <div className="py-14">
         <div className="mx-auto max-w-2xl text-center">
           <p className="eyebrow text-ember">Compatibility</p>
           <h3 className="mt-3 text-balance font-display text-2xl font-medium leading-snug md:text-3xl">
-            100% runtime compatibility with Node
+            It runs on Node, so it&rsquo;s compatible with Node
           </h3>
           <p className="mt-5 text-balance text-lg leading-relaxed text-fd-muted-foreground">
-            Nub passes Node&rsquo;s test suite because it <span className="italic">is</span>{' '}
-            Node. Your code is transpiled and executed with the stock <Mono>node</Mono>{' '}
-            binary. It&rsquo;s not a reimplementation; other Node alternatives continue to
-            play catch-up.
+            Nub isn&rsquo;t a reimplementation. Your code is transpiled and executed with the
+            stock <Mono>node</Mono>{' '}binary, so it passes the vast majority of Node&rsquo;s own
+            test suite — the runtime underneath <span className="italic">is</span>{' '}Node. The few
+            documented deltas are module-hook and native-addon visibility, plus a handful of
+            intended divergences from default-on Web Storage and compile caching.
           </p>
         </div>
-
-        <div className="mx-auto mt-12 max-w-3xl space-y-5">
-          {COMPAT.map((r) => {
-            // Short bars can't fit the label inside the fill (it gets clipped),
-            // so for anything under ~22% the label sits just outside the fill.
-            const labelInside = r.rate >= 22;
-            return (
-              <div key={r.name} className="grid grid-cols-[5.5rem_1fr_auto] items-center gap-3 sm:grid-cols-[7.5rem_1fr_auto] sm:gap-4">
-                <span className={`font-mono text-sm ${r.us ? 'font-semibold text-ember' : 'text-fd-foreground'}`}>
-                  {r.name}
-                </span>
-                <div className="flex h-8 items-center overflow-hidden rounded-md bg-fd-card/50">
-                  <div
-                    className={`flex h-full shrink-0 items-center justify-end pr-3 ${r.us ? 'bg-ember/85' : r.dim ? 'bg-fd-foreground/15' : 'bg-fd-foreground/25'}`}
-                    style={{ width: `${r.rate}%` }}
-                  >
-                    {labelInside ? (
-                      <span className={`font-mono text-xs font-medium ${r.us ? 'text-[#160c08]' : 'text-fd-foreground'}`}>
-                        {r.rate}%
-                      </span>
-                    ) : null}
-                  </div>
-                  {labelInside ? null : (
-                    <span className="ml-2 font-mono text-xs font-medium text-fd-foreground">
-                      {r.rate}%
-                    </span>
-                  )}
-                </div>
-                <span className="font-mono text-xs tabular-nums text-fd-muted-foreground">{r.tests}</span>
-              </div>
-            );
-          })}
-        </div>
-        <p className="mx-auto mt-6 max-w-lg text-center text-sm leading-relaxed text-fd-muted-foreground">
-          Deno&rsquo;s Node-compat suite, node-relative. The gap is 57 documented deltas —
-          module-hook and native-addon visibility, plus three intended divergences from default-on Web Storage and compile caching.{' '}
-          <a
-            href="https://github.com/nubjs/nub/tree/main/tests/cross-runtime"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-sky underline underline-offset-4"
-          >
-            View benchmark repo
-          </a>
-        </p>
     </div>
   );
 }
@@ -1011,8 +960,7 @@ function HypermanagerBand() {
           command="nub install"
           title={
             <>
-              pnpm, but{' '}
-              <span className="text-pink">drop-in</span>
+              A <span className="text-pink">10×</span> faster pnpm
             </>
           }
           subhead={
@@ -1033,14 +981,11 @@ function HypermanagerBand() {
             title="Change package managers, keep your lockfile."
             body={
               <>
-                Nub detects which package manager your project uses from its lockfile, then both
-                reads and writes that same lockfile in place — <Mono>package-lock.json</Mono>,{' '}
-                <Mono>pnpm-lock.yaml</Mono>, or <Mono>bun.lock</Mono>. The lockfile round-trips: nub
-                installs from it and writes the same format back, so there&rsquo;s no migration and
-                no foreign lockfile dropped next to yours. The <Mono>node_modules</Mono>{' '}layout
-                matches too — flat and hoisted for an npm/bun project, the symlinked store for pnpm.
-                A bidirectional conformance suite checks both directions — nub reads each tool&rsquo;s
-                lockfile, and each tool reads nub&rsquo;s back without churn.
+                Nub reads and writes your project&rsquo;s existing lockfile in place —{' '}
+                <Mono>package-lock.json</Mono>, <Mono>pnpm-lock.yaml</Mono>, or <Mono>bun.lock</Mono>.
+                No migration, no foreign lockfile dropped beside yours, and the{' '}
+                <Mono>node_modules</Mono>{' '}layout matches: hoisted for npm/bun, the symlinked
+                store for pnpm.
               </>
             }
             visual={
@@ -1058,16 +1003,14 @@ function HypermanagerBand() {
             accent="pink"
             reverse
             eyebrow="pnpm compatibility"
-            title="Full pnpm support, proprietary config included"
+            title="Built for pnpm compatibility"
             body={
               <>
-                When pnpm is your project&rsquo;s package manager, Nub reads its proprietary config —{' '}
+                When pnpm owns your project, Nub reads its proprietary config too —{' '}
                 <Mono>pnpm-workspace.yaml</Mono>, <Mono>.pnpmfile.cjs</Mono>, and the{' '}
-                <Mono>pnpm.*</Mono>{' '}fields in <Mono>package.json</Mono>{' '}(<Mono>pnpm.overrides</Mono>,{' '}
-                <Mono>onlyBuiltDependencies</Mono>, and the rest). The install engine is{' '}
-                <Mono>aube</Mono>, jdx&rsquo;s Rust package manager built for 1:1 pnpm compatibility,
-                so the lockfile and <Mono>node_modules</Mono>{' '}store it produces are the ones real
-                pnpm accepts unchanged.
+                <Mono>pnpm.*</Mono>{' '}fields. The engine is <Mono>aube</Mono>, built for pnpm
+                compatibility, so the lockfile and <Mono>node_modules</Mono>{' '}store it writes are
+                the ones real pnpm accepts unchanged.
               </>
             }
             visual={
@@ -1090,30 +1033,29 @@ catalog:
           <Feature
             accent="pink"
             eyebrow="Install speed"
-            title="As fast as pnpm on install"
+            title="10× faster warm reinstalls"
             body={
               <>
-                On a warm store, <Mono>nub install</Mono>{' '}lands right alongside{' '}
-                <Mono>pnpm</Mono>{' '}— the two are a statistical tie. The headline speed win
-                isn&rsquo;t the install; it&rsquo;s every <Mono>nub run</Mono>{' '}and{' '}
-                <Mono>nubx</Mono>{' '}after it, where a compiled Rust binary skips the
-                per-invocation Node bootstrap that <Mono>pnpm</Mono>{' '}pays. Install is parity;
-                the daily loop is where Nub pulls ahead.
+                The first install of a package downloads it once into a store shared by every project
+                on your machine. After that, a warm reinstall just points at the store instead of
+                refetching and rewriting the tree — about 10× faster than pnpm on a real 1,168-package
+                app, ~14× on a small one. Apps that need every file copied onto disk — Next, Nuxt — opt
+                out and match pnpm.
               </>
             }
             visual={
               <div className="rounded-xl border border-fd-border bg-[#0b0a08] p-6">
                 <p className="mb-5 font-mono text-[0.7rem] uppercase tracking-[0.14em] text-fd-muted-foreground">
-                  create-t3-app · 253 pkgs · warm store · hyperfine, 12 runs
+                  warm reinstall · 1,168-pkg app · Linux · hyperfine
                 </p>
                 <BenchBars
                   accent="pink"
-                  max={2.39}
-                  unit="s"
+                  max={1938}
+                  unit="ms"
                   rows={[
-                    { cmd: 'bun install', ms: 1.1 },
-                    { cmd: 'pnpm install', ms: 2.26 },
-                    { cmd: 'nub install', ms: 2.39, us: true },
+                    { cmd: 'nub install', ms: 194, us: true },
+                    { cmd: 'bun install', ms: 697 },
+                    { cmd: 'pnpm install', ms: 1938, ratio: 10 },
                   ]}
                 />
                 <a
@@ -1150,42 +1092,23 @@ catalog:
           <Feature
             accent="pink"
             eyebrow="Shim"
-            title={<>A 28× faster Corepack</>}
+            title={<>A built-in Corepack</>}
             body={
               <>
-                <Mono>nub pm shim</Mono>{' '}is a package-manager shim — the same idea as{' '}
-                <Mono>corepack</Mono>, but faster. It drops <Mono>npm</Mono>, <Mono>pnpm</Mono>,{' '}
+                <Mono>nub pm shim</Mono>{' '}drops <Mono>npm</Mono>, <Mono>pnpm</Mono>,{' '}
                 <Mono>yarn</Mono>, and <Mono>bun</Mono>{' '}shims under <Mono>~/.nub/shims</Mono>{' '}
-                that route each invocation to the version the project pins. Corepack&rsquo;s shim
-                is itself a Node program, so it cold-loads a JS bundle on every call; Nub&rsquo;s
-                is a compiled binary that resolves and execs directly. <Mono>nub pm use pnpm@^9</Mono>{' '}
-                declares and provisions that exact version for the whole team.
+                that route each call to the version your project pins — corepack&rsquo;s job, with no
+                separate install.{' '}
+                <Mono>nub pm use pnpm@^9</Mono>{' '}provisions that exact version for the whole team.
               </>
             }
-            reverse
             visual={
-              <div className="rounded-xl border border-fd-border bg-[#0b0a08] p-6">
-                <p className="mb-5 font-mono text-[0.7rem] uppercase tracking-[0.14em] text-fd-muted-foreground">
-                  run a package.json script · hyperfine, 100 runs
-                </p>
-                <BenchBars
-                  accent="pink"
-                  max={365}
-                  rows={[
-                    { cmd: 'nub run', ms: 13, us: true },
-                    { cmd: 'pnpm run', ms: 350, ratio: 27 },
-                    { cmd: 'corepack pnpm run', ms: 365, ratio: 28 },
-                  ]}
-                />
-                <a
-                  href="https://github.com/nubjs/nub/tree/main/tests/bench"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="mt-5 inline-block font-mono text-[0.7rem] uppercase tracking-[0.14em] text-sky underline underline-offset-4"
-                >
-                  Reproduce →
-                </a>
-              </div>
+              <Terminal
+                lines={[
+                  { cmd: 'nub pm shim', comment: 'install npm/pnpm/yarn/bun shims' },
+                  { cmd: 'nub pm use pnpm@^9', comment: 'pin the version for the team' },
+                ]}
+              />
             }
           />
         </div>
