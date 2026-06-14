@@ -59,7 +59,7 @@ version:
 	@node -e " \
 		const fs = require('fs'); \
 		const v = '$(V)'; \
-		const pkgs = ['npm/nub/package.json', \
+		const pkgs = ['npm/nub/package.json', 'npm/nub-types/package.json', \
 			'npm/nub-darwin-arm64/package.json', 'npm/nub-darwin-x64/package.json', \
 			'npm/nub-linux-x64/package.json', 'npm/nub-linux-x64-musl/package.json', \
 			'npm/nub-linux-arm64/package.json', 'npm/nub-linux-arm64-musl/package.json', \
