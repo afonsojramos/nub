@@ -679,7 +679,7 @@ struct ScriptExecOpts<'a> {
 /// Known subcommand names that clap should handle. `install`/`i`/`ci` route
 /// to the embedded aube install engine (src/pm_engine/).
 const SUBCOMMANDS: &[&str] = &[
-    "run", "watch", "exec", "upgrade", "help", "node", "pm", "install", "i", "ci",
+    "run", "watch", "exec", "upgrade", "help", "node", "pm", "agent", "install", "i", "ci",
 ];
 
 /// PM-management verbs nub recognizes only to redirect. The pure-passthrough
@@ -1193,6 +1193,14 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
     // read like `nub node`'s and it never reaches clap dispatch.
     if subcommand == "pm" {
         return run_pm(&rest[1..]);
+    }
+
+    // `agent` is the AI-agent onboarding group (`init`). Like `node`/`pm`, it's a
+    // non-forwarding manual sub-verb match — its bare-usage and invalid-verb
+    // messages read consistently and it never reaches clap dispatch. Spec:
+    // .fray/ai-friendliness.md.
+    if subcommand == "agent" {
+        return crate::agent::run(&rest[1..]);
     }
 
     // The engine's lazy node-gyp shims re-invoke `current_exe()` (= nub)
