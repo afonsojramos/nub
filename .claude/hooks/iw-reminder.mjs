@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 // @ts-check
 // UserPromptSubmit hook — injects a model-only orchestrator reminder each turn.
 // Run directly with node: `node .claude/hooks/iw-reminder.mjs` (no transpiler — max

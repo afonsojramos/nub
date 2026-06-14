@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 // @ts-check
 // PreToolUse hook on the `Agent` tool. Two jobs in one place:
 //   1) ENFORCE background dispatch — deny any Agent call lacking run_in_background:true

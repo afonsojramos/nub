@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 // @ts-check
 // SessionStart hook (matcher: "compact") — re-seeds nub's load-bearing architecture
 // model after a compaction, so structural knowledge is never silently lost. Run directly
