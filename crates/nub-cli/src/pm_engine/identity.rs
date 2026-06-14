@@ -83,6 +83,15 @@
 ///   `NPM_CONFIG_*` aliases and bare external vars are unaffected. (Mirrors the
 ///   brand boundary on the settings-env surface — symmetric with nub's
 ///   `read_branded_pnpm_config` posture.)
+/// - `primer_evergreen` = `true` — nub ships an evergreen offline metadata
+///   primer: freshness is gated at the *pick* site (per resolved-version
+///   regime) instead of the legacy per-name fetch site, so a frozen pick
+///   (settled, immutable history) is served from the primer indefinitely
+///   rather than self-disabling ~24h after the binary's build date under
+///   time-aware resolution. Cooling (`minimumReleaseAge`) is still enforced
+///   inside the pick against the primer's own `time` map, so this is a
+///   cold-install correctness fix, not a security weakening. A user can still
+///   force the legacy fetch-site gate with `AUBE_PRIMER_PICK_GATE=0`.
 pub(crate) const NUB: aube_util::Embedder = aube_util::Embedder {
     name: "nub",
     display_name: "nub",
@@ -104,6 +113,7 @@ pub(crate) const NUB: aube_util::Embedder = aube_util::Embedder {
     warm_store_verify: false,
     no_churn_lockfile_write: true,
     read_branded_settings_env: false,
+    primer_evergreen: true,
 };
 
 /// Register [`NUB`] as the active embedder profile. Idempotent (the engine's
@@ -136,4 +146,5 @@ const _: () = {
     assert!(!NUB.self_update_enabled);
     assert!(NUB.no_churn_lockfile_write);
     assert!(!NUB.read_branded_settings_env);
+    assert!(NUB.primer_evergreen);
 };
