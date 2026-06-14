@@ -42,11 +42,21 @@
 /// - `manifest_namespace` = `""` — nub reads its config from the manifest
 ///   ROOT (top-level `workspaces`/`overrides`/`allowBuilds`), not a branded
 ///   `"nub"` object.
-/// - `env_prefix` = `None` — nub reads no branded env family. (The old
-///   `set_env_families(NPM | EXTERNAL)` masked aube's settings-class `AUBE_*`
-///   aliases; the refactor dropped the env-family gate entirely, so `None`
-///   here is the nearest expression of intent but does NOT re-mask those
-///   aliases — see the gap note in `engine_brand_preflight`.)
+/// - `env_prefix` = `None` — nub exposes NONE of aube's internal debug /
+///   diagnostic / perf-bisect toggle family (`AUBE_DISABLE_*`, `AUBE_DIAG_*`,
+///   `AUBE_CAS_*`, …). Those route through `aube_util::env::embedder_env`, which
+///   reads `{env_prefix}_<SUFFIX>` — so `None` makes every such toggle simply
+///   unreadable under nub, and the branded `AUBE_*` forms never leak into nub's
+///   surface. (The user-facing settings-class `AUBE_*` aliases are gated
+///   separately by `read_branded_settings_env = false`.)
+/// - `config_env_prefix` = `Some("NUB")` — nub's three FIRST-CLASS config knobs
+///   are read under nub's own brand via `aube_util::env::config_env`:
+///   `NUB_CACHE_DIR` (the PM cache dir), `NUB_CONCURRENCY` (the tarball-fetch
+///   fan-out, the env override of the neutral `network-concurrency` setting),
+///   and `NUB_PRIMER_TTL` (the offline-primer staleness bound). These are the
+///   deliberate, minimal exception to the brand boundary: a handful of knobs nub
+///   legitimately owns under its own name. The corresponding `AUBE_*` forms are
+///   never read under nub.
 /// - `cache_namespace` = `"nub/pm"` — engine cache lands at
 ///   `$XDG_CACHE_HOME/nub/pm` (a `/pm` sibling of nub's own runtime caches
 ///   under `$XDG_CACHE_HOME/nub/`), reproducing the old
@@ -83,15 +93,19 @@
 ///   `NPM_CONFIG_*` aliases and bare external vars are unaffected. (Mirrors the
 ///   brand boundary on the settings-env surface — symmetric with nub's
 ///   `read_branded_pnpm_config` posture.)
-/// - `primer_evergreen` = `true` — nub ships an evergreen offline metadata
-///   primer: freshness is gated at the *pick* site (per resolved-version
-///   regime) instead of the legacy per-name fetch site, so a frozen pick
-///   (settled, immutable history) is served from the primer indefinitely
-///   rather than self-disabling ~24h after the binary's build date under
-///   time-aware resolution. Cooling (`minimumReleaseAge`) is still enforced
-///   inside the pick against the primer's own `time` map, so this is a
-///   cold-install correctness fix, not a security weakening. A user can still
-///   force the legacy fetch-site gate with `AUBE_PRIMER_PICK_GATE=0`.
+/// - `primer_ttl` = `None` (unlimited) — nub ships an evergreen offline
+///   metadata primer. The pick-site regime gate (a FROZEN pick is served from
+///   the primer, a live-frontier pick refetches when stale) is the always-on
+///   correctness layer; `primer_ttl` only governs whether the primer is
+///   consulted at all, keyed on the binary's age relative to the primer build
+///   date. `None` = never expire — frozen resolution data is immutable, so an
+///   aged binary's frozen picks are still correct ("evergreen" is just an ∞
+///   TTL). This replaces the old `primer_evergreen` boolean and its
+///   `AUBE_PRIMER_PICK_GATE` override. Cooling (`minimumReleaseAge`) is still
+///   enforced inside the pick against the primer's own `time` map regardless of
+///   TTL, so this is a cold-install correctness fix, not a security weakening. A
+///   user can set a finite `NUB_PRIMER_TTL` (e.g. `30d`) to make the primer
+///   expire after that window.
 pub(crate) const NUB: aube_util::Embedder = aube_util::Embedder {
     name: "nub",
     display_name: "nub",
@@ -104,6 +118,7 @@ pub(crate) const NUB: aube_util::Embedder = aube_util::Embedder {
     workspace_yaml: None,
     manifest_namespace: "",
     env_prefix: None,
+    config_env_prefix: Some("NUB"),
     cache_namespace: "nub/pm",
     data_namespace: "nub",
     canonical_lockfile_always_wins: false,
@@ -113,7 +128,7 @@ pub(crate) const NUB: aube_util::Embedder = aube_util::Embedder {
     warm_store_verify: false,
     no_churn_lockfile_write: true,
     read_branded_settings_env: false,
-    primer_evergreen: true,
+    primer_ttl: None,
 };
 
 /// Register [`NUB`] as the active embedder profile. Idempotent (the engine's
@@ -138,6 +153,7 @@ const _: () = {
     assert!(matches!(NUB.manifest_namespace.as_bytes(), b""));
     assert!(NUB.workspace_yaml.is_none());
     assert!(NUB.env_prefix.is_none());
+    assert!(matches!(NUB.config_env_prefix, Some(p) if matches!(p.as_bytes(), b"NUB")));
     assert!(NUB.vendor.is_some());
     assert!(!NUB.self_engines_check);
     assert!(!NUB.canonical_lockfile_always_wins);
@@ -146,5 +162,5 @@ const _: () = {
     assert!(!NUB.self_update_enabled);
     assert!(NUB.no_churn_lockfile_write);
     assert!(!NUB.read_branded_settings_env);
-    assert!(NUB.primer_evergreen);
+    assert!(NUB.primer_ttl.is_none());
 };

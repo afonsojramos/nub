@@ -1199,10 +1199,11 @@ pub(crate) fn engine_brand_preflight() {
     // sets `AUBE_*` settings vars now has them honored. No replacement seam
     // exists. This is a behavior change flagged for the human (see report).
     //
-    // GAP — resolver primer cache: the primer hardcodes `$XDG_CACHE/aube/primer`
-    // (and reads `AUBE_CACHE_DIR`), bypassing `cache_namespace`. The old
-    // `set_cache_root` redirected it to `…/nub/pm/primer`; the const can't.
-    // Minor (regenerable cache lands under aube's name); flagged, not blocking.
+    // Resolver primer cache (RESOLVED by the brand-boundary-env migration): the
+    // primer now derives its cache dir from the embedder's `cache_namespace`, so
+    // under nub it lands at `…/nub/pm/primer` (not aube's name), and its env
+    // override is read via `config_env("CACHE_DIR")` → `NUB_CACHE_DIR` under nub
+    // (the branded `AUBE_CACHE_DIR` is never read under nub).
     identity::register();
     // Config surface follows role (two-mode model, the maintainer 2026-06-10): under
     // NUB identity the pnpm surface is OFF — `pnpm-workspace.yaml` unread and
