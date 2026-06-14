@@ -30,8 +30,8 @@ jobs:
         os: [ubuntu-latest, macos-14, windows-latest, windows-11-arm]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: ${{ inputs.node }}
       - name: Install @nubjs/nub@${{ inputs.version }}
@@ -47,7 +47,7 @@ jobs:
     steps:
       - name: Toolchain (bash + git)
         run: apk add --no-cache bash git
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install @nubjs/nub@${{ inputs.version }}
         run: npm install -g "@nubjs/nub@${{ inputs.version }}"
       - name: Smoke (musl)

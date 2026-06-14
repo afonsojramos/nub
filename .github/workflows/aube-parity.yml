@@ -57,7 +57,7 @@ jobs:
     # before the 6-hour default.
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # Init ONLY vendor/aube — never `submodules: true`, which would also
       # pull tests/node-suite (the full nodejs/node clone that every other
       # job here deliberately excludes).
@@ -87,12 +87,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Init vendor/aube submodule
         run: git submodule update --init vendor/aube
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: "24"
       - name: Build nub
@@ -113,12 +113,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Init vendor/aube submodule
         run: git submodule update --init vendor/aube
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: "24"
       - uses: oven-sh/setup-bun@v2
@@ -147,12 +147,12 @@ jobs:
       # actions/checkout.
       - name: Force LF checkout
         run: git config --global core.autocrlf false
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Init vendor/aube submodule
         run: git submodule update --init vendor/aube
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: "24"
       - name: Build nub

@@ -36,8 +36,8 @@ jobs:
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: "24"
       # Internal consistency: all npm packages + Cargo.toml + preload.mjs agree.
@@ -97,12 +97,12 @@ jobs:
       AUBE_PRIMER_TOP: "2000"
       AUBE_PRIMER_VERSION_CAP: "100"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # The generate script + build.rs (for the schema constant) live in the
       # vendored aube submodule. Single-path init keeps tests/node-suite out.
       - name: Init vendor/aube submodule
         run: git submodule update --init vendor/aube
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: "24"
       # === produce-the-blob: source decision (ISOLATED on purpose) ================
@@ -263,7 +263,7 @@ jobs:
       # fan-out (regressed during the 2026-06 repo move; tracked separately). It
       # still runs in ci.yml as its own must-pass signal, just not in the publish
       # critical path.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Init node-suite submodule (shallow)
         run: git submodule update --init --depth 1 tests/node-suite
         shell: bash
@@ -275,10 +275,10 @@ jobs:
         shell: bash
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v5
         with:
           version: 10
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: "24"
           cache: "pnpm"
@@ -320,14 +320,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # nub-cli has a path dependency into the vendored aube workspace, so the
       # cargo build can't resolve without this submodule (same as the test gate).
       - name: Init vendor/aube submodule
         run: git submodule update --init vendor/aube
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: "24"
       - uses: oven-sh/setup-bun@v2
@@ -362,7 +362,7 @@ jobs:
       matrix: ${{ fromJSON(needs.verify.outputs.matrix) }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # vendor/aube path dep (nub-cli) — without it the build can't resolve
       # the workspace. Single-path init on purpose: tests/node-suite (the full
@@ -392,11 +392,11 @@ jobs:
         with:
           key: ${{ matrix.platform }}
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v5
         with:
           version: 10
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: "24"
           cache: "pnpm"
@@ -585,9 +585,9 @@ jobs:
     needs: [build, test, conformance]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
@@ -709,8 +709,8 @@ jobs:
         os: [ubuntu-latest, macos-14, windows-latest, windows-11-arm]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: "24"
       - name: Install from npm and smoke (with propagation-race retry)
@@ -755,7 +755,7 @@ jobs:
     steps:
       - name: Toolchain (bash + git for checkout/smoke)
         run: apk add --no-cache bash git
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install from npm and smoke (with propagation-race retry)
         # Same retry logic as the runner-OS legs above — musl hit the 0.0.38
         # propagation race. Wrapped identically: both install + smoke per attempt.
