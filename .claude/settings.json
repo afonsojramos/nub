@@ -9,7 +9,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/agent-must-be-background.sh\""
+            "command": "nub \"$CLAUDE_PROJECT_DIR/.claude/hooks/agent-dispatch.ts\""
           }
         ]
       }
@@ -20,6 +20,16 @@
           {
             "type": "command",
             "command": "nub \"$CLAUDE_PROJECT_DIR/.claude/hooks/iw-reminder.ts\""
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "nub \"$CLAUDE_PROJECT_DIR/.claude/hooks/post-compact-reground.ts\""
           }
         ]
       }

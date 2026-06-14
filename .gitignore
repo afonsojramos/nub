@@ -17,6 +17,15 @@
 !.agents/
 .claude/worktrees/
 
+# fray control surface: the live board + thread files are force-committed (durable across parallel agents on main, same regime as the old epics/final-polish/todo.md); the churn stays ignored. Order matters — negations follow the broad `.*` ignore above, then the churn re-ignores follow the negations.
+!.fray/
+!.fray/_board.md
+!.fray/*.md
+.fray/_board-*.md
+.fray/.dispatch-ledger.jsonl
+.fray/*.findings/
+.fray/**/*.snapshot
+
 # === Global cruft ===
 *.pyc
 __pycache__/
