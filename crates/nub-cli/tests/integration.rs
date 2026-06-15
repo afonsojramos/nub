@@ -1157,6 +1157,81 @@ fn user_node_options_localstorage_file_is_not_clobbered() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The localStorage neutralization must reach GRANDCHILDREN, not just the direct
+/// child (F1). nub injects `--experimental-webstorage` via NODE_OPTIONS, which
+/// inherits to the whole process subtree — so a `node`-spawned grandchild
+/// re-installs Node's throwing `localStorage` getter. The neutralize signal
+/// (`__NUB_NEUTRALIZE_LOCALSTORAGE`) is a plain env var that also inherits, so the
+/// preload re-runs and re-neutralizes at every level. Before the fix the preload
+/// DELETED that var after reading it, so the child and grandchild inherited the
+/// throwing getter with no neutralize signal → `typeof localStorage` threw two
+/// levels down. This fixture has nub run a parent that spawns a plain `node` child
+/// that spawns a plain `node` grandchild, all without `--localstorage-file`, and
+/// asserts `typeof localStorage === "undefined"` (no throw) at all three levels.
+#[test]
+fn localstorage_neutralization_reaches_grandchildren() {
+    if !node_at_least((22, 4, 0)) {
+        eprintln!("skipping: webstorage needs Node >= 22.4 (target is older)");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("nub-ws-grandchild-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("package.json"), r#"{"name":"ws-grandchild"}"#).unwrap();
+    let cache = dir.join("cache");
+
+    // grandchild.js: deepest level. On the raw flag-needed band even
+    // `typeof localStorage` throws, so reading it without a throw proves the
+    // neutralize ran here too. Tag the level so a failure is self-debugging.
+    std::fs::write(
+        dir.join("grandchild.js"),
+        "console.log('GRANDCHILD:' + typeof localStorage);",
+    )
+    .unwrap();
+    // child.js: prints its own level, then spawns the grandchild as a plain `node`
+    // (the nub-as-node PATH shim is in PATH, but a bare `node` here re-runs the
+    // preload via inherited NODE_OPTIONS — exactly the subtree we must cover).
+    std::fs::write(
+        dir.join("child.js"),
+        "console.log('CHILD:' + typeof localStorage);\n\
+         const cp = require('node:child_process');\n\
+         const r = cp.spawnSync('node', [require('node:path').join(__dirname, 'grandchild.js')], { stdio: 'inherit' });\n\
+         process.exit(r.status ?? 1);",
+    )
+    .unwrap();
+    // parent.js: top level run by nub. Spawns the child as a plain `node`.
+    std::fs::write(
+        dir.join("parent.js"),
+        "console.log('PARENT:' + typeof localStorage);\n\
+         const cp = require('node:child_process');\n\
+         const r = cp.spawnSync('node', [require('node:path').join(__dirname, 'child.js')], { stdio: 'inherit' });\n\
+         process.exit(r.status ?? 1);",
+    )
+    .unwrap();
+
+    let out = Command::new(nub_binary())
+        .args(["parent.js"])
+        .current_dir(&dir)
+        .env("XDG_CACHE_HOME", &cache)
+        .output()
+        .expect("failed to spawn nub");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "grandchild chain must not throw at any level: stdout={stdout:?} stderr={stderr:?}"
+    );
+    for level in ["PARENT", "CHILD", "GRANDCHILD"] {
+        assert!(
+            stdout.contains(&format!("{level}:undefined")),
+            "`typeof localStorage` must be \"undefined\" (not throw) at the {level} level with no --localstorage-file; stdout={stdout:?} stderr={stderr:?}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// nub injects its positive flags into the child argv (ahead of the user's) AND
 /// into NODE_OPTIONS; Node resolves argv last-wins and argv-beats-NODE_OPTIONS. So
 /// a user's explicit DISABLE must still win and nothing must crash, across the

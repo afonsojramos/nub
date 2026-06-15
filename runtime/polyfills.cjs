@@ -44,11 +44,16 @@ function installSyncPolyfills(preloaded) {
   // true and no throw occurs; `sessionStorage`, which needs only the flag, keeps
   // working. This runs in the preload BEFORE any user code, so the throwing getter
   // is never observed. When the user passes `--localstorage-file`, the env var is
-  // absent and `localStorage` works normally (we do not touch it). Delete the env
-  // var after reading so it doesn't leak to grandchild processes. The descriptor is
-  // configurable+writable so user code can still assign its own `localStorage`.
+  // absent and `localStorage` works normally (we do not touch it). We deliberately
+  // KEEP the env var set so it inherits to the whole process subtree: a `node`- or
+  // `nub`-spawned grandchild re-inherits the webstorage flag via NODE_OPTIONS and
+  // would otherwise re-install the throwing getter with no neutralize signal. It's
+  // an internal `__NUB_*` plumbing var that's explicitly fine to leak to children.
+  // Neutralization is idempotent — a descendant re-running this preload with the
+  // var still set just re-defines `localStorage` to undefined again, which is
+  // harmless. The descriptor is configurable+writable so user code can still assign
+  // its own `localStorage`.
   if (process.env.__NUB_NEUTRALIZE_LOCALSTORAGE) {
-    delete process.env.__NUB_NEUTRALIZE_LOCALSTORAGE;
     try {
       Object.defineProperty(globalThis, "localStorage", {
         value: undefined,
