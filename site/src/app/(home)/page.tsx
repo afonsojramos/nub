@@ -1174,33 +1174,6 @@ catalog:
             }
             visual={<PMMatrix />}
           />
-
-          <Feature
-            accent="pink"
-            eyebrow="PM shims"
-            title={<>A built-in Corepack</>}
-            body={
-              <>
-                If you want to keep using your <span className="italic">exact</span>{' '}package
-                manager, you can do that too. Nub bundles Corepack-like shims, so you keep your
-                muscle memory without the PM-versioning headaches.{' '}
-                <Link
-                  href="/docs/pm"
-                  className="whitespace-nowrap underline decoration-dotted decoration-fd-muted-foreground/50 underline-offset-4 hover:decoration-fd-muted-foreground"
-                >
-                  Learn more →
-                </Link>
-              </>
-            }
-            visual={
-              <Terminal
-                lines={[
-                  { cmd: 'nub pm shim', comment: 'install npm/pnpm/yarn/bun shims' },
-                  { cmd: 'nub pm use pnpm@^9', comment: 'pin the version for the team' },
-                ]}
-              />
-            }
-          />
         </div>
       </Container>
     </section>
@@ -1282,7 +1255,7 @@ function Footer() {
           <FooterCol
             title="Toolkit"
             links={[
-              ['File runner', '/docs/files'],
+              ['File runner', '/docs/runtime'],
               ['Script runner', '/docs/run'],
               ['Package runner', '/docs/nubx'],
               ['Package manager', '/docs/pm'],
