@@ -860,9 +860,11 @@ function Compatibility() {
             Node-compatible, because it <span className="italic">is</span> Node
           </h3>
           <p className="mt-5 text-balance text-lg leading-relaxed text-fd-muted-foreground">
-            Nub passes Node&rsquo;s test suite because it <span className="italic">is</span>{' '}
-            Node. Your code is transpiled and executed with the stock <Mono>node</Mono>{' '}binary.
-            It&rsquo;s not a reimplementation.
+            Your code is transpiled and executed with the stock <Mono>node</Mono>{' '}binary, so
+            Nub passes Node&rsquo;s own test suite: <span className="font-semibold text-fd-foreground">100% in <Mono>--node</Mono>{' '}passthrough,
+            99.3% augmented</span>{' '}over the full corpus with zero exclusions. The augmented gap is
+            deliberate &mdash; enabled features, suppressed experimental-warning noise, superseded TS
+            handling &mdash; not breakage. It&rsquo;s not a reimplementation.
           </p>
         </div>
 
@@ -899,8 +901,8 @@ function Compatibility() {
           })}
         </div>
         <p className="mx-auto mt-6 max-w-lg text-center text-sm leading-relaxed text-fd-muted-foreground">
-          Deno&rsquo;s Node-compat suite, node-relative. The gap is caused by Nub&rsquo;s preload
-          hook and auto-enablement of experimental features.{' '}
+          Head-to-head on Deno&rsquo;s own Node-compat suite, node-relative. The gap is caused by
+          Nub&rsquo;s preload hook and auto-enablement of experimental features.{' '}
           <a
             href="https://github.com/nubjs/nub/tree/main/tests/cross-runtime"
             target="_blank"
