@@ -33,8 +33,11 @@ const fs = require('fs');
 const src = fs.readFileSync('$CONFIG', 'utf8');
 const stripped = src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
 const config = JSON.parse(stripped);
+// RUN_IGNORED=1 → run the WHOLE corpus with zero skips (the raw, no-exclusions
+// conformance number); default still honors the curated ignore list.
+const runIgnored = process.env.RUN_IGNORED === '1';
 for (const [path, opts] of Object.entries(config)) {
-  if (opts.ignore) continue;
+  if (opts.ignore && !runIgnored) continue;
   console.log(path);
 }
 ")
