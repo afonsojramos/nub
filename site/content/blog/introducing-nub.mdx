@@ -29,14 +29,18 @@ Node is the gold standard for server-side JavaScript. It defines the stdlib the 
 
 Bun and Deno proved there's enormous appetite for an all-in-one toolkit that replaces this pile. But neither has dented Node's production dominance — six years after Deno 1.0 and two and a half after Bun 1.0, neither is a first-class target on AWS, GCP, or Azure, and their Node.js conformance still trails the real thing by a wide margin. Both are from-scratch runtimes reimplementing Node's surface, and the gaps show up in production.
 
+## Introducing Nub
+
 The "next-generation" runtimes share a fundamental flaw: **they're trying to replace Node.js.** Nub embraces it instead. It's a single Rust binary that transpiles your code and executes it on the stock `node` your project pins — so it passes the vast majority of Node's own test suite, because the runtime underneath *is* Node. It combines:
 
-- **A file runner** — `nub index.ts`. Full TypeScript support (parity with Bun), running on the stock `node` binary.
-- **A script runner** — `nub run build`. 25× faster than `pnpm run`.
-- **A bin runner** — `nubx prisma generate`. 20× faster than `npx`.
-- **A watcher** — `nub watch`. The dependency graph drives the watch set; no globs to maintain.
-- **A Node version manager** — `nub node install 26`. Reads your `.node-version`, installs on demand.
-- **A package manager** — `nub install`. The CLI surface is pnpm's, lockfile-compatible with any project — npm, pnpm, or bun.
+```sh
+$ nub index.ts             # file runner — full TypeScript, on stock Node
+$ nub run build            # script runner — 25× faster than pnpm run
+$ nubx prisma generate     # bin runner — 20× faster than npx
+$ nub watch src/server.ts  # watcher — driven by the dependency graph
+$ nub install              # package manager — pnpm-compatible, your lockfile
+$ nub node install 26      # version manager — installs Node on demand
+```
 
 ## `nub <file>` — a TypeScript-first Node.js
 
@@ -50,7 +54,14 @@ $ nub \
     app.ts --port 3000
 ```
 
-Nub transpiles your code in memory with [oxc](https://oxc.rs) (compiled into a native Node addon) and runs the output on the stock `node` binary. There is no Nub runtime — just real Node, with enhancements. The transpile costs nothing measurable: running a TypeScript file adds negligible overhead over plain `node`, and runs about 2.9× faster than `tsx` — while supporting the non-erasable syntax Node's stripper rejects:
+Nub transpiles your code in memory with [oxc](https://oxc.rs) (compiled into a [native Node addon](https://nodejs.org/api/n-api.html)) and runs the output on the stock `node` binary. There is no Nub runtime — just real Node. Everything it adds is layered on through Node's own extension surfaces:
+
+- **Transpiles** TypeScript, JSX, and decorators in memory — no build step.
+- **Polyfills** missing global APIs, like [Temporal](https://tc39.es/proposal-temporal/) and Web Workers.
+- **Sets** the V8 and Node flags that unflag experimental features.
+- **Extends** Node's resolver for `tsconfig.json` paths, and loads `.env` files and YAML/TOML imports.
+
+The transpile costs nothing measurable: running a TypeScript file adds negligible overhead over plain `node`, and runs about 2.9× faster than `tsx` — while supporting the non-erasable syntax Node's stripper rejects:
 
 <Bench
   label="hello.ts · hyperfine, 20 runs"
@@ -105,7 +116,7 @@ const view = <Hello name="world" />  // .tsx — no build step
 
 ### Decorators
 
-Legacy `experimentalDecorators` — the form NestJS, TypeORM, and Angular depend on, which V8 can't run natively — transpile out of the box. Switch the flag on in your `tsconfig.json` and decorated classes just work, `emitDecoratorMetadata` included. TC39 decorators (TypeScript 5.0's default) are on the way, gated on oxc shipping the transform — Nub follows your `tsconfig.json` either way.
+Legacy `experimentalDecorators` — the form NestJS, TypeORM, and Angular depend on, which V8 can't run natively — transpile out of the box. Switch the flag on in your `tsconfig.json` and decorated classes just work, `emitDecoratorMetadata` included.
 
 ```ts
 // with "experimentalDecorators": true in your tsconfig.json
@@ -118,9 +129,11 @@ class API {
 }
 ```
 
-### `using` declarations
+> **TC39 decorators** (TypeScript 5.0's default) are on the way, gated on oxc shipping the transform — Nub follows your `tsconfig.json` either way.
 
-Explicit resource management — `using` and `await using` — works on every supported Node: native where V8 has shipped it, transpiled where it hasn't.
+### Explicit resource management
+
+The `using` and `await using` declarations work on every supported Node: native where V8 has shipped it, safely down-transpiled otherwise.
 
 ```ts
 await using db = await connect()  // disposed at scope end
@@ -148,11 +161,11 @@ Nub loads `.env`, `.env.local`, `.env.<NODE_ENV>`, and `.env.<NODE_ENV>.local` a
 APP=acme
 DATABASE_URL=postgres://localhost/${APP}_dev
 
-# No dotenv. No cross-env. No import "dotenv/config".
+# no --env-file, no dotenv
 $ nub server.ts
 ```
 
-### `nub node` — a version manager you should never need
+### Built-in version management
 
 Nub resolves the right Node for every project implicitly — from `.node-version`, `.nvmrc`, or `package.json#engines` — every time it runs a file. If that version isn't installed, it's downloaded from nodejs.org (checksum-verified, cached under `~/.cache/nub`) and your code runs on it. No pin? The `node` on your `PATH` is used, however you manage it. It's the [uv](https://docs.astral.sh/uv/) experience, for Node.
 
@@ -251,7 +264,7 @@ stream.addEventListener("message", (e) => process.stdout.write(e.data));
 
 ### `localStorage` / `sessionStorage`
 
-Native in Node 25+, flag-gated on 22.4–24 — and on every version, persistence silently fails unless you set `--localstorage-file` yourself. Nub injects the flag and defaults the storage file to `~/.cache/nub/webstorage/<workspace-hash>/localstorage.sqlite` — scoped to your workspace, so monorepo members share one store and it survives across runs. Your own `--localstorage-file`, set anywhere, always wins. The `sessionStorage` global is in-memory and per-process, by design.
+Web Storage is native in Node 25+; on 22.4–24 Node hides it behind a flag, which Nub injects automatically — so `localStorage` works on every supported version. Node also leaves persistence broken by default: it silently fails unless you pass `--localstorage-file`. Nub defaults the storage file to `~/.cache/nub/webstorage/<workspace-hash>/localstorage.sqlite` — scoped to your workspace, so monorepo members share one store and it survives across runs. Your own `--localstorage-file`, set anywhere, always wins. The `sessionStorage` global is in-memory and per-process, by design.
 
 ```ts
 localStorage.setItem("auth.token", "abc123");
@@ -336,21 +349,7 @@ Both `pnpm` and `npm` are themselves Node.js programs: every `pnpm run <script>`
   ]}
 />
 
-**Bin runner** — `nubx` resolves `node_modules/.bin` in Rust and execs the binary directly; `pnpm exec` and `npx` boot a full Node first:
-
-<Bench
-  label="esbuild --version · hyperfine, 20 runs"
-  source="https://github.com/nubjs/nub/tree/main/benchmarks"
-  accent="sky"
-  max={226}
-  rows={[
-    { cmd: 'nubx esbuild --version', ms: 11, us: true },
-    { cmd: 'pnpm exec esbuild --version', ms: 191, ratio: 17 },
-    { cmd: 'npx esbuild --version', ms: 226, ratio: 20 },
-  ]}
-/>
-
-The benchmarked command is identical on every row — the delta is pure wrapper overhead. Methodology: `hyperfine --warmup 3 --runs 100`, Apple M1 Max, Node 24.14.0 — the numbers are machine-specific, the ratios are the portable claim. Reproduce with [`benchmarks/`](https://github.com/nubjs/nub/tree/main/benchmarks).
+The benchmarked script is identical on every row — the delta is pure wrapper overhead. Methodology: `hyperfine --warmup 3 --runs 100`, Apple M1 Max, Node 24.14.0 — the numbers are machine-specific, the ratios are the portable claim. Reproduce with [`benchmarks/`](https://github.com/nubjs/nub/tree/main/benchmarks).
 
 ### Workspace-aware
 
@@ -390,11 +389,25 @@ nubx prisma generate
 nubx tsc --noEmit
 ```
 
-The `.bin` walk-up happens in Rust and the binary is exec'd directly — no Node bootstrap in the wrapper. The binary being executed is identical on both sides; the entire delta is the wrapper overhead in the [benchmarks](#performance) above.
+The `.bin` walk-up happens in Rust and the binary is exec'd directly — no Node bootstrap in the wrapper, where `pnpm exec` and `npx` boot a full Node first. The binary is identical on both sides, so the entire delta is wrapper overhead:
 
-## `nub install` — a built-in package manager
+<Bench
+  label="esbuild --version · hyperfine, 20 runs"
+  source="https://github.com/nubjs/nub/tree/main/benchmarks"
+  accent="sky"
+  max={226}
+  rows={[
+    { cmd: 'nubx esbuild --version', ms: 11, us: true },
+    { cmd: 'pnpm exec esbuild --version', ms: 191, ratio: 17 },
+    { cmd: 'npx esbuild --version', ms: 226, ratio: 20 },
+  ]}
+/>
 
-Nub ships a full package manager, powered by the embedded [aube](https://github.com/jdx/aube) engine — built by [jdx](https://github.com/jdx), the creator of mise. The CLI surface is pnpm's; the lockfile is whatever your project already uses:
+## `nub install` — a 10× faster `pnpm install`
+
+Nub ships a full package manager, powered by the embedded [aube](https://github.com/jdx/aube) engine, built by [jdx](https://github.com/jdx), the creator of mise. Two guarantees define it.
+
+First, whatever lockfile your project already has is respected bidirectionally — Nub reads it and writes it back in the same format. No migration, no foreign lockfile dropped beside yours:
 
 ```sh
 $ nub install   # pnpm-lock.yaml → read, written back
@@ -403,11 +416,13 @@ $ nub install   # bun.lock → read, written back
 $ nub install   # yarn.lock → read-only (installed from, never rewritten)
 ```
 
-There's no migration — `nub install` detects the lockfile your project already has and never drops a foreign file. The npm, pnpm, and bun lockfiles round-trip — read and written back in their own format; yarn is read-only: nub installs from your `yarn.lock` but leaves it untouched, so commits stay clean and yarn stays the tool that writes it. Fresh projects get a standard `pnpm-lock.yaml`. And your package manager keeps working, side by side: run either tool, commit the same file, switch back any time.
+The npm, pnpm, and bun lockfiles round-trip; yarn is read-only. Run nub and your old package manager side by side — same file, switch back any time.
 
-What aube brings:
+Second, on a pnpm project, support is complete: nub reads and honors every config surface pnpm does — `pnpm-workspace.yaml`, `.pnpmfile.cjs`, the `"pnpm"` package.json section, the `npm_config_*` environment — so the install it produces is one real pnpm accepts unchanged.
 
-- **Speed** — a warm install points `node_modules` straight at one global store shared across every project, so it writes little more than symlinks. On a 1,168-package fixture that's about 10× faster than pnpm:
+### Performance
+
+A warm install points `node_modules` straight at one global store shared across every project, so it writes little more than symlinks. On a 1,168-package fixture that's about 10× faster than pnpm:
 
 <Bench
   label="warm install · 1,168 deps · Linux · hyperfine"
@@ -421,24 +436,29 @@ What aube brings:
   ]}
 />
 
-  The win is the global-virtual-store path, which is the default. Apps that need real files on disk — Next, Nuxt — materialize instead and match pnpm.
+The win is the global virtual store: package files link into one machine-wide store instead of being copied per project, so a warm install is almost pure symlinks. Bun is fast too, but it still materializes every package into each project — that extra file work is the gap you see above.
 
-- **The tightest security defaults of any Node package manager** — lifecycle scripts wait for approval (with an opt-in build jail — the only one in the ecosystem), exotic transitive deps are blocked, and brand-new releases sit in a [24-hour cooling window](https://github.com/jdx/aube).
-- **Less disk** — a global content-addressable store shares package files across projects instead of duplicating them per checkout.
+### Secure by default
 
-The install layout follows the lockfile too: pnpm projects and fresh ones get strict, symlinked, pnpm-style installs, with the virtual store tucked under `node_modules/.nub`; projects with an npm, yarn, or bun lockfile default to the flat hoisted layout those tools produce, so tooling that walks `node_modules` sees the layout it expects. One `.npmrc` line (`node-linker`) overrides either default.
+Nub install ships the strongest default security posture of any Node package manager — every protection below is on out of the box:
+
+- **Lifecycle scripts are deny-by-default.** A dependency's `postinstall` won't run unless you approve that package, so a compromised transitive dep can't execute code just because you installed it.
+- **Non-registry transitive deps are blocked.** A dependency-of-a-dependency that resolves to a `git+`, `file:`, or raw-tarball URL — a classic supply-chain vector — is refused rather than silently fetched.
+- **New releases have to age.** A default `minimumReleaseAge` of 24 hours keeps a just-published version out of your tree until it's sat in the registry a day — the simplest defense against the now-common "publish a malicious patch, hijack installs for an hour" attack.
+- **Provenance can't silently downgrade.** A version that loses its trusted-publisher or provenance evidence fails at resolve instead of installing quietly.
+
+One `paranoid: true` line turns every soft gate into a hard failure and adds a build-script jail — approved scripts then run sandboxed, with no network and a scoped filesystem.
+
+## `nub pm` — a baked-in, native-speed Corepack
+
+Run `nub pm shim` once and it drops `npm`, `pnpm`, `yarn`, and `bun` onto your PATH as shims. From then on, running `pnpm install` in a project reads the version that project pins in `packageManager`, provisions that exact version (fetched and verified from the registry), and execs it — corepack's job, but in Rust, with none of the per-call Node bootstrap corepack pays:
 
 ```sh
-$ nub install
-node_modules/express → .nub/express@5.1.0/…
-$ nub install --node-linker=hoisted   # or one .npmrc line
+$ nub pm shim    # install npm / pnpm / yarn / bun shims
+$ pnpm install   # routes to the pnpm the project pins, fetching it if missing
 ```
 
-Configuration comes from the files you already maintain — `.npmrc` (registry, auth, flags), `pnpm-workspace.yaml`, `package.json#workspaces` — and Nub's own defaults rank below every user source. No new config file, no `"nub"` field in `package.json`.
-
-### `nub pm`
-
-Sometimes you want the original tool itself — `nub pm use` declares and provisions the project's package manager — corepack's job, without the PATH shims. It resolves the version, fetches and verifies it from the npm registry, writes `packageManager` (with a `+sha512` hash computed from the verified tarball), and aligns the lockfile — converting formats when you switch managers.
+To set or change the pinned manager by hand, `nub pm use` resolves the version, verifies the tarball, writes `packageManager` (with a `+sha512` hash), and aligns the lockfile — converting formats when you switch managers:
 
 ```sh
 $ nub pm use pnpm@^9
@@ -458,68 +478,38 @@ There are no Nub-specific APIs.
 - No nub lockfile
 - No nub-named config files
 
-Everything Nub ships is a web platform standard (WHATWG / W3C / WinterTC), a TC39 proposal, an unflagged Node.js feature, or a pragmatic affordance for ecosystem compatibility (usually TypeScript). Remove Nub tomorrow and your code keeps working, unchanged.
+Everything Nub ships is one of:
+
+- A web platform standard (WHATWG / W3C / WinterTC)
+- A TC39 proposal
+- An unflagged Node.js feature
+- A pragmatic affordance for ecosystem compatibility — usually TypeScript
+
+Remove Nub tomorrow and your code keeps working, unchanged.
 
 ## FAQ
 
-### Why hasn't anyone else done this?
-
-Because the extension surface that makes it possible is new. Everything Nub does rides on five public Node mechanisms:
-
-- **`module.registerHooks()`** (Node 22.15, April 2025) — synchronous loader hooks. The entire TS / JSX / YAML / TOML path is one registered hook.
-- **`module.register()`** (Node 20.6, 2023) — programmatic loader registration, used on the legacy lines.
-- **`--import` / `--require` preloads** — code that runs before your `main`, used to install the polyfills.
-- **`NODE_OPTIONS` / V8 flag injection** — unflags the `--experimental-*` features Node already implements.
-- **N-API addons** (ABI-stable since 2017) — the oxc transpiler, called from inside the load hook.
-
-That's the whole kit. No patched Node binary, no vendored `libnode`, no separate runtime to discover. Deno (2018) and Bun (2022) predate most of this surface — back then, shipping integrated TypeScript and modern defaults meant writing a runtime around them. Today the same layer composes on top of Node, with the entire compatibility surface preserved for free. The build-vs.-extend tradeoff has tipped.
-
-### Is it faster than Node.js?
-
-**No.** Your code runs in Node itself — once it's executing, V8 is V8. What's dramatically faster is the CLI surface: `nub run` is 25× faster than `pnpm run`, and `nubx` is 20× faster than `npx` on cold start, because those tools pay a full Node bootstrap to do what amounts to a script lookup, and Nub — a native Rust binary — doesn't.
-
-Transpile output lands in a content-addressed on-disk cache keyed on `(source content, Nub version, resolved tsconfig)`. The first run transpiles; every run after pays roughly nothing, and entries dedupe across projects with identical files.
-
-### What can I drop from my project?
-
-Most of the toolchain around your code — including the pieces that were never npm packages to begin with:
-
-- `tsx` / `ts-node` → TypeScript runs natively
-- `dotenv` / `cross-env` → `.env*` loading is built in
-- `nodemon` → `nub watch`
-- `tsconfig-paths` → `paths` resolution is built in
-- `npx` → `nubx`
-- `nvm` / `fnm` → the pin file alone; the right Node installs itself
-- `corepack` → `nub pm`
-- `npm` / `pnpm` / `bun` as CLIs → `nub install` and `nub run`, against the lockfile you already have
-
-And running on a modern Node floor lets you drop what Node itself obsoleted: `node-fetch`, `abort-controller`, `uuid` (the v4 case), `rimraf`, `mkdirp`, `glob` (basic usage), `form-data`, and the `ws` client. That credit is Node's — Nub just makes the modern floor practical.
-
-### Why not just use Node's built-in TypeScript support?
-
-Node 22.18+ runs `.ts` files by default — but it *strips* types, it doesn't transpile. Enums error. Namespace blocks error. Parameter properties error. JSX doesn't work. Decorator metadata doesn't work. Node 26 even removed `--experimental-transform-types`, the flag that used to handle enums — the Node TSC's posture is that full transpilation is userland's job.
-
-Node also deliberately ignores `tsconfig.json`: no `paths`, no `baseUrl`, no `jsx`, no `experimentalDecorators`, no `extends` chains — the Node 26 docs are explicit that tsconfig-dependent features are "intentionally unsupported." Extensionless `.ts` imports don't resolve, and no source maps are generated.
-
-If your codebase is `"erasableSyntaxOnly": true` clean, Node's built-in support is fine. If it isn't, you need a real transpile pipeline — which is what tsx, Bun, Deno, and Nub provide, and Node deliberately doesn't.
-
-Plenty more answered on the [FAQ page](/docs/faq):
-
+- [Is it faster than Node.js?](/docs/faq#is-it-faster-than-nodejs)
+- [Why not just use Node's built-in TypeScript support?](/docs/faq#why-not-just-use-nodes-built-in-typescript-support)
+- [Why hasn't anyone else done this?](/docs/faq#why-hasnt-anyone-else-done-this)
+- [Is Nub a replacement for Node?](/docs/faq#is-nub-a-replacement-for-node)
+- [What can I stop using once I install Nub?](/docs/faq#what-npm-packages-can-i-stop-using-once-i-install-nub)
 - [How is it different from Bun?](/docs/faq#how-is-it-different-from-bun)
 - [How is it different from Deno?](/docs/faq#how-is-it-different-from-deno)
+- [How is it different from `node --run`?](/docs/faq#how-is-it-different-from-node---run)
 - [Will my existing Node code work on Nub?](/docs/faq#will-my-existing-node-code-work-on-nub)
 - [What about CommonJS / `require()`?](/docs/faq#what-about-commonjs--require)
 - [What about native (N-API) addons?](/docs/faq#what-about-native-n-api-addons)
+- [Is it monorepo-friendly?](/docs/faq#is-it-monorepo-friendly)
 - [What's the `--node` flag?](/docs/faq#whats-the---node-flag)
-- [Why doesn't Node ship these defaults natively?](/docs/faq#why-doesnt-node-ship-these-defaults-natively)
 - [What if I want to stop using Nub?](/docs/faq#what-if-i-want-to-stop-using-nub)
 
----
-
-## A note on Node
-
-None of this is a criticism of Node.js. Node is an exceptionally well-managed project, and its caution about breaking changes is the right caution — the whole ecosystem depends on Node staying predictable. That same caution means Node can't ship opinionated modern defaults. The extension surface it has shipped over the last three years means it no longer has to. Nub is the layer on top.
+[Read the full FAQ →](/docs/faq)
 
 ---
 
-*Nub is open source. Install: `npm install -g @nubjs/nub`. Source: [github.com/nubjs/nub](https://github.com/nubjs/nub).*
+## Get started
+
+Nub is open source.
+
+<InstallTabs />

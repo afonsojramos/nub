@@ -24,6 +24,10 @@ No. Nub runs *on* Node — your `node` binary, on your `PATH`. There is no Nub r
 
 No. Nub does not patch Node source, ship a custom-built Node binary, or embed `libnode`. Every augmentation rides on Node's public extension surfaces. The "would a user on plain Node, plus the corresponding `module.register()` / `--import` / npm addon, get the same result?" question always answers yes.
 
+## Is Nub a replacement for Node?
+
+No — Nub *is* Node. Your code is transpiled and executed by the stock `node` binary; there's no Nub runtime to discover and nothing reimplemented. Nub is a layer of developer-experience defaults on top of Node, built entirely on Node's own extension surfaces. None of this is a criticism of Node — its caution about breaking changes is the right caution, and that same caution is exactly why opinionated modern defaults belong in a layer on top rather than in core.
+
 ## How is it different from plain `node`?
 
 Running `nub <file>` is flag-for-flag compatible with `node <file>` — same argv shape, same flag set, same behavior — and on top of that adds:
@@ -41,6 +45,10 @@ All of that comes for free when you type `nub` instead of `node`. For plain Node
 ## What's the elevator pitch?
 
 If you've spent the last few years assembling a personal toolchain out of `tsx`, `dotenv-cli`, `nodemon`, `npx`, `pnpm run`, plus a handful of `tsconfig` loader shims — Nub replaces that pile with one binary that starts in milliseconds and doesn't ask you to change your runtime. **Keep Node. Replace the toolchain.**
+
+## Is it faster than Node.js?
+
+No — your code runs in Node itself, so once it's executing, V8 is V8. What's dramatically faster is the CLI surface: `nub run` is 25× faster than `pnpm run` and `nubx` is 20× faster than `npx` on cold start, because those tools pay a full Node bootstrap to do what amounts to a script lookup, and Nub — a native Rust binary — doesn't. Transpile output lands in a content-addressed on-disk cache keyed on `(source content, Nub version, resolved tsconfig)`, so the first run transpiles and every run after pays roughly nothing.
 
 ## Will my existing Node code work on Nub?
 
@@ -105,6 +113,17 @@ Yes — `nubx` (also available as `nub exec`) is the equivalent. Locally install
 
 Yes — `nub script.ts` runs TypeScript directly, with the full TS surface (not just type stripping), respecting your `tsconfig.json`, with inline source maps so stack traces point at your `.ts` source. Full details: [File runner → TypeScript](/docs/files#typescript).
 
+## Why not just use Node's built-in TypeScript support?
+
+Node 22.18+ runs `.ts` files by default, but it *strips* types rather than transpiling them — so anything beyond erasable annotations is on its own:
+
+- `enum`, `namespace`, and parameter properties → syntax errors (Node 26 even removed `--experimental-transform-types`, the flag that used to handle them)
+- JSX and `emitDecoratorMetadata` → unsupported
+- `tsconfig.json` `paths`, `baseUrl`, `jsx`, `experimentalDecorators`, `extends` → ignored ("intentionally unsupported," per the Node 26 docs)
+- Extensionless `.ts` imports → unresolved, and no source maps
+
+Nub transpiles each file through its native addon instead, so all of that just works. If your codebase is `erasableSyntaxOnly`-clean, Node's built-in support is fine; if it isn't, you need a real transpile pipeline — which is what Nub provides and Node deliberately doesn't.
+
 ## Does it replace `nodemon` / `tsx watch`?
 
 For restart-on-change, yes: `nub watch script.ts` (or `nub --watch script.ts`) restarts the process when anything in the resolved dependency graph (plus your `.env*` files and `tsconfig.json`) changes — no glob list to maintain. (A `--watch` *after* a script name — `nub run dev --watch` — is forwarded to the script itself, like every other argument.) Full details: [Watch mode](/docs/watch).
@@ -137,6 +156,18 @@ Every augmentation Nub applies is something a user with patience could wire up b
 - **N-API addons** (stable since Node 8.6, October 2017) — the ABI-stable native-addon contract. The `oxc` transpiler ships as a Node addon, called from inside the load hook.
 
 That's the entire kit. There is no patched Node binary, no vendored `libnode`, no separate runtime to discover.
+
+## Why hasn't anyone else done this?
+
+Because the extension surface that makes it possible is new. Everything Nub does rides on five public Node mechanisms:
+
+- **`module.registerHooks()`** (Node 22.15, April 2025) — synchronous loader hooks. The entire TS / JSX / YAML / TOML path is one registered hook.
+- **`module.register()`** (Node 20.6, 2023) — programmatic loader registration, used on the legacy lines.
+- **`--import` / `--require` preloads** — code that runs before your `main`, used to install the polyfills.
+- **`NODE_OPTIONS` / V8 flag injection** — unflags the `--experimental-*` features Node already implements.
+- **N-API addons** (ABI-stable since 2017) — the oxc transpiler, called from inside the load hook.
+
+No patched Node binary, no vendored `libnode`, no separate runtime to discover. Deno and Bun predate most of this surface — back then, shipping integrated TypeScript meant writing a runtime around it; today the same layer composes on top of Node, with the entire compatibility surface preserved for free.
 
 ## Why doesn't Node ship these defaults natively?
 
