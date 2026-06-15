@@ -207,8 +207,18 @@ impl Argv0 {
             .unwrap_or_default()
             .to_string_lossy()
             .into_owned();
+        Self::classify(&basename)
+    }
 
-        match basename.as_str() {
+    /// Map an invoked basename (already `.exe`-stripped by `file_stem`) to a
+    /// dispatch mode. `make install-dev` installs the dev binary under
+    /// `nub-dev` / `nubx-dev` so it can sit alongside a released `nub` on
+    /// PATH; the `-dev` suffix is stripped here so a dev symlink dispatches
+    /// exactly like its release-named counterpart — notably `nubx-dev` must
+    /// engage nubx mode, not silently fall through to plain `nub`.
+    fn classify(basename: &str) -> Self {
+        let name = basename.strip_suffix("-dev").unwrap_or(basename);
+        match name {
             "nubx" => Self::Nubx,
             "node" => Self::Node,
             // `file_stem` already stripped any `.exe`, so the same parse serves
@@ -6112,6 +6122,22 @@ mod tests {
     #[test]
     fn argv0_detection() {
         assert_eq!(Argv0::detect(), Argv0::Nub);
+    }
+
+    #[test]
+    fn argv0_classify_maps_release_and_dev_names() {
+        // Release names dispatch to their mode…
+        assert_eq!(Argv0::classify("nub"), Argv0::Nub);
+        assert_eq!(Argv0::classify("nubx"), Argv0::Nubx);
+        assert_eq!(Argv0::classify("node"), Argv0::Node);
+        // …and the `-dev` symlinks `make install-dev` creates map identically
+        // (the bug this guards: `nubx-dev` used to fall through to plain Nub).
+        assert_eq!(Argv0::classify("nub-dev"), Argv0::Nub);
+        assert_eq!(Argv0::classify("nubx-dev"), Argv0::Nubx);
+        assert_eq!(Argv0::classify("node-dev"), Argv0::Node);
+        // A PM-shim name still classifies as a shim, dev-suffixed or not.
+        assert!(matches!(Argv0::classify("pnpm"), Argv0::PmShim(_)));
+        assert!(matches!(Argv0::classify("pnpm-dev"), Argv0::PmShim(_)));
     }
 
     // ── nub pm verbs + PM-verb redirect ─────────────────────────────────
