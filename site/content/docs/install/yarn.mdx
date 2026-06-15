@@ -5,6 +5,8 @@ description: Yarn is supported read-only — Nub reads yarn.lock (Classic v1 and
 
 Yarn is supported **read-only**. Nub reads a project's `yarn.lock` — Classic (v1) and Berry (v2+) — to install and run it, but never writes `yarn.lock`. Treat a Yarn project as something Nub *consumes*, not something Nub maintains: keep using `yarn` for anything that changes the dependency graph. This is the narrowest compatibility tier of any package manager Nub recognizes.
 
+Read-only is enforced as a hard, eager refusal — and that's the reassurance. There is no path by which Nub silently rewrites, churns, or corrupts your `yarn.lock`. Any command that *would* mutate it is checked before the engine runs and rejected with exit code 1 and a message naming the equivalent `yarn` command, leaving the lockfile and `node_modules` exactly as they were. So `nub install` and `nub run` work against a Yarn project, while `nub add` / `nub remove` / `nub update` fail loudly and early rather than risk writing a format Nub can't round-trip.
+
 <CompatTable
   rows={[
     { feature: <><code>yarn.lock</code> read</>, status: 'yes', note: 'Classic (v1) and Berry (v2+)' },
@@ -37,7 +39,9 @@ Top-level `resolutions` in `package.json` is honored — Nub applies it the way 
 
 ## `yarn.lock`
 
-Any command that would change `yarn.lock` is refused with a message pointing you back to Yarn (captured against nub 0.0.44, `nub add lodash` in a Yarn project — the verb, reason, and remedy are interpolated):
+**No minimum version for reading.** Nub parses both `yarn.lock` formats: Classic (`yarn.lock` with no `__metadata` block, written by Yarn 1.x) and Berry (the `__metadata:` / `version:` format written by Yarn 2+). Every Yarn major is readable. The constraint here is not a version floor but the read-only tier — Nub never *writes* `yarn.lock`, regardless of format (below).
+
+Any command that would change `yarn.lock` is refused **before the engine touches anything** — the check fires the moment Nub detects a `yarn.lock`, so nothing on disk is read, resolved, or written first. The process exits non-zero with a message naming the equivalent `yarn` command. Captured against Nub 0.0.44, `nub add lodash` in a Yarn project (the verb, reason, and remedy are interpolated):
 
 ```console
 $ nub add lodash
@@ -45,6 +49,8 @@ Error: nub add: refusing to modify yarn.lock — adding a dependency re-resolves
   yarn.lock write fidelity is unproven in the embedded engine, so commands
   that would rewrite it are blocked. Run it with yarn directly:
     yarn add lodash
+$ echo $?
+1
 ```
 
 Refused (run these with `yarn`):
@@ -87,9 +93,9 @@ The `nub pm use yarn` command is the [meta-manager](/docs/pm) provisioning comma
 
 ## Config files
 
-This is the headline gap. Nub reads **`.npmrc` only** for registry, auth, scopes, CA, and proxy settings. It does not read Yarn's config files at all:
+This is the headline gap. Nub reads **`.npmrc` only** for registry, auth, scopes, CA, and proxy settings. It does not read Yarn's config files for any package-management setting:
 
-- `.yarnrc.yml` (Berry) — project **and** global (`~/.yarnrc.yml`) — is not parsed,
+- `.yarnrc.yml` (Berry) — project **and** global (`~/.yarnrc.yml`) — is read for exactly one key, `yarnPath`, and nothing else. When the project commits a Yarn release and points `yarnPath` at it, `nub pm` runs that release directly (the shim provisioning path — there's nothing to fetch). Every *config* key in the file (registry, auth, scopes, CA, proxy, `nodeLinker`, …) is ignored.
 - classic `.yarnrc` (Yarn 1) is not parsed.
 
 In practice, none of these Yarn-config keys take effect under Nub:
@@ -110,7 +116,7 @@ If your private-registry auth or custom registry lives in `.yarnrc.yml` (which f
 
 ## Node linkers
 
-Nub-the-package-manager only produces a **hoisted `node_modules`** for a Yarn project. Because Nub does not read `.yarnrc.yml` at all, a `nodeLinker` setting there is never seen — and Nub's default layout for a Yarn-incumbent project is hoisted regardless:
+Nub-the-package-manager only produces a **hoisted `node_modules`** for a Yarn project. Because Nub does not read `.yarnrc.yml` for config, a `nodeLinker` setting there is never seen — and Nub's default layout for a Yarn-incumbent project is hoisted regardless:
 
 ```yaml
 # .yarnrc.yml
