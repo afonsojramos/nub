@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 // @ts-check
 /**
- * Codex equivalent of the Claude Fray Agent PreToolUse hook.
+ * Codex Fray dispatch preflight.
  *
  * Usage:
- *   printf '%s' "$PROMPT" | node scripts/fray/codex-dispatch-preflight.mjs \
+ *   printf '%s' "$PROMPT" | node .agents/plugins/fray-codex/scripts/codex-dispatch-preflight.mjs \
  *     --thread <slug> --agent-type <explorer|worker|default>
  *   # Add --dry-run to emit the prompt without writing the ledger.
  *
@@ -16,14 +16,14 @@
 import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadConfig } from './config.mjs';
+import { loadConfig } from '../../../../scripts/fray/config.mjs';
 
-const PROJECT_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+const PROJECT_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
 
 const EPILOGUE = `
 
 ---
-[ORCHESTRATION EPILOGUE - appended by scripts/fray/codex-dispatch-preflight.mjs]
+[ORCHESTRATION EPILOGUE - appended by .agents/plugins/fray-codex/scripts/codex-dispatch-preflight.mjs]
 End your final report with a \`## Follow-ups\` section so the orchestrator can chain the next steps:
 1. Concrete follow-up work your findings or changes imply.
 2. If you implemented something substantial, recommend a fresh adversarial self-review pass.

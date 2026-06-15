@@ -1,20 +1,20 @@
 ---
 name: fray
-description: "Use this skill when running a large, mixed set of Codex efforts - investigations, decided fixes, verifications, launch pushes, audits, or refactor campaigns - where the human wants to stay in the loop. Fray is the orchestrator-first agentic coding paradigm from this repo's Claude plugin, adapted for Codex: use the `.fray/` per-thread control surface, compute the board with `node scripts/fray/index.mjs`, reconcile returned sub-agents, and preserve the same thread, dispatch, decision, and tracker constraints."
+description: "Use this skill when running a large, mixed set of Codex efforts - investigations, decided fixes, verifications, launch pushes, audits, or refactor campaigns - where the human wants to stay in the loop. Fray is an orchestrator-first Codex workflow: use the `.fray/` per-thread control surface, compute the board with `node scripts/fray/index.mjs`, reconcile returned sub-agents, preflight thread-scoped dispatches, and preserve the repo's thread, decision, and tracker constraints."
 ---
 
 # Fray For Codex
 
 Fray is the orchestrator-first workflow for large, mixed coding efforts. The main Codex session is the orchestrator and the only decider. Sub-agents are instruments: they gather facts, implement bounded fixes, verify, or review, then return findings for the orchestrator to fold into `.fray/`.
 
-This skill adapts the Claude Fray plugin in `.claude/skills/fray` to Codex. Preserve the same control surface and constraints. Where Claude uses hooks, Codex uses explicit skill discipline plus helper scripts in `scripts/fray/`.
+Use the repo's Fray control surface exactly as written: independent thread files under `.fray/`, a computed board, orchestrator-owned tracker edits, preflighted sub-agent dispatches, and explicit reconciliation of every return.
 
 ## Start Every Fray Turn
 
 Run the pulse before meaningful work:
 
 ```bash
-node scripts/fray/codex-reminder.mjs
+node .agents/plugins/fray-codex/scripts/codex-reminder.mjs
 node scripts/fray/index.mjs
 ```
 
@@ -62,18 +62,14 @@ Research and implementation stay in one thread. Retool the same file in place wh
 
 Only the orchestrator edits `.fray/<slug>.md` and `.fray/config.yml`. Sub-agents must never edit canonical thread files. If a sub-agent needs to persist durable output, instruct it to write a sidecar under `.fray/<thread>.findings/<id>.md`, then fold the signal into the thread yourself.
 
-## Dispatch Discipline In Codex
+## Dispatch Discipline
 
-Claude hook behavior maps to Codex like this:
-
-- Claude `SessionStart` hook -> Codex: read this skill and run `node scripts/fray/codex-reminder.mjs` at the start of Fray work.
-- Claude `UserPromptSubmit` hook -> Codex: run `node scripts/fray/codex-reminder.mjs` at each turn/checkpoint.
-- Claude `PreToolUse Agent` hook -> Codex: before `multi_agent_v1.spawn_agent`, run `node scripts/fray/codex-dispatch-preflight.mjs` for thread-scoped dispatches.
+Before spawning a thread-scoped sub-agent, run the dispatch preflight. This is the Codex-side guardrail that validates the thread exists, adds the thread pointer, appends the standard follow-up epilogue, and records the ledger row.
 
 For a thread-scoped sub-agent prompt:
 
 ```bash
-printf '%s' "$PROMPT" | node scripts/fray/codex-dispatch-preflight.mjs --thread <slug> --agent-type <explorer|worker|default>
+printf '%s' "$PROMPT" | node .agents/plugins/fray-codex/scripts/codex-dispatch-preflight.mjs --thread <slug> --agent-type <explorer|worker|default>
 ```
 
 The preflight:
@@ -83,7 +79,7 @@ The preflight:
 - appends the orchestration epilogue,
 - writes `.fray/.dispatch-ledger.jsonl`.
 
-Paste the emitted prompt into `spawn_agent`. For a true one-shot with no thread, do not use `THREAD:`.
+Paste the emitted prompt into `multi_agent_v1.spawn_agent`. For a true one-shot with no thread, do not use `THREAD:`.
 Use `--dry-run` only when testing the preflight itself; real dispatches should write the ledger.
 
 ## Sub-Agent Rules
@@ -138,7 +134,7 @@ Use these checks:
 
 ```bash
 node scripts/fray/index.mjs --validate
-node scripts/fray/codex-reminder.mjs --json
+node .agents/plugins/fray-codex/scripts/codex-reminder.mjs --json
 ```
 
-If you edit this skill, keep it aligned with `.claude/skills/fray/SKILL.md` unless Codex tool constraints require a different mechanism.
+If you edit this skill, preserve the Fray invariants: `.fray/` is canonical, the board is computed, only the orchestrator edits thread files, thread-scoped dispatches are preflighted, and every returned agent is reconciled.

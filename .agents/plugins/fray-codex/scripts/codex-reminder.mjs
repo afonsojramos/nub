@@ -1,19 +1,16 @@
 #!/usr/bin/env node
 // @ts-check
 /**
- * Codex-facing Fray pulse.
- *
- * Claude gets this from SessionStart/UserPromptSubmit hooks. Codex does not
- * currently ingest this repo's Claude hook config, so Fray-enabled Codex
- * sessions run this script explicitly at the start of a turn/checkpoint.
+ * Codex-facing Fray pulse. Run this at the start of a Fray turn/checkpoint to
+ * surface pending threads, validation errors, and the reconciliation reminder.
  */
 
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadConfig, STATUS, TERMINAL } from './config.mjs';
+import { loadConfig, STATUS, TERMINAL } from '../../../../scripts/fray/config.mjs';
 
-const PROJECT_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+const PROJECT_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
 const FRAY_DIR = join(PROJECT_DIR, '.fray');
 const asJson = process.argv.includes('--json');
 
