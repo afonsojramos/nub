@@ -49,30 +49,32 @@ const MIN_DISABLE_WARNING: NodeVersion = NodeVersion::new(20, 11, 0);
 /// Whether the target Node has Web Storage at all — DERIVED from the matrix: true
 /// iff the `webstorage` feature has ANY mitigation band covering this version
 /// (its floor is 22.4.0, where `--experimental-webstorage` / `--localstorage-file`
-/// first exist; below that both are "bad option"). Callers gate the
-/// `--localstorage-file` injection on this so older compat-tier Node isn't handed
-/// a flag it rejects. True for every Node >= 22.4 — including 25/26 where the
-/// global is native (it still needs the file to materialize). Verified empirically
-/// on Node 26.2.0 and against .repos/node (v27 pre): `--localstorage-file` alone
-/// exposes a working, persistent `localStorage`; the flag without the file does not.
+/// first exist; below that both are "bad option"). True for every Node >= 22.4 —
+/// including 25/26 where the global is native (it still needs a `--localstorage-file`
+/// to materialize). Verified empirically on Node 26.2.0 and against .repos/node
+/// (v27 pre): `--localstorage-file` alone exposes a working, persistent
+/// `localStorage`; the flag without the file does not.
+///
+/// NOTE: Web Storage is opt-in (the maintainer, 2026-06-14) — nub no longer injects these
+/// flags by default, so this is currently version-detection logic the spawn path
+/// does not consume. Retained as the canonical description of Node's Web Storage
+/// banding (the source of truth shared with the `webstorage` feature_matrix row).
 pub fn webstorage_supported(node_version: &NodeVersion) -> bool {
     feature_matrix::feature("webstorage")
         .mitigation_for(node_version)
         .is_some()
 }
 
-/// Whether nub must inject the `--experimental-webstorage` FLAG (as opposed to just
-/// the `--localstorage-file` path) — DERIVED from the matrix: true iff the
-/// `webstorage` feature's mitigation at this version is an `Unflag` band (the
-/// 22.4–24.x range, where the feature is still flag-gated). On 25+ the matrix
+/// Whether enabling Web Storage requires the `--experimental-webstorage` FLAG (as
+/// opposed to just a `--localstorage-file` path) — DERIVED from the matrix: true
+/// iff the `webstorage` feature's mitigation at this version is an `Unflag` band
+/// (the 22.4–24.x range, where the feature is still flag-gated). On 25+ the matrix
 /// records a `StorageFile` band (the flag defaults on, PR nodejs/node#57666), so
-/// this returns false and nub injects only `--localstorage-file`.
+/// only `--localstorage-file` is needed there.
 ///
-/// Edge case (benign): a 25.0.0 PRERELEASE (e.g. `25.0.0-rc.1`) sorts BELOW 25.0.0
-/// under semver precedence, so it falls in the Unflag band here and gets the
-/// experimental flag injected. On a 25.x build the flag is already a default-on
-/// no-op alias (accepted, not a "bad option"), so this is harmless — no behavior
-/// change, just an extra no-op token on the rare RC. Not worth special-casing.
+/// Like `webstorage_supported`, this is version-detection logic the spawn path no
+/// longer consumes (Web Storage is opt-in as of 2026-06-14); kept as the canonical
+/// banding description.
 pub fn webstorage_flag_needed(node_version: &NodeVersion) -> bool {
     matches!(
         feature_matrix::feature("webstorage").mitigation_for(node_version),
@@ -232,8 +234,9 @@ mod tests {
         let flags = compute_inject_flags(v(22, 15, 0), &[], None, false);
         assert!(flags.contains(&"--experimental-vm-modules"));
         assert!(flags.contains(&"--experimental-eventsource"));
-        // webstorage is NOT in this static set — it needs a runtime-computed
-        // --localstorage-file and version-banded flag logic, handled in spawn.rs.
+        // webstorage is NOT in this static set — and is no longer injected at all:
+        // Web Storage is opt-in (a user passes their own --localstorage-file /
+        // --experimental-webstorage; nub adds neither). See spawn.rs.
         assert!(!flags.contains(&"--experimental-webstorage"));
         // sqlite is unflagged on 22.13.0+ (the 22.x line), so 22.15 does NOT inject it.
         assert!(!flags.contains(&"--experimental-sqlite"));

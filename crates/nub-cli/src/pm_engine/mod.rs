@@ -1042,11 +1042,6 @@ fn apply_lifecycle_augmentation(cwd: &Path) {
     // path pins npm_node_execpath. Mirrors build_script_command's discovery.
     let node = nub_core::node::discovery::discover_node(cwd)
         .unwrap_or_else(|_| nub_core::node::discovery::ResolvedNode::fallback());
-    let project = nub_core::workspace::detect::detect_project(cwd);
-    let project_root = project.as_ref().map(|p| p.root.as_path());
-    let scope_root = project
-        .as_ref()
-        .map(|p| p.workspace_root.as_deref().unwrap_or(p.root.as_path()));
     let pnp_ctx = nub_core::pnp::detect(cwd);
     let Some(aug) = nub_core::node::spawn::compute_augmentation_env(
         &nub_binary,
@@ -1054,8 +1049,6 @@ fn apply_lifecycle_augmentation(cwd: &Path) {
         // Lifecycle scripts are never compat: PM verbs run augmented (there is
         // no `--node` lifecycle path).
         false,
-        project_root,
-        scope_root,
         pnp_ctx.as_ref().map(|c| c.pnp_cjs.as_path()),
     ) else {
         return;

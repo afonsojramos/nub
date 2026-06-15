@@ -985,14 +985,13 @@ fn node_compat_flag_disables_augmentation() {
     );
 }
 
-/// Web Storage is default-on with a workspace-keyed, PERSISTENT backing file:
-/// `localStorage.setItem` in one `nub` invocation is readable by the next, and the
-/// SQLite store lands under `<cache>/nub/webstorage/<hash>/localstorage.sqlite`.
-/// `--node` runs vanilla Node, where `localStorage` is undefined (no injection).
-/// The dev-box PATH Node is 25+, where the global is native but still requires the
-/// `--localstorage-file` nub injects — so this proves the file is what makes it work.
+/// Web Storage is OPT-IN (the maintainer, 2026-06-14): by default nub injects NEITHER
+/// `--experimental-webstorage` NOR a `--localstorage-file`, so `localStorage` is
+/// `undefined` — identical to plain Node. A user who passes their own
+/// `--localstorage-file=<path>` gets a working, persistent store; that user path
+/// is what enables the global, and nub never stands up a store on its own.
 #[test]
-fn webstorage_persists_across_runs_and_is_off_under_node_flag() {
+fn webstorage_is_off_by_default_and_on_with_a_user_localstorage_file() {
     if !node_at_least((22, 4, 0)) {
         eprintln!("skipping: webstorage needs Node >= 22.4 (target is older)");
         return;
@@ -1002,7 +1001,13 @@ fn webstorage_persists_across_runs_and_is_off_under_node_flag() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("package.json"), r#"{"name":"ws-test"}"#).unwrap();
     let cache = dir.join("cache");
+    let user_store = dir.join("mine.sqlite");
 
+    std::fs::write(
+        dir.join("probe.js"),
+        "console.log('TYPEOF:' + typeof globalThis.localStorage);",
+    )
+    .unwrap();
     std::fs::write(
         dir.join("set.js"),
         "localStorage.setItem('token', 'abc123'); console.log('SET_OK');",
@@ -1011,13 +1016,6 @@ fn webstorage_persists_across_runs_and_is_off_under_node_flag() {
     std::fs::write(
         dir.join("get.js"),
         "console.log('GOT:' + (localStorage.getItem('token') ?? 'MISSING'));",
-    )
-    .unwrap();
-    // Under --node, localStorage must be undefined (no augmentation). Guarded so the
-    // script can't throw before printing its verdict.
-    std::fs::write(
-        dir.join("probe.js"),
-        "console.log('TYPEOF:' + typeof globalThis.localStorage);",
     )
     .unwrap();
 
@@ -1035,218 +1033,52 @@ fn webstorage_persists_across_runs_and_is_off_under_node_flag() {
         )
     };
 
-    // Run 1: write a value. Run 2 (separate process): read it back.
-    let (set_out, set_err, set_code) = run(&["set.js"]);
+    // Default run: nub injects nothing → localStorage is undefined, like plain Node.
+    let (probe_out, probe_err, probe_code) = run(&["probe.js"]);
+    assert_eq!(probe_code, 0, "default probe failed: stderr={probe_err}");
+    assert!(
+        probe_out.contains("TYPEOF:undefined"),
+        "Web Storage must be OFF by default (no nub injection); got {probe_out:?} stderr: {probe_err:?}"
+    );
+    // nub must NOT have created a store of its own under the cache.
+    assert!(
+        !cache.join("nub").join("webstorage").exists(),
+        "nub must not stand up a default webstorage store"
+    );
+
+    // Opt in with a user-supplied --localstorage-file: the global comes alive and
+    // persists across invocations into the user's named store.
+    let store_arg = format!("--localstorage-file={}", user_store.display());
+    let (set_out, set_err, set_code) = run(&[&store_arg, "set.js"]);
     assert_eq!(
         set_code, 0,
-        "set run failed: stderr={set_err}\nstdout={set_out}"
+        "set with a user store failed: stderr={set_err}\nstdout={set_out}"
     );
     assert!(
         set_out.contains("SET_OK"),
-        "set run stdout: {set_out:?} stderr: {set_err:?}"
+        "user --localstorage-file must enable localStorage; stdout={set_out:?} stderr={set_err:?}"
     );
-
-    let (get_out, get_err, get_code) = run(&["get.js"]);
+    let (get_out, get_err, get_code) = run(&[&store_arg, "get.js"]);
     assert_eq!(
         get_code, 0,
-        "get run failed: stderr={get_err}\nstdout={get_out}"
+        "get failed: stderr={get_err}\nstdout={get_out}"
     );
     assert!(
         get_out.contains("GOT:abc123"),
-        "value must persist across invocations; got stdout: {get_out:?} stderr: {get_err:?}"
+        "value must persist into the user's store; got {get_out:?} stderr={get_err:?}"
     );
-
-    // The store landed under <cache>/nub/webstorage/<hash>/localstorage.sqlite.
-    let ws_root = cache.join("nub").join("webstorage");
-    let hash_dirs: Vec<_> = std::fs::read_dir(&ws_root)
-        .unwrap_or_else(|e| panic!("webstorage dir {ws_root:?} not created: {e}"))
-        .filter_map(|e| e.ok())
-        .collect();
-    assert_eq!(
-        hash_dirs.len(),
-        1,
-        "exactly one workspace hash dir expected"
-    );
-    let sqlite = hash_dirs[0].path().join("localstorage.sqlite");
-    assert!(sqlite.is_file(), "SQLite store must exist at {sqlite:?}");
-    // It's a real SQLite database, not an empty placeholder.
-    let header = std::fs::read(&sqlite).unwrap();
     assert!(
-        header.starts_with(b"SQLite format 3\0"),
-        "store must be a SQLite file; got header {:?}",
-        &header.get(..16)
-    );
-
-    // --node: vanilla Node, no injected --localstorage-file → localStorage undefined.
-    let (probe_out, probe_err, probe_code) = run(&["--node", "probe.js"]);
-    assert_eq!(probe_code, 0, "--node probe failed: stderr={probe_err}");
-    assert!(
-        probe_out.contains("TYPEOF:undefined"),
-        "`--node` must NOT inject webstorage; got {probe_out:?} stderr: {probe_err:?}"
+        user_store.is_file(),
+        "the user's --localstorage-file must be the store: {user_store:?} not found"
     );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A user-supplied POSITIVE `--experimental-webstorage` must NOT disable nub's
-/// store: under the current semantics (spawn.rs `WebstorageSuppress`, 2026-06-11)
-/// a positive flag no longer suppresses anything — nub still injects its
-/// `--localstorage-file`, so `localStorage` is live and persists. The old
-/// "positive flag = manual control = suppress both" semantics left the global
-/// DEAD (no file → `localStorage` undefined on 22.4–24.x). This guards the
-/// reversal end-to-end: setItem must round-trip across two invocations that BOTH
-/// pass the user's own `--experimental-webstorage`.
-///
-/// Band: gated `>=22.4` like its siblings. NOT skipped on `>=25`: there the
-/// positive flag is a native no-op (webstorage is on without it), but nub still
-/// injects the file, so a WORKING/persistent `localStorage` is exactly what the
-/// assertion checks — it stays meaningful across the whole 22.4+ band.
-#[test]
-fn user_positive_webstorage_flag_still_gets_a_working_localstorage() {
-    if !node_at_least((22, 4, 0)) {
-        eprintln!("skipping: webstorage needs Node >= 22.4 (target is older)");
-        return;
-    }
-    let dir = std::env::temp_dir().join(format!("nub-ws-userpos-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("package.json"), r#"{"name":"ws-userpos"}"#).unwrap();
-    let cache = dir.join("cache");
-
-    std::fs::write(
-        dir.join("set.js"),
-        "localStorage.setItem('k', 'kept'); console.log('SET_OK');",
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join("get.js"),
-        "console.log('GOT:' + (localStorage.getItem('k') ?? 'MISSING'));",
-    )
-    .unwrap();
-
-    // BOTH runs carry the user's own positive flag (argv, ahead of the file).
-    let run = |script: &str| {
-        let out = Command::new(nub_binary())
-            .args(["--experimental-webstorage", script])
-            .current_dir(&dir)
-            .env("XDG_CACHE_HOME", &cache)
-            .output()
-            .expect("failed to spawn nub");
-        (
-            String::from_utf8_lossy(&out.stdout).into_owned(),
-            String::from_utf8_lossy(&out.stderr).into_owned(),
-            out.status.code().unwrap_or(-1),
-        )
-    };
-
-    let (set_out, set_err, set_code) = run("set.js");
-    assert_eq!(
-        set_code, 0,
-        "set under a user --experimental-webstorage must not crash: stderr={set_err}\nstdout={set_out}"
-    );
-    assert!(
-        set_out.contains("SET_OK"),
-        "localStorage.setItem must work with the user's positive flag; stdout={set_out:?} stderr={set_err:?}"
-    );
-
-    let (get_out, get_err, get_code) = run("get.js");
-    assert_eq!(
-        get_code, 0,
-        "get run failed: stderr={get_err}\nstdout={get_out}"
-    );
-    assert!(
-        get_out.contains("GOT:kept"),
-        "the positive flag must NOT suppress nub's file — the value must persist; got {get_out:?} stderr={get_err:?}"
-    );
-
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// Regression for the unquoted-NODE_OPTIONS BLOCKER: a `--localstorage-file` whose
-/// path contains a SPACE must survive Node's NODE_OPTIONS tokenizer, which splits
-/// unquoted runs on spaces. The script-runner path (`nub run`) carries webstorage
-/// via NODE_OPTIONS (scripts run under a shell, so flags travel through the env,
-/// not argv) — so a spacey `XDG_CACHE_HOME` here exercises the exact path that
-/// silently dropped persistence (exit 0, value gone) before quoting was added.
-#[test]
-fn webstorage_persists_through_node_options_with_spacey_cache_path() {
-    if !node_at_least((22, 4, 0)) {
-        eprintln!("skipping: webstorage needs Node >= 22.4 (target is older)");
-        return;
-    }
-    let dir = std::env::temp_dir().join(format!("nub-ws-space-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("package.json"), r#"{"name":"ws-space"}"#).unwrap();
-    // The space is the whole point — the previously-broken case.
-    let cache = dir.join("nub cache dir");
-
-    std::fs::write(
-        dir.join("set.js"),
-        "localStorage.setItem('k', 'persisted'); console.log('SET_OK');",
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join("get.js"),
-        "console.log('GOT:' + (localStorage.getItem('k') ?? 'MISSING'));",
-    )
-    .unwrap();
-
-    let run = |script: &str| {
-        // `nub run <script>` routes webstorage through NODE_OPTIONS (vs. `nub <file>`,
-        // which uses argv) — the assembly path the BLOCKER lived in.
-        let out = Command::new(nub_binary())
-            .args(["run", script])
-            .current_dir(&dir)
-            .env("XDG_CACHE_HOME", &cache)
-            .output()
-            .expect("failed to spawn nub");
-        (
-            String::from_utf8_lossy(&out.stdout).into_owned(),
-            String::from_utf8_lossy(&out.stderr).into_owned(),
-            out.status.code().unwrap_or(-1),
-        )
-    };
-    // Use package.json scripts so the runner takes the NODE_OPTIONS path.
-    std::fs::write(
-        dir.join("package.json"),
-        r#"{"name":"ws-space","scripts":{"set":"node set.js","get":"node get.js"}}"#,
-    )
-    .unwrap();
-
-    let (set_out, set_err, set_code) = run("set");
-    assert_eq!(
-        set_code, 0,
-        "set run failed: stderr={set_err}\nstdout={set_out}"
-    );
-    assert!(
-        set_out.contains("SET_OK"),
-        "set stdout: {set_out:?} stderr: {set_err:?}"
-    );
-
-    let (get_out, get_err, get_code) = run("get");
-    assert_eq!(
-        get_code, 0,
-        "get run failed: stderr={get_err}\nstdout={get_out}"
-    );
-    assert!(
-        get_out.contains("GOT:persisted"),
-        "value must persist through a spacey-cache NODE_OPTIONS path; got stdout: {get_out:?} stderr: {get_err:?}"
-    );
-
-    // The store really landed under the spacey cache dir (not a fragmented path).
-    let ws_root = cache.join("nub").join("webstorage");
-    assert!(
-        ws_root.is_dir(),
-        "webstorage dir must exist under the spacey cache: {ws_root:?}"
-    );
-
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// A user-set `NODE_OPTIONS=--localstorage-file=<their path>` must win: nub must
-/// NOT clobber it with its own workspace store (the owner's no-clobber rule). The
-/// user's file gets the data; nub's cache dir stays empty of a webstorage store.
+/// A user-set `NODE_OPTIONS=--localstorage-file=<their path>` must reach Node
+/// untouched: nub never injects its own store and never strips the user's, so the
+/// user's file gets the data and nub's cache dir stays empty of any webstorage
+/// store. (Pure passthrough — nub adds no webstorage flags of its own.)
 #[test]
 fn user_node_options_localstorage_file_is_not_clobbered() {
     if !node_at_least((22, 4, 0)) {

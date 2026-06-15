@@ -170,15 +170,6 @@ pub struct SpawnConfig<'a> {
     pub nub_binary: &'a Path,
     /// Parsed .env vars to inject into the child environment.
     pub env_vars: &'a std::collections::HashMap<String, String>,
-    /// Project root directory (for webstorage path computation).
-    pub project_root: Option<&'a Path>,
-    /// The already-resolved webstorage SCOPE root, when the caller has detected
-    /// it (workspace root if any, else the project root). Threading it avoids a
-    /// redundant filesystem walk in `compute_localstorage_path` — material under
-    /// `nub run -r`, where every member would otherwise re-walk (and re-emit the
-    /// dir-creation warning) for the same shared store. `None` lets the path
-    /// computation walk up from `project_root` itself.
-    pub webstorage_scope_root: Option<&'a Path>,
     /// Yarn PnP `.pnp.cjs` path (from `nub_core::pnp::detect`), injected via
     /// `--require` ahead of nub's own preload so PnP's resolver patches install
     /// first. `None` when not in a PnP tree.
@@ -307,40 +298,14 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
             cmd.arg(flag);
         }
 
-        // Webstorage: give `nub <file>` a working, persistent `localStorage` by
-        // default (the whitepaper promise). Two pieces, gated separately:
-        //   • `--experimental-webstorage` — only on Node 22.4–24.x, where the
-        //     feature is still flag-gated. Native (defaults on) at 25+, so we leave
-        //     it off there to stay close to plain-Node argv (it'd be a no-op alias).
-        //   • `--localstorage-file=<path>` — on EVERY Node >= 22.4, INCLUDING 25/26.
-        //     This is what actually materializes the global: without the file Node
-        //     leaves `localStorage` undefined (and throws on access) regardless of
-        //     the experimental flag. The path is workspace-keyed so members of one
-        //     workspace share a store and unrelated projects stay isolated.
-        // `--experimental-webstorage` is part of the nub contract — injected
-        // UNCONDITIONALLY within band, EXCEPT when the user explicitly disabled
-        // the feature (the maintainer, 2026-06-11). Respect the user, granularly:
-        //   • `--localstorage-file` (argv or NODE_OPTIONS) suppresses only nub's
-        //     FILE — the banded flag is still injected so the user's store
-        //     materializes on 22.4–24.x.
-        //   • `--no-experimental-webstorage` suppresses BOTH (their disable wins;
-        //     a file alone is a dead store under it).
-        //   • a POSITIVE user `--experimental-webstorage` suppresses NOTHING — a
-        //     duplicate boolean flag is idempotent (verified), so nub's copy
-        //     rides alongside harmlessly.
-        // Below 22.4 both flags are "bad option" — the compat tier runs without
-        // them. (These are argv, not NODE_OPTIONS, so no quoting is needed.)
-        let own = user_webstorage_suppression(config.user_args, node_options.as_deref());
-        if !own.flag && flags::webstorage_flag_needed(&config.node.version) {
-            cmd.arg("--experimental-webstorage");
-        }
-        if !own.file && flags::webstorage_supported(&config.node.version) {
-            if let Some(storage_path) =
-                compute_localstorage_path(config.project_root, config.webstorage_scope_root)
-            {
-                cmd.arg(format!("--localstorage-file={}", storage_path.display()));
-            }
-        }
+        // Web Storage is OPT-IN (the maintainer, 2026-06-14): nub injects NEITHER
+        // `--experimental-webstorage` NOR a default `--localstorage-file=<path>`.
+        // `localStorage` / `sessionStorage` are therefore `undefined` by default,
+        // exactly as on plain Node. A user who wants them passes their own
+        // `--localstorage-file=...` and/or `--experimental-webstorage` (argv or
+        // NODE_OPTIONS); nub leaves those flags untouched so they reach Node as-is.
+        // (This reverses the prior default-on "whitepaper promise" — nub no longer
+        // materializes a persistent, workspace-keyed store on the user's behalf.)
 
         // PATH shim: prepend a temp dir with a `node` symlink → nub.
         if let Ok(shim_dir) = setup_path_shim(config.nub_binary) {
@@ -535,30 +500,10 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
                 }
             }
         }
-        // Webstorage via NODE_OPTIONS too: the argv `--localstorage-file` above only
-        // reaches the DIRECT child. A hardcoded-path `node` grandchild (e.g. a
-        // script's `spawn(process.execPath, …)`) inherits the preload through
-        // NODE_OPTIONS but, without the store here, gets `localStorage` undefined —
-        // and on Node 26 it THROWS on first access. Mirror the argv site exactly:
-        // same version-banded gating, same user-override suppression, plus
-        // NODE_OPTIONS-safe quoting. The direct child sees these in both argv and
-        // NODE_OPTIONS, but the value is identical (nub's computed path), so the
-        // last-wins duplicate is a harmless no-op — same shape as the preload token,
-        // which already rides both surfaces.
-        let own_env = user_webstorage_suppression(config.user_args, existing_opts.as_deref());
-        if !own_env.flag && flags::webstorage_flag_needed(&config.node.version) {
-            node_opts_parts.push("--experimental-webstorage".to_string());
-        }
-        if !own_env.file && flags::webstorage_supported(&config.node.version) {
-            if let Some(storage_path) =
-                compute_localstorage_path(config.project_root, config.webstorage_scope_root)
-            {
-                node_opts_parts.push(format!(
-                    "--localstorage-file={}",
-                    node_options_quote(&storage_path.display().to_string())
-                ));
-            }
-        }
+        // Web Storage is opt-in (see the argv site above): nub injects no
+        // `--experimental-webstorage` / `--localstorage-file` into NODE_OPTIONS
+        // either. A user-set `NODE_OPTIONS=--localstorage-file=...` is preserved
+        // verbatim by the `existing_opts` passthrough below.
         if let Some(existing) = existing_opts {
             node_opts_parts.push(existing);
         }
@@ -765,8 +710,9 @@ fn setup_path_shim(nub_binary: &Path) -> Result<Utf8PathBuf> {
 
 /// Compute the augmentation environment variables (NODE_OPTIONS + PATH)
 /// that script runners need to set on child shells so that `node` invocations
-/// inside scripts get nub's transpilation, polyfills, flag injection, and
-/// webstorage — the same augmentation `nub <file>` applies via direct args.
+/// inside scripts get nub's transpilation, polyfills, and flag injection — the
+/// same augmentation `nub <file>` applies via direct args. (Web Storage is
+/// opt-in and never injected here; see `spawn_node`.)
 ///
 /// Returns `None` if already re-entrant (parent nub already set up augmentation)
 /// or if compat mode is active.
@@ -780,8 +726,6 @@ pub fn compute_augmentation_env(
     nub_binary: &Path,
     node_version: super::version::NodeVersion,
     compat_mode: bool,
-    project_root: Option<&Path>,
-    scope_root: Option<&Path>,
     pnp: Option<&Path>,
 ) -> Option<AugmentationEnv> {
     if compat_mode {
@@ -835,29 +779,10 @@ pub fn compute_augmentation_env(
         ));
     }
     node_opts_parts.push(injection.node_options_token());
-    // Webstorage, default-on with a workspace-keyed localstorage file — matches
-    // the whitepaper promise and `spawn_node`. Same two-piece gating: the
-    // experimental flag only on 22.4–24.x (native at 25+), the --localstorage-file
-    // on every Node >= 22.4 (it's what actually exposes + persists the global).
-    // Granular user suppression (same rule as `spawn_node`, see
-    // `user_webstorage_suppression`): a user `--localstorage-file` (argv/NODE_OPTIONS)
-    // suppresses only nub's file; `--no-experimental-webstorage` suppresses both;
-    // a positive `--experimental-webstorage` suppresses nothing (idempotent dup).
-    // Below 22.4 both flags are "bad option" and abort the process — so
-    // version-gated. The value is quoted so a spacey cache path survives Node's
-    // NODE_OPTIONS tokenizer (finding 1/3).
-    let own = user_webstorage_suppression(&[], existing_node_options.as_deref());
-    if !own.flag && flags::webstorage_flag_needed(&node_version) {
-        node_opts_parts.push("--experimental-webstorage".to_string());
-    }
-    if !own.file && flags::webstorage_supported(&node_version) {
-        if let Some(storage_path) = compute_localstorage_path(project_root, scope_root) {
-            node_opts_parts.push(format!(
-                "--localstorage-file={}",
-                node_options_quote(&storage_path.display().to_string())
-            ));
-        }
-    }
+    // Web Storage is opt-in (the maintainer, 2026-06-14) — nub injects no
+    // `--experimental-webstorage` / `--localstorage-file` here, matching
+    // `spawn_node`. A user-set `NODE_OPTIONS=--localstorage-file=...` rides through
+    // unchanged via the `existing_node_options` passthrough below.
     if let Some(existing) = existing_node_options {
         node_opts_parts.push(existing);
     }
@@ -1116,8 +1041,8 @@ impl PreloadInjection {
 /// Values WITHOUT a space are returned unchanged: they tokenize fine bare, and
 /// not quoting them keeps NODE_OPTIONS readable and matches plain-Node argv.
 /// Use this for EVERY value-bearing flag nub writes into NODE_OPTIONS
-/// (`--localstorage-file=`, `--test-coverage-exclude=`, the preload
-/// `--require=`/`--import=` token, PnP `--require=`).
+/// (`--test-coverage-exclude=`, the preload `--require=`/`--import=` token,
+/// PnP `--require=`).
 fn node_options_quote(value: &str) -> String {
     if value.contains(' ') {
         let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
@@ -1125,71 +1050,6 @@ fn node_options_quote(value: &str) -> String {
     } else {
         value.to_string()
     }
-}
-
-/// Which webstorage pieces nub must SUPPRESS because the user already controls
-/// them — scanned across BOTH surfaces (argv + inherited NODE_OPTIONS).
-///
-/// `--experimental-webstorage` is part of the nub contract (the maintainer, 2026-06-11):
-/// within its version band nub injects it UNCONDITIONALLY, *except* when the user
-/// explicitly disabled the feature with `--no-experimental-webstorage`. The three
-/// user spellings map as follows:
-///
-/// - **`--no-experimental-webstorage`** (argv or NODE_OPTIONS) — the user
-///   explicitly disabled Web Storage. Suppress BOTH the flag AND nub's file: a
-///   `--localstorage-file` alongside `--no-experimental-webstorage` leaves
-///   `localStorage` undefined anyway (verified: Node 22.15 AND native 26.2 both
-///   report `undefined` for `--no-experimental-webstorage --localstorage-file`),
-///   so the file would only be a dead store. nub injects nothing → plain-Node
-///   behavior with their flag.
-/// - **`--localstorage-file`** (argv or NODE_OPTIONS) — the user named their own
-///   store. Suppress only nub's FILE (never clobber the user's store); nub STILL
-///   injects the banded `--experimental-webstorage` so the user's file actually
-///   materializes on 22.4–24.x (without the flag, file alone → `localStorage`
-///   undefined there — verified on 22.15).
-/// - **`--experimental-webstorage`** (POSITIVE, user-supplied) — no longer
-///   suppresses anything. A duplicate boolean flag is idempotent in Node
-///   (verified: argv×2 and argv+NODE_OPTIONS both exit 0, feature ENABLED), so
-///   nub's own injection rides harmlessly alongside the user's and the file is
-///   still injected to materialize the global. This reverses the prior
-///   "positive flag = manual control = suppress both" semantics.
-struct WebstorageSuppress {
-    file: bool,
-    flag: bool,
-}
-
-fn user_webstorage_suppression(
-    user_args: &[String],
-    node_options: Option<&str>,
-) -> WebstorageSuppress {
-    let mut own = WebstorageSuppress {
-        file: false,
-        flag: false,
-    };
-    let mut scan = |tok: &str| {
-        if tok.starts_with("--localstorage-file") {
-            own.file = true;
-        }
-        if tok == "--no-experimental-webstorage" {
-            // Explicit disable: nub injects nothing (a file alone leaves
-            // localStorage undefined under --no-experimental-webstorage anyway).
-            own.flag = true;
-            own.file = true;
-        }
-        // A POSITIVE `--experimental-webstorage` is intentionally NOT handled:
-        // it no longer suppresses nub's injection (duplicate boolean is
-        // idempotent — verified). nub injects the flag unconditionally within
-        // band; the user's copy is a harmless duplicate.
-    };
-    for a in user_args {
-        scan(a);
-    }
-    if let Some(opts) = node_options {
-        for tok in opts.split_whitespace() {
-            scan(tok);
-        }
-    }
-    own
 }
 
 /// Pick the preload injection for a Node version, given the located ESM preload
@@ -1278,76 +1138,6 @@ fn find_preload(nub_binary: &Path) -> Option<String> {
     None
 }
 
-/// The webstorage scope root: the directory whose hash keys the localStorage file,
-/// so every entry point under one project shares one store. Resolution order
-/// (matching `shim_lockfile_root`): workspace root (pnpm-workspace.yaml /
-/// package.json#workspaces) → nearest package.json walking up → the starting dir
-/// itself. `start` is the caller's project root (or cwd); `detect_project` walks up
-/// from it, so handing it a package.json root still surfaces the enclosing
-/// workspace when there is one. Two members of the same workspace thus resolve to
-/// the SAME root (and the same file); two unrelated projects resolve to different
-/// roots. The path is canonicalized so symlinked / relative spellings of one
-/// project don't fragment into separate stores.
-fn webstorage_scope_root(start: &Path) -> PathBuf {
-    let resolved = crate::workspace::detect::detect_project(start)
-        .map(|p| p.workspace_root.unwrap_or(p.root))
-        .unwrap_or_else(|| start.to_path_buf());
-    fs::canonicalize(&resolved).unwrap_or(resolved)
-}
-
-/// Compute the default `--localstorage-file` path for webstorage, scoped by
-/// WORKSPACE. Path: `<cache>/webstorage/<hash>/localstorage.sqlite` where `<cache>`
-/// is nub's cache root (`$XDG_CACHE_HOME/nub` or `~/.cache/nub`) and `<hash>` is the
-/// first 16 hex chars of SHA-256 over the canonicalized workspace-scope root (see
-/// `webstorage_scope_root`).
-///
-/// Returns `None` — and webstorage injection is skipped — when the cache root can't
-/// be located OR the per-workspace directory can't be created (e.g. a read-only
-/// HOME). A failed store must NOT brick `nub script.ts`: SQLite creates the file but
-/// not its parent dir, and handing Node a `--localstorage-file` under a
-/// non-creatable dir would abort the run, so on dir-creation failure we emit a
-/// one-line stderr warning and run without webstorage instead.
-fn compute_localstorage_path(
-    project_root: Option<&Path>,
-    scope_root: Option<&Path>,
-) -> Option<PathBuf> {
-    // Prefer a scope root the caller already resolved (no re-walk); otherwise walk
-    // up from project_root (or cwd) ourselves.
-    let cwd_fallback = env::current_dir().ok();
-    let root = match scope_root {
-        Some(s) => fs::canonicalize(s).unwrap_or_else(|_| s.to_path_buf()),
-        None => {
-            let start = project_root.or(cwd_fallback.as_deref())?;
-            webstorage_scope_root(start)
-        }
-    };
-
-    let base = env::var("XDG_CACHE_HOME")
-        .ok()
-        .map(PathBuf::from)
-        .or_else(|| dirs_next::home_dir().map(|h| h.join(".cache")))?;
-
-    use sha2::{Digest, Sha256};
-    let full_hex = crate::pm::hex_lower(&Sha256::digest(root.to_string_lossy().as_bytes()));
-    let hash = &full_hex[..16];
-
-    let storage_dir = base.join("nub").join("webstorage").join(hash);
-    if let Err(e) = fs::create_dir_all(&storage_dir) {
-        // Warn AT MOST ONCE per process: `nub run -r` calls this per package, and a
-        // read-only HOME would otherwise repeat the same line for every member.
-        static WARNED: std::sync::Once = std::sync::Once::new();
-        WARNED.call_once(|| {
-            eprintln!(
-                "nub: webstorage disabled — could not create {}: {e}",
-                storage_dir.display()
-            );
-        });
-        return None;
-    }
-
-    Some(storage_dir.join("localstorage.sqlite"))
-}
-
 /// Resolve the path to the currently running Nub binary (follows symlinks).
 pub fn current_nub_binary() -> Result<PathBuf> {
     let exe = env::current_exe().context("could not determine path to nub binary")?;
@@ -1428,64 +1218,6 @@ mod tests {
         );
         // An embedded double-quote in a spacey value is backslash-escaped.
         assert_eq!(node_options_quote(r#"/tmp/a "b" c"#), r#""/tmp/a \"b\" c""#);
-    }
-
-    #[test]
-    fn webstorage_suppression_follows_the_contract_semantics() {
-        // The nub contract (the maintainer, 2026-06-11): `--experimental-webstorage` is
-        // injected UNCONDITIONALLY within band, EXCEPT when the user disabled the
-        // feature with `--no-experimental-webstorage`. So suppression is granular:
-        //   • a POSITIVE user `--experimental-webstorage` suppresses NOTHING
-        //     (idempotent duplicate — reversed from the prior "manual control"),
-        //   • `--no-experimental-webstorage` suppresses BOTH flag and file,
-        //   • a user `--localstorage-file` suppresses ONLY nub's file.
-        let own = |args: &[&str], env: Option<&str>| {
-            let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-            user_webstorage_suppression(&args, env)
-        };
-
-        // Baseline: nothing set → nub injects both pieces.
-        let o = own(&[], None);
-        assert!(!o.file && !o.flag, "nothing set: nub injects flag + file");
-        let o = own(&["script.js"], Some("--enable-source-maps"));
-        assert!(!o.file && !o.flag);
-
-        // POSITIVE user flag (argv or NODE_OPTIONS) suppresses NOTHING — nub still
-        // injects its own copy (a duplicate boolean is an idempotent no-op).
-        for o in [
-            own(&["--experimental-webstorage"], None),
-            own(&[], Some("--experimental-webstorage")),
-        ] {
-            assert!(
-                !o.file && !o.flag,
-                "a positive --experimental-webstorage must NOT suppress nub's injection"
-            );
-        }
-
-        // A user file (argv `=` form, argv two-token form, or NODE_OPTIONS env)
-        // suppresses the FILE only — nub must still inject the banded experimental
-        // flag so the user's store materializes on 22.4–24.x (the CI-caught case).
-        for o in [
-            own(&["--localstorage-file=/my/store.sqlite"], None),
-            own(&["--localstorage-file", "/my/store.sqlite"], None),
-            own(
-                &[],
-                Some("--enable-source-maps --localstorage-file=/my/store.sqlite"),
-            ),
-        ] {
-            assert!(o.file, "user file must suppress nub's file");
-            assert!(!o.flag, "user file must NOT suppress the flag");
-        }
-
-        // Explicit DISABLE (argv or env) → nub injects nothing: a file alone
-        // leaves localStorage undefined under --no-experimental-webstorage anyway
-        // (verified on 22.15 AND native 26.2), so the file would be a dead store.
-        for o in [
-            own(&["--no-experimental-webstorage"], None),
-            own(&[], Some("--no-experimental-webstorage")),
-        ] {
-            assert!(o.file && o.flag, "explicit disable suppresses both");
-        }
     }
 
     // `ctrl_c::CURRENT_CHILD` is a process-global AtomicU32. The two tests that
@@ -1778,124 +1510,6 @@ mod tests {
             PathBuf::from("C:\\Temp")
         );
         assert_eq!(resolve(&[("TEMP", "C:\\")]), PathBuf::from("C:\\"));
-    }
-
-    /// A throwaway dir under the temp root, unique per call and removed on drop.
-    /// (nub-core has no `tempfile` dev-dep; this mirrors the PID+nanos pattern the
-    /// signal tests use.)
-    struct TempDir(PathBuf);
-    impl TempDir {
-        fn new(tag: &str) -> Self {
-            let p = env::temp_dir().join(format!(
-                "nub-ws-{tag}-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-            fs::create_dir_all(&p).unwrap();
-            TempDir(p)
-        }
-        fn path(&self) -> &Path {
-            &self.0
-        }
-    }
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
-    #[test]
-    fn webstorage_scope_is_keyed_on_the_workspace_root() {
-        // Two members of ONE pnpm workspace must resolve to the SAME scope root (and
-        // thus share one localStorage file); two unrelated projects must resolve to
-        // DIFFERENT roots. This is the whole point of workspace-scoping — a monorepo's
-        // packages see each other's storage, separate repos stay isolated.
-        let ws = TempDir::new("mono");
-        fs::write(
-            ws.path().join("pnpm-workspace.yaml"),
-            "packages:\n  - 'packages/*'\n",
-        )
-        .unwrap();
-        // A committed pnpm-lock.yaml makes pnpm the incumbent PM — without it the
-        // brand hard gate (AGENTS.md) refuses to read the pnpm-NAMED workspace file,
-        // so detect_project would not treat this dir as the workspace root.
-        fs::write(ws.path().join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").unwrap();
-        fs::write(ws.path().join("package.json"), r#"{"name":"root"}"#).unwrap();
-        let pkg_a = ws.path().join("packages/a");
-        let pkg_b = ws.path().join("packages/b");
-        fs::create_dir_all(&pkg_a).unwrap();
-        fs::create_dir_all(&pkg_b).unwrap();
-        fs::write(pkg_a.join("package.json"), r#"{"name":"a"}"#).unwrap();
-        fs::write(pkg_b.join("package.json"), r#"{"name":"b"}"#).unwrap();
-
-        let root_a = webstorage_scope_root(&pkg_a);
-        let root_b = webstorage_scope_root(&pkg_b);
-        assert_eq!(
-            root_a, root_b,
-            "members of one workspace must share a scope root"
-        );
-        assert_eq!(
-            root_a,
-            fs::canonicalize(ws.path()).unwrap(),
-            "the shared root is the workspace root, not the member dir"
-        );
-
-        // A standalone project (no workspace ancestor) resolves to its own package.json.
-        let solo = TempDir::new("solo");
-        fs::write(solo.path().join("package.json"), r#"{"name":"solo"}"#).unwrap();
-        let root_solo = webstorage_scope_root(solo.path());
-        assert_ne!(
-            root_solo, root_a,
-            "an unrelated project must get a different scope root"
-        );
-    }
-
-    #[test]
-    fn localstorage_path_is_stable_and_workspace_distinct() {
-        // Same project → identical computed file path across calls (so persistence
-        // works run-to-run); different projects → different hash dirs (isolation).
-        // The filename is `localstorage.sqlite` under <cache>/nub/webstorage/<hash>/.
-        // (We do NOT mutate XDG_CACHE_HOME — that's an unsafe data race against
-        // parallel tests, per manage.rs:60 — so we read the real cache base the same
-        // way the function does and clean up the hash dirs we create.)
-        let proj1 = TempDir::new("p1");
-        fs::write(proj1.path().join("package.json"), r#"{"name":"p1"}"#).unwrap();
-        let proj2 = TempDir::new("p2");
-        fs::write(proj2.path().join("package.json"), r#"{"name":"p2"}"#).unwrap();
-
-        let a1 = compute_localstorage_path(Some(proj1.path()), None).unwrap();
-        let a2 = compute_localstorage_path(Some(proj1.path()), None).unwrap();
-        let b = compute_localstorage_path(Some(proj2.path()), None).unwrap();
-        // Clean up the hash dirs we just created under the real cache root.
-        let _ = fs::remove_dir_all(a1.parent().unwrap());
-        let _ = fs::remove_dir_all(b.parent().unwrap());
-
-        assert_eq!(a1, a2, "same project must produce a stable path");
-        assert_ne!(a1, b, "different projects must land in different hash dirs");
-        assert_eq!(a1.file_name().unwrap(), "localstorage.sqlite");
-
-        let webstorage_root = a1.parent().unwrap().parent().unwrap();
-        assert_eq!(
-            webstorage_root.file_name().unwrap(),
-            "webstorage",
-            "file must live under .../webstorage/<hash>/: {}",
-            a1.display()
-        );
-        assert_eq!(
-            webstorage_root.parent().unwrap().file_name().unwrap(),
-            "nub"
-        );
-        // The 16-hex-char hash dir name (first 16 of SHA-256).
-        let hash = a1.parent().unwrap().file_name().unwrap().to_str().unwrap();
-        assert_eq!(
-            hash.len(),
-            16,
-            "hash dir is first-16-hex of SHA-256: {hash}"
-        );
-        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]

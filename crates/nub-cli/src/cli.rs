@@ -1580,12 +1580,6 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path) -> Result<i32
     // .env, these apply even in compat mode — they're an explicit user flag, matching
     // the prior process-env behavior.
     overlay_env_file_vars(&mut env_vars);
-    let project_root = project.as_ref().map(|p| p.root.as_path());
-    // The webstorage scope root: workspace root if any, else the project root.
-    // Already resolved by detect_project above — thread it so spawn doesn't re-walk.
-    let scope_root = project
-        .as_ref()
-        .map(|p| p.workspace_root.as_deref().unwrap_or(p.root.as_path()));
 
     let nub_binary = nub_core::node::spawn::current_nub_binary()?;
     // Yarn PnP: inject the user's own `.pnp.cjs` (spawn.rs gates this on
@@ -1598,8 +1592,6 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path) -> Result<i32
         show_warnings: SHOW_WARNINGS.load(Ordering::Relaxed),
         nub_binary: &nub_binary,
         env_vars: &env_vars,
-        project_root,
-        webstorage_scope_root: scope_root,
         pnp: pnp_ctx.as_ref().map(|c| c.pnp_cjs.as_path()),
         cwd,
     };
@@ -2396,10 +2388,6 @@ fn build_script_command(
         &nub_binary,
         node.version,
         compat_mode,
-        Some(&project.root),
-        // Already-resolved scope root (workspace root if any, else project root) —
-        // threaded so webstorage path computation doesn't re-walk per script.
-        Some(project.workspace_root.as_deref().unwrap_or(&project.root)),
         pnp_ctx.as_ref().map(|c| c.pnp_cjs.as_path()),
     );
 
@@ -3110,10 +3098,6 @@ fn apply_exec_augmentation(cmd: &mut std::process::Command, cwd: &Path) {
         &nub_binary,
         node.version,
         false,
-        Some(cwd),
-        // No pre-detected project here (this is the non-node launcher path) — let
-        // the path computation walk up from `cwd` itself.
-        None,
         pnp_ctx.as_ref().map(|c| c.pnp_cjs.as_path()),
     ) else {
         return;

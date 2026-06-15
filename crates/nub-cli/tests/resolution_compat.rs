@@ -107,45 +107,18 @@ fn passes(bin: &Path, test: &Path, suite: &Path) -> bool {
 }
 
 /// Accepted augmented-mode divergences — verified NOT to be resolution bugs.
-/// Each was traced to nub's default webstorage augmentation (the
-/// `--experimental-webstorage` flag plus nub's warning suppression), not its
-/// resolver: every one passes under `node --import=<preload>` (nub's resolution
-/// hooks active) and fails under `node --experimental-webstorage` (the flag,
-/// hooks absent). They assert on exact stderr / expected warnings / re-spawned
-/// child flags, which that augmentation perturbs. So nub's thin
-/// resolver-over-Node matches Node across the resolution subset — zero genuine
-/// resolution divergences. See wiki/research/resolution-conformance.md.
 /// Format: (test path relative to the suite, reason).
-const KNOWN_DIVERGENCES: &[(&str, &str)] = &[
-    (
-        "es-module/test-esm-cjs-named-error.mjs",
-        "webstorage augmentation, not resolution",
-    ),
-    (
-        "es-module/test-esm-exports-deprecations.mjs",
-        "webstorage augmentation, not resolution",
-    ),
-    (
-        "es-module/test-esm-imports-deprecations.mjs",
-        "webstorage augmentation, not resolution",
-    ),
-    (
-        "es-module/test-esm-extensionless-esm-and-wasm.mjs",
-        "webstorage augmentation, not resolution",
-    ),
-    (
-        "es-module/test-require-module-cycle-esm-cjs-esm.js",
-        "webstorage augmentation, not resolution",
-    ),
-    (
-        "es-module/test-require-module-cycle-esm-cjs-esm-esm.js",
-        "webstorage augmentation, not resolution",
-    ),
-    (
-        "es-module/test-require-module-cycle-esm-esm-cjs-esm-esm.js",
-        "webstorage augmentation, not resolution",
-    ),
-];
+///
+/// Empty since 2026-06-14: every prior entry was traced to nub's DEFAULT
+/// webstorage augmentation (the `--experimental-webstorage` flag plus warning
+/// suppression), which perturbed exact-stderr / expected-warning / re-spawned-
+/// child-flag assertions — not the resolver. Web Storage is now opt-in (nub
+/// injects neither flag by default; see spawn.rs), so those tests no longer
+/// diverge and their entries were removed. nub's thin resolver-over-Node matches
+/// Node across the resolution subset with zero genuine resolution divergences.
+/// Re-add an entry here only for a NEW, verified non-resolution divergence.
+/// See wiki/research/resolution-conformance.md.
+const KNOWN_DIVERGENCES: &[(&str, &str)] = &[];
 
 /// Resolution-parity corpus — discovers the resolution-relevant Node-suite tests
 /// and runs each twice (augmented + baseline Node) to compare. Like
