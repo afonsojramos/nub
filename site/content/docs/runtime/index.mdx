@@ -1,11 +1,11 @@
 ---
 title: Runtime
-description: What nub adds when it runs your code on stock Node — TypeScript, resolution, env loading, data imports, and modern globals — and the --node escape hatch that turns it all off.
+description: What Nub adds when it runs your code on stock Node — TypeScript, resolution, env loading, data imports, and modern globals — and the --node escape hatch that turns it all off.
 ---
 
 The top-level `nub <file>` command runs a file on the `node` you already have installed. It is a true drop-in for `node <file>` — same argv shape, same flag set, same behavior — and on top of that it augments the runtime: TypeScript and JSX execute directly, imports resolve the way your editor resolves them, `.env*` files load automatically, data files import as parsed values, and modern web/TC39 globals are present even on older Node.
 
-Nub registers a `module.registerHooks()` load hook and injects a small preload, then gets out of the way. Every augmentation rides on Node's own extension surfaces, so nothing here changes how existing Node code behaves — it only adds.
+Nub registers a `module.registerHooks()` load hook and injects a small preload. Every augmentation rides on Node's own extension surfaces.
 
 ```bash
 nub index.ts
@@ -14,12 +14,25 @@ nub script.js
 ```
 
 <Callout title="Supported Node versions">
-Nub runs your code on stock Node — it resolves which Node your project pins and fetches one if it's missing, but never ships a runtime of its own. The supported floor is **Node 18.19+**; below that nub refuses to run. Node 18.19–22.14 use the compatibility tier (async `module.register()` loader-worker) and 22.15+ use the fast path (sync `module.registerHooks()`) — functionally equivalent, differing only in startup overhead. See [Managing Node versions](/docs/node) for pinning and pre-installing.
+Nub runs your code on stock Node — it resolves which Node your project pins and fetches one if it's missing, but never ships a runtime of its own. The supported floor is **Node 18.19+**; below that Nub refuses to run. Node 18.19–22.14 use the compatibility tier (async `module.register()` loader-worker) and 22.15+ use the fast path (sync `module.registerHooks()`) — functionally equivalent, differing only in startup overhead. See [Managing Node versions](/docs/node) for pinning and pre-installing.
 </Callout>
 
 ## A drop-in for `node`
 
-Anything `node <args>` accepts, `nub <args>` accepts too. Pass-through is the default for the entire flag space: diagnostics (`--prof`, `--cpu-prof`, `--report-*`), module-resolution flags (`--conditions`, `--preserve-symlinks`), inspector flags (`--inspect`, `--inspect-brk`), and warning flags (`--no-warnings`, `--trace-deprecation`) all reach Node verbatim. Reading a program from stdin works the same way `node -` does.
+Anything `node <args>` accepts, `nub <args>` accepts too. Pass-through is the default for the entire flag space — every flag reaches Node verbatim:
+
+```bash
+# diagnostics
+--prof  --cpu-prof  --report-*
+# module resolution
+--conditions  --preserve-symlinks
+# inspector
+--inspect  --inspect-brk
+# warnings
+--no-warnings  --trace-deprecation
+```
+
+Reading a program from stdin works the same way `node -` does.
 
 ```bash
 nub --max-old-space-size=4096 build.ts
@@ -37,7 +50,7 @@ In brief:
 - **[Decorators](/docs/runtime/decorators)** — legacy decorators run with no build step under `experimentalDecorators`, including `emitDecoratorMetadata` for the DI / ORM ecosystem.
 - **[Resolution](/docs/runtime/resolution)** — extensionless imports, `.js → .ts` rewriting, and `tsconfig.json` path aliases resolve at runtime, the way `tsc` and your editor resolve them.
 - **[Environment variables](/docs/runtime/env)** — `.env*` files load into the environment before Node starts, with `${VAR}` expansion. No `dotenv`, no `--env-file`.
-- **[Loaders](/docs/runtime/loaders)** — import `.yaml`, `.toml`, `.jsonc`, `.json5`, and `.txt` files directly as parsed values, with no npm parser and no claimed import specifiers.
+- **[Loaders](/docs/runtime/loaders)** — import `.yaml`, `.toml`, `.jsonc`, `.json5`, and `.txt` files directly as parsed values, with no npm parser.
 - **[Modern APIs](#modern-apis)** — modern globals and built-ins (Temporal, URLPattern, WebSocket, EventSource, node:sqlite, and more) work out of the box, polyfilled or unflagged per Node-version band.
 - **[Workers](/docs/runtime/workers)** — the browser-shape `Worker` global runs your `.ts` entry points, wrapping `node:worker_threads`.
 - **[Web Storage](/docs/runtime/web-storage)** — `localStorage` / `sessionStorage` behavior and the opt-in that backs persistent storage.
@@ -48,7 +61,7 @@ In brief:
 Most of these globals are already typed by `@types/node` 26 — use that version and they typecheck with no extra setup. The one exception is `reportError`, which lives in nub's own types package; install it if you call that.
 </TypesSetup>
 
-Modern globals — TC39, web-platform, and newer Node built-ins — work out of the box under nub. Whatever Node version you run, the API is there — native where Node ships it, and where Node doesn't, nub fills the gap automatically. You write against the API; the version split is nub's problem, not yours.
+Modern globals — TC39, web-platform, and newer Node built-ins — work out of the box under Nub. Whatever Node version you run, the API is there — native where Node ships it, and where Node doesn't, Nub fills the gap automatically. You write against the API; the version split is Nub's problem, not yours.
 
 ```ts
 const now = Temporal.Now.plainDateTimeISO();
@@ -58,9 +71,9 @@ const stream = new EventSource("https://api/stream");
 const { DatabaseSync } = require("node:sqlite");
 ```
 
-Two mechanisms do the work, picked per API: nub either preloads a JS polyfill (feature-detected, so it steps aside the moment the native global appears) or injects the `--experimental-*` flag that an older Node hides the API behind. Once Node stabilizes an API, it's native and nub does nothing — there's no gap above the line, just a native implementation.
+Two mechanisms do the work, picked per API: Nub either preloads a JS polyfill (feature-detected, so it steps aside the moment the native global appears) or injects the `--experimental-*` flag that an older Node hides the API behind. Once Node stabilizes an API, it's native and Nub does nothing.
 
-The **minimum version** column is the practical floor — the lowest Node where the API works under nub. Everything above that floor is covered, native or not.
+The **minimum version** column is the lowest Node where the API works under Nub.
 
 | API | Minimum version | How |
 |---|---|---|
@@ -77,13 +90,11 @@ The **minimum version** column is the practical floor — the lowest Node where 
 | [`EventSource`](https://developer.mozilla.org/en-US/docs/Web/API/EventSource) | Node 20.18 | flag-injected below the native line, native above |
 | [`node:sqlite`](https://nodejs.org/api/sqlite.html) | Node 22.5 | flag-injected below Node 22.13, native above |
 
-"Every supported Node" means the full supported range, 18.19 and up. The three floored rows are the only ones with a real cutoff: the underlying Node mechanism doesn't exist below it.
+A dash means the API works across the full supported range, 18.19 and up. The three floored rows have a real cutoff, because the underlying Node mechanism doesn't exist below it:
 
-- The `WebSocket` global needs Node 20.10 — the flag nub injects below the native line (Node 22) doesn't exist on older 20.x patches.
-- The `EventSource` global needs Node 20.18, the patch where Node added the flag on the 20 LTS line. Below that, Node has no EventSource for nub to reach.
-- The `node:sqlite` module needs Node 22.5, where Node first shipped it. Below that the module doesn't exist.
-
-Polyfilled rows carry no version cutoff at all — they're gated by a runtime `typeof` check, so they load on whatever you run and bow out as soon as the native global is present.
+- The `WebSocket` global needs Node 20.10 — the flag Nub injects below the native line (Node 22) doesn't exist on older 20.x patches.
+- The `EventSource` global needs Node 20.18, the patch where Node added the flag on the 20 LTS line.
+- The `node:sqlite` module needs Node 22.5, where Node first shipped it.
 
 ## `--node`
 

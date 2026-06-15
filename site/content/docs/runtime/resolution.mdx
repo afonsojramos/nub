@@ -3,9 +3,9 @@ title: Module resolution
 description: The TypeScript-aware resolution Nub layers on top of Node — tsconfig paths and baseUrl, extends chains, extensionless imports, and the .js→.ts emit swap.
 ---
 
-Nub adds a TypeScript-aware resolution layer on top of Node's own resolver. It owns exactly the cases Node has no opinion on — `tsconfig.json` path aliases, extensionless imports in TypeScript files, and the `.js`→`.ts` emit-convention swap. Everything else (node_modules, `exports` / `imports` maps, export conditions, scoped packages, bare specifiers) falls through to Node unchanged, so byte-for-byte compatibility is preserved for code that doesn't use these features.
+Nub adds a TypeScript-aware resolution layer on top of Node's own resolver. It owns exactly the cases Node has no opinion on — `tsconfig.json` path aliases, extensionless imports in TypeScript files, and the `.js`→`.ts` emit-convention swap. Everything else (node_modules, `exports` / `imports` maps, export conditions, scoped packages, bare specifiers) falls through to Node unchanged.
 
-If your editor's Go-to-Definition works on an import and `tsc` accepts it, Nub resolves it the same way at runtime — no `tsconfig-paths` package, no build step. Resolution runs on every Node version nub supports (18.19+) — there is no Node-version floor for any feature on this page.
+If your editor's Go-to-Definition works on an import and `tsc` accepts it, Nub resolves it the same way at runtime — no `tsconfig-paths` package, no build step. Resolution runs on every Node version Nub supports (18.19+).
 
 ## `tsconfig.json`
 
@@ -46,7 +46,7 @@ With `baseUrl` set and no matching `paths` entry, a bare specifier resolves rela
 import { config } from "lib/config";   // resolves <baseUrl>/lib/config.ts
 ```
 
-A bare specifier with no `baseUrl`-relative file on disk falls through to Node's node_modules resolution — Nub never probes node_modules itself.
+A bare specifier with no `baseUrl`-relative file on disk falls through to Node's node_modules resolution.
 
 ### `extends`
 
@@ -54,7 +54,9 @@ Nub walks up to the nearest `tsconfig.json` and follows `extends` chains, includ
 
 Configs are read once per process. Edit your `tsconfig.json` and restart the process — or let [`nub watch`](/docs/watch) restart it for you.
 
-> Package `extends` under Yarn PnP is not resolved through the PnP API — it falls back to the node_modules walk, which covers the common npm / pnpm install.
+<Callout title="extends under Yarn PnP">
+Package `extends` under Yarn PnP is not resolved through the PnP API — it falls back to the node_modules walk, which covers the common npm / pnpm install.
+</Callout>
 
 ## Extensionless imports
 
@@ -77,7 +79,7 @@ The probe order is extension-aware — it depends on the parent file's extension
 
 A directory import honors the directory's `package.json` `"main"` before falling back to `index.*` probing.
 
-This probing is scoped to TypeScript-family parent files only. A plain `.js` file stays strict about extensions, exactly like vanilla Node, so reversible `.js` code behaves identically under `nub` and `node`.
+This probing is scoped to TypeScript-family parent files only. A plain `.js` file stays strict about extensions, exactly like vanilla Node.
 
 ## .js → .ts resolution
 
@@ -89,16 +91,25 @@ import { handler } from "./handler.js";  // resolves ./handler.ts when no ./hand
 
 A real on-disk `./handler.js` always wins; the swap only fires when the written extension points at a file that doesn't exist. The same rewrite covers `.jsx → .tsx`, `.mjs → .mts`, and `.cjs → .cts`.
 
+## Yarn Plug'n'Play
+
+A project Yarn installed in PnP mode just runs — Nub enables Plug'n'Play automatically, with no flag and no setup. Walking up from the working directory, Nub detects a `.pnp.cjs` at the project root and injects it ahead of its own preload (`--require .pnp.cjs` on the fast tier, the `NODE_OPTIONS` equivalent on the compat tier), so PnP's resolver patches install first and Nub's TypeScript resolution layers on top.
+
+```bash
+nub index.ts        # .pnp.cjs is detected and loaded automatically
+nub run build       # same for run scripts and nubx
+```
+
+Both module systems resolve. Requiring `.pnp.cjs` patches CommonJS `require` directly — that is PnP's own `_resolveFilename` override. PnP does not patch the ESM loader, though, so `import` of a PnP dependency is resolved by Nub's own resolve hook, which calls `pnpapi.resolveRequest` with Node's import conditions (a dual package picks its `import` build) and tags the resolved file's format (a zip-stored pure-ESM dependency loads as ESM, not CommonJS). Nub does not register Yarn's `.pnp.loader.mjs` — its ESM resolver collides with the fast tier's `module.registerHooks` — so the loader file is ignored and the same `pnpapi.resolveRequest` path serves both tiers.
+
+It works across the whole supported Node range (18.19+), on macOS, Linux, and Windows — including `import` of zip-stored packages and running a zip-stored binary through `nubx`. Passing `--node` skips PnP along with every other augmentation. This is the runtime *running* a PnP project; Nub's installer does not itself produce a PnP install — that stays Yarn's job.
+
 ## What falls through to Node
 
-Nub resolves only the cases Node has no opinion on. Everything else is Node's job:
+Nub resolves only the TypeScript-aware cases Node has no opinion on. Everything else is Node's job, handled by Node's own resolver unchanged:
 
-| Nub resolves | Node handles |
-|---|---|
-| `tsconfig.json` `paths` aliases | `node_modules` resolution |
-| TS extension probes | `exports` / `imports` maps |
-| the `.js`→`.ts` emit swap | export conditions |
-| directory-index probing | scoped packages |
-| a directory's `package.json` `"main"` | bare specifiers |
-
-Because Nub only adds the additive cases and never reimplements Node's own resolution, byte-for-byte compatibility holds for any code that doesn't use these features.
+- `node_modules` resolution
+- `exports` / `imports` maps
+- export conditions
+- scoped packages
+- bare specifiers

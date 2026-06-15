@@ -4,7 +4,7 @@ description: A browser-style worker API on stock Node — the full constructor, 
 ---
 
 <TypesSetup>
-The browser-shape `Worker` global is typed by nub's own types package — `@types/node` declares only `node:worker_threads`.
+The browser-shape `Worker` global is typed by Nub's own types package — `@types/node` declares only `node:worker_threads`.
 </TypesSetup>
 
 Browsers expose a `Worker` global; Node ships only `node:worker_threads.Worker`, a different class with a different API, and never a browser-shape global. Nub closes that gap with a polyfill preloaded on every supported Node (18.19+), so the browser constructor and messaging shape work unchanged.
@@ -24,13 +24,13 @@ self.onmessage = (ev) => {
 };
 ```
 
-The worker entry is TypeScript here for free — nub transpiles it like any other entry. The constructor takes a string or `URL`; pass `new URL("./worker.ts", import.meta.url)` for a path resolved relative to the current module, exactly as in the browser.
+The worker entry is TypeScript here for free — Nub transpiles it like any other entry. The constructor takes a string or `URL`; pass `new URL("./worker.ts", import.meta.url)` for a path resolved relative to the current module, exactly as in the browser.
 
 ## Mechanism
 
-The polyfill is a preload (`runtime/worker-polyfill.mjs`), not a flag injection — Node has no flag that exposes a browser `Worker`. It defines `globalThis.Worker` (feature-detected with `typeof`, so it installs only when no native global is already present) as an `EventTarget` subclass wrapping a `node:worker_threads.Worker`. The global is defined non-enumerable, so vanilla-Node code that enumerates `globalThis` never observes nub's addition.
+The polyfill is a preload (`runtime/worker-polyfill.mjs`), not a flag injection — Node has no flag that exposes a browser `Worker`. It defines `globalThis.Worker` (feature-detected with `typeof`, so it installs only when no native global is already present) as an `EventTarget` subclass wrapping a `node:worker_threads.Worker`.
 
-Inside the worker, nub installs the dedicated-worker scope on top of `node:worker_threads.parentPort`:
+Inside the worker, Nub installs the dedicated-worker scope on top of `node:worker_threads.parentPort`:
 
 ```text
 self
@@ -53,7 +53,7 @@ The main-thread `Worker` carries the browser subset:
 
 Inbound `"message"` events arrive as real `MessageEvent`s (`ev.data`); a thrown error in the worker surfaces on the main thread as an `ErrorEvent` (`ev.message`, `ev.error`).
 
-The `type` option is accepted for web compatibility but not enforced: Node decides module-vs-CommonJS for the worker entry by file extension and the nearest `package.json` `"type"` — the same rule nub applies to the main entry — and there is no `classic` / `importScripts` mode.
+The `type` option is accepted for web compatibility but not enforced: Node decides module-vs-CommonJS for the worker entry by file extension and the nearest `package.json` `"type"` — the same rule Nub applies to the main entry — and there is no `classic` / `importScripts` mode.
 
 ## Divergences
 

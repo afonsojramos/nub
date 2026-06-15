@@ -3,16 +3,18 @@ title: TypeScript
 description: How Nub runs the full TypeScript surface on stock Node — non-erasable syntax, using downleveling, and source maps — none of which plain Node does.
 ---
 
-Nub runs the whole TypeScript surface, not just the erasable subset Node's built-in type-stripping accepts. Files ending in `.ts`, `.tsx`, `.mts`, and `.cts` execute directly: Nub transpiles them with its oxc-based transpiler, then hands the result to Node. Nothing here is plain-Node behavior — these are the transforms Nub layers on through a `module.registerHooks()` load hook.
+Nub runs the whole TypeScript surface, not just the erasable subset Node's built-in type-stripping accepts. Files ending in `.ts`, `.tsx`, `.mts`, and `.cts` execute directly: Nub transpiles them with its oxc-based transpiler through a `module.registerHooks()` load hook, then hands the result to Node.
 
 ```bash
 nub index.ts
 nub server.tsx
 ```
 
-Transpilation works on every Node version nub supports (18.19+) — it happens before Node sees the code, so there is no Node-version floor for any of the transforms on this page. The one carve-out is source maps; see [Source maps](#source-maps) below.
+Transpilation happens before Node sees the code, so the transforms on this page work on every Node version Nub supports (18.19+). The one carve-out is source maps; see [Source maps](#source-maps) below.
 
-Files inside `node_modules` are never transpiled; they load exactly as the package shipped them. Nub does not type-check — types are stripped for execution; keep `tsc --noEmit` in your editor and CI for type validation.
+<Callout title="Types are stripped, not checked">
+Nub does not type-check — types are stripped for execution. Keep `tsc --noEmit` in your editor and CI for type validation. Files inside `node_modules` are never transpiled either; they load exactly as the package shipped them.
+</Callout>
 
 ## Non-erasable syntax
 
@@ -32,13 +34,13 @@ class User {
 import fs = require("node:fs");
 ```
 
-These files don't run on vanilla `node` (with or without type-stripping), so supporting them breaks no Node-compatible code path — there isn't one. You opt into the syntax by writing it; Nub makes it run.
+You opt into the syntax by writing it; Nub makes it run.
 
 JSX and decorators each have their own page: see [JSX](/docs/runtime/jsx) for the `.jsx` / `.tsx` runtime and tsconfig configuration, and [Decorators](/docs/runtime/decorators) for the legacy `experimentalDecorators` form and `emitDecoratorMetadata`.
 
 ## Explicit resource management
 
-Explicit Resource Management — the `using` and `await using` declarations — is downleveled so it runs on Nub's entire Node floor. Node 22's V8 cannot parse `using` natively (it's a hard `SyntaxError`), so Nub's transpiler lowers it to the helper-based form before Node ever sees it.
+Explicit Resource Management — the `using` and `await using` declarations — runs on Nub's entire Node floor. Older Node (Node 22's V8) cannot parse `using` natively — it's a hard `SyntaxError` — so Nub's transpiler lowers it to the helper-based form before Node ever sees it.
 
 ```ts
 class Handle {
@@ -78,4 +80,4 @@ Error: kaboom
 
 The stack frame reports `app.ts:2:8` — the line in your source, not the transpiled output. To turn it off, pass `--no-enable-source-maps`.
 
-Source maps are injected on every supported Node version except the **26.2.x** patch band, where a Node regression makes a no-message `assert(false)` rethrow as a `TypeError` instead of an `AssertionError` when source maps are on. On 26.2.x specifically Nub withholds the flag — stack traces there are not remapped, a cosmetic loss far preferable to corrupting a thrown error's type. Every other version (18.19 through 26.1, and 26.3+) gets source maps.
+Source maps are injected on every supported Node version except the **26.2.x** patch band, where a Node regression makes a no-message `assert(false)` rethrow as a `TypeError` instead of an `AssertionError` when source maps are on. On 26.2.x Nub withholds the flag, so stack traces there are not remapped. Every other version (18.19 through 26.1, and 26.3+) gets source maps.

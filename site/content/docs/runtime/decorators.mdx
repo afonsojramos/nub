@@ -31,4 +31,4 @@ When `emitDecoratorMetadata` is also set, Nub emits the `Reflect.metadata(...)` 
 
 ## Stage 3 decorators
 
-Stage 3 decorators (TypeScript 5's default when neither flag is set) are not supported: that transform is an upstream gap in oxc, so Nub rejects Stage-3-shaped decorator syntax with a diagnostic pointing you at `experimentalDecorators: true`. NestJS / TypeORM / class-validator users already set that flag and are unaffected.
+Stage 3 decorators (TypeScript 5's default when neither flag is set) are not supported: that transform is an [upstream gap in oxc](https://github.com/oxc-project/oxc/issues/9170), so Nub rejects Stage-3-shaped decorator syntax with a diagnostic pointing you at `experimentalDecorators: true`.
