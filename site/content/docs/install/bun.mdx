@@ -5,9 +5,20 @@ description: When Bun is the incumbent, Nub installs against it — the bun.lock
 
 When Bun is the incumbent package manager, Nub installs against it: the `bun.lock` text lockfile round-trips unbroken, top-level `trustedDependencies` is honored for build-script trust, and `overrides` / `resolutions`, `patchedDependencies`, and workspaces + catalogs all resolve the way Bun resolves them. Nub does not write its own lockfile into a Bun project.
 
-| `bun.lock` (text) | `bun.lockb` (binary) | `bunfig.toml` | `trustedDependencies` | `overrides` | `resolutions` | `patchedDependencies` | `catalog` | `workspaces` | `.npmrc` |
-|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| ✓ read+write | ✗ | ✗ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+<CompatTable
+  rows={[
+    { feature: <code>bun.lock</code>, status: 'yes', note: 'text format, read + write' },
+    { feature: <code>bun.lockb</code>, status: 'no', note: 'binary format, not supported' },
+    { feature: <code>bunfig.toml</code>, status: 'no' },
+    { feature: <code>trustedDependencies</code>, status: 'yes' },
+    { feature: <code>overrides</code>, status: 'yes' },
+    { feature: <code>resolutions</code>, status: 'yes' },
+    { feature: <code>patchedDependencies</code>, status: 'yes' },
+    { feature: <code>catalog</code>, status: 'yes' },
+    { feature: <code>workspaces</code>, status: 'yes' },
+    { feature: <code>.npmrc</code>, status: 'yes' },
+  ]}
+/>
 
 (Both `overrides` and `resolutions` are honored; when both pin the same package, top-level `overrides` wins — Bun's own precedence. `patchedDependencies` patches apply at materialize time, and `workspaces` + catalogs resolve to local workspace packages.)
 

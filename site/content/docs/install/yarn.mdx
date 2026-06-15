@@ -5,9 +5,20 @@ description: Yarn is supported read-only — Nub reads yarn.lock (Classic v1 and
 
 Yarn is supported **read-only**. Nub reads a project's `yarn.lock` — Classic (v1) and Berry (v2+) — to install and run it, but never writes `yarn.lock`. Treat a Yarn project as something Nub *consumes*, not something Nub maintains: keep using `yarn` for anything that changes the dependency graph. This is the narrowest compatibility tier of any package manager Nub recognizes.
 
-| `yarn.lock` read | `yarn.lock` write | `.yarnrc.yml` / `.yarnrc` | `resolutions` | `packageManager` | `nodeLinker: pnp`/`pnpm` install | `dependenciesMeta.*.built` | `packageExtensions` | `supportedArchitectures` | `.npmrc` |
-|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| ✓ v1+Berry | ✗ refused | ✗ | ✓ | ✓ | ✗ hoisted | ✗ | ✗ | ✗ | ✓ |
+<CompatTable
+  rows={[
+    { feature: <><code>yarn.lock</code> read</>, status: 'yes', note: 'Classic (v1) and Berry (v2+)' },
+    { feature: <><code>yarn.lock</code> write</>, status: 'no', note: 'refused' },
+    { feature: <><code>.yarnrc.yml</code> / <code>.yarnrc</code></>, status: 'no' },
+    { feature: <code>resolutions</code>, status: 'yes' },
+    { feature: <code>packageManager</code>, status: 'yes' },
+    { feature: <><code>nodeLinker: pnp</code> / <code>pnpm</code> install</>, status: 'no', note: 'installs hoisted instead' },
+    { feature: <code>dependenciesMeta.*.built</code>, status: 'no' },
+    { feature: <code>packageExtensions</code>, status: 'no' },
+    { feature: <code>supportedArchitectures</code>, status: 'no' },
+    { feature: <code>.npmrc</code>, status: 'yes' },
+  ]}
+/>
 
 ## Running a Yarn project
 

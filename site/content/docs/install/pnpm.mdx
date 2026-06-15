@@ -5,9 +5,19 @@ description: pnpm is the package manager Nub mirrors most closely — native pnp
 
 The pnpm engine is the one Nub mirrors most closely. The CLI surface is modeled on pnpm's, the isolated `node_modules` layout matches pnpm's symlink scheme, and when pnpm is the incumbent, Nub reads and writes pnpm's own `pnpm-lock.yaml` in pnpm's native format. A repo can move between `pnpm install` and `nub install` without either tool rewriting the other's lockfile.
 
-| `pnpm-lock.yaml` (v9) | `pnpm-workspace.yaml` | `.pnpmfile.cjs` | `pnpm.overrides` | `resolutions` | `allowBuilds` / `onlyBuiltDependencies` | `catalog:` | `workspaces` | `.npmrc` |
-|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| ✓ read+write | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+<CompatTable
+  rows={[
+    { feature: <code>pnpm-lock.yaml</code>, status: 'yes', note: 'v9, read + write' },
+    { feature: <code>pnpm-workspace.yaml</code>, status: 'yes' },
+    { feature: <code>.pnpmfile.cjs</code>, status: 'yes' },
+    { feature: <code>pnpm.overrides</code>, status: 'yes' },
+    { feature: <code>resolutions</code>, status: 'yes' },
+    { feature: <><code>allowBuilds</code> / <code>onlyBuiltDependencies</code></>, status: 'yes' },
+    { feature: <code>catalog:</code>, status: 'yes' },
+    { feature: <code>workspaces</code>, status: 'yes' },
+    { feature: <code>.npmrc</code>, status: 'yes' },
+  ]}
+/>
 
 (All pnpm-named surfaces are honored only when pnpm is the incumbent. pnpm prefers `pnpm.overrides`; top-level `resolutions` is still honored — pnpm supports it for Yarn compatibility — but top-level `overrides` is npm/bun's field and is ignored under pnpm.)
 

@@ -5,9 +5,17 @@ description: Nub speaks npm's on-disk formats — package-lock.json v2/v3 round-
 
 Nub speaks npm's on-disk formats, so a project that already uses npm keeps working unchanged. The CLI you type is pnpm-shaped; the files Nub reads and writes are npm's.
 
-| `package-lock.json` (v2/v3) | global / builtin `.npmrc` | `overrides` | `resolutions` | `workspaces` | `engines` / `os` / `cpu` / `libc` | project+user `.npmrc` |
-|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| ✓ read+write (v1 ✗) | ✗ | ✓ | ✗ dropped+warned | ✓ | ✓ | ✓ |
+<CompatTable
+  rows={[
+    { feature: <code>package-lock.json</code>, status: 'yes', note: 'v2 / v3, read + write; v1 not supported' },
+    { feature: <>global / builtin <code>.npmrc</code></>, status: 'no' },
+    { feature: <code>overrides</code>, status: 'yes' },
+    { feature: <code>resolutions</code>, status: 'no', note: 'dropped + warned' },
+    { feature: <code>workspaces</code>, status: 'yes' },
+    { feature: <><code>engines</code> / <code>os</code> / <code>cpu</code> / <code>libc</code></>, status: 'yes' },
+    { feature: <>project + user <code>.npmrc</code></>, status: 'yes' },
+  ]}
+/>
 
 ## `package-lock.json`
 

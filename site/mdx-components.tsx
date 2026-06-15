@@ -3,6 +3,7 @@ import { Callout as FumaCallout } from 'fumadocs-ui/components/callout';
 import type { MDXComponents } from 'mdx/types';
 import type { ComponentProps, ReactNode } from 'react';
 import { Bench } from '@/components/code';
+import { CompatTable } from '@/components/compat-table';
 import { InstallTabs } from '@/components/install-tabs';
 
 // Neutral info glyph (lucide "info" path) drawn with currentColor so it inherits a
@@ -60,6 +61,7 @@ export function getMDXComponents(components?: MDXComponents): MDXComponents {
     ...defaultMdxComponents,
     Callout,
     Bench,
+    CompatTable,
     InstallTabs,
     ...components,
   };
