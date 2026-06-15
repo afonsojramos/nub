@@ -6,28 +6,25 @@
 //! user pastes into their own coding agent; these verbs are the OFFLINE FALLBACK
 //! for when that agent can't fetch the live docs over the web:
 //!
-//! - `docs`  — the docs entry point. With no args it prints the onboarding doc
-//!   (`site/public/start.md`, also served at https://nubjs.com/start.md)
-//!   followed by a table of contents of every docs page baked into the binary.
-//!   `--page <slug>` prints one page's full markdown; `--list` prints just the
-//!   TOC. The whole docs tree (`site/content/docs/**/*.mdx`) is baked in at
-//!   build time, so an agent can pull the current docs with no network.
+//! - `docs`  — MIRRORS the published docs. With no args it prints the page TOC
+//!   at the top, then the `/docs` index page's markdown (the same content served
+//!   at https://nubjs.com/docs), then a one-line note that every slug — and every
+//!   markdown link target inside the pages — is a valid `--page` argument. The
+//!   slugs ARE the in-doc link hrefs (`/docs/runtime/decorators`, …), so an agent
+//!   can take a markdown link target and plug it straight into `--page`. `--page
+//!   <path>` prints one page's full markdown; `--list`/`--toc` prints just the
+//!   TOC. The whole docs tree (`site/content/docs/**/*.mdx`) is baked in at build
+//!   time, so an agent can pull the current docs with no network.
 //! - `skill` — prints the evergreen agent skill (`site/public/skill.md`, also
 //!   served at https://nubjs.com/skill.md) for the agent to install itself.
 //!
-//! `start.md`/`skill.md` are embedded via `include_str!`; the docs tree is baked
-//! by `build.rs` into a `&[(slug, title, markdown)]` table — all so the verbs
-//! work with no network fetch from a stale binary. This is a non-forwarding
-//! group handled by a manual sub-verb match (like `nub node` / `nub pm`), so its
+//! `skill.md` is embedded via `include_str!`; the docs tree is baked by
+//! `build.rs` into a `&[(slug, title, markdown)]` table — all so the verbs work
+//! with no network fetch from a stale binary. This is a non-forwarding group
+//! handled by a manual sub-verb match (like `nub node` / `nub pm`), so its
 //! bare-usage and invalid-verb messages read consistently.
 
 use anyhow::{Result, bail};
-
-/// The onboarding doc, authored once at `site/public/start.md` (so the same file
-/// also serves at https://nubjs.com/start.md) and embedded here so `nub agent
-/// docs` prints it offline with no network fetch. It's the entry prompt the
-/// homepage points an agent at — the offline fallback for fetching that URL.
-const START_MD: &str = include_str!("../../../../site/public/start.md");
 
 /// The EVERGREEN agent skill, authored once at `site/public/skill.md` (so the same
 /// file also serves at https://nubjs.com/skill.md) and embedded here so `nub agent
@@ -39,12 +36,18 @@ const SKILL_MD: &str = include_str!("../../../../site/public/skill.md");
 
 /// The full docs tree, baked in at build time by `build.rs` as a slug-sorted
 /// `&[(slug, title, markdown)]` table with each page's YAML frontmatter
-/// stripped. `nub agent docs` serves the TOC and `--page <slug>` content from
+/// stripped. Each slug is the page's exact `/docs/...` URL path — the same href
+/// the docs link to internally — so a markdown link target is a valid `--page`
+/// argument. `nub agent docs` serves the TOC and `--page <path>` content from
 /// this with no network fetch.
 mod baked {
     include!(concat!(env!("OUT_DIR"), "/docs_baked.rs"));
 }
 use baked::DOCS;
+
+/// The canonical slug for the docs index page (`site/content/docs/index.mdx`,
+/// served at `/docs`). Its body is printed verbatim by the no-args invocation.
+const INDEX_SLUG: &str = "/docs";
 
 /// Entry point for `nub agent …`, dispatched from `dispatch_subcommand`.
 pub fn run(args: &[String]) -> Result<i32> {
@@ -66,14 +69,16 @@ pub fn run(args: &[String]) -> Result<i32> {
     }
 }
 
-/// `nub agent docs [--page <slug> | --list]`.
+/// `nub agent docs [--page <path> | --list]`.
 ///
-/// No args  → the onboarding doc (`start.md`) followed by the page TOC, so the
-///            agent gets the starting prompt AND the full list of pages it can
-///            pull via `--page`.
-/// `--list` → just the TOC.
-/// `--page <slug>` → that page's full markdown (frontmatter stripped). An
-///            unknown slug errors with the valid slugs and exits non-zero.
+/// No args  → MIRRORS the docs: the page TOC at the top, then the `/docs` index
+///            page's markdown, then a note that every slug (and every in-doc
+///            link target) is a valid `--page` argument.
+/// `--list` / `--toc` → just the TOC.
+/// `--page <path>` → that page's full markdown (frontmatter stripped). The path
+///            is the page's `/docs/...` URL — the same form the docs link to — so
+///            a copied link target resolves. An unknown path errors with the
+///            valid slugs and exits non-zero.
 fn run_docs(args: &[String]) -> Result<i32> {
     let mut page: Option<&str> = None;
     let mut list_only = false;
@@ -83,7 +88,7 @@ fn run_docs(args: &[String]) -> Result<i32> {
             "--list" | "--toc" => list_only = true,
             "--page" => {
                 let slug = iter.next().map(String::as_str).ok_or_else(|| {
-                    anyhow::anyhow!("nub agent docs --page needs a slug, e.g. `--page runtime/typescript`")
+                    anyhow::anyhow!("nub agent docs --page needs a path, e.g. `--page /docs/runtime/typescript`")
                 })?;
                 page = Some(slug);
             }
@@ -92,7 +97,7 @@ fn run_docs(args: &[String]) -> Result<i32> {
             }
             other => bail!(
                 "nub agent docs: unexpected argument '{other}'. \
-                 Usage: nub agent docs [--page <slug> | --list]."
+                 Usage: nub agent docs [--page <path> | --list]."
             ),
         }
     }
@@ -101,17 +106,54 @@ fn run_docs(args: &[String]) -> Result<i32> {
         return print_page(slug);
     }
 
-    if !list_only {
-        print!("{START_MD}");
+    if list_only {
+        print_toc();
+        return Ok(0);
+    }
+
+    // Mirror the docs: TOC first, then the /docs index page, then fetch note.
+    print_toc();
+    println!();
+    if let Some((_, _, body)) = DOCS.iter().find(|(s, _, _)| *s == INDEX_SLUG) {
+        print!("{body}");
         println!();
     }
-    print_toc();
+    println!(
+        "---\n\nFetch any page's full markdown with `nub agent docs --page <path>` — \
+         every path in the list above, and every markdown link target inside the pages \
+         (e.g. `](/docs/runtime/decorators)`), is a valid argument."
+    );
     Ok(0)
+}
+
+/// Resolve a user-supplied `--page` argument to a baked slug, tolerating minor
+/// variations so a copied link target always lands: with or without the leading
+/// slash, and with or without the `/docs` prefix. The canonical slug is the full
+/// `/docs/...` URL path, but `runtime/decorators`, `/runtime/decorators`, and
+/// `/docs/runtime/decorators` all resolve to the same page.
+fn resolve_slug(arg: &str) -> Option<&'static (&'static str, &'static str, &'static str)> {
+    // Strip any URL fragment (`/docs/runtime/resolution#yarn-plugnplay`).
+    let arg = arg.split('#').next().unwrap_or(arg);
+    let trimmed = arg.trim_matches('/');
+    // Candidate canonical forms to try against the baked slugs.
+    let with_docs = format!("/docs/{trimmed}");
+    let candidates = [
+        format!("/{trimmed}"),       // exact (already had a leading slash)
+        with_docs.clone(),           // bare path, prepend /docs
+        format!("/docs/{}", trimmed.strip_prefix("docs/").unwrap_or(trimmed)),
+    ];
+    DOCS.iter().find(|(s, _, _)| {
+        // The docs root: `/docs`, `docs`, `/`, or empty all mean the index.
+        if trimmed.is_empty() || trimmed == "docs" {
+            return *s == INDEX_SLUG;
+        }
+        candidates.iter().any(|c| c == s) || *s == arg
+    })
 }
 
 /// Print the markdown for one page, or error (exit 1) listing valid slugs.
 fn print_page(slug: &str) -> Result<i32> {
-    match DOCS.iter().find(|(s, _, _)| *s == slug) {
+    match resolve_slug(slug) {
         Some((_, _, body)) => {
             print!("{body}");
             Ok(0)
@@ -127,9 +169,11 @@ fn print_page(slug: &str) -> Result<i32> {
     }
 }
 
-/// Print the table of contents: one `<slug> — <title>` line per page.
+/// Print the table of contents: one `<slug> — <title>` line per page. The slug
+/// is the page's `/docs/...` URL path — the same href the docs link to — so it
+/// doubles as a `--page` argument.
 fn print_toc() {
-    println!("## Docs pages (pass any slug to `nub agent docs --page <slug>`)\n");
+    println!("## Docs pages — pass any path to `nub agent docs --page <path>`\n");
     for (slug, title, _) in DOCS {
         println!("  {slug} — {title}");
     }
@@ -140,9 +184,9 @@ fn print_usage() {
         "nub agent — make AI coding agents reach for nub\n\n\
          Usage: nub agent <command>\n\n\
          Commands:\n\
-         \x20 docs     print the onboarding doc + a TOC of every baked docs page\n\
-         \x20          (offline fallback for https://nubjs.com/start.md)\n\
-         \x20          --page <slug>  print one page's full markdown\n\
+         \x20 docs     mirror the docs: a TOC of every page + the /docs index content\n\
+         \x20          (offline fallback for https://nubjs.com/docs)\n\
+         \x20          --page <path>  print one page's full markdown (e.g. /docs/runtime/jsx)\n\
          \x20          --list         print just the page TOC\n\
          \x20 skill    print nub's evergreen agent skill to stdout (install it yourself)"
     );
@@ -158,20 +202,28 @@ mod tests {
     }
 
     #[test]
-    fn docs_verb_prints_the_onboarding_doc() {
-        // `nub agent docs` prints the embedded start.md and exits 0.
+    fn docs_verb_mirrors_the_docs_and_drops_start_md() {
+        // `nub agent docs` mirrors the docs and exits 0.
         assert_eq!(run(&["docs".into()]).unwrap(), 0);
 
-        let body = START_MD;
-        assert!(!body.trim().is_empty(), "onboarding doc must not be empty");
-        // It's the entry prompt: it must carry the self-healing pointers at the
-        // always-current sources plus the install + `--node` escape hatch.
-        for pointer in ["nubjs.com/llms.txt", "nub --version", "--node"] {
-            assert!(
-                body.contains(pointer),
-                "onboarding doc must reference `{pointer}`"
-            );
-        }
+        // The /docs index page is baked and non-empty — it's what no-args prints.
+        let index = DOCS
+            .iter()
+            .find(|(s, _, _)| *s == INDEX_SLUG)
+            .expect("/docs index page baked");
+        assert!(
+            index.2.contains("all-in-one toolkit"),
+            "index body must be the real /docs page content"
+        );
+
+        // start.md is GONE: the embedded onboarding-doc const no longer exists.
+        // (Asserted structurally — the `START_MD` symbol was removed; if it were
+        // reintroduced this module wouldn't compile against the old reference.)
+        let toc_out = DOCS.iter().map(|(s, _, _)| *s).collect::<Vec<_>>();
+        assert!(
+            toc_out.contains(&INDEX_SLUG),
+            "the TOC carries the /docs index slug, not a start.md entry"
+        );
     }
 
     #[test]
@@ -213,27 +265,34 @@ mod tests {
     }
 
     #[test]
-    fn docs_tree_is_baked_with_section_root_slugs() {
-        // The whole docs tree must be present, keyed by the site's routing slugs.
-        // `index.mdx` collapses to its section root (`runtime/index.mdx` ->
-        // `runtime`); the top-level `index.mdx` stays `index`.
+    fn docs_tree_is_baked_with_url_path_slugs_matching_in_doc_links() {
+        // The whole docs tree must be present, keyed by the EXACT `/docs/...` URL
+        // paths the docs link to internally (so a markdown link target is a valid
+        // `--page` argument). `index.mdx` collapses to its section root
+        // (`runtime/index.mdx` -> `/docs/runtime`); the top-level `index.mdx` is
+        // the docs root `/docs`.
         let slugs: Vec<&str> = DOCS.iter().map(|(s, _, _)| *s).collect();
         for expected in [
-            "index",
-            "runtime",
-            "runtime/typescript",
-            "install",
-            "install/pnpm",
-            "pm",
-            "nubx",
-            "run",
+            "/docs",
+            "/docs/runtime",
+            "/docs/runtime/typescript",
+            "/docs/runtime/decorators",
+            "/docs/install",
+            "/docs/install/pnpm",
+            "/docs/pm",
+            "/docs/nubx",
+            "/docs/run",
         ] {
             assert!(
                 slugs.contains(&expected),
                 "baked docs must include slug `{expected}`; got {slugs:?}"
             );
         }
-        // No `*/index` leaked through un-collapsed.
+        // Every slug is a rooted `/docs` URL path, and no `*/index` leaked through.
+        assert!(
+            slugs.iter().all(|s| s.starts_with("/docs")),
+            "every slug is a /docs URL path: {slugs:?}"
+        );
         assert!(
             !slugs.iter().any(|s| s.ends_with("/index")),
             "section-root `index` slugs must collapse to the parent: {slugs:?}"
@@ -242,7 +301,7 @@ mod tests {
         // the title was lifted out of it.
         let ts = DOCS
             .iter()
-            .find(|(s, _, _)| *s == "runtime/typescript")
+            .find(|(s, _, _)| *s == "/docs/runtime/typescript")
             .expect("typescript page present");
         assert_eq!(ts.1, "TypeScript", "title comes from frontmatter");
         assert!(
@@ -256,32 +315,65 @@ mod tests {
     }
 
     #[test]
-    fn docs_no_args_prints_start_then_toc() {
-        // No args is the entry point: start.md + a TOC of every page.
+    fn docs_no_args_mirrors_toc_then_index() {
+        // No args is the mirror: TOC at top + the /docs index content + fetch note.
         assert_eq!(run_docs(&[]).unwrap(), 0);
-        // `--list` is the TOC-only variant.
+        // `--list`/`--toc` is the TOC-only variant.
         assert_eq!(run_docs(&["--list".into()]).unwrap(), 0);
+        assert_eq!(run_docs(&["--toc".into()]).unwrap(), 0);
     }
 
     #[test]
-    fn docs_page_round_trips_and_unknown_slug_errors() {
-        // A known slug serves that page; both `--page <slug>` and `--page=<slug>`.
+    fn docs_page_double_duty_link_target_round_trips() {
+        // THE acceptance test: a verbatim in-doc markdown link target resolves.
+        // The docs link as `](/docs/runtime/decorators)` — so that exact path,
+        // pasted straight into `--page`, must serve the page.
+        let canonical = resolve_slug("/docs/runtime/decorators")
+            .expect("canonical /docs link target resolves");
+        assert_eq!(canonical.0, "/docs/runtime/decorators");
+
+        // the maintainer's example spelling (`/runtime/decorators`, no `/docs`) resolves to
+        // the same page via tolerance.
         assert_eq!(
-            run_docs(&["--page".into(), "runtime/typescript".into()]).unwrap(),
+            resolve_slug("/runtime/decorators").map(|p| p.0),
+            Some("/docs/runtime/decorators")
+        );
+        // Bare (no leading slash) and a fragment also resolve.
+        assert_eq!(
+            resolve_slug("runtime/decorators").map(|p| p.0),
+            Some("/docs/runtime/decorators")
+        );
+        assert_eq!(
+            resolve_slug("/docs/runtime/resolution#yarn-plugnplay").map(|p| p.0),
+            Some("/docs/runtime/resolution")
+        );
+        // The docs root resolves from any of its spellings.
+        for root in ["/docs", "docs", "/", ""] {
+            assert_eq!(
+                resolve_slug(root).map(|p| p.0),
+                Some(INDEX_SLUG),
+                "`{root}` resolves to the /docs index"
+            );
+        }
+
+        // `--page` end-to-end, both `--page <path>` and `--page=<path>`.
+        assert_eq!(
+            run_docs(&["--page".into(), "/docs/runtime/typescript".into()]).unwrap(),
             0
         );
-        assert_eq!(run_docs(&["--page=pm".into()]).unwrap(), 0);
+        assert_eq!(run_docs(&["--page=/docs/pm".into()]).unwrap(), 0);
 
-        // Unknown slug is an error (non-zero exit via the bubbled-up anyhow).
+        // Unknown slug is an error (non-zero exit via the bubbled-up anyhow),
+        // and the error lists the valid `/docs/...` slugs.
         let err = run_docs(&["--page".into(), "nonexistent".into()]).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("unknown page 'nonexistent'"), "{msg}");
         assert!(
-            msg.contains("runtime/typescript"),
+            msg.contains("/docs/runtime/typescript"),
             "error lists valid slugs: {msg}"
         );
 
-        // `--page` with no slug is a usage error.
+        // `--page` with no path is a usage error.
         assert!(run_docs(&["--page".into()]).is_err());
     }
 }

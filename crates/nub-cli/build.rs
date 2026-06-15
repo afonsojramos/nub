@@ -6,11 +6,13 @@
 //! derive the site's routing slugs + read the frontmatter `title` exactly the
 //! way we want, and strips the YAML frontmatter from the printed markdown.
 //!
-//! Slug derivation mirrors how fumadocs routes the tree:
-//!   - `runtime/typescript.mdx` -> `runtime/typescript`
-//!   - `index.mdx`              -> `index`            (docs root)
-//!   - `runtime/index.mdx`      -> `runtime`          (section root)
-//!   - `install/index.mdx`      -> `install`          (section root)
+//! Slugs are the EXACT URL-path form the docs link to internally (`grep` the
+//! MDX: internal links are `](/docs/runtime/decorators)` etc.), so a markdown
+//! link target pastes straight into `nub agent docs --page <target>`:
+//!   - `runtime/typescript.mdx` -> `/docs/runtime/typescript`
+//!   - `index.mdx`              -> `/docs`                 (docs root)
+//!   - `runtime/index.mdx`      -> `/docs/runtime`         (section root)
+//!   - `install/index.mdx`      -> `/docs/install`         (section root)
 //!
 //! The docs live in-repo, so the directory is always present; if it ever goes
 //! missing the build fails loudly rather than shipping an empty TOC.
@@ -87,19 +89,26 @@ fn collect(root: &Path, dir: &Path, pages: &mut BTreeMap<String, (String, String
     }
 }
 
-/// Derive the site-routing slug from a path relative to the docs root (no
-/// extension). `index` segments collapse to their parent section, matching how
-/// fumadocs routes `index.mdx`.
+/// Derive the URL-path slug from a path relative to the docs root (no
+/// extension). The slug is the exact `/docs/...` href the docs link to, so a
+/// markdown link target is a valid `--page` argument. `index` segments collapse
+/// to their section root, matching how fumadocs routes `index.mdx`.
 fn slug_for(rel: &Path) -> String {
     let parts: Vec<String> = rel
         .components()
         .map(|c| c.as_os_str().to_string_lossy().replace('\\', "/"))
         .collect();
-    match parts.split_last() {
+    let tail = match parts.split_last() {
         // `runtime/index` -> `runtime`, `install/index` -> `install`.
         Some((last, head)) if last == "index" && !head.is_empty() => head.join("/"),
-        // Top-level `index` stays `index` (the docs root page).
+        // Top-level `index` -> "" so the docs root is just `/docs`.
+        Some((last, head)) if last == "index" && head.is_empty() => String::new(),
         _ => parts.join("/"),
+    };
+    if tail.is_empty() {
+        "/docs".to_string()
+    } else {
+        format!("/docs/{tail}")
     }
 }
 
