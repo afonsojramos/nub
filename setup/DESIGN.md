@@ -24,6 +24,9 @@ The central fact that reshapes everything: **nub already does jobs (1) and (3) i
 | PM cache-dir env override: `NUB_CACHE_DIR` (neutral `npm_config_*` also honored) | `identity.rs:52-59` |
 | nub's PM reads standard `.npmrc`: `registry`, `_authToken`, `<scope>:registry`, `NPM_TOKEN` — never a branded file | `publish_family.rs:25-30`; `aube-resolver/src/error.rs:335` |
 | `nub ci` = frozen + clean install (one step) | `pm_engine/mod.rs:2176`, `install_family.rs:177,797` |
+| `nub store path` prints the resolved CAS store dir (scriptable — derive cache paths at runtime, don't hardcode) | `store_config_family.rs:13-15` |
+| `nub store add <pkg>` populates the global store without touching `node_modules` (a real CI pre-warm primitive) | `wiki/commands/pm/store.md:28` |
+| Resolved-Node-binary command is `nub node which` (not `--which-node`) | `cli.rs:3942-3952` |
 | `nub --version` → bare `v<semver>` on **stdout**, resolved Node on **stderr** | `setup/action.yml:37-39`; commit `92d1011` |
 
 ## Field-by-field map: every `setup-node` input/output
@@ -50,7 +53,7 @@ The central fact that reshapes everything: **nub already does jobs (1) and (3) i
 
 | `setup-node` output | Decision | `setup-nub` treatment |
 |---|---|---|
-| `node-version` | **ADAPT/MIRROR** | Emit `node-version` = the version nub resolves for the project (from `nub --which-node` / the resolved pin), so a downstream step reading `steps.x.outputs.node-version` keeps working. Empty if no provisioning happened. See [HQ4](#hq4). |
+| `node-version` | **ADAPT/MIRROR** | Emit `node-version` = the version nub resolves for the project (from `nub node which` / the resolved pin), so a downstream step reading `steps.x.outputs.node-version` keeps working. Empty if no provisioning happened. See [HQ4](#hq4). |
 | `cache-hit` | **MIRROR** | `true`/`false` from `actions/cache` restore. Only meaningful when `cache: true`. See [HQ4](#hq4). |
 | — (new) | **ADD** | `nub-version` = installed nub version (`nub --version`, bare `v<semver>`). This is the v1 action's existing `version` output, **renamed** `nub-version` to disambiguate from `node-version`. See [HQ5](#hq5). |
 
@@ -95,6 +98,8 @@ Keying on the lockfile (`cache-dependency-path`, default = auto-detect the prese
 
 **RECOMMENDATION:** ship `cache` (boolean) + `cache-dependency-path` in v1; cache the three dirs above with the keyed `restore-keys` ladder; default `cache: false`. This is the single most valuable field and worth getting concrete. **Open sub-question for the maintainer:** default `cache` to `true` (aggressive, setup-node-like — most CI wants it) or `false` (conservative, pnpm-like — opt-in)? Recommend **`false` for v1**, flip to `true` once the cache paths prove out on the smoke matrix.
 
+**Implementation primitives (don't hardcode paths).** nub exposes scriptable commands the action should lean on instead of literal paths: `nub store path` prints the resolved CAS store dir (`store_config_family.rs:13-15`) — derive the `actions/cache` path from it rather than hardcoding `~/.local/share/nub/store/v1`, so an `XDG_DATA_HOME` override or a future layout change doesn't silently break caching. For an explicit pre-warm beyond restore, `nub store add <pkg>` populates the global store without touching `node_modules` (`wiki/commands/pm/store.md:28`) — though for CI the simpler warm path is just `nub ci` after a cache restore.
+
 ### HQ3 — `registry-url` / `scope` / `always-auth` / `token` (auth)
 
 **The brand-boundary check passes cleanly.** `setup-node` writes a project-level `.npmrc` with the registry + `:_authToken=${NODE_AUTH_TOKEN}` and exports `NPM_CONFIG_USERCONFIG` to point at it. nub's PM reads exactly that standard `.npmrc` (registry, `_authToken`, `<scope>:registry`, `NPM_TOKEN` — `publish_family.rs:25`, `aube-resolver/error.rs:335`). So `setup-nub` writes the **identical neutral `.npmrc`** `setup-node` does — no branded file, no `nub`-named config, fully consistent with the symmetric brand boundary (nub never emits its brand into your config and reads only neutral fields).
@@ -108,7 +113,7 @@ Keying on the lockfile (`cache-dependency-path`, default = auto-detect the prese
 - `node-version` — the Node version nub resolves for the project (mirrors `setup-node`'s output name so downstream steps keep working). Empty when nothing was provisioned.
 - `cache-hit` — boolean from cache restore (only meaningful with `cache: true`).
 
-**Confirm with the maintainer:** is emitting `node-version` worth the extra `nub --which-node` call on every run even when no input was given? Recommend yes — it's cheap and preserves the drop-in output contract.
+**Confirm with the maintainer:** is emitting `node-version` worth the extra `nub node which` call on every run even when no input was given? Recommend yes — it's cheap and preserves the drop-in output contract.
 
 ### HQ5 — Version-selection naming (`version` vs `node-version`)
 
@@ -246,5 +251,5 @@ Recommended: a `v0` branch (or lightweight tag) the release workflow advances to
 5. **`cache` is a boolean, not a pm-name enum** (HQ2) — confirm nub's single-store model means we diverge from `setup-node`'s `cache: npm|yarn|pnpm`. **Recommend: boolean.**
 6. **Cache the three dirs** (`store/v1`, `pm`, `node`), NOT `node_modules/.nub`; key on lockfile + node-version with the `restore-keys` ladder (HQ2). **Recommend: as specified.**
 7. **Reuse `NODE_AUTH_TOKEN`** (not `NUB_AUTH_TOKEN`) for the `.npmrc` auth token (HQ3). **Recommend: reuse — ecosystem convention, brand-clean, drop-in.**
-8. **Emit `node-version` output unconditionally** (extra `nub --which-node` per run) vs only when provisioning happened (HQ4). **Recommend: unconditional — cheap, preserves contract.**
+8. **Emit `node-version` output unconditionally** (extra `nub node which` per run) vs only when provisioning happened (HQ4). **Recommend: unconditional — cheap, preserves contract.**
 9. **Create + maintain a floating `v0` ref** separate from `v0.0.x` (release-process, but blocks adoption). **Recommend: do it before promoting the action.**
