@@ -1521,18 +1521,23 @@ fn workspace_filter_by_name() {
     assert!(!stdout.contains("app-built"), "app should not run");
 }
 
-/// --filter with ...pkg includes the package + its dependencies.
+/// --filter with the trailing-ellipsis `pkg...` selects the package + its
+/// dependencies. Dep graph: app → utils → core, so `@mono/app...` runs all
+/// three. Verified byte-identical to `pnpm --filter @mono/app... run build`
+/// (pnpm 10.15.1). The leading form `...@mono/app` means the opposite — app +
+/// its *dependents* — which here is app alone (nothing depends on app); see
+/// the ellipsis-direction fix in commit 9113866.
 #[test]
 fn workspace_filter_with_deps() {
     let fixture = fixtures_dir().join("monorepo-deps");
     let output = Command::new(nub_binary())
-        .args(["run", "--filter", "...@mono/app", "build"])
+        .args(["run", "--filter", "@mono/app...", "build"])
         .current_dir(&fixture)
         .output()
         .expect("failed to spawn nub");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(output.status.code(), Some(0));
-    // ...@mono/app = app + its deps (utils, core)
+    // @mono/app... = app + its deps (utils, core)
     assert!(stdout.contains("core-built"), "core is a transitive dep");
     assert!(stdout.contains("utils-built"), "utils is a direct dep");
     assert!(stdout.contains("app-built"), "app itself");
