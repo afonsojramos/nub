@@ -1,13 +1,13 @@
 ---
 title: Node manager
-description: Manage the Node versions Nub provisions — pin a version and it's fetched automatically, or drive the cache explicitly with nub node install / ls / uninstall / pin.
+description: Manage the Node versions Nub provisions — pin a version and it's fetched automatically, or drive the cache explicitly with the install, list, uninstall, and pin subcommands.
 ---
 
-Nub runs your code on stock Node and provisions the right version for you. Pin a version, run a file, and the matching Node is downloaded and cached without a second command — the [implicit path](/docs/runtime#the-node-version) covers the common case completely, so you rarely manage versions by hand. The `nub node` subcommands exist for the cases the automatic path can't reach: warming the cache before you run, seeing what's installed, reclaiming disk, and recording a pin.
+Nub runs your code on stock Node and provisions the right version for you. Pin a version, run a file, and the matching Node is downloaded and cached without a second command — the [implicit path](/docs/runtime#the-node-version) covers the common case, so you rarely manage versions by hand. The `nub node` subcommands cover what the automatic path can't reach: warming the cache before you run, listing what's installed, reclaiming disk, and recording a pin.
 
 ## Automatic provisioning
 
-Drop a `.node-version` or `.nvmrc` in your project (or an `engines.node` range in `package.json`) and run `nub`. If that Node is already on your machine it's used as-is; if not, Nub downloads the matching stock build from nodejs.org — SHA-256 verified and cached under `~/.cache/nub/node` — then runs your code in the same breath.
+Drop a `.node-version` or `.nvmrc` in your project (or an `engines.node` range in `package.json`) and run `nub`. If that Node is already on your machine it's used as-is; if not, Nub downloads the matching stock build from nodejs.org — SHA-256 verified and cached under `~/.cache/nub/node` — then runs your code.
 
 ```console
 $ echo 22.15.0 > .node-version
@@ -18,7 +18,7 @@ Installed in 8.0s
 # ...your script runs, on exactly the Node you pinned
 ```
 
-This is the headline. Everything below is for when you want to do one of these steps deliberately instead of letting it happen on the next run. For the full provisioning story — precedence, the `~/.cache/nub` layout, the per-invocation shim — see [Running files → The Node version](/docs/runtime#the-node-version).
+Everything below is for doing one of these steps deliberately instead of letting it happen on the next run. For the full provisioning story — precedence, the `~/.cache/nub` layout, the per-invocation shim — see [Running files → The Node version](/docs/runtime#the-node-version).
 
 ## `nub node install`
 
@@ -87,29 +87,28 @@ Whatever spec you give is written verbatim — including an alias like `lts` —
 
 ## Mirrors and proxies
 
-Corporate network? Node downloads honor `HTTP(S)_PROXY`/`NO_PROXY`, and corporate TLS-intercepting CAs work out of the box (system trust roots). To fetch Node from an internal mirror instead of nodejs.org, set the standard env var or the `.npmrc` key pnpm uses — Nub reads both, no Nub-specific config:
+Node downloads honor `HTTP(S)_PROXY` and `NO_PROXY`, and TLS-intercepting corporate CAs work out of the box through the system trust store. To fetch Node from an internal mirror instead of nodejs.org, set the standard env var or the `.npmrc` key pnpm uses — Nub reads both, with no Nub-specific config:
 
 ```ini
 # .npmrc (project or ~)
 node-mirror:release=https://artifactory.corp.example/node/
 ```
 
-The `NODEJS_ORG_MIRROR` env var (the nvm/n convention) takes precedence when set. An explicit mirror is used for musl builds too — point it at a mirror that carries the `unofficial-builds` layout on Alpine.
+The `NODEJS_ORG_MIRROR` env var (the nvm/n convention) takes precedence over the `.npmrc` key. A mirror is used for musl builds too — point it at one carrying the `unofficial-builds` layout on Alpine.
 
-## Bring your own version manager
+## No pin: your PATH Node
 
-With no pin file, Nub adopts whatever `node` is on your `PATH`. Switch versions with `nvm`, `mise`, `fnm`, `brew`, or the official installer and Nub picks up the active one. Outside a pinned project, your shell's `node` is the answer.
+Nub is the version manager. When a project pins a version, Nub provisions that version itself — it tries your `PATH` Node first and uses it only if it satisfies the pin, otherwise it downloads the matching stock build from nodejs.org and caches it. It does not defer to `nvm`, `fnm`, or `mise` to switch; the pin drives resolution and Nub fetches what's missing.
 
-```bash
-nvm use 24
-nub node which       # prints the exact Node binary Nub will spawn here
+Only when nothing is pinned — no `.node-version`, `.nvmrc`, `engines.node`, or `devEngines.runtime` anywhere up the tree — does Nub fall back to whatever `node` is on your `PATH`. That's the unpinned escape hatch, not the path you're meant to live on: pin a version and you stop thinking about which `node` your shell happens to point at.
+
+```console
+$ nub node which
+/Users/you/.cache/nub/node/22.15.0/bin/node
+» resolved from .node-version (22.15.0)
 ```
 
-The quickest way to answer "which Node runs here, and where is it?" is `nub node which` — it prints the resolved binary path to stdout (so `NODE=$(nub node which)` captures just the path), with a `» resolved from <source>` explainer on stderr, whether the version came from a pin, the cache, or your `PATH`. Bare `nub node` reports the same as a status block.
-
-## Scope
-
-Five verbs — `which`, `install`, `ls`, `uninstall`, and `pin` — are the whole group (plus bare `nub node` for a status readout). There's no `ls-remote`, `prune`, `--force`, custom aliases, or global-default command — the automatic provisioning covers the common path.
+The `nub node which` command answers "which Node runs here, and where is it?" — the resolved binary path goes to stdout (so `NODE=$(nub node which)` captures just the path), and a `» resolved from <source>` explainer goes to stderr. With no pin the explainer reads `» resolved from node on PATH`. Bare `nub node` prints the same as a status block.
 
 ## Related
 
