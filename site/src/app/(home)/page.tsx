@@ -867,8 +867,8 @@ function Compatibility() {
             Node-compatible, because it <span className="italic">is</span> Node
           </h3>
           <p className="mt-5 text-balance text-lg leading-relaxed text-fd-muted-foreground">
-            Your code is transpiled and executed with the stock <Mono>node</Mono>{' '}binary, so
-            Nub passes Node&rsquo;s own test suite — <span className="font-semibold text-fd-foreground">99.3% of the full corpus</span>. The gap comes from nub&rsquo;s native Node addons and unflagged experimental features, not breakage. It&rsquo;s not a reimplementation.
+            Your code is transpiled and executed with the stock <Mono>node</Mono>{' '}binary, so it
+            runs on real Node, not a reimplementation. That&rsquo;s where the compatibility comes from.
           </p>
         </div>
 
