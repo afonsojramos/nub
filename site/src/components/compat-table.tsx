@@ -3,12 +3,13 @@ import type { ReactNode } from 'react';
 // Per-package-manager compatibility table. Vertical (one feature per row) so it
 // never overflows horizontally, with a color-coded status glyph:
 //   yes      → green check  (supported)
-//   no       → red X        (unsupported)
+//   no       → red X        (a genuine nub gap — the incumbent PM has it, nub doesn't mirror it)
 //   partial  → amber check  (partially supported — use sparingly)
-// The check/X are distinct in BOTH shape and color so support reads at a glance.
+//   n/a      → gray dash     (not this PM's feature — a faithful mirror correctly omits it; NOT a failure)
+// The check/X/dash are distinct in BOTH shape and color so support reads at a glance.
 // Styled to match the docs' dark theme and the existing fumadocs table look.
 
-export type CompatStatus = 'yes' | 'no' | 'partial';
+export type CompatStatus = 'yes' | 'no' | 'partial' | 'n/a';
 
 export interface CompatRow {
   /** The config field / capability — markdown rendered, so backticked code works. */
@@ -19,6 +20,27 @@ export interface CompatRow {
 }
 
 function StatusGlyph({ status }: { status: CompatStatus }) {
+  if (status === 'n/a') {
+    return (
+      <span className="inline-flex items-center gap-1.5 font-medium text-fd-muted-foreground">
+        <svg
+          aria-hidden
+          width="14"
+          height="14"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="3"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          className="size-3.5 shrink-0"
+        >
+          <path d="M5 12h14" />
+        </svg>
+        <span className="sr-only">Not applicable</span>
+      </span>
+    );
+  }
   if (status === 'no') {
     return (
       <span className="inline-flex items-center gap-1.5 font-medium text-red-500 dark:text-red-400">
