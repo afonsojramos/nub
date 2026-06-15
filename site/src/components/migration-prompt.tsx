@@ -2,12 +2,24 @@
 
 import { useState } from 'react';
 
-/* The prompt copied to the clipboard. Points an AI coding agent at the
-   agent-onboarding doc (https://nubjs.com/start.md) and carries the core
-   directives so it acts before reading the doc in full. DRAFT wording —
-   the maintainer owns the final voice. */
-const PROMPT =
-  'Read https://nubjs.com/start.md to learn nub’s full surface. Then install the nub skill: get its text by running `nub agent skill` (which just prints the skill body — it does not install anything) or by fetching https://nubjs.com/skill.md, then write it to the skills or rules directory your AI coding tool uses — for example .claude/skills/ for Claude Code, .cursor/rules/ for Cursor, or the equivalent for whichever agent is running. Installing the skill is the only thing to do on your own; make no other changes without my go-ahead. Next, in an education pass (no edits), study this project’s existing tooling — its dependencies, scripts, TypeScript runner, env loading, and version and package managers — and explain to me, above all, how nub fits into it and simplifies it: which tools nub consolidates or replaces here, and how and when to use it (run files with `nub <file>`, package.json scripts with `nub run`, local CLIs with `nubx`, plus `nub --node` for plain Node), and what nub removes from the setup. Then point out the dependencies or devDependencies nub makes redundant (for example tsx, ts-node, dotenv, nodemon, tsconfig-paths) and offer to migrate off them — but make no change until I opt in. There’s no need to switch off the existing package manager: nub respects its lockfile bidirectionally, so nub and the current package manager work interchangeably.';
+/* The prompt copied to the clipboard. People read this before running it, so
+   it's formatted as a numbered checklist (newlines survive the copy). It points
+   an AI coding agent at the onboarding doc, installs the skill, then runs an
+   education pass before any opt-in migration. DRAFT wording — the maintainer owns the
+   final voice. */
+const PROMPT = [
+  'Adopt nub (https://nubjs.com) in this Node.js project by working through these steps:',
+  '',
+  '1. Read https://nubjs.com/start.md to learn nub’s full surface.',
+  '',
+  '2. Install the nub skill. Run `nub agent skill` to print the skill body (it only prints it — it does not install anything), or fetch https://nubjs.com/skill.md. Then write it into every skills or rules location this project uses — for example .claude/skills/ for Claude Code and .cursor/rules/ for Cursor — covering all of them, not just one. Installing the skill is the only step to take unprompted; everything after it is opt-in, so pause for approval before making any change.',
+  '',
+  '3. Explain how nub fits in. In an education pass with no edits, study this project’s existing tooling — its dependencies, scripts, TypeScript runner, env loading, and version and package managers — then lay out, above all, how nub fits into it and simplifies it: which tools it consolidates or replaces here, what it removes from the setup, and how and when to use it (`nub <file>` to run files, `nub run` for package.json scripts, `nubx` for local CLIs, and `nub --node` for plain Node).',
+  '',
+  '4. Offer to migrate. Point out the dependencies or devDependencies nub makes redundant (for example tsx, ts-node, dotenv, nodemon, or tsconfig-paths) and offer to migrate off them — but make no change without explicit approval.',
+  '',
+  'There’s no need to switch off the existing package manager: nub respects its lockfile bidirectionally, so nub and the current package manager work interchangeably.',
+].join('\n');
 
 export function MigrationPrompt({ className = '' }: { className?: string }) {
   const [copied, setCopied] = useState(false);
