@@ -1245,8 +1245,32 @@ function Footer() {
             <a href="https://github.com/nubjs/nub/blob/main/LICENSE" className="hover:text-fd-foreground">License</a>
           </div>
         </div>
-        <p className="mt-6 text-center text-xs text-fd-muted-foreground">
-          © {year} Nub. MIT-licensed.
+        <p className="mt-6 flex items-center justify-center gap-1.5 text-xs text-fd-muted-foreground">
+          <span>© {year} Nub</span>
+          <span aria-hidden>·</span>
+          <a
+            href="https://github.com/nubjs/nub/blob/main/LICENSE"
+            className="inline-flex items-center gap-1 hover:text-fd-foreground"
+          >
+            <svg
+              width="12"
+              height="12"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden
+            >
+              <path d="m16 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z" />
+              <path d="m2 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z" />
+              <path d="M7 21h10" />
+              <path d="M12 3v18" />
+              <path d="M3 7h2c2 0 5-1 7-2 2 1 5 2 7 2h2" />
+            </svg>
+            MIT
+          </a>
         </p>
       </Container>
     </footer>
