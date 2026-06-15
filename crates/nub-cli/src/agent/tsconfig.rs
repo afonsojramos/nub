@@ -1,5 +1,4 @@
-//! tsconfig type-pickup merge for the shared `@nubjs/types` wiring (used by both
-//! `nub init` and `nub agent init`).
+//! tsconfig type-pickup merge for `nub agent init`.
 //!
 //! Wires nub's ambient TypeScript declarations into the project's tsconfig so
 //! the augmented surfaces (data-format imports, `import.meta.hot`, `Temporal`,
@@ -21,7 +20,7 @@
 use anyhow::{Context, Result};
 use serde_json::{Map, Value};
 
-/// The ambient-declarations package nub's init wires in. Working name
+/// The ambient-declarations package nub's `agent init` wires in. Working name
 /// (`.fray/ts-declarations.md`); a sibling agent owns the final public name.
 pub const TYPES_PACKAGE: &str = "@nubjs/types";
 

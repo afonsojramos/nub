@@ -12,8 +12,9 @@
 mod agents_md;
 mod artifacts;
 mod detect;
-// The interactive-prompt helper is shared with `nub init` (crate::init).
-pub(crate) mod prompt;
+mod package_json;
+mod prompt;
+mod tsconfig;
 
 use std::path::{Path, PathBuf};
 
@@ -22,11 +23,10 @@ use anyhow::{Result, bail};
 use detect::{Agent, Detection};
 use prompt::{Confirm, Mode};
 
-// The `@nubjs/types` project-integration wiring (tsconfig merge, devDependency,
-// and the `nub-env.d.ts` fallback) lives in `crate::init` and is SHARED with
-// `nub init` — `nub agent init` offers it on an existing TS-shaped project,
-// `nub init` scaffolds it into a fresh one.
-use crate::init::types_wiring;
+/// The in-repo ambient-declarations fallback, bundled from `assets/nub-env.d.ts`
+/// (kept byte-identical to the `@nubjs/types` package content). Written into the
+/// project as the offline / no-install-step pickup path.
+const NUB_ENV_DTS: &str = include_str!("../../assets/nub-env.d.ts");
 
 /// Entry point for `nub agent …`, dispatched from `dispatch_subcommand`.
 pub fn run(args: &[String]) -> Result<i32> {
@@ -196,24 +196,96 @@ fn write_agents_md(cwd: &Path, written: &mut Vec<String>) -> Result<()> {
     Ok(())
 }
 
-/// Offer the TypeScript types pickup on an existing project: merge tsconfig, add
-/// `@nubjs/types` to devDependencies, and optionally drop the `nub-env.d.ts`
-/// fallback. Only offered when there's a tsconfig — the unambiguous TS signal.
-/// (A no-tsconfig project that nonetheless runs `.ts` files still benefits, but
-/// creating a tsconfig from nothing is `nub init`'s job, not this command's.)
-///
-/// Delegates to the SHARED wiring in `crate::init::types_wiring` so `nub init`
-/// and `nub agent init` stay byte-identical on the type-integration shape.
+/// Offer the TypeScript types pickup: merge tsconfig, add `@nubjs/types` to
+/// devDependencies, and optionally drop the `nub-env.d.ts` fallback. Only
+/// offered when there's a tsconfig (or the user opts in for a TS-shaped
+/// project). The tsconfig + package.json merges are value-level + additive.
 fn maybe_wire_types(
     cwd: &Path,
     det: &Detection,
     confirm: &Confirm,
     written: &mut Vec<String>,
 ) -> Result<()> {
+    // Offer only when a tsconfig exists — that's the unambiguous TS signal. (A
+    // no-tsconfig project that nonetheless runs `.ts` files still benefits, but
+    // creating a tsconfig from nothing is more invasive than this command should
+    // be by default.)
     if !det.has_tsconfig {
         return Ok(());
     }
-    types_wiring::wire(cwd, det.has_package_json, confirm, written)
+
+    let tsconfig_path = cwd.join("tsconfig.json");
+    let text = std::fs::read_to_string(&tsconfig_path)?;
+    let ts_plan = match tsconfig::plan(&text) {
+        Ok(p) => p,
+        Err(e) => {
+            println!("  skipping tsconfig: {e}");
+            return Ok(());
+        }
+    };
+
+    if ts_plan.changed {
+        let mut q = format!(
+            "Wire nub's types into tsconfig.json (types += {}, lib += es2024{})?",
+            tsconfig::TYPES_PACKAGE,
+            if ts_plan.dropped_dom {
+                ", drop dom"
+            } else {
+                ""
+            }
+        );
+        if ts_plan.had_comments {
+            q.push_str(" [note: comments in tsconfig.json will be removed]");
+        }
+        if confirm.ask(&q, true) {
+            std::fs::write(&tsconfig_path, &ts_plan.new_text)?;
+            written.push("tsconfig.json (types wired)".to_string());
+            // Also add @nubjs/types to devDependencies when package.json is present.
+            maybe_add_dev_dep(cwd, det, written)?;
+        }
+    } else {
+        println!("  tsconfig.json already wired for nub's types — no change");
+        // Even if the tsconfig was already wired, the devDep may still be missing.
+        maybe_add_dev_dep(cwd, det, written)?;
+    }
+
+    // The in-repo fallback `.d.ts` — works without installing `@nubjs/types`
+    // (offline / no-install). Default NO: it duplicates the package's content, so
+    // it's only wanted when the package can't be added.
+    if confirm.ask(
+        "Also drop an in-repo nub-env.d.ts fallback (for offline / no-install)?",
+        false,
+    ) {
+        write_file(cwd, "nub-env.d.ts", NUB_ENV_DTS)?;
+        written.push("nub-env.d.ts (types fallback)".to_string());
+    }
+    Ok(())
+}
+
+/// If a `package.json` exists, add `@nubjs/types` to `devDependencies`.
+/// Silently skips when no package.json is present. Idempotent.
+fn maybe_add_dev_dep(cwd: &Path, det: &Detection, written: &mut Vec<String>) -> Result<()> {
+    if !det.has_package_json {
+        return Ok(());
+    }
+    let pkg_path = cwd.join("package.json");
+    let text = std::fs::read_to_string(&pkg_path)?;
+    let plan = match package_json::plan(&text) {
+        Ok(p) => p,
+        Err(e) => {
+            println!("  skipping package.json devDep: {e}");
+            return Ok(());
+        }
+    };
+    if plan.changed {
+        std::fs::write(&pkg_path, &plan.new_text)?;
+        written.push(format!(
+            "package.json (devDependencies += {}@{})",
+            tsconfig::TYPES_PACKAGE,
+            package_json::TYPES_VERSION,
+        ));
+    }
+    Ok(())
 }
 
 fn print_summary(written: &[String]) {
@@ -240,8 +312,6 @@ fn write_file(cwd: &Path, rel: &str, body: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    // The devDep tests reference the shared package_json merge constants.
-    use crate::init::package_json;
 
     fn td() -> tempfile::TempDir {
         tempfile::tempdir().expect("tempdir")
@@ -282,13 +352,13 @@ mod tests {
         // *inside* a `declare module { … }` block is fine (it's the module's own
         // export, not a top-level one); the un-indented form at column 0 is what
         // turns the file into a module. So flag only column-0 import/export.
-        for line in types_wiring::NUB_ENV_DTS.lines() {
+        for line in NUB_ENV_DTS.lines() {
             assert!(
                 !line.starts_with("import ") && !line.starts_with("export "),
                 "nub-env.d.ts must be a global script (no top-level import/export); offending line: {line}"
             );
         }
-        assert!(types_wiring::NUB_ENV_DTS.contains("declare module \"*.yaml\""));
+        assert!(NUB_ENV_DTS.contains("declare module \"*.yaml\""));
     }
 
     // ── End-to-end: --yes drives the whole flow non-interactively ──

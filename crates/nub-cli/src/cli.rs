@@ -697,7 +697,7 @@ struct ScriptExecOpts<'a> {
 /// Known subcommand names that clap should handle. `install`/`i`/`ci` route
 /// to the embedded aube install engine (src/pm_engine/).
 const SUBCOMMANDS: &[&str] = &[
-    "run", "watch", "exec", "upgrade", "help", "node", "pm", "agent", "init", "install", "i", "ci",
+    "run", "watch", "exec", "upgrade", "help", "node", "pm", "agent", "install", "i", "ci",
 ];
 
 /// PM-management verbs nub recognizes only to redirect. The pure-passthrough
@@ -1002,6 +1002,17 @@ fn run_nub() -> Result<i32> {
         if is_node_passthrough {
             run_file_with_compat(&rest, compat)
         } else {
+            // `init` is reserved for nub's own project init (not the PM
+            // engine's npm-style manifest scaffold) — deliberately absent
+            // from ENGINE_VERBS, answered with a "coming" note rather than
+            // a PM redirect so nobody scaffolds the wrong shape meanwhile.
+            if first == "init" {
+                bail!(
+                    "nub: \"init\" is reserved — nub's own project init is coming and \
+                     hasn't shipped yet\n\
+                     \x20\x20(to run a package.json script named init: nub run init)"
+                );
+            }
             // No magic auto-run (deliberate divergence from pnpm/bun, which run
             // `<pm> dev` as the dev script). But when the bareword is almost
             // certainly a script — it's defined in the local package.json#scripts,
@@ -1208,15 +1219,6 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
     // .fray/ai-friendliness.md.
     if subcommand == "agent" {
         return crate::agent::run(&rest[1..]);
-    }
-
-    // `init` scaffolds a fresh modern-TS Node project (spec:
-    // wiki/commands/init.md). Like `node`/`pm`/`agent`, a non-forwarding manual
-    // sub-verb match so its flag-parsing + messages stay self-contained and it
-    // never reaches clap dispatch. NOT the PM engine's npm-style manifest
-    // scaffold — deliberately absent from ENGINE_VERBS.
-    if subcommand == "init" {
-        return crate::init::run(&rest[1..]);
     }
 
     // The engine's lazy node-gyp shims re-invoke `current_exe()` (= nub)
@@ -6191,8 +6193,7 @@ mod tests {
         // to native verbs (the embedded aube engine, src/pm_engine/) — they
         // must stay native and out of the registry.
         for verb in [
-            "run", "exec", "node", "pm", "agent", "init", "watch", "upgrade", "help", "install",
-            "i", "ci",
+            "run", "exec", "node", "pm", "watch", "upgrade", "help", "install", "i", "ci",
         ] {
             assert!(
                 SUBCOMMANDS.contains(&verb),
@@ -6259,11 +6260,11 @@ mod tests {
         assert!(msg.contains("-r"), "{msg}");
     }
 
-    // `init` is nub's own project-scaffold verb (crate::init): the engine-
-    // registry exclusion is asserted in
-    // pm_engine::tests::verb_registry_excludes_reserved_and_tool_identity_verbs,
-    // and the end-to-end scaffold/refuse behavior is covered through the spawned
-    // binary in tests/pm_verbs.rs (init_scaffolds_* / init_refuses_*).
+    // `init` reservation: the registry exclusion is asserted in
+    // pm_engine::tests::verb_registry_excludes_reserved_and_tool_identity_verbs
+    // and the bareword arm's "nub's own init is coming" answer is covered
+    // through the spawned binary in tests/pm_verbs.rs (the arm lives inside
+    // run_nub's argv pre-parse, which has no injectable entry point here).
 
     /// A project dir whose `.npmrc` points the registry at an unroutable port, so
     /// any code path that should NOT reach the network fails fast (connection

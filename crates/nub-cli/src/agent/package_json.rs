@@ -1,10 +1,9 @@
-//! `package.json` devDependency merge for the shared `@nubjs/types` wiring
-//! (used by both `nub init` and `nub agent init`).
+//! `package.json` devDependency merge for `nub agent init`.
 //!
-//! When the types offer is accepted (the same offer that wires the tsconfig
-//! `types`/`lib`), this module also records the package in `devDependencies`.
-//! The version written matches the running nub binary — the `@nubjs/types`
-//! package is versioned in lock-step with the CLI.
+//! When the user accepts the `@nubjs/types` types offer (same offer that wires
+//! the tsconfig `types`/`lib`), this module also records the package in
+//! `devDependencies`. The version written matches the running nub binary —
+//! the `@nubjs/types` package is versioned in lock-step with the CLI.
 //!
 //! The merge is value-level (`serde_json` with `preserve_order`) and additive:
 //! it only touches `devDependencies`, inserting the key if missing or leaving it
@@ -13,7 +12,7 @@
 use anyhow::{Context, Result};
 use serde_json::{Map, Value};
 
-pub use crate::init::tsconfig::TYPES_PACKAGE;
+pub use crate::agent::tsconfig::TYPES_PACKAGE;
 
 /// The version string written into devDependencies. The `@nubjs/types` package
 /// is versioned in lock-step with the CLI binary (workspace version), so the

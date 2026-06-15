@@ -495,50 +495,24 @@ fn verb_help_is_rebranded_and_exits_zero() {
     }
 }
 
-/// `nub init` scaffolds a fresh modern-TS project (it is nub's own project
-/// init, NOT the PM engine's manifest scaffold and NOT a PM redirect). In an
-/// empty dir with `-y` it writes the five files and prints the next-step hint.
+/// `init` is reserved for nub's own project init: not an engine verb, not a
+/// PM redirect — the answer names the coming nub feature and nothing else.
 #[test]
-fn init_scaffolds_a_fresh_typescript_project() {
-    let dir = pm_tmpdir("init-fresh");
-    let out = run_nub(&dir, &["init", "-y", "--no-git"]);
-    assert_eq!(out.code, 0, "init must succeed: {}", out.combined());
-    out.assert_brand_clean();
-    for f in ["package.json", "tsconfig.json", "index.ts", ".gitignore"] {
-        assert!(dir.join(f).is_file(), "init must write {f}");
-    }
-    let pkg = std::fs::read_to_string(dir.join("package.json")).unwrap();
-    assert!(pkg.contains("\"type\": \"module\""));
-    assert!(
-        pkg.contains("nub index.ts"),
-        "start script targets index.ts"
-    );
-    // Not a PM redirect.
-    assert!(
-        !out.combined().contains("pnpm init") && !out.combined().contains("package manager"),
-        "init must not redirect to a PM: {}",
-        out.combined()
-    );
-}
-
-/// `nub init` refuses to clobber existing project files (no `--force`), listing
-/// the conflicts and exiting non-zero — the manifest is left untouched.
-#[test]
-fn init_refuses_to_overwrite_existing_files() {
-    let dir = pm_tmpdir("init-conflict");
+fn init_is_reserved_and_answers_with_the_coming_note() {
+    let dir = pm_tmpdir("init");
     std::fs::write(dir.join("package.json"), r#"{"name":"init-fixture"}"#).unwrap();
-    let out = run_nub(&dir, &["init", "-y", "--no-git"]);
-    assert_ne!(out.code, 0, "init must refuse an existing package.json");
+    let out = run_nub(&dir, &["init"]);
+    assert_ne!(out.code, 0, "init must error until nub's own init ships");
     out.assert_brand_clean();
     assert!(
-        out.stderr.contains("refusing to overwrite") && out.stderr.contains("package.json"),
-        "the refusal must list the conflicting file: {}",
+        out.stderr.contains("nub's own project init is coming"),
+        "the message must name the coming nub feature: {}",
         out.stderr
     );
-    // The existing manifest is preserved untouched.
-    assert_eq!(
-        std::fs::read_to_string(dir.join("package.json")).unwrap(),
-        r#"{"name":"init-fixture"}"#
+    assert!(
+        !out.stderr.contains("package manager") && !out.stderr.contains("pnpm init"),
+        "init must not redirect to a PM: {}",
+        out.stderr
     );
 }
 
