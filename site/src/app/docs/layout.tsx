@@ -16,9 +16,29 @@ const COMMAND_BY_URL: Record<string, string> = {
   '/docs/watch': 'nub watch',
 };
 
-function LabelWithChip({ label, command }: { label: ReactNode; command: string }) {
+/* The chip column shares ONE right edge across every nav row. On a folder row,
+   Fumadocs renders an expand/collapse chevron as a flex sibling to the right of
+   our label span (16px `size-4` icon + the link's 8px `gap-2` = a 24px slot),
+   which would otherwise push the folder's chip 24px left of the page-row chips.
+   To keep all chips in one vertical column, page rows (no chevron) reserve that
+   same 24px gutter on the right via `mr-6`; folder rows leave it to the chevron. */
+const CHEVRON_GUTTER = 'mr-6'; // 24px = chevron (16px) + link gap (8px)
+
+function LabelWithChip({
+  label,
+  command,
+  reserveChevronGutter,
+}: {
+  label: ReactNode;
+  command: string;
+  reserveChevronGutter: boolean;
+}) {
   return (
-    <span className="flex w-full items-center justify-between gap-2">
+    <span
+      className={`flex w-full items-center justify-between gap-2${
+        reserveChevronGutter ? ` ${CHEVRON_GUTTER}` : ''
+      }`}
+    >
       <span>{label}</span>
       <code className="shrink-0 whitespace-nowrap rounded border border-fd-border/50 bg-fd-muted px-1 py-px font-mono text-[0.58rem] leading-tight font-normal text-fd-muted-foreground in-data-[active=true]:border-fd-primary/30 in-data-[active=true]:bg-fd-primary/10 in-data-[active=true]:text-fd-primary">
         {command}
@@ -36,14 +56,21 @@ function styleNode(node: TreeNode): TreeNode {
     // being lost to the chevron slot.
     const command = node.index ? COMMAND_BY_URL[node.index.url] : undefined;
     if (command) {
-      styled.name = <LabelWithChip label={node.name} command={command} />;
+      // Folder row: the chevron sibling supplies the right-hand gutter.
+      styled.name = (
+        <LabelWithChip label={node.name} command={command} reserveChevronGutter={false} />
+      );
     }
     return styled;
   }
   if (node.type === 'page') {
     const command = COMMAND_BY_URL[node.url];
     if (command) {
-      return { ...node, name: <LabelWithChip label={node.name} command={command} /> };
+      // Page row: no chevron, so reserve the gutter to keep the chip column aligned.
+      return {
+        ...node,
+        name: <LabelWithChip label={node.name} command={command} reserveChevronGutter={true} />,
+      };
     }
   }
   return node;
