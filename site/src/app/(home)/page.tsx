@@ -2,6 +2,7 @@ import Link from 'next/link';
 import type { Metadata } from 'next';
 import type { ReactNode } from 'react';
 import { InstallTabs } from '@/components/install-tabs';
+import { MigrationPrompt } from '@/components/migration-prompt';
 import { Terminal, Source, BenchBars } from '@/components/code';
 import { ToolkitTabs } from '@/components/toolkit-tabs';
 import { getLatestNode } from '@/lib/node-version';
@@ -216,6 +217,9 @@ async function Hero() {
             <HeroSub className="mt-6" />
             <div className="mt-9">
               <InstallTabs />
+            </div>
+            <div className="mt-4">
+              <MigrationPrompt />
             </div>
           </div>
           <Terminal size="lg" className="w-full min-w-0 max-w-xl xl:max-w-none" lines={heroLines(node.major)} />
@@ -942,8 +946,10 @@ const RULES = [
    `packageExtensions` row has no pm_engine dialect-scoping (no per-PM conflict);
    the nub=yes cell is grounded in the embedded aube engine, which honors a
    top-level `packageExtensions` natively (vendor/aube/crates/aube-manifest/src/lib.rs
-   `package_extensions()` → resolver package_ext.rs). bun=no verified: zero refs in
-   bun source + docs. Legend:
+   `package_extensions()` → resolver package_ext.rs). Same for `allowBuilds` — a real
+   pnpm field (pnpm-workspace.yaml; pnpm/core/types/src/package.ts) that aube reads via
+   its pnpm-compat settings family; bun honors none of it (only `trustedDependencies`).
+   Both bun=no cells verified: zero refs in bun source + docs. Legend:
      yes  — honored
      no   — ignored
      —    — n/a
@@ -970,6 +976,10 @@ const PM_MATRIX: { field: ReactNode; cells: Record<(typeof PM_COLUMNS)[number], 
   {
     field: <><Mono>packageExtensions</Mono></>,
     cells: { npm: 'no', pnpm: 'yes', yarn: 'yes', bun: 'no', nub: 'yes' },
+  },
+  {
+    field: <><Mono>allowBuilds</Mono></>,
+    cells: { npm: 'no', pnpm: 'yes', yarn: 'no', bun: 'no', nub: 'yes' },
   },
   {
     field: <><Mono>.npmrc</Mono></>,
