@@ -12,7 +12,7 @@ nubx --filter @org/api tsc --build     # run a local bin across a filtered works
 nub dlx -p cowsay -c 'cowsay hi | tr a-z A-Z'  # one-off tool, no install, shell pipeline
 ```
 
-For a locally-resolved bin, `nubx` does the `node_modules/.bin` walk-up in Rust and exec's the resolved binary directly, so the wrapper overhead that `npx` and `pnpm exec` pay on every call — a full Node bootstrap — approximately disappears: roughly 17–19× lighter on a native CLI like `esbuild`. The tool that actually runs is identical to what `npx` would run; only the wrapper gets out of the way.
+For a locally-resolved bin, `nubx` does the `node_modules/.bin` walk-up in Rust and exec's the resolved binary directly, so the wrapper overhead that `npx` and `pnpm exec` pay on every call — a full Node bootstrap — approximately disappears: 19× lighter than `npx` on a native CLI like `esbuild` (and roughly 17× lighter than `pnpm exec`). The tool that actually runs is identical to what `npx` would run; only the wrapper gets out of the way.
 
 This page is task-oriented. For the bigger picture see the [Introduction](/docs); for running files and scripts see [running files](/docs/runtime) and [running scripts](/docs/run).
 
@@ -88,17 +88,6 @@ dependencies:
                 ||     ||
 ```
 
-## Yarn Plug'n'Play
-
-Yarn Berry's Plug'n'Play mode replaces `node_modules/.bin/` with a runtime resolution table managed by Yarn's own loader. Tools that only walk the `.bin/` tree — `npx`, `pnpm exec`, `bunx` — don't see it. `nubx` does: when the `.bin` walk-up misses in a PnP tree, it hands off to a PnP-aware runner that resolves the bin through `pnpapi` (re-injecting `.pnp.cjs`), so a Yarn Berry project's bins run with no setup — including zip-stored ones.
-
-This PnP resolution is part of `nubx`'s augmentation, so it is skipped under [`--node`](#--node). If you run `nubx --node` in a PnP tree and want the bin to resolve, opt into the conventional layout by setting `nodeLinker: node-modules` in `.yarnrc.yml`.
-
-```yaml
-# .yarnrc.yml
-nodeLinker: node-modules
-```
-
 ## Flag differences
 
 - **`-c`/`--shell-mode`** — the shell-string form lives on `nub dlx -c` (shown above); `nub exec`/`nubx` run a resolved bin directly.
@@ -109,4 +98,4 @@ nodeLinker: node-modules
 - [Running files](/docs/runtime) — `nub index.ts`, TypeScript-first execution.
 - [Running scripts](/docs/run) — `nub run`, the workspace-aware script runner that shares the `.bin` resolution chain.
 - [Watch mode](/docs/watch) — `nub watch`, restart on change.
-- [FAQ](/docs/faq) — short answers, including the `--node` flag and the Yarn PnP caveat.
+- [FAQ](/docs/faq) — short answers, including the `--node` flag.

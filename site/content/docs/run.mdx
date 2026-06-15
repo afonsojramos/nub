@@ -1,9 +1,9 @@
 ---
 title: Script runner
-description: A drop-in for npm run and pnpm run — lifecycle hooks, the standard npm environment variables, arg forwarding, and pnpm-style workspace filters, roughly 7× faster on the cold path.
+description: A drop-in for npm run and pnpm run — lifecycle hooks, the standard npm environment variables, arg forwarding, and pnpm-style workspace filters, 24× faster on the cold path.
 ---
 
-The `nub run` command executes the scripts in your `package.json`. It is a drop-in replacement for `npm run` and `pnpm run` — ~7× faster on the cold path, with the full workspace and lifecycle-hook surface preserved. It reads your `package.json` directly; package management stays with whatever you already use (`pnpm`, `npm`, `yarn`, `bun`). This page is a cookbook: each section is a task with the exact command to run.
+The `nub run` command executes the scripts in your `package.json`. It is a drop-in replacement for `npm run` and `pnpm run` — 24× faster on the cold path, with the full workspace and lifecycle-hook surface preserved. It reads your `package.json` directly; package management stays with whatever you already use (`pnpm`, `npm`, `yarn`, `bun`). This page is a cookbook: each section is a task with the exact command to run.
 
 ## `nub run <script>`
 

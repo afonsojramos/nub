@@ -90,8 +90,6 @@ Because Nub writes the same lockfile your package manager does, nothing forces a
 
 Yes. All four keep working exactly as they do without Nub. Your lockfile stays in whatever format your package manager produces. Workspace topology (`pnpm-workspace.yaml`, `npm` workspaces, `yarn` workspaces) is honored by `nub run` and `nubx` directly. The source of truth for `nub run` is `package.json` and its `"scripts"` field; for `nubx`, it's `node_modules/.bin`.
 
-One Yarn-specific note: Yarn Berry's Plug'n'Play mode replaces `node_modules/.bin/` with a runtime resolution table managed by Yarn's own loader. Tools that only walk the `.bin/` tree — `npx`, `pnpm exec`, `bunx` — don't see it, but `nubx` does: when the `.bin` walk-up misses in a PnP tree it resolves the bin through `pnpapi` (this is part of `nubx`'s augmentation, so it's skipped under `--node`). Yarn Berry users running `nubx --node` can restore the conventional `.bin/` layout by setting `nodeLinker: node-modules` in `.yarnrc.yml`.
-
 ## Is it monorepo-friendly?
 
 Yes. Workspace topology comes from `package.json`'s `"workspaces"` field (`npm`, `yarn`) and `pnpm-workspace.yaml` (`pnpm`), with the `-r` / `--filter` semantics every workspace user already knows from `pnpm`:
@@ -218,11 +216,11 @@ ws client                               # native WebSocket since 22.0, flag-inje
 
 The second bucket's credit is Node's — running on a modern-Node floor is what makes the inheritance practical without per-project Node-version verification.
 
-## What's `nub-resolver`?
+## How does Nub resolve modules?
 
-The one Rust crate Nub ships of its own — `nub-resolver` — is a Rust implementation of Node's ESM resolution algorithm that layers in `tsconfig.json` `paths` and extensionless `.ts` import probing on top of vanilla Node's behavior. It builds on `oxc_resolver` for the primitives, is validated against a conformance suite ported from Node's own ESM resolver specification, and is also what powers the resolver inside `nubx` and `nub run`.
+Nub's resolver is a Rust implementation of Node's ESM resolution algorithm that layers in `tsconfig.json` `paths` and extensionless `.ts` import probing on top of vanilla Node's behavior. It builds on `oxc_resolver` for the primitives, is validated against a conformance suite ported from Node's own ESM resolver specification, and is also what powers the resolver inside `nubx` and `nub run`.
 
-The rest of the hot path delegates to crates the Rust JavaScript-tooling ecosystem has already converged on — [`oxc`](https://oxc.rs/) for parsing, transformation, and source maps; [`napi-rs`](https://napi.rs/) for Rust→Node bindings. Nub's own contribution is the orchestration: detecting the user's Node version, wiring up `module.registerHooks()`, prepending the PATH shim, managing the transpile cache, version-gating the polyfills, and `nub-resolver` itself.
+The rest of the hot path delegates to crates the Rust JavaScript-tooling ecosystem has already converged on — [`oxc`](https://oxc.rs/) for parsing, transformation, and source maps; [`napi-rs`](https://napi.rs/) for Rust→Node bindings. Nub's own contribution is the orchestration: detecting the user's Node version, wiring up `module.registerHooks()`, prepending the PATH shim, managing the transpile cache, version-gating the polyfills, and the resolver itself.
 
 ## How is it different from Bun?
 
