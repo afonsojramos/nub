@@ -57,6 +57,8 @@ try {
   /** @type {string[]} */
   const pending = []; // `<slug>[status]` for every non-terminal thread — compact, one line, names included so a stalled thread is caught BY NAME (not just a count). Full detail stays in `node scripts/fray/index.mjs`, NOT injected per-message.
   /** @type {string[]} */
+  const queued = []; // non-terminal threads that still carry a `QUEUED` follow-up marker — surfaced BY NAME so the drain-the-queue step can't be skipped (the maintainer: missing these is "totally unacceptable").
+  /** @type {string[]} */
   const errors = [];
   try {
     for (const f of readdirSync(join(dir, '.fray'))) {
@@ -67,13 +69,17 @@ try {
       if (!/^title:\s*\S/m.test(src)) errors.push(`${id}: missing title`);
       if (!st) errors.push(`${id}: missing status`);
       else if (!STATUS.includes(st)) errors.push(`${id}: invalid status "${st}"`);
-      if (!TERMINAL.includes(st ?? '')) pending.push(`${id}[${st ?? '?'}]`);
+      if (!TERMINAL.includes(st ?? '')) {
+        pending.push(`${id}[${st ?? '?'}]`);
+        if (/\bQUEUED\b/.test(src)) queued.push(id);
+      }
     }
   } catch {
     /* no .fray dir yet */
   }
   const status =
     `FRAY — ${pending.length} pending: ${pending.join(', ') || 'none'}. Advance or reconcile EACH this turn; if you went deep on ONE thread, don't let the others silently stall (\`node scripts/fray/index.mjs\` for detail). When you fold a return: DRAIN that thread's queued follow-ups (\`## Steps\` items marked QUEUED — dispatch on <agent>'s return) + MOVE any answered Open question into Decisions (a DECIDED thing lives under ## Decisions, NEVER Open questions). done/dismissed threads are TERMINAL + KEPT — never delete them.` +
+    (queued.length ? `  ⚠ UN-DRAINED QUEUED FOLLOW-UPS in ${queued.length} thread(s): ${queued.join(', ')}. THE INSTANT any of their agents returns, RE-READ that thread .md (don't reconcile from memory) and DISPATCH the actionable QUEUED items as sub-agents THIS turn (a mandated self-review/integration pass IS one — dispatch it). Surface, never silently drop, the the maintainer-gated/post-launch ones. Skipping this is the #1 failure.` : '') +
     (errors.length ? `  ⚠ VALIDATION ERRORS (fix now): ${errors.join('; ')}` : '');
 
   const modeLine =
