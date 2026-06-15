@@ -526,10 +526,14 @@ fn matches_pattern(name: &str, rel_dir: &str, pattern: &str) -> bool {
     }
 
     // Directory / path-glob selector. The `{dir}` and `./dir` forms both parse to
-    // a leading "./". A bare dir is a PARENT selector — every package AT or UNDER
-    // it (pnpm's `parentDir`); a `**`/`*`/`?`/`{}` form globs the rel dir. Matching
+    // a leading "./". A BARE dir selects ONLY the package whose own directory IS
+    // that dir — pnpm's default glob dir-filtering (`useGlobDirFiltering`,
+    // `matchProjectsByGlob`) glob-matches the rel dir against the literal selector,
+    // and a literal has no `**`, so it never matches a nested child. Recursion is
+    // opt-in via an explicit glob (`./dir/*`, `./dir/**`), handled just above by
+    // the glob branch of this same block. Matching
     // the workspace-relative dir (not the absolute path) is what makes
-    // `--filter ./packages` and `--filter ./packages/**` select child packages.
+    // `--filter ./packages/*` and `--filter ./packages/**` select child packages.
     if let Some(p) = pattern.strip_prefix("./") {
         let p = p.trim_end_matches('/');
         if p.is_empty() {
@@ -538,7 +542,7 @@ fn matches_pattern(name: &str, rel_dir: &str, pattern: &str) -> bool {
         if p.contains('*') || p.contains('?') || p.contains('{') {
             return glob_match::glob_match(p, rel_dir);
         }
-        return rel_dir == p || rel_dir.starts_with(&format!("{p}/"));
+        return rel_dir == p;
     }
 
     // Name glob (non-path patterns) match the package NAME.
@@ -781,21 +785,20 @@ mod tests {
 
     #[test]
     fn dir_selector_matches_workspace_relative_path() {
-        // Directory selectors match the dir relative to the workspace root: a bare
-        // dir is a PARENT selector (children at/under it — pnpm's parentDir), a
-        // `**`/`*` form globs it, and an exact dir picks one. Regression for the
-        // bug where these matched nothing (ends_with on the absolute dir).
+        // Directory selectors match the dir relative to the workspace root, with
+        // pnpm's default glob dir-filtering semantics: a BARE dir selects ONLY the
+        // package whose own directory IS that dir — it never recurses into nested
+        // packages (pnpm `--filter ./apps` over `apps/web` selects {}). Recursion
+        // is opt-in via an explicit `*`/`**` glob; an exact package dir picks one.
         let members = vec![
             pkg_in("@x/a", "packages/a"),
             pkg_in("@x/b", "packages/b"),
             pkg_in("@x/c", "tools/c"),
         ];
-        // Parent dir selects every child under it, not `tools/c`.
-        assert_eq!(
-            selected_names(&members, "./packages"),
-            HashSet::from(["@x/a", "@x/b"])
-        );
-        // Path-glob forms, same result.
+        // A bare parent dir is NOT a package dir, so it selects nothing — the bare
+        // form is exact-package-dir-only, no recursion (pnpm parity, D1).
+        assert!(selected_names(&members, "./packages").is_empty());
+        // Path-glob forms DO reach the children.
         assert_eq!(
             selected_names(&members, "./packages/**"),
             HashSet::from(["@x/a", "@x/b"])
@@ -809,10 +812,34 @@ mod tests {
             selected_names(&members, "./packages/a"),
             HashSet::from(["@x/a"])
         );
-        // The `{dir}` form parses to `./dir` and selects the same parent set.
+        // The `{dir}` form parses to `./dir`; bare, so it too matches only an exact
+        // package dir. `{packages}` is not a package → nothing.
+        assert!(selected_names(&members, "{packages}").is_empty());
+        // But `{packages/a}` names a package dir exactly → that package.
         assert_eq!(
-            selected_names(&members, "{packages}"),
-            HashSet::from(["@x/a", "@x/b"])
+            selected_names(&members, "{packages/a}"),
+            HashSet::from(["@x/a"])
+        );
+    }
+
+    #[test]
+    fn bare_dir_selector_matches_package_not_its_nested_child() {
+        // The sharper D1 case: a dir that is BOTH a package AND the parent of a
+        // nested package. pnpm `--filter ./packages/group` selects only `group`
+        // (the package whose dir IS `packages/group`), never the nested
+        // `groupchild`. Recursion would need `./packages/group/*`.
+        let members = vec![
+            pkg_in("group", "packages/group"),
+            pkg_in("groupchild", "packages/group/child"),
+        ];
+        assert_eq!(
+            selected_names(&members, "./packages/group"),
+            HashSet::from(["group"])
+        );
+        // The explicit glob reaches the nested child (and not the parent itself).
+        assert_eq!(
+            selected_names(&members, "./packages/group/*"),
+            HashSet::from(["groupchild"])
         );
     }
 

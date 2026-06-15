@@ -128,6 +128,18 @@ function matrixFor(topo) {
       add([...F("./apps"), ...F("!api")], "dir parent minus one");
       break;
 
+    case "dir-is-package-and-parent": // packages/group is a package AND parent of packages/group/child
+      add(
+        ["--filter", "./packages/group"],
+        "bare dir that is a package AND a parent : selects only group, not the nested child",
+      );
+      add(
+        ["--filter", "./packages/group/*"],
+        "explicit glob reaches the nested child only",
+      );
+      add(["--filter", "{packages/group}"], "{dir} bare form : group only");
+      break;
+
     case "dev-prod-mix": // app -(prod)-> lib, app -(dev)-> tool
       add(F("app..."), "app... : app + prod(lib) + dev(tool) deps");
       add(F("...tool"), "...tool : tool + its (dev-)dependent app");
@@ -143,24 +155,11 @@ function matrixFor(topo) {
 // any NEW, unexpected divergence. Keyed by `<topology> <selectorLabel>`.
 // Remove an entry once nub's source is fixed so the matrix re-asserts parity.
 //
-// DIVERGENCE D1 -- bare directory selector is a RECURSIVE PARENT in nub, but an
-// EXACT-DIR-ONLY match in pnpm. pnpm's `--filter ./dir` / `--filter {dir}`
-// selects a package ONLY when `dir` itself holds that package's package.json;
-// it does NOT select packages nested under `dir` (those need a glob:
-// `./dir/*`, `{dir/*}`). nub's matches_pattern (crates/nub-core/src/workspace/
-// filter.rs, the `strip_prefix("./")` branch) matches
-// `rel_dir == p || rel_dir.starts_with("p/")`, i.e. every package at-or-under
-// the dir. So `--filter ./apps` selects {api,web} in nub but {} in pnpm, and
-// for a dir that is BOTH a package and a parent, `--filter ./packages/group`
-// selects {group,groupchild} in nub but {group} in pnpm. The in-crate test
-// `dir_selector_matches_workspace_relative_path` encodes the WRONG (recursive)
-// behavior and must be revised alongside the source fix. Filed for triage
-// 2026-06-15; see this dir's README, "Known divergences".
-const KNOWN_DIVERGENCES = new Set([
-  "nested-dirs --filter ./apps",
-  "nested-dirs --filter {packages}",
-  "nested-dirs --filter ./apps --filter !api",
-]);
+// (D1 -- bare directory selector recursion -- was FIXED 2026-06-15: a bare dir
+// now matches only the exact package dir, matching pnpm's default glob
+// dir-filtering. The matrix re-asserts parity on `./apps`, `{packages}`, and the
+// `dir-is-package-and-parent` topology.)
+const KNOWN_DIVERGENCES = new Set([]);
 
 // --- run a tool, parse the selected set ------------------------------------
 const NAME_RE = /NUBPKG:([A-Za-z0-9@/_.-]+)/g;

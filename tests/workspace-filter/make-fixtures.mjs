@@ -71,6 +71,13 @@ const TOPOLOGIES = [
     packages: { core: [], util: ["core"], web: ["util", "core"], api: ["core"] },
   },
   {
+    name: "dir-is-package-and-parent",
+    doc: "packages/group is BOTH a package AND the parent of packages/group/child — the sharp bare-dir D1 case",
+    globs: ["packages/**"],
+    dir: (n) => (n === "groupchild" ? "packages/group/child" : `packages/${n}`),
+    packages: { group: [], groupchild: [] },
+  },
+  {
     name: "dev-prod-mix",
     doc: "app prod-depends lib, dev-depends tool — exercises dev/prod dep edges",
     globs: ["packages/*"],

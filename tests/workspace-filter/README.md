@@ -52,24 +52,20 @@ Workspace selection is pure manifest analysis in `nub-core` — it does **not** 
 
 ## Known divergences
 
-These are real, triaged divergences vs pnpm. They are listed in `KNOWN_DIVERGENCES` in `run-filter-matrix.mjs` so the suite stays green on them (tracked, not a regression) while still failing on anything new. **Do not edit nub source to fix these as part of the test harness** — they are filed for separate triage. Remove the corresponding `KNOWN_DIVERGENCES` entry once nub is fixed, so the matrix re-asserts parity.
+None. Triaged divergences are listed in `KNOWN_DIVERGENCES` in `run-filter-matrix.mjs` so the suite stays green on them (tracked, not a regression) while still failing on anything new; the set is currently empty. Remove the corresponding `KNOWN_DIVERGENCES` entry once nub is fixed, so the matrix re-asserts parity.
 
-### D1 — bare directory selector: nub recurses, pnpm matches the exact dir only
+### D1 (FIXED 2026-06-15) — bare directory selector: exact dir only, no recursion
 
-**pnpm:** `--filter ./dir` and `--filter {dir}` select a package **only when `dir` itself is that package's directory** (holds its `package.json`). They do **not** select packages nested *under* `dir` — that needs a glob (`./dir/*`, `{dir/*}`).
+**pnpm:** `--filter ./dir` and `--filter {dir}` select a package **only when `dir` itself is that package's directory** (holds its `package.json`). They do **not** select packages nested *under* `dir` — that needs a glob (`./dir/*`, `{dir/*}`). This is pnpm's default glob dir-filtering (`useGlobDirFiltering` / `matchProjectsByGlob`): a literal selector glob-matches the workspace-relative dir, and a literal has no `**`, so it never reaches a nested child.
 
-**nub:** `matches_pattern` (`crates/nub-core/src/workspace/filter.rs`, the `strip_prefix("./")` branch) treats a bare dir as a **recursive parent**: `rel_dir == p || rel_dir.starts_with("p/")`, i.e. every package at or under the dir.
+**The fix:** `matches_pattern` (`crates/nub-core/src/workspace/filter.rs`, the `strip_prefix("./")` branch) previously treated a bare dir as a recursive parent (`rel_dir == p || rel_dir.starts_with("p/")`). It now matches only the exact package dir (`rel_dir == p`); recursion is opt-in via an explicit `*`/`**` glob, handled by the glob branch above it. The matrix re-asserts parity:
 
-Observed in the `nested-dirs` topology (`packages/{core,util}`, `apps/{web,api}`):
+| selector | pnpm = nub |
+| --- | --- |
+| `--filter ./apps` (parent, not a package) | `{}` |
+| `--filter {packages}` (parent, not a package) | `{}` |
+| `--filter ./apps/*` (glob) | `{api, web}` |
+| `--filter ./packages/group` (dir IS a package, also a parent) | `{group}` |
+| `--filter ./packages/group/*` (glob) | `{groupchild}` |
 
-| selector | pnpm | nub |
-| --- | --- | --- |
-| `--filter ./apps` | `{}` | `{api, web}` |
-| `--filter {packages}` | `{}` | `{core, util}` |
-| `--filter ./apps --filter !api` | `{}` | `{web}` |
-
-Sharper still — when a directory is **both a package and a parent of another package** (`./packages/group` is package `group` and also holds child package `groupchild`): pnpm selects `{group}`, nub selects `{group, groupchild}`.
-
-The in-crate test `dir_selector_matches_workspace_relative_path` in `filter.rs` currently **asserts the wrong (recursive) behavior** (e.g. that `./packages` selects its children), so the source fix must revise that test alongside `matches_pattern`. Filed for triage 2026-06-15.
-
-> Note: the globbed forms are already correct — `./apps/*`, `{packages/*}`, and exact-package dirs (`./packages/core`) all match pnpm. The divergence is specific to the *bare, un-globbed parent dir* shape.
+The sharper "dir is both a package and a parent" case is covered by the `dir-is-package-and-parent` topology, and the in-crate tests `dir_selector_matches_workspace_relative_path` + `bare_dir_selector_matches_package_not_its_nested_child` pin the rule.
