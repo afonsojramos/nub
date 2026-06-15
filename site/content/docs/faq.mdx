@@ -8,7 +8,7 @@ description: The short, indexed answers to common questions about Nub — what i
 Nub is an all-in-one toolkit powered by Node.js that modernizes the developer experience in the Node.js ecosystem. Use it to run files, `package.json` scripts, and locally installed CLIs. Use it instead of `node`, `npm run`, and `npx` (or the equivalents in your preferred package manager).
 
 ```console
-$ npm i -g @nubjs/nub
+$ npm install -g --ignore-scripts=false @nubjs/nub
 $ nub index.ts             # run a TypeScript file
 $ nub run dev              # run a package.json script
 $ nubx prisma generate     # run a CLI from node_modules/.bin
@@ -78,7 +78,7 @@ On Node older than 18.19, augmented commands emit a tagged error telling you to 
 
 ## Does it work on Linux / macOS / Windows?
 
-Yes — Linux (x64, arm64), macOS (x64, arm64), Windows (x64). Same platforms the underlying Node + `napi-rs` ecosystem already targets. Nub is distributed as prebuilt Rust binaries via `npm install -g @nubjs/nub`, with platform-specific N-API addons resolved at install time.
+Yes — Linux (x64, arm64), macOS (x64, arm64), Windows (x64). Same platforms the underlying Node + `napi-rs` ecosystem already targets. Nub is distributed as prebuilt Rust binaries via `npm install -g --ignore-scripts=false @nubjs/nub`, with platform-specific N-API addons resolved at install time.
 
 ## Does it replace my package manager?
 
@@ -89,6 +89,8 @@ Because Nub writes the same lockfile your package manager does, nothing forces a
 ## Does it work with `pnpm` / `npm` / `yarn` / `bun`?
 
 Yes. All four keep working exactly as they do without Nub. Your lockfile stays in whatever format your package manager produces. Workspace topology (`pnpm-workspace.yaml`, `npm` workspaces, `yarn` workspaces) is honored by `nub run` and `nubx` directly. The source of truth for `nub run` is `package.json` and its `"scripts"` field; for `nubx`, it's `node_modules/.bin`.
+
+Yarn Berry's Plug'n'Play mode is the one case where that last source of truth doesn't exist — PnP has no `node_modules/.bin/`, just a runtime resolution table managed by Yarn's loader. Nub handles it anyway: the runtime detects a `.pnp.cjs` and runs the project through it, and `nubx` resolves PnP bins through `pnpapi` (the way `yarn exec` does). See [module resolution](/docs/runtime/resolution#yarn-plugnplay).
 
 ## Is it monorepo-friendly?
 
@@ -284,7 +286,7 @@ No. Nub reads `tsconfig.json` the way `tsc` does — `paths`, `baseUrl`, `extend
 ## How do I install Nub?
 
 ```bash
-npm install -g @nubjs/nub
+npm install -g --ignore-scripts=false @nubjs/nub
 ```
 
 That installs the Rust binary (via the usual `@<scope>/<platform-arch>` npm distribution pattern that `swc`, `esbuild`, `oxc`, and `napi-rs`-based tools use) plus the N-API addons for your platform. The resulting `nub` and `nubx` commands are on your `PATH`.
@@ -292,14 +294,14 @@ That installs the Rust binary (via the usual `@<scope>/<platform-arch>` npm dist
 ## How do I upgrade?
 
 ```bash
-npm install -g @nubjs/nub@latest
+npm install -g --ignore-scripts=false @nubjs/nub@latest
 ```
 
 Same as installing. Nub and Node version independently: Nub resolves the Node your project pins (`.node-version` / `.nvmrc` / `engines.node`) and provisions it if it's missing, falling back to the `node` on your `PATH` only when nothing is pinned. So upgrading Nub does not change your project's Node version, and upgrading Node does not change your Nub version.
 
 ## Is there a curl install script?
 
-Yes. On macOS and Linux, `curl -fsSL https://nubjs.com/install.sh | bash`; on Windows, `powershell -c "irm https://nubjs.com/install.ps1 | iex"`. Both drop a native binary into `~/.nub` and put it on your `PATH`. If you'd rather go through your package manager, `npm install -g @nubjs/nub` (or `pnpm add -g` / `yarn global add`) does the same thing.
+Yes. On macOS and Linux, `curl -fsSL https://nubjs.com/install.sh | bash`; on Windows, `powershell -c "irm https://nubjs.com/install.ps1 | iex"`. Both drop a native binary into `~/.nub` and put it on your `PATH`. If you'd rather go through your package manager, `npm install -g --ignore-scripts=false @nubjs/nub` (or `pnpm add -g` / `yarn global add`) does the same thing.
 
 ## Does it have a dev server?
 

@@ -6,7 +6,7 @@ description: Nub is a Rust CLI that augments the Node you already have — TypeS
 Nub is an all-in-one toolkit powered by Node.js that **modernizes** the developer experience in the Node.js ecosystem. Use it to run files, `package.json` scripts, and locally installed CLIs — instead of `node`, `npm run`, and `npx` (or the equivalents in your preferred package manager).
 
 ```bash
-npm i -g @nubjs/nub
+npm install -g --ignore-scripts=false @nubjs/nub
 nub index.ts             # run a TypeScript file
 nub run dev              # run a package.json script
 nub watch src/server.ts  # restart on file changes
@@ -25,7 +25,7 @@ It's written in Rust, powered by Node.js, and provides a Bun-like modern DX on t
 ## Install
 
 ```bash
-npm install -g @nubjs/nub
+npm install -g --ignore-scripts=false @nubjs/nub
 ```
 
 Both `pnpm add -g @nubjs/nub` and `yarn global add @nubjs/nub` work equivalently. That installs the Rust binary plus the platform-specific N-API addons, and puts `nub` and `nubx` on your `PATH`.

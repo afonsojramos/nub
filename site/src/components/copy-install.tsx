@@ -3,7 +3,7 @@
 import { useState } from 'react';
 
 export function CopyInstall({
-  command = 'npm i -g @nubjs/nub',
+  command = 'npm install -g --ignore-scripts=false @nubjs/nub',
   className = '',
 }: {
   command?: string;
