@@ -842,13 +842,15 @@ function NubxBand() {
 /* ------------------------------------------------------------ Compatibility */
 
 /* Source: tests/cross-runtime/ (run.mjs + results.json, corpus colinhacks/node_test @ node-25.8.1).
-   Nub 98.7% = (4375 node passes − 57 nubRegressions) / 4375. Deno/Bun bars are node-normalized;
-   exact counts are ~1% stale vs current results.json (re-run before launch). Deno ref: deno.com/blog/v2.8 */
+   This chart is the cross-runtime COMPETITIVE comparison, node-relative — a SEPARATE measurement
+   from the headline 99.3% (Node's own test suite, tests/run-node-compat.sh). Do not conflate them.
+   Rates = runtime_pass / node_pass on the identical corpus. Counts mirror results.json:
+   node 4375, nub 4320, deno 3380, bun 1769 passes (node_pass = 4375). Deno ref: deno.com/blog/v2.8 */
 const COMPAT = [
   { name: 'Node 25.8', rate: 100, tests: '4,375 / 4,375', us: false, dim: false },
-  { name: 'Nub', rate: 98.7, tests: '4,318 / 4,375', us: true, dim: false },
-  { name: 'Deno 2.8', rate: 76.6, tests: '3,351 / 4,375', us: false, dim: true },
-  { name: 'Bun 1.3.14', rate: 40.1, tests: '1,756 / 4,375', us: false, dim: true },
+  { name: 'Nub', rate: 98.7, tests: '4,320 / 4,375', us: true, dim: false },
+  { name: 'Deno 2.8', rate: 77.3, tests: '3,380 / 4,375', us: false, dim: true },
+  { name: 'Bun 1.3.14', rate: 40.4, tests: '1,769 / 4,375', us: false, dim: true },
 ];
 
 function Compatibility() {
@@ -868,7 +870,10 @@ function Compatibility() {
           </p>
         </div>
 
-        <div className="mx-auto mt-12 max-w-3xl space-y-5">
+        <p className="mx-auto mt-12 max-w-2xl text-center text-sm font-medium text-fd-foreground">
+          How the runtimes compare on Deno&rsquo;s own Node-compat corpus
+        </p>
+        <div className="mx-auto mt-5 max-w-3xl space-y-5">
           {COMPAT.map((r) => {
             // Short bars can't fit the label inside the fill (it gets clipped),
             // so for anything under ~22% the label sits just outside the fill.
@@ -901,8 +906,9 @@ function Compatibility() {
           })}
         </div>
         <p className="mx-auto mt-6 max-w-lg text-center text-sm leading-relaxed text-fd-muted-foreground">
-          Head-to-head on Deno&rsquo;s own Node-compat suite, node-relative. The gap is caused by
-          Nub&rsquo;s preload hook and auto-enablement of experimental features.{' '}
+          A separate cross-runtime measurement, node-relative: each runtime against the identical
+          corpus, scored as a fraction of what stock Node passes. Deno and Bun reimplement Node&rsquo;s
+          APIs; Nub runs on Node, so it tracks Node.{' '}
           <a
             href="https://github.com/nubjs/nub/tree/main/tests/cross-runtime"
             target="_blank"
