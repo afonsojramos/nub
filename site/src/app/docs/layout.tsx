@@ -16,29 +16,9 @@ const COMMAND_BY_URL: Record<string, string> = {
   '/docs/watch': 'nub watch',
 };
 
-/* The chip column shares ONE right edge across every nav row. On a folder row,
-   Fumadocs renders an expand/collapse chevron as a flex sibling to the right of
-   our label span (16px `size-4` icon + the link's 8px `gap-2` = a 24px slot),
-   which would otherwise push the folder's chip 24px left of the page-row chips.
-   To keep all chips in one vertical column, page rows (no chevron) reserve that
-   same 24px gutter on the right via `mr-6`; folder rows leave it to the chevron. */
-const CHEVRON_GUTTER = 'mr-6'; // 24px = chevron (16px) + link gap (8px)
-
-function LabelWithChip({
-  label,
-  command,
-  reserveChevronGutter,
-}: {
-  label: ReactNode;
-  command: string;
-  reserveChevronGutter: boolean;
-}) {
+function LabelWithChip({ label, command }: { label: ReactNode; command: string }) {
   return (
-    <span
-      className={`flex w-full items-center justify-between gap-2${
-        reserveChevronGutter ? ` ${CHEVRON_GUTTER}` : ''
-      }`}
-    >
+    <span className="flex w-full items-center justify-between gap-2">
       <span>{label}</span>
       <code className="shrink-0 whitespace-nowrap rounded border border-fd-border/50 bg-fd-muted px-1 py-px font-mono text-[0.58rem] leading-tight font-normal text-fd-muted-foreground in-data-[active=true]:border-fd-primary/30 in-data-[active=true]:bg-fd-primary/10 in-data-[active=true]:text-fd-primary">
         {command}
@@ -49,28 +29,46 @@ function LabelWithChip({
 
 function styleNode(node: TreeNode): TreeNode {
   if (node.type === 'folder') {
-    const styled = { ...node, children: node.children.map(styleNode) };
-    // A folder-with-index (e.g. install/) renders its title as a link to the
-    // index page with a chevron beside it. Apply the same command chip the
-    // index page would get, so the "nub install" chip stays visible instead of
-    // being lost to the chevron slot.
-    const command = node.index ? COMMAND_BY_URL[node.index.url] : undefined;
+    // The folder header renders a clickable link to its index page; give it the
+    // same command chip that index page would get. When the folder has no
+    // `index` (a meta whose `pages` lists "index" explicitly rather than "..."),
+    // the index instead appears as a regular child page — find it so the chip
+    // still attaches, and drop that duplicate child below so the header isn't
+    // stuttered by an identical row beneath it.
+    const indexChild = node.children.find(
+      (c): c is Extract<TreeNode, { type: 'page' }> => c.type === 'page' && c.url in COMMAND_BY_URL,
+    );
+    const folderUrl = node.index?.url ?? indexChild?.url;
+    const isDuplicateIndex = (c: TreeNode) =>
+      !node.index && c.type === 'page' && c.url === folderUrl;
+
+    // Force every folder non-collapsible: Fumadocs then draws no chevron toggle
+    // and keeps the children always visible (collapsible:false makes the folder
+    // default-open and disables the Collapsible). This is the sidebar-wide
+    // "no chevron, always expanded" behavior, applied in the component so it
+    // covers every folder uniformly without touching per-folder meta.json.
+    // Promote the discovered index child to `index` so the header renders as a
+    // clickable link (SidebarFolderLink) rather than a non-link trigger — the
+    // folders whose meta lists "index" explicitly (not "...") otherwise have no
+    // folder-index and render an unclickable header.
+    const styled: TreeNode = {
+      ...node,
+      collapsible: false,
+      index: node.index ?? indexChild,
+      children: node.children.filter((c) => !isDuplicateIndex(c)).map(styleNode),
+    };
+    // With no chevron competing for the right edge, the chip aligns into the
+    // shared column like every other row.
+    const command = folderUrl ? COMMAND_BY_URL[folderUrl] : undefined;
     if (command) {
-      // Folder row: the chevron sibling supplies the right-hand gutter.
-      styled.name = (
-        <LabelWithChip label={node.name} command={command} reserveChevronGutter={false} />
-      );
+      styled.name = <LabelWithChip label={node.name} command={command} />;
     }
     return styled;
   }
   if (node.type === 'page') {
     const command = COMMAND_BY_URL[node.url];
     if (command) {
-      // Page row: no chevron, so reserve the gutter to keep the chip column aligned.
-      return {
-        ...node,
-        name: <LabelWithChip label={node.name} command={command} reserveChevronGutter={true} />,
-      };
+      return { ...node, name: <LabelWithChip label={node.name} command={command} /> };
     }
   }
   return node;
