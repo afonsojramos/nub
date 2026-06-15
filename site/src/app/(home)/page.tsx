@@ -222,7 +222,7 @@ async function Hero() {
               <MigrationPrompt />
             </div>
           </div>
-          <Terminal size="lg" className="w-full min-w-0 max-w-xl xl:max-w-none" lines={heroLines(node.major)} />
+          <Terminal size="lg" className="w-full min-w-0 max-w-2xl xl:max-w-none" lines={heroLines(node.major)} />
         </div>
       </div>
     </section>
@@ -557,7 +557,7 @@ import { host, port } from "./config.yaml" // named exports`}
               <>
                 Nub is <span className="italic">actually</span> a drop-in replacement for{' '}
                 <Mono>node</Mono>. Every V8 and Node flag, <Mono>NODE_OPTIONS</Mono>, argv, exit
-                codes, and signals behave identically — nub forwards them straight to the real{' '}
+                codes, and signals behave identically — Nub forwards them straight to the real{' '}
                 <Mono>node</Mono>{' '}it runs. Swap <Mono>node</Mono>{' '}for <Mono>nub</Mono>{' '}in
                 any script, Dockerfile, or CI step; nothing else changes.
               </>
@@ -621,7 +621,7 @@ const APIS: { name: string; label: string }[] = [
   { name: 'navigator.locks', label: 'Auto-polyfilled' },
   { name: 'localStorage', label: 'Unflagged < 25' },
   { name: 'EventSource', label: 'Auto-unflagged' },
-  { name: 'node:sqlite', label: 'Unflagged < 22.13' },
+  { name: 'node:sqlite', label: 'Unflagged < 23' },
   { name: 'vm.Module', label: 'Auto-unflagged' },
   { name: 'RegExp.escape', label: 'Polyfilled < 24' },
   { name: 'Promise.try', label: 'Polyfilled < 24' },
@@ -691,7 +691,7 @@ function RunScriptBand() {
                 Whereas scripts run with <Mono>npm run</Mono>{' '}or <Mono>pnpm run</Mono>{' '}feel
                 perceptibly laggy — they&rsquo;re Node.js programs, so each call cold-loads the
                 package manager&rsquo;s own JavaScript (config, workspace probe, the works) before
-                your script runs — nub&rsquo;s runner is a Rust binary with no startup of its own.
+                your script runs — Nub&rsquo;s runner is a Rust binary with no startup of its own.
               </>
             }
             visual={
@@ -934,7 +934,7 @@ const RULES = [
   'No nub:* module namespace',
   'No @nub/* npm scope',
   'No "nub" field in package.json',
-  'No nub lockfile',
+  'No Nub lockfile',
 ];
 
 /* -------------------------------------------------------------- Final CTA */
