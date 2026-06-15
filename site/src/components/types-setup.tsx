@@ -57,41 +57,38 @@ export function TypesSetup({
   }
 
   return (
-    /* No outer card border/background — just a titled note + ONE code block, so it
-       no longer reads as a box inside a box. The single code block (install line +
-       tsconfig snippet merged) is the only bordered surface, and carries a subtle
-       copy button in its top-right corner exactly like every other code block. */
-    <div className="my-6">
-      <div className="mb-1 font-medium text-fd-foreground">TypeScript setup</div>
+    /* The whole setup lives in ONE bordered callout card. Inside: the title + note +
+       a single merged code block (install line + tsconfig snippet) — one inner box, so
+       it no longer reads as a box-in-a-box. The subtle copy control sits in the CARD's
+       top-right and copies the agent-ready setup prompt for the whole block. */
+    <div className="relative my-6 rounded-lg border border-fd-border bg-fd-card/40 px-5 py-4">
+      {/* Subtle copy control — bordered `bg-fd-secondary` chip + clipboard glyph + hover,
+          matching the Fumadocs code-block copy button so it's visible (the old bare glyph
+          was invisible). Covers the WHOLE card; copies the agent-ready prompt, not raw text. */}
+      <button
+        type="button"
+        onClick={copy}
+        aria-label="Copy TypeScript setup instructions for your AI agent"
+        title="Copy setup instructions for your AI agent"
+        data-checked={copied || undefined}
+        className="absolute right-3 top-3 z-10 inline-flex items-center justify-center rounded-md border bg-fd-secondary p-1 text-fd-muted-foreground transition-colors duration-100 hover:bg-fd-accent hover:text-fd-accent-foreground data-checked:text-fd-accent-foreground"
+      >
+        <CopyIcon copied={copied} />
+      </button>
+
+      <div className="mb-1 pr-8 font-medium text-fd-foreground">TypeScript setup</div>
 
       {children ? <div className="mb-3 text-fd-muted-foreground [&>p]:m-0">{children}</div> : null}
 
-      <div className="relative">
-        {/* Subtle copy control — same glyph, size, bordered `bg-fd-secondary` chip,
-            and hover behavior as the Fumadocs copy button on every code block, so it's
-            just as visible as the ones the user already sees. Copies the agent-ready
-            prompt (not the raw text); flips to a checkmark on copy. */}
-        <button
-          type="button"
-          onClick={copy}
-          aria-label="Copy TypeScript setup instructions for your AI agent"
-          title="Copy setup instructions for your AI agent"
-          data-checked={copied || undefined}
-          className="absolute right-2 top-2.5 z-10 inline-flex items-center justify-center rounded-md border bg-fd-secondary p-1 text-fd-muted-foreground backdrop-blur-lg transition-colors duration-100 hover:bg-fd-accent hover:text-fd-accent-foreground data-checked:text-fd-accent-foreground"
-        >
-          <CopyIcon copied={copied} />
-        </button>
-
-        <pre className="overflow-x-auto rounded-lg border border-fd-border bg-fd-card/60 px-4 py-3.5 font-mono text-[0.9rem] leading-relaxed text-fd-foreground">
-          <code>
-            <span className="select-none text-ember">$ </span>
-            {install}
-            {'\n\n'}
-            <span className="select-none text-fd-muted-foreground">{'// tsconfig.json\n'}</span>
-            {tsconfig}
-          </code>
-        </pre>
-      </div>
+      <pre className="overflow-x-auto rounded-lg border border-fd-border bg-fd-card/60 px-4 py-3.5 font-mono text-[0.9rem] leading-relaxed text-fd-foreground">
+        <code>
+          <span className="select-none text-ember">$ </span>
+          {install}
+          {'\n\n'}
+          <span className="select-none text-fd-muted-foreground">{'// tsconfig.json\n'}</span>
+          {tsconfig}
+        </code>
+      </pre>
     </div>
   );
 }
