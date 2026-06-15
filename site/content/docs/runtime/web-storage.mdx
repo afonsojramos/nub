@@ -3,20 +3,9 @@ title: Web Storage
 description: sessionStorage works out of the box; localStorage persists once you name a backing file with --localstorage-file.
 ---
 
-<Callout title="Install the type declarations">
-The Web Storage globals are typed by `@types/node` — use version **26**, which declares `sessionStorage` and `localStorage` globally. Install nub's own declarations alongside it so the rest of the runtime typechecks:
-
-```bash
-npm i -D @nubjs/types @types/node@26
-```
-
-```jsonc
-// tsconfig.json
-{ "compilerOptions": { "types": ["node", "@nubjs/types"] } }
-```
-
-Nub adds no Web Storage types of its own — `@nubjs/types` covers only surfaces `@types/node` does not, and Web Storage is not one of them.
-</Callout>
+<TypesSetup>
+The Web Storage globals are typed by `@types/node` 26, which declares `sessionStorage` and `localStorage` globally — install `@nubjs/types` alongside it for the rest of the runtime.
+</TypesSetup>
 
 Web Storage works under nub without a flag to remember. Node hides `sessionStorage` and `localStorage` behind `--experimental-webstorage` on the 22.4–24 band (native from 25), so nub injects that flag for you on exactly that band — you never pass it. Below Node 22.4 the flag does not exist and Web Storage is unavailable.
 

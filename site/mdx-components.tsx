@@ -5,6 +5,7 @@ import type { ComponentProps, ReactNode } from 'react';
 import { Bench } from '@/components/code';
 import { CompatTable } from '@/components/compat-table';
 import { InstallTabs } from '@/components/install-tabs';
+import { TypesSetup } from '@/components/types-setup';
 
 // Neutral info glyph (lucide "info" path) drawn with currentColor so it inherits a
 // muted tone — no loud accent. Inline SVG keeps us off a runtime icon dependency,
@@ -63,6 +64,7 @@ export function getMDXComponents(components?: MDXComponents): MDXComponents {
     Bench,
     CompatTable,
     InstallTabs,
+    TypesSetup,
     ...components,
   };
 }

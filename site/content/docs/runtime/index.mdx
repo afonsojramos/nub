@@ -13,6 +13,10 @@ nub server.tsx
 nub script.js
 ```
 
+<Callout title="Supported Node versions">
+Nub runs your code on stock Node — it resolves which Node your project pins and fetches one if it's missing, but never ships a runtime of its own. The supported floor is **Node 18.19+**; below that nub refuses to run. Node 18.19–22.14 use the compatibility tier (async `module.register()` loader-worker) and 22.15+ use the fast path (sync `module.registerHooks()`) — functionally equivalent, differing only in startup overhead. See [Managing Node versions](/docs/node) for pinning and pre-installing.
+</Callout>
+
 ## A drop-in for `node`
 
 Anything `node <args>` accepts, `nub <args>` accepts too. Pass-through is the default for the entire flag space: diagnostics (`--prof`, `--cpu-prof`, `--report-*`), module-resolution flags (`--conditions`, `--preserve-symlinks`), inspector flags (`--inspect`, `--inspect-brk`), and warning flags (`--no-warnings`, `--trace-deprecation`) all reach Node verbatim. Reading a program from stdin works the same way `node -` does.
@@ -40,9 +44,9 @@ In brief:
 
 ## Modern APIs
 
-<Callout title="TypeScript setup">
-Most of these globals are already typed by `@types/node` 26 plus TypeScript's bundled libs — use that version and they typecheck with no extra setup. The one exception is `reportError`, which lives in nub's own types package; if you call it, install `@nubjs/types` as a devDependency alongside `@types/node` and add both to `compilerOptions.types`: `["node", "@nubjs/types"]`.
-</Callout>
+<TypesSetup>
+Most of these globals are already typed by `@types/node` 26 — use that version and they typecheck with no extra setup. The one exception is `reportError`, which lives in nub's own types package; install it if you call that.
+</TypesSetup>
 
 Modern globals — TC39, web-platform, and newer Node built-ins — work out of the box under nub. Whatever Node version you run, the API is there — native where Node ships it, and where Node doesn't, nub fills the gap automatically. You write against the API; the version split is nub's problem, not yours.
 
@@ -56,22 +60,22 @@ const { DatabaseSync } = require("node:sqlite");
 
 Two mechanisms do the work, picked per API: nub either preloads a JS polyfill (feature-detected, so it steps aside the moment the native global appears) or injects the `--experimental-*` flag that an older Node hides the API behind. Once Node stabilizes an API, it's native and nub does nothing — there's no gap above the line, just a native implementation.
 
-The **available from** column is the practical floor — the lowest Node where the API works under nub. Everything above that floor is covered, native or not.
+The **minimum version** column is the practical floor — the lowest Node where the API works under nub. Everything above that floor is covered, native or not.
 
-| API | Available from | How |
+| API | Minimum version | How |
 |---|---|---|
-| `Temporal` | every supported Node | polyfill |
-| `URLPattern` | every supported Node | polyfill below Node 24, native above |
-| `RegExp.escape` | every supported Node | polyfill below Node 24, native above |
-| `Error.isError` | every supported Node | polyfill below Node 24, native above |
-| `Promise.try` | every supported Node | polyfill below Node 24, native above |
-| `Float16Array` | every supported Node | polyfill below Node 24, native above |
-| `navigator.locks` | every supported Node | polyfill below Node 24.5, native above |
-| `reportError` | every supported Node | polyfill |
-| `vm.Module` | every supported Node | flag-injected |
-| `WebSocket` | Node 20.10 | flag-injected below Node 22, native above |
-| `EventSource` | Node 20.18 | flag-injected below the native line, native above |
-| `node:sqlite` | Node 22.5 | flag-injected below Node 22.13, native above |
+| [`Temporal`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Temporal) | — | polyfill |
+| [`URLPattern`](https://developer.mozilla.org/en-US/docs/Web/API/URLPattern) | — | polyfill below Node 24, native above |
+| [`RegExp.escape`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/RegExp/escape) | — | polyfill below Node 24, native above |
+| [`Error.isError`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Error/isError) | — | polyfill below Node 24, native above |
+| [`Promise.try`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise/try) | — | polyfill below Node 24, native above |
+| [`Float16Array`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Float16Array) | — | polyfill below Node 24, native above |
+| [`navigator.locks`](https://developer.mozilla.org/en-US/docs/Web/API/Web_Locks_API) | — | polyfill below Node 24.5, native above |
+| [`reportError`](https://developer.mozilla.org/en-US/docs/Web/API/Window/reportError) | — | polyfill |
+| [`vm.Module`](https://nodejs.org/api/vm.html#class-vmmodule) | — | flag-injected |
+| [`WebSocket`](https://developer.mozilla.org/en-US/docs/Web/API/WebSocket) | Node 20.10 | flag-injected below Node 22, native above |
+| [`EventSource`](https://developer.mozilla.org/en-US/docs/Web/API/EventSource) | Node 20.18 | flag-injected below the native line, native above |
+| [`node:sqlite`](https://nodejs.org/api/sqlite.html) | Node 22.5 | flag-injected below Node 22.13, native above |
 
 "Every supported Node" means the full supported range, 18.19 and up. The three floored rows are the only ones with a real cutoff: the underlying Node mechanism doesn't exist below it.
 
@@ -83,20 +87,9 @@ Polyfilled rows carry no version cutoff at all — they're gated by a runtime `t
 
 ## `--node`
 
-Pass `--node` to run with zero augmentation — no load hook, no preload, no flag injection, no `.env` loading. Your code runs on plain Node, exactly as `node <file>` would.
+Pass `--node` to run with zero augmentation — no load hook, no preload, no flag injection, no `.env` loading. Your code runs on plain Node, exactly as `node <file>` would. It still runs the project's *pinned* Node (from `.node-version` / `.nvmrc`, fetched if missing), which makes it the tool for differential debugging — does this reproduce on vanilla Node, on the exact version this project pins? A bare `node script.js` can't answer that, because it runs your shell's Node, not the project's.
 
 ```bash
-nub --node script.js     # plain Node behavior, no augmentation
+nub --node script.js     # the project's pinned Node, vanilla
+node script.js           # your shell's Node, unaugmented, unprovisioned
 ```
-
-The one thing it keeps is version provisioning: `--node` still runs the project's *pinned* Node (from `.node-version` / `.nvmrc`, fetched if missing), not whatever happens to be on your shell `PATH`. That makes it the right tool for differential debugging — "does this reproduce on vanilla Node, on the exact version this project pins?" — which a bare `node script.js` can't answer, because that runs your shell's Node, not the project's.
-
-There is no nub verb for "plain Node" beyond this flag — to run your own shell's Node, just type `node`. The PATH shim nub uses to augment descendant `node` calls is scoped to children of a `nub …` invocation, so your shell's `node` is always your real, unaugmented Node.
-
-```bash
-node script.js           # your real shell Node, no augmentation, no provisioning
-```
-
-## Supported Node versions
-
-Nub doesn't ship a Node runtime — it runs your code on stock Node, resolving which Node to use from your project and fetching one if it's missing. Augmented modes require **Node 18.19+**; below that, augmented commands emit a tagged error telling you to upgrade. For pinning, pre-installing, and listing cached versions, see [Managing Node versions](/docs/node).

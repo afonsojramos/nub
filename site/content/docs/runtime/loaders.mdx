@@ -1,0 +1,52 @@
+---
+title: Loaders
+description: Import .json/.jsonc/.json5/.toml/.yaml/.yml/.txt directly — default and named exports, via an extension-keyed load hook.
+---
+
+<TypesSetup>
+The module declarations for these extensions — letting `tsc` recognize `import config from "./config.yaml"` — ship in nub's own types package, `@nubjs/types`.
+</TypesSetup>
+
+Import a config or data file directly — no `npm install yaml` / `json5`, no `fs.readFile` + `parse` plumbing. The default export is the parsed value; for an object, its top-level keys are also available as named exports. Same shape as `import data from "./data.json"`, which Node has supported since 2017. Loaders work on every Node version nub supports (18.19+).
+
+```ts
+import config from "./config.yaml";          // parsed object
+import flags from "./feature.jsonc";         // parsed object (comments stripped)
+import pkg from "./Cargo.toml";              // parsed object
+import schema from "./schema.json5";         // parsed object (JSON5 superset)
+import prompt from "./prompt.txt";           // string
+import { host, port } from "./config.yaml";  // named exports mirror top-level keys
+```
+
+## Extensions
+
+Loaders are keyed on file extension:
+
+- `.jsonc` — JSON with comments
+- `.json5` — the JSON5 superset
+- `.toml`
+- `.yaml` / `.yml`
+- `.txt` — loaded as a string, no parsing
+
+The `.json` extension is intentionally not in this set — it is Node-native (`resolveJsonModule`), so Nub leaves it to Node.
+
+## Default and named exports
+
+The default export is the parsed value. When the parsed value is an object, each top-level key is also emitted as a named export, so you can destructure at the import site.
+
+```yaml
+# config.yaml
+host: localhost
+port: 5432
+```
+
+```ts
+import config from "./config.yaml";          // { host: "localhost", port: 5432 }
+import { host, port } from "./config.yaml";  // "localhost", 5432
+```
+
+Only keys that are valid JavaScript binding identifiers become named exports. A key that is a reserved word (`package`, `class`, `default`, …) or not an identifier stays reachable through the default export rather than failing the whole module — so a `Cargo.toml` with a `[package]` table still imports cleanly, with `package` available as `pkg.package`.
+
+## A loader, not a specifier
+
+These are extension-based loaders, not built-in modules. Nub never claims the `yaml` / `toml` / `json5` import specifiers, so a bare `import { parse } from "yaml"` keeps resolving to the published npm package on both Nub and Node. The behavior is triggered purely by the file extension on a relative import.

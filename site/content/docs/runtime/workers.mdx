@@ -1,0 +1,64 @@
+---
+title: Web Workers
+description: A browser-style worker API on stock Node — the full constructor, messaging, and event surface, on every supported version.
+---
+
+<TypesSetup>
+The browser-shape `Worker` global is typed by nub's own types package — `@types/node` declares only `node:worker_threads`.
+</TypesSetup>
+
+Browsers expose a `Worker` global; Node ships only `node:worker_threads.Worker`, a different class with a different API, and never a browser-shape global. Nub closes that gap with a polyfill preloaded on every supported Node (18.19+), so the browser constructor and messaging shape work unchanged.
+
+```ts
+const worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });
+
+worker.postMessage({ n: 41 });
+worker.onmessage = (ev) => console.log(ev.data); // → 42
+worker.onerror = (ev) => console.error(ev.message);
+```
+
+```ts
+// worker.ts
+self.onmessage = (ev) => {
+  self.postMessage(ev.data.n + 1);
+};
+```
+
+The worker entry is TypeScript here for free — nub transpiles it like any other entry. The constructor takes a string or `URL`; pass `new URL("./worker.ts", import.meta.url)` for a path resolved relative to the current module, exactly as in the browser.
+
+## Mechanism
+
+The polyfill is a preload (`runtime/worker-polyfill.mjs`), not a flag injection — Node has no flag that exposes a browser `Worker`. It defines `globalThis.Worker` (feature-detected with `typeof`, so it installs only when no native global is already present) as an `EventTarget` subclass wrapping a `node:worker_threads.Worker`. The global is defined non-enumerable, so vanilla-Node code that enumerates `globalThis` never observes nub's addition.
+
+Inside the worker, nub installs the dedicated-worker scope on top of `node:worker_threads.parentPort`:
+
+```text
+self
+postMessage
+close
+addEventListener, removeEventListener
+onmessage, onmessageerror
+```
+
+Node's worker global is not an `EventTarget` and exposes none of these, so the polyfill provides the whole surface.
+
+## API surface
+
+The main-thread `Worker` carries the browser subset:
+
+- **`new Worker(scriptURL, options?)`** — `scriptURL` is a string or `URL`; `options` accepts `type` (`"module"` | `"classic"`), `name`, and `credentials`.
+- **`postMessage(message, transfer?)`** — `transfer` is a list of `ArrayBuffer` / `MessagePort` to transfer.
+- **`terminate()`** — stops the worker.
+- **`onmessage` / `onmessageerror` / `onerror`** — event-handler properties, plus the inherited `addEventListener` / `removeEventListener` / `dispatchEvent`.
+
+Inbound `"message"` events arrive as real `MessageEvent`s (`ev.data`); a thrown error in the worker surfaces on the main thread as an `ErrorEvent` (`ev.message`, `ev.error`).
+
+The `type` option is accepted for web compatibility but not enforced: Node decides module-vs-CommonJS for the worker entry by file extension and the nearest `package.json` `"type"` — the same rule nub applies to the main entry — and there is no `classic` / `importScripts` mode.
+
+## Divergences
+
+A worker that listens for messages keeps itself alive; one that never listens exits naturally, matching `node:worker_threads` and the browser. Events other than `message` / `messageerror` dispatched inside the worker land on a private `EventTarget`, so `event.target` is that target rather than the global scope — a minor divergence from the browser, where the global scope is itself the dispatch target.
+
+## TypeScript
+
+The `Worker` global, `WorkerOptions`, and the worker-side handlers are typed by `@nubjs/types` (a types-only devDependency). The declaration steps aside when `lib: ["dom"]` is in your `tsconfig.json` — the DOM's own `Worker` type wins there — so the two never collide.
