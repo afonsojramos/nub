@@ -26,11 +26,11 @@ export function MigrationPrompt({ className = '' }: { className?: string }) {
     <button
       type="button"
       onClick={copy}
-      aria-label="Copy migration prompt for your AI agent"
+      aria-label="Copy agent prompt"
       className={`group inline-flex items-center gap-2.5 rounded-full border border-fd-border bg-fd-card/60 py-2 pl-4 pr-3.5 text-sm leading-none text-fd-muted-foreground backdrop-blur hover:border-ember/50 hover:bg-ember/[0.06] ${className}`}
     >
       <span className="text-fd-foreground">
-        {copied ? 'Copied — paste into your agent' : 'Copy prompt for your AI agent'}
+        {copied ? 'Copied — paste into your agent' : 'Copy agent prompt'}
       </span>
       <span className="inline-flex w-4 shrink-0 justify-center text-fd-muted-foreground group-hover:text-ember">
         {copied ? (
