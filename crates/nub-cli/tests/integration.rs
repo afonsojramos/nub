@@ -985,13 +985,16 @@ fn node_compat_flag_disables_augmentation() {
     );
 }
 
-/// Web Storage is OPT-IN (the maintainer, 2026-06-14): by default nub injects NEITHER
-/// `--experimental-webstorage` NOR a `--localstorage-file`, so `localStorage` is
-/// `undefined` — identical to plain Node. A user who passes their own
-/// `--localstorage-file=<path>` gets a working, persistent store; that user path
-/// is what enables the global, and nub never stands up a store on its own.
+/// sessionStorage works OUT OF THE BOX (the maintainer, 2026-06-15): nub always injects
+/// `--experimental-webstorage` on the 22.4–24 flag-needed band (and 25+ has it
+/// native), so `sessionStorage` is a working global with no opt-in. localStorage
+/// stays the user's explicit opt-in: nub NEVER synthesizes a `--localstorage-file`,
+/// so without one the store never materializes (on the band the `localStorage`
+/// getter is installed but throws `ERR_INVALID_ARG_VALUE` on access; on native 25+
+/// it returns `undefined`). A user who passes their own `--localstorage-file=<path>`
+/// gets a working, persistent store, and nub never stands one up on its own.
 #[test]
-fn webstorage_is_off_by_default_and_on_with_a_user_localstorage_file() {
+fn sessionstorage_works_by_default_localstorage_needs_user_file() {
     if !node_at_least((22, 4, 0)) {
         eprintln!("skipping: webstorage needs Node >= 22.4 (target is older)");
         return;
@@ -1003,9 +1006,10 @@ fn webstorage_is_off_by_default_and_on_with_a_user_localstorage_file() {
     let cache = dir.join("cache");
     let user_store = dir.join("mine.sqlite");
 
+    // sessionStorage needs only the flag (no file) — works on the whole 22.4+ range.
     std::fs::write(
         dir.join("probe.js"),
-        "console.log('TYPEOF:' + typeof globalThis.localStorage);",
+        "sessionStorage.setItem('k', 'v'); console.log('SS:' + sessionStorage.getItem('k'));",
     )
     .unwrap();
     std::fs::write(
@@ -1033,14 +1037,15 @@ fn webstorage_is_off_by_default_and_on_with_a_user_localstorage_file() {
         )
     };
 
-    // Default run: nub injects nothing → localStorage is undefined, like plain Node.
+    // Default run, no --localstorage-file: sessionStorage is a working global out of
+    // the box (nub injects --experimental-webstorage on the band; native on 25+).
     let (probe_out, probe_err, probe_code) = run(&["probe.js"]);
-    assert_eq!(probe_code, 0, "default probe failed: stderr={probe_err}");
+    assert_eq!(probe_code, 0, "sessionStorage probe failed: stderr={probe_err}");
     assert!(
-        probe_out.contains("TYPEOF:undefined"),
-        "Web Storage must be OFF by default (no nub injection); got {probe_out:?} stderr: {probe_err:?}"
+        probe_out.contains("SS:v"),
+        "sessionStorage must work out of the box (no --localstorage-file); got {probe_out:?} stderr: {probe_err:?}"
     );
-    // nub must NOT have created a store of its own under the cache.
+    // nub must NOT have created a localStorage store of its own under the cache.
     assert!(
         !cache.join("nub").join("webstorage").exists(),
         "nub must not stand up a default webstorage store"

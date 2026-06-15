@@ -298,30 +298,32 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
             cmd.arg(flag);
         }
 
-        // Web Storage is OPT-IN (the maintainer, 2026-06-14): nub injects NEITHER
-        // `--experimental-webstorage` NOR a default `--localstorage-file=<path>`.
-        // `localStorage` / `sessionStorage` are therefore `undefined` by default,
-        // exactly as on plain Node. A user who wants them passes their own
-        // `--localstorage-file=...` and/or `--experimental-webstorage` (argv or
-        // NODE_OPTIONS); nub leaves those flags untouched so they reach Node as-is.
-        // (This reverses the prior default-on "whitepaper promise" — nub no longer
-        // materializes a persistent, workspace-keyed store on the user's behalf.)
+        // Web Storage: nub ALWAYS injects `--experimental-webstorage` on the band
+        // where that flag is the enabling mechanism (Node 22.4 through <25, i.e.
+        // `webstorage_flag_needed`), regardless of whether the user opted into
+        // localStorage persistence (the maintainer, 2026-06-15: "a flag that we inject no
+        // matter what"). On that band `sessionStorage` needs ONLY the flag (no file)
+        // — gating it behind a `--localstorage-file` opt-in wrongly broke out-of-the-
+        // box sessionStorage. So inject the flag unconditionally in-band; this makes
+        // sessionStorage work everywhere on 22.4–24 and installs the `localStorage`
+        // getter (which still throws `ERR_INVALID_ARG_VALUE` on ACCESS until the user
+        // supplies a `--localstorage-file`). Empirically the flag alone does NOT throw
+        // at startup on 22.4–24, so always-injecting is safe.
         //
-        // BUT: when the user DOES opt in via `--localstorage-file` (argv or
-        // NODE_OPTIONS), nub honors it on every supported Node version. On the
-        // 22.4–24.x band the global is still flag-gated, so `--localstorage-file`
-        // alone yields `ReferenceError: localStorage is not defined`; Node also
-        // needs `--experimental-webstorage` there (it is native/default-on at 25+).
-        // So inject `--experimental-webstorage` IFF the user opted in AND the
-        // running Node is in the flag-needed band — and only if the user has not
-        // already supplied it (no double-add) or explicitly disabled it with
-        // `--no-experimental-webstorage` (respect their disable). This fires ONLY
-        // on the explicit opt-in; with no `--localstorage-file` nothing is added,
-        // so the default-off behavior above is preserved.
-        if user_webstorage_opt_in(config.user_args, node_options.as_deref())
-            && flags::webstorage_flag_needed(&config.node.version)
-            && !user_has_webstorage_flag(config.user_args, node_options.as_deref())
-        {
+        // nub NEVER synthesizes `--localstorage-file` — localStorage persistence
+        // stays the user's explicit opt-in (forwarded verbatim if they pass it).
+        //
+        // Scope is exactly the `webstorage_flag_needed` band: below 22.4 the flag is
+        // an unrecognized "bad option" (would crash startup), and on 25+ Web Storage
+        // is native so the flag is unnecessary. Skip the inject when the user already
+        // supplied `--experimental-webstorage` / `--no-experimental-webstorage` (no
+        // double-add; respect an explicit disable — nub never re-enables over a user
+        // negation).
+        if should_inject_webstorage_flag(
+            &config.node.version,
+            config.user_args,
+            node_options.as_deref(),
+        ) {
             cmd.arg("--experimental-webstorage");
         }
 
@@ -518,22 +520,17 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
                 }
             }
         }
-        // Web Storage is opt-in (see the argv site above): nub injects no
-        // `--experimental-webstorage` / `--localstorage-file` into NODE_OPTIONS by
-        // default, and a user-set `NODE_OPTIONS=--localstorage-file=...` is
-        // preserved verbatim by the `existing_opts` passthrough below.
-        //
-        // The one exception mirrors the argv site: when the user opted in via
-        // `--localstorage-file` and the running Node still needs the experimental
-        // flag (22.4–24.x), inject `--experimental-webstorage` into NODE_OPTIONS
-        // too — so a hardcoded-path `node` re-invocation that inherits the opt-in
-        // file ALSO inherits the flag it needs to materialize the global. Same
-        // guard: only on opt-in, only in-band, and not if the user already
-        // supplied/disabled the flag.
-        if user_webstorage_opt_in(config.user_args, node_options.as_deref())
-            && flags::webstorage_flag_needed(&config.node.version)
-            && !user_has_webstorage_flag(config.user_args, node_options.as_deref())
-        {
+        // Web Storage (mirrors the argv site above): always inject
+        // `--experimental-webstorage` into NODE_OPTIONS on the flag-needed band
+        // (22.4–24.x), regardless of any `--localstorage-file` opt-in, so a child
+        // `node` re-invocation inherits the flag and `sessionStorage` works out of
+        // the box. nub never synthesizes `--localstorage-file`. Same guard: only
+        // in-band, and not if the user already supplied/disabled the flag.
+        if should_inject_webstorage_flag(
+            &config.node.version,
+            config.user_args,
+            node_options.as_deref(),
+        ) {
             node_opts_parts.push("--experimental-webstorage".to_string());
         }
         if let Some(existing) = existing_opts {
@@ -811,22 +808,14 @@ pub fn compute_augmentation_env(
         ));
     }
     node_opts_parts.push(injection.node_options_token());
-    // Web Storage is opt-in (the maintainer, 2026-06-14) — nub injects no
-    // `--experimental-webstorage` / `--localstorage-file` here by default, matching
-    // `spawn_node`. A user-set `NODE_OPTIONS=--localstorage-file=...` rides through
-    // unchanged via the `existing_node_options` passthrough below.
-    //
-    // Honor the opt-in the same way the direct-spawn path does: if the user's
-    // NODE_OPTIONS carries `--localstorage-file` and the running Node still needs
-    // the experimental flag (22.4–24.x), inject `--experimental-webstorage` so a
-    // script-run child shell's `node` materializes the global rather than throwing
-    // `ReferenceError: localStorage is not defined`. (Scripts have no argv here —
-    // the only opt-in channel is NODE_OPTIONS.) Guarded against double-add / a
-    // user `--no-experimental-webstorage` disable.
-    if user_webstorage_opt_in(&[], existing_node_options.as_deref())
-        && flags::webstorage_flag_needed(&node_version)
-        && !user_has_webstorage_flag(&[], existing_node_options.as_deref())
-    {
+    // Web Storage (mirrors `spawn_node`): always inject
+    // `--experimental-webstorage` on the flag-needed band (22.4–24.x) so a
+    // script-run child shell's `node` has `sessionStorage` out of the box, with no
+    // `--localstorage-file` opt-in required. nub never synthesizes
+    // `--localstorage-file`. (Scripts have no argv here — the only user channel is
+    // NODE_OPTIONS.) Guarded against double-add / a user
+    // `--no-experimental-webstorage` disable.
+    if should_inject_webstorage_flag(&node_version, &[], existing_node_options.as_deref()) {
         node_opts_parts.push("--experimental-webstorage".to_string());
     }
     if let Some(existing) = existing_node_options {
@@ -919,26 +908,6 @@ fn is_permission_flag(arg: &str) -> bool {
     PERMISSION_FLAGS.contains(&token)
 }
 
-/// Whether the user opted into Web Storage by supplying `--localstorage-file`
-/// (argv OR NODE_OPTIONS). Web Storage is off by default (nub injects nothing); a
-/// `--localstorage-file=<path>` is the explicit opt-in that asks Node to
-/// materialize a persistent `localStorage`. Matching the token up to any `=`
-/// catches both the `--localstorage-file=path` and the space-separated
-/// `--localstorage-file path` argv forms; in NODE_OPTIONS Node only accepts the
-/// `=` form, so a whitespace split covers it. Pure over its inputs for testability.
-fn user_webstorage_opt_in(user_args: &[String], node_options: Option<&str>) -> bool {
-    let in_argv = user_args
-        .iter()
-        .any(|a| a.split('=').next() == Some("--localstorage-file"));
-    let in_opts = node_options
-        .map(|o| {
-            o.split_whitespace()
-                .any(|t| t.split('=').next() == Some("--localstorage-file"))
-        })
-        .unwrap_or(false);
-    in_argv || in_opts
-}
-
 /// Whether the user already supplied the `--experimental-webstorage` flag in
 /// either polarity (`--experimental-webstorage` or `--no-experimental-webstorage`)
 /// via argv or NODE_OPTIONS. When true, nub must NOT add its own
@@ -952,6 +921,25 @@ fn user_has_webstorage_flag(user_args: &[String], node_options: Option<&str>) ->
         .map(|o| o.split_whitespace().any(is_ws))
         .unwrap_or(false);
     in_argv || in_opts
+}
+
+/// Whether nub should inject `--experimental-webstorage` for this invocation
+/// (the maintainer, 2026-06-15: "a flag that we inject no matter what"). True iff the Node
+/// version is on the flag-needed band (22.4 through <25, where the flag both EXISTS
+/// and is still REQUIRED) AND the user hasn't already supplied the flag in either
+/// polarity. The inject is UNCONDITIONAL on the band — it does not depend on any
+/// `--localstorage-file` opt-in — so `sessionStorage` works out of the box; it
+/// installs the `localStorage` getter too (which throws on access until the user
+/// supplies their own `--localstorage-file`; nub never synthesizes one). Below 22.4
+/// the flag is a "bad option" startup crash; on 25+ Web Storage is native so the
+/// flag is unnecessary. Pure over its inputs for testability.
+fn should_inject_webstorage_flag(
+    node_version: &super::version::NodeVersion,
+    user_args: &[String],
+    node_options: Option<&str>,
+) -> bool {
+    flags::webstorage_flag_needed(node_version)
+        && !user_has_webstorage_flag(user_args, node_options)
 }
 
 /// Whether Node's test-runner coverage is active for this invocation — i.e. the
@@ -1302,27 +1290,59 @@ mod tests {
     }
 
     #[test]
-    fn webstorage_opt_in_detected_in_both_channels() {
+    fn webstorage_flag_always_injected_on_band_without_localstorage_file() {
+        // the maintainer, 2026-06-15: nub injects --experimental-webstorage "no matter what"
+        // on the flag-needed band (22.4–24), with NO --localstorage-file present —
+        // so sessionStorage works out of the box. (a) in-band with no file → inject.
+        for ver in [
+            NodeVersion::new(22, 4, 0),
+            NodeVersion::new(22, 15, 0),
+            NodeVersion::new(24, 0, 0),
+            NodeVersion::new(24, 99, 0),
+        ] {
+            assert!(
+                should_inject_webstorage_flag(&ver, &[], None),
+                "must inject --experimental-webstorage on {ver:?} with no --localstorage-file"
+            );
+        }
+    }
+
+    #[test]
+    fn webstorage_flag_not_injected_below_floor_or_when_native() {
+        // (b) below 22.4 the flag is an unrecognized "bad option" → never inject.
+        for ver in [NodeVersion::new(18, 19, 0), NodeVersion::new(22, 3, 0)] {
+            assert!(
+                !should_inject_webstorage_flag(&ver, &[], None),
+                "must NOT inject below the 22.4 floor ({ver:?}) — would crash startup"
+            );
+        }
+        // (c) on 25+ Web Storage is native → the flag is unnecessary, don't inject.
+        for ver in [NodeVersion::new(25, 0, 0), NodeVersion::new(26, 2, 0)] {
+            assert!(
+                !should_inject_webstorage_flag(&ver, &[], None),
+                "must NOT inject on {ver:?} — Web Storage is native there"
+            );
+        }
+    }
+
+    #[test]
+    fn webstorage_flag_not_double_injected_when_user_supplied() {
+        // (e) user already passed the flag (either polarity, either channel) → nub
+        // must not double-inject / must respect an explicit disable.
         let s = |v: &str| v.to_string();
-        // No opt-in → off.
-        assert!(!user_webstorage_opt_in(&[], None));
-        assert!(!user_webstorage_opt_in(&[s("app.js")], Some("--max-old-space-size=64")));
-        // argv, `=` form and space-separated form.
-        assert!(user_webstorage_opt_in(
-            &[s("--localstorage-file=/tmp/x.sqlite"), s("app.js")],
+        let v = NodeVersion::new(22, 15, 0);
+        assert!(!should_inject_webstorage_flag(&v, &[s("--experimental-webstorage")], None));
+        assert!(!should_inject_webstorage_flag(&v, &[], Some("--experimental-webstorage")));
+        assert!(!should_inject_webstorage_flag(&v, &[s("--no-experimental-webstorage")], None));
+        assert!(!should_inject_webstorage_flag(&v, &[], Some("--no-experimental-webstorage")));
+        // A --localstorage-file opt-in does NOT change the in-band decision — the
+        // flag injects either way; (d) nub never synthesizes --localstorage-file, so
+        // its presence/absence is irrelevant to whether the flag is injected.
+        assert!(should_inject_webstorage_flag(
+            &v,
+            &[s("--localstorage-file=/tmp/x.sqlite")],
             None
         ));
-        assert!(user_webstorage_opt_in(
-            &[s("--localstorage-file"), s("/tmp/x.sqlite")],
-            None
-        ));
-        // NODE_OPTIONS (Node accepts only the `=` form there).
-        assert!(user_webstorage_opt_in(
-            &[],
-            Some("--localstorage-file=/tmp/x.sqlite")
-        ));
-        // Not confused by an unrelated flag that shares a prefix.
-        assert!(!user_webstorage_opt_in(&[s("--localstorage-file-foo=1")], None));
     }
 
     #[test]

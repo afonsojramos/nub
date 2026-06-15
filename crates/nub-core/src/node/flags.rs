@@ -55,10 +55,10 @@ const MIN_DISABLE_WARNING: NodeVersion = NodeVersion::new(20, 11, 0);
 /// (v27 pre): `--localstorage-file` alone exposes a working, persistent
 /// `localStorage`; the flag without the file does not.
 ///
-/// NOTE: Web Storage is opt-in (the maintainer, 2026-06-14) — nub no longer injects these
-/// flags by default, so this is currently version-detection logic the spawn path
-/// does not consume. Retained as the canonical description of Node's Web Storage
-/// banding (the source of truth shared with the `webstorage` feature_matrix row).
+/// NOTE: this is version-detection logic the spawn path uses indirectly via
+/// `webstorage_flag_needed` (which derives from the same matrix). It is the
+/// canonical description of Node's Web Storage banding (the source of truth shared
+/// with the `webstorage` feature_matrix row).
 pub fn webstorage_supported(node_version: &NodeVersion) -> bool {
     feature_matrix::feature("webstorage")
         .mitigation_for(node_version)
@@ -72,9 +72,10 @@ pub fn webstorage_supported(node_version: &NodeVersion) -> bool {
 /// records a `StorageFile` band (the flag defaults on, PR nodejs/node#57666), so
 /// only `--localstorage-file` is needed there.
 ///
-/// Like `webstorage_supported`, this is version-detection logic the spawn path no
-/// longer consumes (Web Storage is opt-in as of 2026-06-14); kept as the canonical
-/// banding description.
+/// The spawn path (`spawn.rs`) consumes this to decide where to ALWAYS inject
+/// `--experimental-webstorage` (the maintainer, 2026-06-15): on the flag-needed band the
+/// flag is unconditionally injected so `sessionStorage` works out of the box; below
+/// the band it's a "bad option" and on 25+ it's unnecessary (native).
 pub fn webstorage_flag_needed(node_version: &NodeVersion) -> bool {
     matches!(
         feature_matrix::feature("webstorage").mitigation_for(node_version),
@@ -125,8 +126,9 @@ pub fn test_coverage_exclude_supported(node_version: &NodeVersion) -> bool {
 /// | `--test-coverage-exclude`)        |                                           |                              |                              |
 /// | below-floor flags (18.19)         | `--experimental-webstorage`, `--disable-warning`, `--test-coverage-exclude` | **exit 9 "bad option"** | band-gated OUT (never injected there) |
 ///
-/// (Webstorage's flag/file pair is injected in `spawn.rs`, not here — its
-/// suppression is granular and lives in `user_webstorage_suppression`; see there.)
+/// (Webstorage's `--experimental-webstorage` is injected in `spawn.rs`, not here —
+/// always-injected on the `webstorage_flag_needed` band, suppressed only when the
+/// user already supplied the flag in either polarity; see there.)
 pub fn compute_inject_flags(
     node_version: NodeVersion,
     user_argv: &[String],
@@ -234,9 +236,9 @@ mod tests {
         let flags = compute_inject_flags(v(22, 15, 0), &[], None, false);
         assert!(flags.contains(&"--experimental-vm-modules"));
         assert!(flags.contains(&"--experimental-eventsource"));
-        // webstorage is NOT in this static set — and is no longer injected at all:
-        // Web Storage is opt-in (a user passes their own --localstorage-file /
-        // --experimental-webstorage; nub adds neither). See spawn.rs.
+        // webstorage is NOT in this static set: spawn.rs owns its injection (it
+        // always injects --experimental-webstorage on the 22.4–24 flag-needed band,
+        // paired with no synthesized --localstorage-file). See spawn.rs.
         assert!(!flags.contains(&"--experimental-webstorage"));
         // sqlite is unflagged on 22.13.0+ (the 22.x line), so 22.15 does NOT inject it.
         assert!(!flags.contains(&"--experimental-sqlite"));

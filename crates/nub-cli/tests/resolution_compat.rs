@@ -109,14 +109,14 @@ fn passes(bin: &Path, test: &Path, suite: &Path) -> bool {
 /// Accepted augmented-mode divergences — verified NOT to be resolution bugs.
 /// Format: (test path relative to the suite, reason).
 ///
-/// Empty since 2026-06-14: every prior entry was traced to nub's DEFAULT
-/// webstorage augmentation (the `--experimental-webstorage` flag plus warning
-/// suppression), which perturbed exact-stderr / expected-warning / re-spawned-
-/// child-flag assertions — not the resolver. Web Storage is now opt-in (nub
-/// injects neither flag by default; see spawn.rs), so those tests no longer
-/// diverge and their entries were removed. nub's thin resolver-over-Node matches
-/// Node across the resolution subset with zero genuine resolution divergences.
-/// Re-add an entry here only for a NEW, verified non-resolution divergence.
+/// Empty as of 2026-06-15. NOTE: nub again injects `--experimental-webstorage` on
+/// the 22.4–24 band (always, so sessionStorage works out of the box — the maintainer,
+/// 2026-06-15), so the webstorage-flag/warning perturbations that previously forced
+/// entries here CAN resurface in exact-stderr / expected-warning / re-spawned-child-
+/// flag assertions of the Node-suite resolution corpus. None are listed because
+/// those are not RESOLUTION divergences; if the corpus surfaces one on the band,
+/// classify it (webstorage perturbation vs genuine resolver bug) and add an entry
+/// only for a NEW, verified non-resolution divergence.
 /// See wiki/research/resolution-conformance.md.
 const KNOWN_DIVERGENCES: &[(&str, &str)] = &[];
 
