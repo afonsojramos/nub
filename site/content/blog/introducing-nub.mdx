@@ -110,7 +110,7 @@ The most consistent frustration in Node + TypeScript: your editor, your bundler,
 
 ### JSX
 
-Files ending in `.jsx` and `.tsx` execute directly — no Vite plugin, no separate compile step. The JSX runtime is sourced the way the rest of your toolchain sources it: `compilerOptions.jsx` and `jsxImportSource` from your nearest `tsconfig.json`, with a `/** @jsxImportSource preact */` pragma winning per-file. Defaults match oxc, Vite, and Bun: automatic runtime, `react` import source. And JSX is recognized in `.jsx` / `.tsx` only — never silently enabled in plain `.js`.
+Files ending in `.jsx` and `.tsx` execute directly — no Vite plugin, no separate compile step. The JSX runtime is sourced the way the rest of your toolchain sources it: `compilerOptions.jsx` and `jsxImportSource` from your nearest `tsconfig.json`, with a `/** @jsxImportSource preact */` pragma winning per-file. Defaults match oxc, Vite, and Bun: automatic runtime, `react` import source.
 
 ```tsx
 const view = <Hello name="world" />  // .tsx — no build step
@@ -257,7 +257,7 @@ match?.pathname.groups.id; // "42"
 
 ### `WebSocket`
 
-Browser-standard WebSocket client. Available from Node 20.10+; Nub injects `--experimental-websocket` below 22.0, native above. Below 20.10 Node has no WebSocket client and Nub doesn't fake one.
+Browser-standard WebSocket client. Available from Node 20.10+; Nub injects `--experimental-websocket` below 22.0, native above. Below 20.10 there is no WebSocket client.
 
 ```ts
 const ws = new WebSocket("wss://api.example.com/stream");
@@ -277,7 +277,7 @@ stream.addEventListener("message", (e) => process.stdout.write(e.data));
 
 ### `localStorage` / `sessionStorage`
 
-The `sessionStorage` global — in-memory, per-process — works out of the box. Persistent `localStorage` is opt-in: pass `--localstorage-file=<path>` and Node persists to that file. On the 22.4–24 band Node also gates the global behind `--experimental-webstorage`, which Nub injects for you whenever you supply the file, so a single `--localstorage-file` is enough on every supported version. Without that flag, `localStorage` stays `undefined`, exactly as on plain Node — Nub adds no default store.
+The `sessionStorage` global — in-memory, per-process — works out of the box. Persistent `localStorage` is opt-in: pass `--localstorage-file=<path>` and Node persists to that file. On the 22.4–24 band Node also gates the global behind `--experimental-webstorage`, which Nub injects for you whenever you supply the file, so a single `--localstorage-file` is enough on every supported version. Without that flag, `localStorage` stays `undefined`.
 
 ```ts
 // run with: nub --localstorage-file=.localstorage app.ts
@@ -300,7 +300,7 @@ mod.namespace.answer; // 42
 
 ### `node:sqlite`
 
-Embedded SQLite. Available from Node 22.5+; Nub injects `--experimental-sqlite` until 22.13 where Node stabilized it. Below 22.5 it doesn't exist and Nub doesn't fake it.
+Embedded SQLite. Available from Node 22.5+; Nub injects `--experimental-sqlite` until 22.13 where Node stabilized it. Below 22.5 it isn't available.
 
 ```ts
 import { DatabaseSync } from "node:sqlite";
@@ -416,6 +416,8 @@ The `.bin` walk-up happens in Rust and the binary is exec'd directly — no Node
     { cmd: 'npx esbuild --version', ms: 226, ratio: 20 },
   ]}
 />
+
+When the tool isn't installed, `nubx` fetches it from the registry and runs it — no prompt, the same local-first-then-DLX model as `npx` and `pnpm dlx`. A version specifier like `nubx cowsay@1.5.0` goes straight through that fetch path.
 
 ## `nub install`: a 10× faster `pnpm install`
 

@@ -162,13 +162,18 @@ Which lockfile Nub reads and writes, which config it honors, whether a write is 
 
 1. **`packageManager` field** (`package.json`) — the Corepack standard, and a stronger signal than any lockfile on disk. A pnpm project that picked up a stray `package-lock.json` keeps resolving as pnpm.
 2. **`devEngines.packageManager` field** — the fallback declaration, object (`{ "name": "pnpm" }`) or array form. Outranked by `packageManager`; a version or tool disagreement between the two is a hard error.
-3. **The lockfile on disk** — consulted only when no declaration names a manager. Filename precedence: `pnpm-lock.yaml` → `bun.lock` → `yarn.lock` → `npm-shrinkwrap.json` → `package-lock.json`.
+3. **The lockfile on disk** — consulted only when no declaration names a manager. Filename precedence, highest first:
+   - `pnpm-lock.yaml`
+   - `bun.lock`
+   - `yarn.lock`
+   - `npm-shrinkwrap.json`
+   - `package-lock.json`
 4. **Nothing present** — a fresh project is **nub identity**: Nub writes its own canonical `pnpm-lock.yaml` (v9) and honors only un-branded, cross-tool config. A declaration naming `nub` (what `nub pm use nub` writes) is nub identity too, and accepts whatever lockfile already exists.
 
 In a workspace, only the **root** carries the declaration and lockfile; Nub walks up from the working directory, so a member package resolves to the root's identity.
 
-<Callout title="Contradictions are loud, never silently resolved">
-When signals disagree, Nub stops rather than guess. Two lockfiles, no declaration:
+<Callout title="Contradictions are loud">
+When signals disagree, Nub stops and reports it. Two lockfiles, no declaration:
 
 ```console
 $ nub install

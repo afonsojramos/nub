@@ -37,7 +37,7 @@ A `--watch` placed after a script name is forwarded *to the script* like any oth
 
 ## Preserve output
 
-Nub preserves terminal output by default and prints a restart banner, rather than clearing the screen. The previous run's error message is usually the most important thing on screen, so wiping it on every restart is the wrong default.
+Nub preserves terminal output by default and prints a restart banner, rather than clearing the screen — so the previous run's error message stays on screen.
 
 ```bash
 nub watch src/server.ts
@@ -81,7 +81,7 @@ Nub's watch mode is intentionally not byte-for-byte Node — it adds the banner,
 node --watch script.js
 ```
 
-Nub's PATH shim is per-invocation: it only affects descendants of an active `nub ...` call, so the `node` in your shell is always your real Node. There is no `--node` compat flag on `nub watch` — for strict-Node watch behavior, this is the path. See [the `--node` flag](/docs/faq) for where compat mode does and doesn't apply.
+Nub's PATH shim is per-invocation: it only affects descendants of an active `nub ...` call, so the `node` in your shell is always your real Node. For strict-Node watch behavior, this is the path.
 
 ## Related
 

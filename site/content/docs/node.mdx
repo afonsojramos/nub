@@ -5,8 +5,6 @@ description: Manage the Node versions Nub provisions — pin a version and it's 
 
 Nub runs your code on stock Node and provisions the right version for you. Pin a version, run a file, and the matching Node is downloaded and cached without a second command — the [implicit path](/docs/runtime#the-node-version) covers the common case completely, so you rarely manage versions by hand. The `nub node` subcommands exist for the cases the automatic path can't reach: warming the cache before you run, seeing what's installed, reclaiming disk, and recording a pin.
 
-The whole group is optional — `nub <file>` behavior never changes whether you use it or not.
-
 ## Automatic provisioning
 
 Drop a `.node-version` or `.nvmrc` in your project (or an `engines.node` range in `package.json`) and run `nub`. If that Node is already on your machine it's used as-is; if not, Nub downloads the matching stock build from nodejs.org — SHA-256 verified and cached under `~/.cache/nub/node` — then runs your code in the same breath.
@@ -39,7 +37,7 @@ Aliases and ranges resolve the same way pins do — `lts`, `latest`, `lts/<coden
 nub node install             # installs whatever .node-version / .nvmrc / engines.node names
 ```
 
-It's idempotent and frugal. A version already in the cache is a no-op; a version already available on your `PATH` (a system install, `nvm`, `fnm`, …) is reported and **skipped** rather than re-downloaded — there's nothing to gain from a second copy.
+A version already in the cache is a no-op; a version already available on your `PATH` (a system install, `nvm`, `fnm`, …) is reported and **skipped** rather than re-downloaded.
 
 ```console
 $ nub node install 22.15.0
@@ -57,7 +55,7 @@ $ nub node ls
   20.11.0
 ```
 
-Only Nub's own download cache is shown — `ls` doesn't enumerate your `nvm` / `fnm` / system installs, because Nub doesn't manage those stores. The `→` marker appears only when the resolved version is one Nub has cached.
+Only Nub's own download cache is shown — `ls` doesn't enumerate your `nvm` / `fnm` / system installs. The `→` marker appears only when the resolved version is one Nub has cached.
 
 ## `nub node uninstall`
 
@@ -68,7 +66,7 @@ $ nub node uninstall 20.11.0
 Removed Node 20.11.0 from the cache
 ```
 
-Like `ls`, this operates on Nub's cache only — it will never touch a version `nvm` or your system package manager installed.
+Like `ls`, this operates on Nub's cache only.
 
 ## `nub node pin`
 
@@ -82,11 +80,10 @@ pinned Node 22 → /path/to/project/.node-version
 A few deliberate behaviors:
 
 - **It pins the project, not the subdirectory.** Run from anywhere inside the project and the file lands at the project root — the nearest `package.json` directory — not in your current subfolder.
-- **In a workspace, it pins the whole repo.** A Node version is a property of the repository, not one package, so in a monorepo the pin is written at the workspace root. (A single package can't run on its own Node anyway — resolution walks *up*, so a member-level pin wouldn't reach its siblings.)
-- **It edits the pin file you already have.** If the project carries a `.nvmrc` but no `.node-version`, `pin` updates the `.nvmrc` in place rather than dropping a second file that would silently shadow it.
-- **It always prints where it wrote.** No guessing which file changed.
+- **In a workspace, it pins the whole repo.** A Node version is a property of the repository, not one package, so in a monorepo the pin is written at the workspace root.
+- **It edits the pin file you already have.** If the project carries a `.nvmrc` but no `.node-version`, `pin` updates the `.nvmrc` in place.
 
-Whatever spec you give is written verbatim — including an alias like `lts` — and `pin` never hits the network, so it's instant and works offline. The `.node-version` file is the tool-agnostic convention (`nvm`, `fnm`, `volta`, `asdf` all read it), so the pin is portable to your other tools, not just Nub.
+Whatever spec you give is written verbatim — including an alias like `lts` — and `pin` works offline. The `.node-version` file is the tool-agnostic convention (`nvm`, `fnm`, `volta`, `asdf` all read it), so the pin is portable to your other tools.
 
 ## Mirrors and proxies
 
@@ -101,7 +98,7 @@ The `NODEJS_ORG_MIRROR` env var (the nvm/n convention) takes precedence when set
 
 ## Bring your own version manager
 
-With no pin file, Nub adopts whatever `node` is on your `PATH`. Switch versions with `nvm`, `mise`, `fnm`, `brew`, or the official installer and Nub picks up the active one — it doesn't install a "default" Node of its own and won't shadow the version manager you already use. Nub has no user-level config file; outside a pinned project, your shell's `node` is the answer.
+With no pin file, Nub adopts whatever `node` is on your `PATH`. Switch versions with `nvm`, `mise`, `fnm`, `brew`, or the official installer and Nub picks up the active one. Outside a pinned project, your shell's `node` is the answer.
 
 ```bash
 nvm use 24
@@ -112,7 +109,7 @@ The quickest way to answer "which Node runs here, and where is it?" is `nub node
 
 ## Scope
 
-Five verbs — `which`, `install`, `ls`, `uninstall`, and `pin` — are the whole group (plus bare `nub node` for a status readout). There's deliberately no `ls-remote`, no `prune`, `--force`, custom aliases, or a global-default command — the automatic provisioning covers the common path, and the small surface keeps "you don't have to think about Node versions" true.
+Five verbs — `which`, `install`, `ls`, `uninstall`, and `pin` — are the whole group (plus bare `nub node` for a status readout). There's no `ls-remote`, `prune`, `--force`, custom aliases, or global-default command — the automatic provisioning covers the common path.
 
 ## Related
 

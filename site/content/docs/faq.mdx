@@ -22,11 +22,11 @@ No. Nub runs *on* Node — your `node` binary, on your `PATH`. There is no Nub r
 
 ## Is it a fork of Node?
 
-No. Nub does not patch Node source, ship a custom-built Node binary, or embed `libnode`. Every augmentation rides on Node's public extension surfaces. The "would a user on plain Node, plus the corresponding `module.register()` / `--import` / npm addon, get the same result?" question always answers yes.
+No. Nub does not patch Node source, ship a custom-built Node binary, or embed `libnode`. Every augmentation rides on Node's public extension surfaces.
 
 ## Is Nub a replacement for Node?
 
-No — Nub *is* Node. Your code is transpiled and executed by the stock `node` binary; there's no Nub runtime to discover and nothing reimplemented. Nub is a layer of developer-experience defaults on top of Node, built entirely on Node's own extension surfaces. None of this is a criticism of Node — its caution about breaking changes is the right caution, and that same caution is exactly why opinionated modern defaults belong in a layer on top rather than in core.
+No — Nub *is* Node. Your code is transpiled and executed by the stock `node` binary; there's no Nub runtime to discover and nothing reimplemented. Nub is a layer of developer-experience defaults on top of Node, built entirely on Node's own extension surfaces.
 
 ## How is it different from plain `node`?
 
@@ -52,7 +52,7 @@ No — your code runs in Node itself, so once it's executing, V8 is V8. What's d
 
 ## Will my existing Node code work on Nub?
 
-Yes. The compatibility surface is Node's. If a package works on Node, it works on Nub — because what's actually running underneath is Node. There's no separate compatibility matrix to consult.
+Yes. The compatibility surface is Node's. If a package works on Node, it works on Nub — because what's actually running underneath is Node.
 
 The contract is: code targeting Node runs on Nub byte-for-byte. If you hit a case where that's not true, it's a bug.
 
@@ -66,7 +66,7 @@ Works. Native addons compile against Node's N-API ABI, and Nub is running on you
 
 ## Does it support all Node core modules?
 
-Yes. Every `node:` core module — `node:fs`, `node:http`, `node:test`, `node:worker_threads`, `node:sqlite`, `node:crypto`, all of them — works because they're provided by your Node binary, not by Nub. Nub does not own the `node:` namespace and does not register synthetic specifiers.
+Yes. Every `node:` core module — `node:fs`, `node:http`, `node:test`, `node:worker_threads`, `node:sqlite`, `node:crypto`, all of them — works because they're provided by your Node binary, not by Nub.
 
 ## What Node versions does it support?
 
@@ -107,7 +107,7 @@ Topological ordering, parallelism, and `--workspace-root` are honored. The point
 
 ## Does it replace `npx`?
 
-Yes — `nubx` (also available as `nub exec`) is the equivalent. Locally installed CLIs live in a standard place: `node_modules/.bin/`, with the resolution algorithm well-defined (walk up the directory tree, check `.bin/` at each level) — and `nubx` is that lookup, in Rust. Local `node_modules/.bin` resolution returns in single-digit milliseconds. For binaries that aren't installed, Nub detects the package manager your project uses and delegates the fetch — so your lockfile stays consistent.
+Yes — `nubx` (also available as `nub exec`) is the equivalent. Locally installed CLIs live in a standard place: `node_modules/.bin/`, with the resolution algorithm well-defined (walk up the directory tree, check `.bin/` at each level) — and `nubx` is that lookup, in Rust. Local `node_modules/.bin` resolution returns in single-digit milliseconds. For binaries that aren't installed, `nubx` fetches them from the registry and runs them on the fly — the same local-first-then-DLX model as `npx` and `pnpm dlx`, with no interactive prompt. Nub is a complete package manager, so it does the fetch itself rather than shelling out to a foreign PM.
 
 ## Does it replace `tsx` / `ts-node`?
 
@@ -171,11 +171,9 @@ No patched Node binary, no vendored `libnode`, no separate runtime to discover. 
 
 ## Why doesn't Node ship these defaults natively?
 
-Node is an exceptionally well-managed open source project, with a release cadence and stability story few projects this load-bearing match. The Node team's caution about breaking changes is the right caution — Node is the substrate that thousands of production deployments rely on, and it has to stay predictable.
+Node stays predictable on purpose — it's the substrate thousands of production deployments rely on. Shipping opinionated defaults, integrated TypeScript, eager `.env` loading, or a workspace-aware script runner into core would shift the meaning of "running on Node."
 
-By the same logic, Node can't ship the kinds of changes that would bring plain `node` into alignment with modern developer-tooling expectations — opinionated defaults, integrated TypeScript, eager `.env` loading, a workspace-aware script runner. Collectively those would shift the meaning of "running on Node," and breaking that contract isn't worth it.
-
-What Node has done instead, over the last three years, is expose enough public extension surface — `module.registerHooks()`, `module.register()`, `--import`, stable N-API — that the modern-defaults layer doesn't have to live inside Node anymore. It can live above. That's what Nub is. The Node Foundation, correctly, is not going to ship a 5× faster script runner in next month's LTS, and shouldn't try. Nub can. Nub is the rate of change layered on top of the rate of stability.
+What Node has done instead, over the last three years, is expose enough public extension surface — `module.registerHooks()`, `module.register()`, `--import`, stable N-API — that the modern-defaults layer doesn't have to live inside Node anymore. It can live above. That's what Nub is.
 
 ## What polyfills does it ship?
 
@@ -183,7 +181,7 @@ Each polyfill is a thin shim over an established community implementation, featu
 
 - **`Temporal`** — TC39 date/time API. Native in Node 26+; Nub polyfills via [`@js-temporal/polyfill`](https://github.com/js-temporal/temporal-polyfill) on older Node
 - **`URLPattern`** — WHATWG URL pattern matching. Native in Node 24+; Nub polyfills via [`urlpattern-polyfill`](https://github.com/kenchris/urlpattern-polyfill) on older Node
-- **`WebSocket`** — Browser-standard WebSocket client. On by default since Node 22.0 (flag-gated on 20.10–21.x, where Nub injects `--experimental-websocket`); Nub polyfills via [`ws`](https://github.com/websockets/ws) on older Node
+- **`WebSocket`** — Browser-standard WebSocket client. Available from Node 20.10+; Nub injects `--experimental-websocket` below 22.0 where Node stabilized it
 - **`Worker`** — Browser-shape worker constructor over `node:worker_threads`. Node has no native plan ([nodejs/node#43583](https://github.com/nodejs/node/issues/43583) open since 2022); Nub ships a ~150-LOC wrapper
 - **WinterTC gap globals** — `reportError`, `self`, `PromiseRejectionEvent`. Node TSC has no opposition to these; PRs stalled to inactivity. ~50-LOC preload bundle
 
@@ -250,7 +248,7 @@ Node itself shipped a built-in script runner in 22.0 (`node --run`, April 2024).
 
 Your codebase keeps working on plain Node, unchanged.
 
-Nub adds no APIs to your code. No `globalThis.nub`. No `nub:*` module namespace. No `@nub/*` npm scope (with the single TypeScript-ecosystem exception of `@types/nub` on DefinitelyTyped). No `NUB_*` environment variables. No `"nub"` field in `package.json`. Your `package.json` doesn't mention Nub. Your imports don't reference Nub. Your runtime checks don't gate on Nub.
+Nub adds no APIs to your code. No `globalThis.nub`. No `nub:*` module namespace. No `@nub/*` npm scope. No `NUB_*` environment variables. No `"nub"` field in `package.json`.
 
 If Nub disappeared tomorrow, the worst case is: TypeScript files need a separate compile step or a tsx-equivalent loader; `.env` files need `dotenv-cli` or `import "dotenv/config"` again; you're back to whatever toolchain you had before. The code itself doesn't change.
 
@@ -265,13 +263,11 @@ nub run --node test           # Nub's CLI orchestration, runtime augmentation of
 nubx --node prisma generate   # Nub's bin resolution, runtime augmentation off
 ```
 
-No transpile hook, no `.env` loading into the spawned process, no polyfills, no experimental-flag injection, no PATH shim. Useful when a script's `#!/usr/bin/env node` shebang chain expects real Node, when bisecting a Nub bug, or when CI wants byte-exact Node runtime behavior with Nub's `--filter` / workspace selection.
-
-There's no `NODE_COMPAT=1` env var and no plain-Node passthrough verb — the per-invocation flag on the two orchestration verbs is the one mechanism. For ad-hoc plain-Node runs, type `node`.
+No transpile hook, no `.env` loading into the spawned process, no polyfills, no experimental-flag injection, no PATH shim. Useful when a script's `#!/usr/bin/env node` shebang chain expects real Node, when bisecting a Nub bug, or when CI wants byte-exact Node runtime behavior with Nub's `--filter` / workspace selection. For ad-hoc plain-Node runs, type `node`.
 
 ## Does Nub add anything to my `package.json`?
 
-No. Nub doesn't consume a `package.json`-level config field. No `"nub"` key, no `"nub.config"`, no `"dependencies"` shim. The fields Nub reads are the existing standard ones, exactly as Node, `npm`, `pnpm`, and `yarn` read them:
+No. The fields Nub reads are the existing standard ones, exactly as Node, `npm`, `pnpm`, and `yarn` read them:
 
 ```json
 "scripts"
@@ -285,7 +281,7 @@ No. Nub doesn't consume a `package.json`-level config field. No `"nub"` key, no 
 
 ## Does Nub add anything to my `tsconfig.json`?
 
-No. Nub reads `tsconfig.json` the way `tsc` does — `paths`, `baseUrl`, `extends` chains, `jsx`, `experimentalDecorators` — and applies them at runtime. It does not require, write, or interpret any Nub-specific field.
+No. Nub reads `tsconfig.json` the way `tsc` does — `paths`, `baseUrl`, `extends` chains, `jsx`, `experimentalDecorators` — and applies them at runtime.
 
 ## How do I install Nub?
 

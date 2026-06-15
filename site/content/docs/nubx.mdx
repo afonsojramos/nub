@@ -1,9 +1,9 @@
 ---
 title: Package runner
-description: Use nubx (or nub exec) to run the CLIs in your project's node_modules/.bin — a drop-in for npx and pnpm exec, an order of magnitude faster on cold start.
+description: Use nubx (or nub exec) to run a CLI from your project's node_modules/.bin, falling back to a registry fetch when it isn't installed — a drop-in for npx and pnpm dlx, an order of magnitude faster on cold start.
 ---
 
-The `nubx` command runs the command-line tools your project already depends on — the ones installed into `node_modules/.bin` by `pnpm`, `npm`, `yarn`, or `bun`. It's a drop-in for `npx` and `pnpm exec`: it does the `node_modules/.bin` walk-up in Rust and exec's the resolved binary directly, so the wrapper overhead that `npx` and `pnpm exec` pay on every call (a full Node bootstrap) approximately disappears — `~17–19×` lighter on a native CLI like `esbuild`. The tool that actually runs is identical to what `npx` would run; only the wrapper gets out of the way.
+The `nubx` command runs a command-line tool by name: an already-installed one from `node_modules/.bin` (put there by `pnpm`, `npm`, `yarn`, or `bun`), or — when it isn't installed — one fetched from the registry on the fly. It's a drop-in for `npx` and `pnpm dlx`, local-first with a DLX fallback. For a locally-resolved bin it does the `node_modules/.bin` walk-up in Rust and exec's the resolved binary directly, so the wrapper overhead that `npx` and `pnpm exec` pay on every call (a full Node bootstrap) approximately disappears — `~17–19×` lighter on a native CLI like `esbuild`. The tool that actually runs is identical to what `npx` would run; only the wrapper gets out of the way.
 
 This page is task-oriented. For the bigger picture see the [Introduction](/docs); for running files and scripts see [running files](/docs/runtime) and [running scripts](/docs/run).
 
@@ -60,28 +60,46 @@ nubx --node prisma generate
 nub exec --node tsc --noEmit
 ```
 
-What still happens under `--node`: the workspace-aware `node_modules/.bin` walk-up, the not-installed message below, and `nubx`'s own CLI machinery. Only the runtime augmentation is disabled. There is no `NODE_COMPAT=1` env var — pass `--node` per invocation that needs it.
+What still happens under `--node`: the workspace-aware `node_modules/.bin` walk-up, the registry DLX fallback below, and `nubx`'s own CLI machinery. Only the runtime augmentation is disabled.
 
 ## When a tool isn't installed
 
-Already-installed bins are the whole scope — `nubx` does not fetch from the registry. If the bin isn't on the `node_modules/.bin` chain, `nubx` exits non-zero and prints a one-line suggestion. It detects your package manager from the nearest lockfile (`pnpm-lock.yaml` → `yarn.lock` → `bun.lock` → `package-lock.json`, falling back to a `$PATH` priority of `pnpm > yarn > bun > npm`) and points you at that PM's own dlx/exec verb — so installs and ad-hoc fetches stay in the tool that owns your lockfile, keeping it consistent.
+When a bin isn't on the `node_modules/.bin` chain, `nubx` falls back to a registry fetch — it resolves the package, installs it into a throwaway project, and runs it, then drops the scratch dir. This is the same local-first-then-DLX model as `npx` and `pnpm dlx`; nub is a complete package manager, so it does the fetch itself rather than shelling out to a foreign PM. Following `pnpm dlx` semantics, there is no interactive confirm-prompt — it just fetches and runs.
 
 ```console
-$ nubx prettier
-nubx: prettier is not installed locally.
-      Install it (pnpm add -D prettier) or run it ad-hoc with:
-        pnpm dlx prettier
+$ nubx cowsay "Hello"
+dependencies:
++ cowsay@1.6.0
+
+ _______
+< Hello >
+ -------
+        \   ^__^
+         \  (oo)\_______
+            (__)\       )\/\
+                ||----w |
+                ||     ||
 ```
 
-The suggestion is printed, never run — you copy the command. The exact suggestion varies with the detected PM (`pnpm dlx <pkg>`, `npx <pkg>`, `yarn dlx <pkg>`, `bunx <pkg>`).
+This fallback is unique to the `nubx` (and `nub exec`-as-`nubx`) entry point. Plain `nub exec` is no-network: a missing bin there prints an install suggestion and exits 127 instead of reaching the registry.
 
 ## Version specifiers
 
-Version specifiers like `nubx prettier@3.5` are accepted, but they always miss the local-bin lookup — `nubx` doesn't match against installed versions. You'll get the not-installed message. Install the version you want, or run your PM's dlx verb directly.
+A version specifier like `nubx cowsay@1.5.0` goes straight through the DLX fetch path: `nubx` resolves and runs that exact version from the registry, no local install required.
 
-```bash
-pnpm add -D prettier@3.5    # then: nubx prettier
-pnpm dlx prettier@3.5       # ad-hoc, no install
+```console
+$ nubx cowsay@1.5.0 "pinned"
+dependencies:
++ cowsay@1.5.0  latest 1.6.0
+
+ ________
+< pinned >
+ --------
+        \   ^__^
+         \  (oo)\_______
+            (__)\       )\/\
+                ||----w |
+                ||     ||
 ```
 
 ## Yarn Plug'n'Play
@@ -92,6 +110,21 @@ Yarn Berry's Plug'n'Play mode replaces `node_modules/.bin/` with a runtime resol
 # .yarnrc.yml
 nodeLinker: node-modules
 ```
+
+## Drop-in for `pnpm exec`
+
+Existing `pnpm exec` invocations carry over — `nubx` and `nub exec` accept pnpm `exec`'s core workspace flags (`-r`, `--filter`, `--parallel`), and `nub dlx` matches `pnpm dlx` for one-off tools you don't want installed.
+
+```bash
+nubx --filter @org/api tsc --build            # run a local bin across a filtered workspace
+nub exec -r --parallel tsc --noEmit           # every member, no topo ordering
+nub dlx -p cowsay -c 'cowsay hi | tr a-z A-Z' # one-off tool, no install, shell pipeline
+```
+
+## Flag differences
+
+- **`-c`/`--shell-mode`** — the shell-string form lives on `nub dlx -c` (shown above); `nub exec`/`nubx` run a resolved bin directly.
+- **Recursive scope** — `nub exec` covers `-r`, `--filter`, and `--parallel`; the richer recursive flags (`--resume-from`, `--reporter`, `--stream`) live on `nub run`.
 
 ## Related
 

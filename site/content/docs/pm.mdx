@@ -3,7 +3,7 @@ title: Package meta-manager
 description: Provision and run the package manager your project pins — corepack's job, in native Rust. Pin a version and the exact pnpm/npm/yarn is fetched, verified, cached, and run on the project's Node.
 ---
 
-Nub reads your project's package-manager pin, downloads that exact version from the npm registry — integrity-verified before extraction, cached under `~/.cache/nub/pm` — and runs it under the project's Node. No corepack, no `enable` step, no baked version table: a nub binary from six months ago provisions today's pnpm.
+Nub reads your project's package-manager pin, downloads that exact version from the npm registry — integrity-verified before extraction, cached under `~/.cache/nub/pm` — and runs it under the project's Node. No corepack, no `enable` step, no baked version table: a Nub binary from six months ago provisions today's pnpm.
 
 ```console
 $ nub pm which
@@ -59,11 +59,11 @@ using pnpm@11.5.3
 
 What it writes:
 
-- **`packageManager`** — the exact version plus a `+sha512` hash computed from the verified tarball (never copied from registry metadata). This is what corepack, pnpm, and turbo execute, and `use` is the only nub command that writes it.
-- **The lockfile, in the new manager's format.** An existing lockfile in another format is *converted* — resolution state preserved, never deleted-and-regenerated — and the old file removed. Already the right format: kept as is. No lockfile: nothing; the next install creates it. The converted lockfile passes the real manager's frozen install (`pnpm install --frozen-lockfile`, `npm ci`, `bun install --frozen-lockfile`) byte-for-byte.
+- **`packageManager`** — the exact version plus a `+sha512` hash computed from the verified tarball. This is what corepack, pnpm, and turbo execute, and `use` is the only Nub command that writes it.
+- **The lockfile, in the new manager's format.** An existing lockfile in another format is *converted* — resolution state preserved — and the old file removed. Already the right format: kept as is. No lockfile: nothing; the next install creates it. The converted lockfile passes the real manager's frozen install (`pnpm install --frozen-lockfile`, `npm ci`, `bun install --frozen-lockfile`) byte-for-byte.
 - **`devEngines` is never created.** If it already exists and names a different manager, its `name` is reconciled (version dropped — `packageManager` alone pins exactly).
 
-Every file written or removed is named in the output; rerunning is a no-op. Two refusals, both before anything is written: multiple foreign-format lockfiles (nub won't guess which carries the real resolution state — remove the stale ones first), and `use yarn` when it would have to convert (nub doesn't write `yarn.lock` yet; generate it with `yarn install`, then rerun — with `yarn.lock` in place only the declaration is written). Running `use bun` writes the declaration and the lockfile but doesn't provision bun.
+Every file written or removed is named in the output; rerunning is a no-op. Two refusals, both before anything is written: multiple foreign-format lockfiles (remove the stale ones first), and `use yarn` when it would have to convert (Nub doesn't write `yarn.lock` yet; generate it with `yarn install`, then rerun — with `yarn.lock` in place only the declaration is written). Running `use bun` writes the declaration and the lockfile but doesn't provision bun.
 
 ## `nub pm update`
 
@@ -88,7 +88,7 @@ $ nub pm cache clear
 
 Versions live at `~/.cache/nub/pm/<pm>/<version>`. An exact pin that's already cached runs fully offline — the registry is only contacted to resolve ranges and fetch missing versions. Provisioned package managers also run with a warm V8 compile cache (`NODE_COMPILE_CACHE`), so the PM's multi-megabyte bundle loads as cached bytecode instead of re-parsing on every call.
 
-## Private registries
+## `.npmrc`
 
 The PM download — packument and tarball — goes through your `.npmrc`: `registry=` picks the mirror, `//host/:_authToken=` authenticates against it. An auth-required Artifactory/Nexus mirror works with the config you already have:
 
@@ -101,7 +101,7 @@ To fetch package managers from a different registry than your dependencies, `COR
 
 ## `nub pm shim`
 
-Make **bare** `npm` / `pnpm` / `yarn` commands (plus `npx`, `pnpx`, `yarnpkg`) use the project's pinned package manager — typed from muscle memory, or spawned by tools you don't control. This is what `corepack enable` does, without the corepack tax: each shim *is* the nub binary (a hardlink), so deciding which PM to run costs zero Node boots.
+Make **bare** `npm` / `pnpm` / `yarn` commands (plus `npx`, `pnpx`, `yarnpkg`) use the project's pinned package manager — typed from muscle memory, or spawned by tools you don't control. This is what `corepack enable` does, without the corepack tax: each shim *is* the Nub binary (a hardlink), so deciding which PM to run costs zero Node boots.
 
 ```console
 $ nub pm shim
@@ -113,15 +113,15 @@ With shims active, a bare command resolves against the project it runs in:
 
 - **Pinned, matching name** — runs the pinned version, provisioning it on first use. A cached pin runs fully offline.
 - **Pinned, different name** — refuses: `npm install` in a pnpm project would write a competing `package-lock.json`; the error names the pinned manager and the command to paste. (`npx`, `pnpx`, and the `init` / `create` / `dlx` / `exec` verbs are exempt — `npm create vite` works anywhere.)
-- **Unpinned** — falls through to the package manager already on your `PATH`, exactly as if the shim weren't there. If there is none, nub provisions a sensible default (matched to your lockfile's format, else latest) and says so.
+- **Unpinned** — falls through to the package manager already on your `PATH`, exactly as if the shim weren't there. If there is none, Nub provisions a sensible default (matched to your lockfile's format, else latest) and says so.
 
-Strictness applies to commands you type. When a package manager is already running above the shim — a lifecycle script shelling out to a different PM, detected via `npm_config_user_agent` — a name mismatch falls through to the system PM instead of refusing, so a pnpm `postinstall` that calls `npm` doesn't break an install you never issued.
+Strictness applies to commands you type. When a package manager is already running above the shim — a lifecycle script shelling out to a different PM, detected via `npm_config_user_agent` — a name mismatch falls through to the system PM instead of refusing.
 
-The shim never writes to your `package.json`. Re-run `nub pm shim` after upgrading nub to refresh the links.
+Re-run `nub pm shim` after upgrading Nub to refresh the links.
 
 ## `nub pm unshim`
 
-Remove the shims and the `PATH` entry. Works even after the nub binary itself has been uninstalled — the shim directory carries its own copy for exactly this cleanup.
+Remove the shims and the `PATH` entry. Works even after the Nub binary itself has been uninstalled — the shim directory carries its own copy for exactly this cleanup.
 
 ```console
 $ nub pm unshim
