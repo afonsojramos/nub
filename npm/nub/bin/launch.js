@@ -57,6 +57,59 @@ function resolveBinary(verb) {
 // POSIX single-quote a string for safe embedding in the sh trampoline.
 function shq(s) { return `'${String(s).replace(/'/g, "'\\''")}'`; }
 
+// True iff `p` is executable by THIS process (the +x bits that matter to us).
+function isExecutable(p) {
+  try { fs.accessSync(p, fs.constants.X_OK); return true; } catch { return false; }
+}
+
+// Make `binPath` runnable by us, returning a path that IS executable — `binPath`
+// itself when we can fix it in place, otherwise a user-owned executable copy.
+//
+// npm strips +x on extract from any file that isn't a `bin`-field entry, and the
+// platform packages declare no `bin` field, so the native binary lands 0o644. The
+// install-time `postinstall.js` chmods it back — but when npm SKIPS lifecycle scripts
+// (npm v12's default, or `ignore-scripts=true`) that never runs, leaving a 0o644
+// binary at runtime. The launcher's in-place chmod recovers the common case (we own
+// the file). It CANNOT recover the canonical container case: `root` does `npm i -g`,
+// the image drops to a non-root `USER`, and that user's first `nub` can neither run
+// the 0o644 binary nor chmod a file it doesn't own — `spawn` dies EACCES (verified:
+// scripts-off install + non-root run + root-owned 0o644 binary). For THAT case we
+// copy the binary into a user-owned cache dir at 0o755 and run the copy. This is the
+// scripts-off complement to postinstall's install-time chmod: self-heal that holds
+// even when we're not the binary's owner. Best-effort; returns the original path if
+// every recovery fails (the caller surfaces the spawn error).
+function ensureExecutable(binPath, verb) {
+  if (process.platform === "win32") return binPath; // .exe needs no +x bit
+  if (isExecutable(binPath)) return binPath;
+  // Common case: we own the file (e.g. `sudo`-free user-prefix install) — chmod in place.
+  try { fs.chmodSync(binPath, 0o755); } catch {}
+  if (isExecutable(binPath)) return binPath;
+  // Non-owner / read-only store: stage a user-owned executable copy in the cache.
+  // Key the copy on the source path + size + mtime so a binary upgrade re-stages and
+  // we never exec stale bytes; an existing fresh+executable copy is reused as-is.
+  try {
+    const st = fs.statSync(binPath);
+    const base = process.env.XDG_CACHE_HOME ||
+      (os.homedir() && os.homedir() !== "/" ? path.join(os.homedir(), ".cache") : null);
+    if (!base) return binPath;
+    const dir = path.join(base, "nub", "bin");
+    fs.mkdirSync(dir, { recursive: true });
+    const tag = `${st.size}-${Math.trunc(st.mtimeMs)}`;
+    const dest = path.join(dir, `${verb}-${tag}`);
+    if (isExecutable(dest)) {
+      const dst = fs.statSync(dest);
+      if (dst.size === st.size) return dest; // already staged, current, runnable
+    }
+    // Atomic stage: copy to a unique temp in the same dir, chmod, rename into place.
+    const tmp = path.join(dir, `.${verb}.${process.pid}.${Date.now()}.tmp`);
+    fs.copyFileSync(binPath, tmp);
+    fs.chmodSync(tmp, 0o755);
+    fs.renameSync(tmp, dest);
+    if (isExecutable(dest)) return dest;
+  } catch {}
+  return binPath; // give up; caller's spawn surfaces the real error
+}
+
 // Verify a PATH entry demonstrably resolves to OUR launcher before replacing it —
 // never clobber an unrelated `nub` (there is an unrelated nub@1.0.0 on npm). For a
 // symlink, realpath(entry) must equal our launcher's realpath. For a pnpm cmd-shim
@@ -128,15 +181,18 @@ function healPathEntry(verb, nativePath) {
 // argv0Name: the verb this stub represents ("nubx" for bin/nubx; undefined => nub).
 module.exports = function launch(argv0Name) {
   const verb = argv0Name || "nub";
-  const binPath = resolveBinary(verb);
+  const resolved = resolveBinary(verb);
   // Ensure the platform binary is executable. npm strips the +x bit on install from
   // files that aren't `bin`-field entries, and the platform package declares no bin
-  // field — so the staged-executable binary lands 0o644 and both spawnSync (below)
-  // and the healed sh trampoline's `exec` would EACCES / "Permission denied". The old
-  // postinstall did this chmod; doing it in the launcher covers EVERY package manager
-  // (npm strips, others may not) and runs before the heal writes a trampoline that
-  // exec's this binary. Best-effort; harmless if already executable.
-  try { fs.chmodSync(binPath, 0o755); } catch {}
+  // field — so the binary lands 0o644 and both spawn (below) and the healed sh
+  // trampoline's `exec` would EACCES / "Permission denied". `postinstall.js` chmods it
+  // at INSTALL time, but that's skipped under npm v12's scripts-off default (or
+  // `ignore-scripts=true`); ensureExecutable is the runtime net for that. It chmods in
+  // place when we own the file, and falls back to a user-owned executable COPY when we
+  // don't (the root-installs-then-drops-to-non-root container case the launcher's bare
+  // chmod cannot reach). Returns a path that IS executable; the heal + spawn both use
+  // it so the fast-path trampoline targets the runnable file too.
+  const binPath = ensureExecutable(resolved, verb);
   // Self-heal the PATH entry on first POSIX call so later calls skip Node entirely.
   healPathEntry(verb, binPath);
   // This call still runs through Node; spawn the native binary. argv0 basename of
