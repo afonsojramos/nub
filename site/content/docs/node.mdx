@@ -7,7 +7,7 @@ Nub runs your code on stock Node and provisions the right version for you. Pin a
 
 ## Automatic provisioning
 
-Drop a `.node-version` or `.nvmrc` in your project (or an `engines.node` range in `package.json`) and run `nub`. If that Node is already on your machine it's used as-is; if not, Nub downloads the matching stock build from nodejs.org — SHA-256 verified and cached under `~/.cache/nub/node` — then runs your code.
+Drop a `.node-version` or `.nvmrc` in your project (or an `engines.node` range in `package.json`) and run `nub`. If that Node is already on your machine it's used as-is; if not, Nub downloads the matching stock build from nodejs.org — SHA-256 verified and cached under `~/.cache/nub/node` — then runs your code. Nub provisions the pinned version itself rather than handing off to `nvm`, `fnm`, or `mise`; with nothing pinned anywhere up the tree, it uses whatever `node` is already on your `PATH`.
 
 ```console
 $ echo 22.15.0 > .node-version
@@ -96,19 +96,26 @@ node-mirror:release=https://artifactory.corp.example/node/
 
 The `NODEJS_ORG_MIRROR` env var (the nvm/n convention) takes precedence over the `.npmrc` key. A mirror is used for musl builds too — point it at one carrying the `unofficial-builds` layout on Alpine.
 
-## No pin: your PATH Node
+## `nub node which`
 
-Nub is the version manager. When a project pins a version, Nub provisions that version itself — it tries your `PATH` Node first and uses it only if it satisfies the pin, otherwise it downloads the matching stock build from nodejs.org and caches it. It does not defer to `nvm`, `fnm`, or `mise` to switch; the pin drives resolution and Nub fetches what's missing.
-
-Only when nothing is pinned — no `.node-version`, `.nvmrc`, `engines.node`, or `devEngines.runtime` anywhere up the tree — does Nub fall back to whatever `node` is on your `PATH`. That's the unpinned escape hatch, not the path you're meant to live on: pin a version and you stop thinking about which `node` your shell happens to point at.
+Resolve which Node runs here and where it lives. The binary path goes to stdout; a `» resolved from <source>` explainer goes to stderr, so it never pollutes a captured value.
 
 ```console
 $ nub node which
-/Users/you/.cache/nub/node/22.15.0/bin/node
+/Users/you/.nvm/versions/node/v22.15.0/bin/node
 » resolved from .node-version (22.15.0)
 ```
 
-The `nub node which` command answers "which Node runs here, and where is it?" — the resolved binary path goes to stdout (so `NODE=$(nub node which)` captures just the path), and a `» resolved from <source>` explainer goes to stderr. With no pin the explainer reads `» resolved from node on PATH`. Bare `nub node` prints the same as a status block.
+The stdout/stderr split means `nub node which` composes in a shell — capture the path and the explainer stays out of the variable:
+
+```console
+$ NODE=$(nub node which)
+» resolved from .node-version (22.15.0)
+$ echo "$NODE"
+/Users/you/.nvm/versions/node/v22.15.0/bin/node
+```
+
+With no pin the explainer reads `» resolved from node on PATH`. Bare `nub node` prints a status block instead — the version, path, and resolution source on separate lines.
 
 ## Related
 
