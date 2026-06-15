@@ -4,7 +4,23 @@
   "description": "TypeScript-first developer supertool — a fast script runner and TS runtime powered by Node.js",
   "license": "MIT",
   "repository": "https://github.com/nubjs/nub",
-  "homepage": "https://github.com/nubjs/nub",
+  "homepage": "https://nubjs.com",
+  "bugs": {
+    "url": "https://github.com/nubjs/nub/issues"
+  },
+  "keywords": [
+    "typescript",
+    "nodejs",
+    "runtime",
+    "ts-node",
+    "tsx",
+    "script-runner",
+    "package-manager",
+    "node-version-manager"
+  ],
+  "engines": {
+    "node": ">=18.19.0"
+  },
   "bin": {
     "nub": "bin/nub",
     "nubx": "bin/nubx"
@@ -15,7 +31,9 @@
   "files": [
     "bin",
     "platform.js",
-    "postinstall.js"
+    "postinstall.js",
+    "README.md",
+    "LICENSE"
   ],
   "optionalDependencies": {
     "@nubjs/nub-darwin-arm64": "0.0.43",
