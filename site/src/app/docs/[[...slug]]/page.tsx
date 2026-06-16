@@ -42,12 +42,13 @@ export function generateStaticParams() {
    social-card eyebrow (matching the sidebar chips in docs/layout.tsx); others
    fall back to a plain "Documentation" label. */
 const EYEBROW_BY_URL: Record<string, string> = {
-  '/docs/files': 'nub <file>',
+  '/docs/runtime': 'nub <file>',
+  '/docs/run': 'nub run',
+  '/docs/nubx': 'nubx',
+  '/docs/install': 'nub install',
   '/docs/node': 'nub node',
   '/docs/pm': 'nub pm',
-  '/docs/run': 'nub run',
   '/docs/watch': 'nub watch',
-  '/docs/nubx': 'nubx',
 };
 
 /* Build the per-page social-card URL handled by `app/og/route.tsx`. */

@@ -11,8 +11,8 @@
  * here, and `lucide-react` is not a dependency of this site). So this is a
  * dependency-light reimplementation:
  *
- *   - copy logic + the `ClipboardItem` async-write pattern are taken verbatim
- *     from the official scaffold;
+ *   - copy logic is taken from the official scaffold, adapted to prefetch the
+ *     markdown so the "copied" check is immediate (see `prefetchMarkdown`);
  *   - the `useCopyButton` hook is the real one, imported from
  *     `fumadocs-ui/utils/use-copy-button` (confirmed in the package exports map);
  *   - icons are inline SVGs (no lucide);
@@ -32,6 +32,23 @@ const PROMPT = (url: string) =>
   `Read ${url}, I want to ask questions about it.`;
 
 const cache = new Map<string, Promise<string>>();
+
+/* Fetch the page's raw markdown once and memoize it. Kicked off on mount and on
+   pointer-enter/focus of the copy button so the click has the text in hand — the
+   `checked` state then flips immediately instead of waiting on a cold network
+   round-trip (the clipboard write resolves against already-resolved text). A
+   failed fetch is evicted so a later attempt can retry rather than copy nothing. */
+function prefetchMarkdown(url: string): Promise<string> {
+  const existing = cache.get(url);
+  if (existing) return existing;
+  const promise = fetch(url).then((res) => {
+    if (!res.ok) throw new Error(`Failed to fetch ${url}: ${res.status}`);
+    return res.text();
+  });
+  promise.catch(() => cache.delete(url));
+  cache.set(url, promise);
+  return promise;
+}
 
 function CheckIcon() {
   return (
@@ -114,36 +131,33 @@ const pill =
 const label = 'translate-y-[1px]';
 
 function CopyMarkdownButton({ markdownUrl }: { markdownUrl: string }) {
-  const [loading, setLoading] = useState(false);
+  // Warm the cache on mount so the first click is already on the fast path.
+  useEffect(() => {
+    prefetchMarkdown(markdownUrl);
+  }, [markdownUrl]);
+
   const [checked, onClick] = useCopyButton(async () => {
-    const cached = cache.get(markdownUrl);
-    if (cached) {
-      await navigator.clipboard.writeText(await cached);
-      return;
-    }
-    setLoading(true);
-    try {
-      const promise = fetch(markdownUrl).then((res) => res.text());
-      cache.set(markdownUrl, promise);
-      await navigator.clipboard.write([
-        new ClipboardItem({ 'text/plain': promise }),
-      ]);
-    } finally {
-      setLoading(false);
-    }
+    // The text is (almost) always already resolved here — prefetched on mount
+    // and on hover/focus — so this awaits in-memory text, not the network, and
+    // `checked` flips effectively on the next tick. The remaining slow case
+    // (click before any prefetch resolves) is the only one that waits, and it
+    // still copies the correct content.
+    const text = await prefetchMarkdown(markdownUrl);
+    await navigator.clipboard.writeText(text);
   });
 
   return (
     <button
       type="button"
-      disabled={loading}
       onClick={onClick}
+      onPointerEnter={() => prefetchMarkdown(markdownUrl)}
+      onFocus={() => prefetchMarkdown(markdownUrl)}
       className={`group ${pill}`}
     >
-      <span className="inline-flex w-4 justify-center text-fd-muted-foreground transition group-hover:text-ember">
+      <span className="inline-flex h-4 w-4 items-center justify-center text-fd-muted-foreground transition group-hover:text-ember">
         {checked ? <CheckIcon /> : <CopyIcon />}
       </span>
-      <span className={label}>{checked ? 'Copied' : 'Copy Markdown'}</span>
+      <span className={label}>Copy Markdown</span>
     </button>
   );
 }

@@ -2,10 +2,11 @@
   "title": "Documentation",
   "pages": [
     "index",
-    "files",
+    "runtime",
     "watch",
     "run",
     "nubx",
+    "install",
     "node",
     "pm",
     "faq"

@@ -1,11 +1,7 @@
 ---
 title: Web Storage
-description: sessionStorage works out of the box; localStorage persists once you name a backing file with --localstorage-file.
+description: Session storage works out of the box; persistent local storage turns on once you point it at a backing file.
 ---
-
-<TypesSetup>
-The Web Storage globals are typed by `@types/node` 26, which declares `sessionStorage` and `localStorage` globally — install `@nubjs/types` alongside it for the rest of the runtime.
-</TypesSetup>
 
 Web Storage works under Nub without a flag to remember. Node hides `sessionStorage` and `localStorage` behind `--experimental-webstorage` on the 22.4–24 band (native from 25), so Nub injects that flag for you on exactly that band — you never pass it. Below Node 22.4 the flag does not exist and Web Storage is unavailable.
 
