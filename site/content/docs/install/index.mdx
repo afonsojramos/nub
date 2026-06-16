@@ -153,25 +153,47 @@ On top of explicit approval, a curated set of well-known packages builds automat
 
 ## Security
 
-Beyond explicit approval, Nub ships a **deny-by-default** posture with a gated automatic-trust floor on top (`defaultTrust=true`). A curated set of well-known packages — aube's default-trust list — may build without your approval, but only when every gate holds:
+Nub ships a **deny-by-default** install posture. Beyond the packages you approve explicitly, a curated set of well-known packages — aube's default-trust floor, off in standalone aube and flipped on under Nub — may build without approval, but only when **all three** gates hold at once:
 
-- **registry provenance** — it resolved from a registry (git / file / link / tarball never qualify; an npm alias can't borrow a listed name's trust),
-- **advisory vetting** — an OSV `MAL-*` advisory gate ran against this install's graph, *or* the graph was inherited from an unchanged, already-advisory-checked lockfile (a frozen install / `nub ci` / a teammate clone),
-- **cooling window** — the resolved version's publish time is older than `minimumReleaseAge` (default 1440 minutes / 24h). Unknown publish time fails closed.
+| Gate | Requirement | On failure |
+|---|---|---|
+| **Registry provenance** | Resolved from a registry. Git, file, link, tarball, and npm-alias specifiers never qualify — an alias can't borrow a listed name's trust. | Not built |
+| **Advisory vetting** | An OSV `MAL-*` advisory check ran against this graph, *or* the graph was inherited from an already-checked lockfile (a frozen install, `nub ci`, a teammate's clone). | Not built |
+| **Cooling window** | The resolved version's publish time is older than `minimumReleaseAge` (default 24 hours). | Not built — fails closed on unknown publish time |
 
-A fresh resolve (or a lockfile Nub itself wrote, which carries the `time:` block) gives the floor everything it needs, so curated packages like `esbuild` build automatically:
+Explicit decisions outrank the floor in both directions. A package you approve through `pnpm.onlyBuiltDependencies`, `pnpm.allowBuilds`, Bun's `trustedDependencies`, or `nub approve-builds` builds regardless; an explicit denial (`allowBuilds: { pkg: false }`, `neverBuiltDependencies`) always wins.
+
+A fresh resolve, or a lockfile Nub itself wrote (which carries the `time:` block), gives the floor everything it needs, so curated packages like `esbuild` build automatically:
 
 ```console
 # captured: nub 0.0.44, pnpm-incumbent, esbuild@0.21.5 — no allowBuilds entry
 $ nub install
-WARN defaultTrust: running build scripts for 1 default-trusted package(s): esbuild@0.21.5 code=WARN_NUB_DEFAULT_TRUST_BUILDS count=1 packages=["esbuild@0.21.5"]
+WARN defaultTrust: running build scripts for 1 default-trusted package(s): esbuild@0.21.5 code=WARN_NUB_DEFAULT_TRUST_BUILDS count=1 packages=["esbuild@0.21.5"]   # ✓ all three gates passed
 dependencies:
 + esbuild@0.21.5
 ```
 
-On a foreign lockfile that carries no publish-time data — notably an incumbent `bun.lock` — the cooling-window gate has nothing to read, fails closed, and the same package is skipped (see the [Bun page](/docs/install/bun#trusteddependencies) for the captured A/B).
+When a gate fails, the floor steps aside rather than guess: the same package is skipped and disclosed, with `nub approve-builds` as the remedy. Tighten the cooling window past every published version and even a curated package fails closed:
 
-The OS-level **build jail** (network-blocked, filesystem-scoped sandbox) is compiled in but **off by default** — opt in via the neutral `paranoid` / `npm_config_paranoid` setting (macOS + Linux only; Windows is a passthrough).
+```console
+# captured: nub 0.0.44, esbuild — .npmrc minimumReleaseAge set past every release
+$ nub install
+WARN ignored build scripts for 1 package(s): esbuild@0.21.5. Run `nub approve-builds` to review and enable them. code=WARN_NUB_IGNORED_BUILD_SCRIPTS   # ❌ cooling-window gate failed closed
+dependencies:
++ esbuild@0.21.5
+```
+
+A foreign lockfile that carries no publish-time data — notably an incumbent `bun.lock` — trips the same fail-closed path: the cooling gate has nothing to read, so the package is skipped (see the [Bun page](/docs/install/bun#trusteddependencies) for the captured A/B).
+
+### The advisory gate
+
+The OSV check queries `api.osv.dev` on a fresh resolve. A confirmed `MAL-*` hit is a **hard block** — the install aborts with `ERR_NUB_MALICIOUS_PACKAGE`, never a skip-and-warn, because a malicious-package advisory isn't a judgement call. An osv.dev **outage** is treated differently: the check fails *open*, warning and proceeding so a network blip can't brick an offline install. That asymmetry is deliberate — a hit always blocks, an outage never does. To fail closed on outages too, set `advisoryCheck=required` (also bundled into `paranoid` below).
+
+Frozen reinstalls — `nub ci`, `--frozen-lockfile`, a teammate's clone — inherit the advisory vetting recorded when the lockfile was written and skip the per-install round-trip, but still enforce the cooling and provenance gates on every install.
+
+### The build jail
+
+The OS-level build jail — a network-blocked, filesystem-scoped sandbox around every build script — is compiled in but **off by default**. Opt in with the neutral `paranoid` / `npm_config_paranoid` setting, which also flips the advisory gate to fail-closed. The jail covers macOS and Linux; Windows is a passthrough.
 
 ## Package manager inference
 
