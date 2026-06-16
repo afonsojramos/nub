@@ -1,6 +1,6 @@
 ---
 title: npm
-description: Nub speaks npm's on-disk formats — the version-2 and version-3 lockfile round-trips byte-for-byte, and npm config is read at project and user scope. The CLI is pnpm-shaped; the files are npm's.
+description: Nub speaks npm's on-disk formats — the version-2 and version-3 lockfile round-trips byte-for-byte, and npm config is read across npm's builtin, global, user, and project scopes. The CLI is pnpm-shaped; the files are npm's.
 ---
 
 The CLI you type is pnpm-shaped; the files Nub reads and writes are npm's. A project already on npm keeps working unchanged — no `pnpm-lock.yaml` is introduced.
@@ -9,7 +9,7 @@ The CLI you type is pnpm-shaped; the files Nub reads and writes are npm's. A pro
   rows={[
     { feature: <code>package-lock.json</code>, status: 'yes', note: 'v2 / v3, read + write; v1 errors' },
     { feature: <>project + user <code>.npmrc</code></>, status: 'yes' },
-    { feature: <>global / builtin <code>.npmrc</code></>, status: 'no' },
+    { feature: <>global / builtin <code>.npmrc</code></>, status: 'yes' },
     { feature: <code>overrides</code>, status: 'yes' },
     { feature: <code>resolutions</code>, status: 'n/a', note: 'npm ignores it — use overrides' },
     { feature: <code>workspaces</code>, status: 'yes' },
@@ -64,21 +64,16 @@ Run `npm install` once under npm 7+ to upgrade the lock to v2/v3, then Nub reads
 
 ## `.npmrc`
 
-When npm is the incumbent, Nub reads `.npmrc` at two scopes:
+When npm is the incumbent, Nub reads npm's `.npmrc` cascade:
 
 ```
-project   ./.npmrc      (all keys)
-user      ~/.npmrc      (all keys, relocatable via NPM_CONFIG_USERCONFIG)
+builtin   npm's builtin npmrc
+global    $PREFIX/etc/npmrc, or NPM_CONFIG_GLOBALCONFIG
+user      ~/.npmrc, or NPM_CONFIG_USERCONFIG
+project   ./.npmrc
 ```
 
-Everything at those scopes works — default and scoped registries, auth tokens, TLS (`strict-ssl`, `cafile`), proxies, and install-shaping keys like `engine-strict` and `save-exact`. The `npm_config_*` env vars drive install behavior too. Precedence matches npm, highest first: CLI flags, then `npm_config_*` env vars, then the project `.npmrc`, then the user `.npmrc`.
-
-**Global and builtin scopes are not read.** Nub covers project, user, env, and CLI, but not:
-
-- the **global** npmrc at `$PREFIX/etc/npmrc` (`npm config set --global`), and
-- npm's **builtin** npmrc shipped inside the npm install.
-
-A private registry, auth token, CA, or `legacy-peer-deps` set *only* in the global npmrc is invisible to Nub — which can mean the wrong registry or an auth failure on a machine that relies on global config. Move those settings to `~/.npmrc`.
+Everything at those scopes works — default and scoped registries, auth tokens, TLS (`strict-ssl`, `cafile`), proxies, and install-shaping keys like `engine-strict` and `save-exact`. The `npm_config_*` env vars drive install behavior too. Precedence matches npm, highest first: CLI flags, then `npm_config_*`, then project, user, global, and builtin `.npmrc`.
 
 ## Install behavior
 
@@ -90,6 +85,5 @@ A private registry, auth token, CA, or `legacy-peer-deps` set *only* in the glob
 ## Gaps
 
 - **lockfileVersion 1** (npm ≤ 6) errors, not migrated — run `npm install` once to upgrade first.
-- **No global/builtin `.npmrc`.** Settings only in `$PREFIX/etc/npmrc` or npm's builtin config are ignored; move them to `~/.npmrc`.
 - **A v2 lock becomes v3** on the first mutating install (preserved on no-op installs only).
 - **No drop-in `npm` CLI grammar.** npm-specific subcommands/flags and `npm-shrinkwrap.json` are not emulated; the CLI is pnpm-shaped.
