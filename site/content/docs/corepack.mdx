@@ -3,7 +3,7 @@ title: Replacing corepack
 description: Nub is the version manager and package-manager dispatcher you should never have to think about. The right Node and the right package manager are provisioned and run for you, with no shim process between you and your install.
 ---
 
-Corepack and nvm sit in front of every package-manager command you run: nvm picks the Node, corepack's shim spawns a second Node just to launch your real package manager, and only then does the install start. Nub is both of those, folded into one binary — and it dispatches the install in-process, so nothing sits in the middle.
+Corepack and nvm sit in front of every package-manager command you run: nvm picks the Node, corepack's shim boots its own Node process to locate and load your real package manager, and only then does the install start. Nub is both of those, folded into one binary — and it dispatches the install in-process, so nothing sits in the middle.
 
 ```console
 $ which nub
@@ -14,16 +14,16 @@ dependencies:
 + is-odd@3.0.1
 ```
 
-That is the whole interaction. No `corepack enable`, no activation prompt, no second Node booting to hand off to a third — `nub install` resolves the project's package manager, version-manages the Node it runs on, and performs the install itself.
+That is the whole interaction. No `corepack enable`, no activation prompt, no extra Node booting to hand off your package manager — `nub install` resolves the project's package manager, version-manages the Node it runs on, and performs the install itself.
 
 ## The shim tax
 
-Corepack is a shim. When you run `pnpm install` through it, corepack boots a Node process, reads your `packageManager` pin, locates (or downloads) that exact pnpm, and execs it — a second Node startup that runs before pnpm has done any work. On first use of a pinned version it also prints a download notice to stderr:
+Corepack is a shim. When you run `pnpm install` through it, corepack boots its own Node process, reads your `packageManager` pin, locates (or downloads) that exact pnpm, and loads it — an extra Node startup that runs before pnpm has done any work. On first use of a pinned version it also prints a download notice to stderr:
 
 ```console
 $ pnpm install
 ! Corepack is about to download https://registry.npmjs.org/pnpm/-/pnpm-9.15.4.tgz
-# ❌ a second Node boots before pnpm runs — every invocation
+# ❌ an extra Node boots before pnpm runs — every invocation
 ```
 
 Nub carries no shim process. The package-manager engine is compiled into the Nub binary and called in-process, so dispatching an install is a function call, not a subprocess. The interposition that costs corepack a full Node startup costs Nub a few milliseconds.
