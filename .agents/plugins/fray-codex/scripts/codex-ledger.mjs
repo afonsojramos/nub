@@ -7,7 +7,7 @@
  *   node .agents/plugins/fray-codex/scripts/codex-ledger.mjs attach-agent \
  *     --dispatch-id <id> --agent-id <spawned-agent-id> [--nickname "..."]
  *   node .agents/plugins/fray-codex/scripts/codex-ledger.mjs mark-reconciled \
- *     --dispatch-id <id>
+ *     --dispatch-id <id> --thread-updated
  */
 
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
@@ -36,6 +36,7 @@ if (!['attach-agent', 'mark-reconciled'].includes(command)) {
 const dispatchId = arg('--dispatch-id');
 const agentId = arg('--agent-id');
 const nickname = arg('--nickname') ?? '';
+const threadUpdated = process.argv.includes('--thread-updated');
 
 if (!dispatchId) {
   console.error(`codex-ledger ${command}: --dispatch-id is required`);
@@ -44,6 +45,13 @@ if (!dispatchId) {
 
 if (command === 'attach-agent' && !agentId) {
   console.error('codex-ledger attach-agent: --dispatch-id and --agent-id are required');
+  process.exit(2);
+}
+
+if (command === 'mark-reconciled' && !threadUpdated) {
+  console.error(
+    'codex-ledger mark-reconciled: --thread-updated is required. Fold the return into the owning .fray/<slug>.md thread before marking reconciled.',
+  );
   process.exit(2);
 }
 

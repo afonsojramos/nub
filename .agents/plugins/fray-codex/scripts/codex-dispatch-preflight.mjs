@@ -26,11 +26,20 @@ const EPILOGUE = `
 
 ---
 [ORCHESTRATION EPILOGUE - appended by .agents/plugins/fray-codex/scripts/codex-dispatch-preflight.mjs]
+End your final report with a compact \`## Fray state packet\` section before \`## Follow-ups\`. This is the orchestrator's handoff material and must be self-contained:
+- \`thread:\` the Fray thread slug.
+- \`dispatch:\` the FRAY_DISPATCH_ID.
+- \`status:\` done / blocked / needs-decision / partial.
+- \`changed:\` paths changed, or "none".
+- \`verified:\` commands run and pass/fail/blocker.
+- \`snags:\` exact blockers, conflicts, or risks.
+- \`next:\` the single next action for the orchestrator.
 End your final report with a \`## Follow-ups\` section so the orchestrator can chain the next steps:
 1. Concrete follow-up work your findings or changes imply.
 2. If you implemented something substantial, recommend a fresh adversarial self-review pass.
 3. If you changed code or tests CI should exercise, recommend a push-to-main and CI-watch follow-up.
 4. The single most important next step, and whether it needs the maintainer because it is a default/security/product/brand/API-config-env call.
+Do not edit canonical Fray thread files (\`.fray/*.md\` or \`.fray/config.yml\`); return findings to the orchestrator, or write a sidecar under \`.fray/<thread>.findings/<id>.md\` only if durable output is needed.
 If you committed: verify the tree compiles at your commit. If there are no follow-ups, write "Follow-ups: none."`;
 
 /**
@@ -96,11 +105,27 @@ if (!prompt.trim()) {
   process.exit(2);
 }
 
-if (!new RegExp(`^THREAD:\\s*${thread.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'm').test(prompt)) {
+const threadLines = [...prompt.matchAll(/^THREAD:\s*(.+)$/gm)].map((m) => m[1].trim().replace(/^\.fray\//, '').replace(/\.md$/, ''));
+const mismatchedThread = threadLines.find((lineThread) => lineThread !== thread);
+if (mismatchedThread) {
+  console.error(
+    `codex-dispatch-preflight: prompt contains THREAD: ${mismatchedThread}, but --thread is ${thread}. Refuse ambiguous dispatch metadata.`,
+  );
+  process.exit(2);
+}
+if (!threadLines.includes(thread)) {
   prompt = `THREAD: ${thread}\n\n${prompt}`;
 }
 
-if (!new RegExp(`^FRAY_DISPATCH_ID:\\s*${dispatchId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'm').test(prompt)) {
+const dispatchLines = [...prompt.matchAll(/^FRAY_DISPATCH_ID:\s*(.+)$/gm)].map((m) => m[1].trim());
+const mismatchedDispatch = dispatchLines.find((lineDispatch) => lineDispatch !== dispatchId);
+if (mismatchedDispatch) {
+  console.error(
+    `codex-dispatch-preflight: prompt contains FRAY_DISPATCH_ID: ${mismatchedDispatch}, but --dispatch-id is ${dispatchId}. Refuse ambiguous dispatch metadata.`,
+  );
+  process.exit(2);
+}
+if (!dispatchLines.includes(dispatchId)) {
   prompt = prompt.replace(/^(THREAD:\s*.+)$/m, `$1\nFRAY_DISPATCH_ID: ${dispatchId}`);
 }
 
