@@ -21,7 +21,7 @@ const EPILOGUE = `
 2. If you implemented something substantial → recommend a SELF-REVIEW pass (a fresh adversarial sub-agent reviewing your diff for correctness/regressions).
 3. If you added/changed code or tests CI should exercise → recommend cutting a push to \`main\` + a CI-watch follow-up to confirm green.
 4. The single most important NEXT STEP, and whether it needs the maintainer (a default/security/product/brand/API-config-env call → recommend-only) or can proceed autonomously.
-DELIVERY: also deliver this report by calling SendMessage({ to: "main", summary: "<5-10 words>", message: "<your report>" }). Ending your turn / going idle does NOT surface your text to the orchestrator — the explicit SendMessage to "main" is the channel, and it is REQUIRED whenever you were RESUMED by an orchestrator message or ran long-lived (a poll/build/install loop). If the orchestrator messages you mid-run, reply to "main" the same way.
+Your FINAL MESSAGE is your whole report to the orchestrator — there is no mid-run channel back to it, so put everything it needs to chain the next step in that final message.
 If you COMMITTED: verify the tree COMPILES at your commit (a parallel agent may share a file — build before committing so you don't ship a broken HEAD). If there are no follow-ups, write "Follow-ups: none."`;
 
 /**

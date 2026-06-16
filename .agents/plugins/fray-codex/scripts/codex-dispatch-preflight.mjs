@@ -5,17 +5,18 @@
  *
  * Usage:
  *   printf '%s' "$PROMPT" | node .agents/plugins/fray-codex/scripts/codex-dispatch-preflight.mjs \
- *     --thread <slug> --agent-type <explorer|worker|default>
+ *     --thread <slug> --agent-type <explorer|worker|default> --label "Plain English task"
  *   # Add --dry-run to emit the prompt without writing the ledger.
  *
  * It validates that the thread file exists, prefixes THREAD when needed,
- * appends the orchestration epilogue, records the dispatch ledger, and emits
- * the prompt to pass to multi_agent_v1.spawn_agent.
+ * adds a durable FRAY_DISPATCH_ID, appends the orchestration epilogue, records
+ * the dispatch ledger, and emits the prompt to pass to multi_agent_v1.spawn_agent.
  */
 
 import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { randomUUID } from 'node:crypto';
 import { loadConfig } from '../../../../scripts/fray/config.mjs';
 
 const PROJECT_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
@@ -43,6 +44,11 @@ function arg(name) {
 const threadRaw = arg('--thread');
 const agentType = arg('--agent-type') ?? '';
 const label = arg('--label') ?? '';
+const model = arg('--model') ?? '';
+const reasoningEffort = arg('--reasoning-effort') ?? '';
+const serviceTier = arg('--service-tier') ?? '';
+const forkContext = arg('--fork-context');
+const dispatchId = arg('--dispatch-id') ?? `fray-${new Date().toISOString().replace(/[-:.TZ]/g, '')}-${randomUUID().slice(0, 8)}`;
 const dryRun = process.argv.includes('--dry-run');
 
 if (!threadRaw) {
@@ -82,6 +88,10 @@ if (!new RegExp(`^THREAD:\\s*${thread.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s
   prompt = `THREAD: ${thread}\n\n${prompt}`;
 }
 
+if (!new RegExp(`^FRAY_DISPATCH_ID:\\s*${dispatchId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'm').test(prompt)) {
+  prompt = prompt.replace(/^(THREAD:\s*.+)$/m, `$1\nFRAY_DISPATCH_ID: ${dispatchId}`);
+}
+
 if (!prompt.includes('[ORCHESTRATION EPILOGUE')) {
   prompt += EPILOGUE;
 }
@@ -92,9 +102,16 @@ if (!dryRun) {
     `${JSON.stringify({
       ts: new Date().toISOString(),
       tool: 'codex.spawn_agent',
+      dispatch_id: dispatchId,
       agent_type: agentType,
       label,
       thread,
+      model,
+      reasoning_effort: reasoningEffort,
+      service_tier: serviceTier,
+      fork_context: forkContext,
+      agent_id: '',
+      nickname: '',
       reconciled: false,
     })}\n`,
   );
