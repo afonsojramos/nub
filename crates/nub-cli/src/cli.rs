@@ -5079,6 +5079,27 @@ enum ShimPlan {
     Refuse { message: String },
 }
 
+/// The corepack-style "which PM am I running" notice for the shim-dispatch
+/// path: a dim, **stderr-only** `pnpm@11.0.1 (via nub shim)`, printed once
+/// before exec. Stderr-only so a bare `pnpm --version | …` stays uncluttered;
+/// dim (reusing the PM engine's TTY/`FORCE_COLOR`/`NO_COLOR` predicate) so it
+/// reads as a notice, not output. Only the shim's pinned-PM dispatch calls it —
+/// direct `nub install`/`nub run` never do (they aren't "via nub shim").
+fn emit_shim_version_line(pm: nub_core::pm::Pm, version: &str) {
+    let line = shim_version_line(pm, version);
+    if crate::pm_engine::scope_warning_uses_dim() {
+        eprintln!("\x1b[2m{line}\x1b[0m");
+    } else {
+        eprintln!("{line}");
+    }
+}
+
+/// The `<pm>@<version> (via nub shim)` text — split out so the exact wording
+/// (which the docs reproduce verbatim) is asserted without capturing stderr.
+fn shim_version_line(pm: nub_core::pm::Pm, version: &str) -> String {
+    format!("{pm}@{version} (via nub shim)")
+}
+
 /// Entry point for an `npm`/`pnpm`/`yarn`/… argv0 invocation through the shim.
 fn run_pm_shim(invoked: nub_core::pm::shim::ShimName, args: &[String]) -> Result<i32> {
     let cwd = env::current_dir()?;
@@ -5168,6 +5189,12 @@ fn shim_plan(
             }
             // Cache-first: an exact pin already in the store is zero-network.
             let prov = nub_core::pm::provision::provision_pm(&pin, &pm_store_root()?, cwd, None)?;
+            // Announce the resolved PM + version on the shim-dispatch path only
+            // (corepack-style notice): a dim, stderr-only `pnpm@11.0.1 (via nub
+            // shim)`. `prov.version` is the version we already resolved for this
+            // exec — no extra resolve. Direct `nub install`/`nub run` never reach
+            // here, so they stay silent (they aren't "via nub shim").
+            emit_shim_version_line(pin.pm, &prov.version);
             let bin = shim::sibling_bin(&prov.bin, bin_entry)?;
             exec_under_project_node(cwd, bin, args)
         }
@@ -6988,6 +7015,21 @@ mod tests {
             ),
             other => panic!("pnpm in a yarnPath project must refuse, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn shim_version_line_is_the_documented_via_nub_shim_notice() {
+        use nub_core::pm::Pm;
+        // Exact wording the docs reproduce verbatim; yarn/yarnberry both surface
+        // as `yarn` (the bare PM name), matching `Pm`'s Display.
+        assert_eq!(
+            shim_version_line(Pm::Pnpm, "11.0.1"),
+            "pnpm@11.0.1 (via nub shim)"
+        );
+        assert_eq!(
+            shim_version_line(Pm::YarnBerry, "4.9.1"),
+            "yarn@4.9.1 (via nub shim)"
+        );
     }
 
     #[test]
