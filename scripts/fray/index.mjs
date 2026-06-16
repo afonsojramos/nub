@@ -6,7 +6,7 @@
  * files (the filename slug IS the thread id — the filesystem guarantees uniqueness,
  * so there is no `id` frontmatter field and nothing to dedupe) plus `.fray/config.yml`
  * (globals). Each thread's frontmatter is validated against the schema; the
- * `iw-reminder` hook runs `--validate` every turn so malformed frontmatter surfaces
+ * `fray-reminder` hook runs `--validate` every turn so malformed frontmatter surfaces
  * to the orchestrator immediately.
  *
  * Usage:

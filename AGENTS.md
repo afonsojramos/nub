@@ -63,7 +63,7 @@ And tier EVERY agent by the model-selection guidelines (judgment / the-fix-that-
 
 ## fray (orchestrator-first, sub-agents as instruments) — a named methodology (HIGH PRIORITY)
 
-Full methodology: `.claude/skills/fray/SKILL.md` (formerly named "Interactive Workflow"; renamed **fray** 2026-06-14).
+Full methodology: `.claude/skills/fray/SKILL.md`.
 
 This is **fray** — the preferred way to run a large, mixed set of efforts (investigations + decided fixes + verifications) toward a goal like a launch. Reference it by name. It is the default for any multi-effort push where the work is part *find-out-what's-true* and part *land-the-decided-thing*, and where the human wants to stay in the loop on the decisions the investigations surface. Use it **instead of the `Workflow` tool** for these — workflows hardcode a DAG up front and fan out hard (expensive, and they bury the decision points); fray stays cheap and dynamic by driving everything from the main session with individually-dispatched sub-agents.
 

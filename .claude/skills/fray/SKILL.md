@@ -1,6 +1,6 @@
 ---
 name: fray
-description: Use this skill when running a large, mixed set of efforts — investigations + decided fixes + verifications — toward a goal (a launch push, a pre-release audit, a refactor campaign) where the human wants to stay in the loop on what the investigations surface. fray is the default for any multi-effort push that is part "find out what's true" and part "land the decided thing." Use it instead of hardcoding a multi-agent DAG up front — those bury the decision points and fan out expensively before the facts are in.
+description: Load this skill IMMEDIATELY — as your FIRST action, before any other tool call or response — whenever the user mentions "fray" in ANY form ("fray", "fray mode", "enter/start fray", "load fray", "use fray", "in fray", "the fray skill"), OR asks to orchestrate / run / coordinate a multi-effort push, audit, or campaign through sub-agents. Also the default for any large, mixed set of efforts — investigations + decided fixes + verifications — toward a goal (a launch push, a pre-release audit, a refactor campaign) where the human wants to stay in the loop on what the investigations surface; the default for any multi-effort push that is part "find out what's true" and part "land the decided thing." Use it instead of hardcoding a multi-agent DAG up front — those bury the decision points and fan out expensively before the facts are in. Treat any "fray" mention as an explicit instruction to load this skill, never as ambient context.
 version: 2.0.0
 metadata:
   internal: true
@@ -10,7 +10,7 @@ metadata:
 
 **fray** is the orchestrator-first methodology for driving a large, mixed set of efforts (investigations + decided fixes + verifications) through individually-dispatched background sub-agents. A *fray* is a tangle of concurrent **threads**; each thread is one ongoing effort (possibly a chain of sub-agents). The human stays in the loop on the decisions the investigations surface. fray is the default for any multi-effort push that is part *find-out-what's-true* and part *land-the-decided-thing* — use it **instead of** a hardcoded `Workflow` DAG, which fans out expensively and buries the decision points before the facts are in.
 
-(Formerly "the Interactive Workflow"; renamed **fray**. The methodology is unchanged — only the control-surface SHAPE moved from one bloated `todo.md` to a directory of per-thread files.)
+(The control surface is a directory of per-thread files under `.fray/` — not one bloated `todo.md`; the board is computed on demand.)
 
 ---
 
@@ -20,7 +20,7 @@ metadata:
 - **`.fray/config.yml`** — the ONLY non-thread file. Holds the globals that belong to no single thread: `autonomous_mode` (`on`/`off`) and a `state:` block (the few cross-cutting "what's true now" facts — `published`, `nub_fork_pin`, `release`, …). Nothing here duplicates per-thread state.
 - **`.fray/<slug>.findings/<id>.md`** — sub-agent findings **sidecars** (write-ownership, below).
 - **There is NO stored board.** The board/status view is **COMPUTED ON DEMAND** by `node scripts/fray/index.mjs` (default board grouped by status · `--status <s>` · `--search <q>` · `--validate` · `--json`). A stored board is a cache that drifts out of sync with the threads — the exact failure that bloated the old single-file tracker. Never write one; always compute it.
-- **Per turn, the `iw-reminder` hook validates every thread's frontmatter and lists the pending (non-terminal) threads BY NAME** — so a malformed or stalled thread surfaces immediately, not whenever you happen to look.
+- **Per turn, the `fray-reminder` hook validates every thread's frontmatter and lists the pending (non-terminal) threads BY NAME** — so a malformed or stalled thread surfaces immediately, not whenever you happen to look.
 
 ---
 
@@ -152,7 +152,7 @@ What this changes about how you work:
 A sub-agent that returns and is never ingested is the single worst failure mode — its findings, WIP, and surfaced question all vanish, and the board silently lies. This happens when a completion arrives while you're deep in a conversational thread and you let it scroll past.
 
 - **Reconcile at the TOP of every turn, before anything else** — including before answering the human. A returning agent outranks any conversational thread: ingest it first, then continue. A return is not "handled" until its facts are in the thread's `## Status`/`## Decisions`, its status advanced, any question it raised moved to `## Open questions`, and its queued follow-ups DRAINED from `## Steps`. *Folded*, not just *finished*.
-- **RE-READ THE WHOLE THREAD `.md` ON EVERY RETURN, THEN DISPATCH ITS QUEUED FOLLOW-UPS — NON-NEGOTIABLE, the #1 priority the instant an agent completes.** Follow-ups get ENQUEUED *during* the agent's run — by you while it ran, and in the agent's own returned `## Follow-ups` (a self-review/integration rec, a fixture, the next link in the chain). If you reconcile from MEMORY instead of opening the file, you WILL miss them and they silently rot — the exact failure this rule guards against. Mechanically, on each return: (1) open the thread `.md`; (2) scan `## Steps` for every `[ ]`/`QUEUED` item AND the returner's `## Follow-ups`; (3) **DISPATCH each actionable autonomous one as a sub-agent THIS turn** — START THE SUB-AGENTS FIRST (top priority), then do any orchestration bookkeeping while they run, never the reverse (an idle fleet while you do meta-work is the anti-pattern); a mandated self-review IS a queued follow-up — dispatch it; (4) surface the human-gated/post-launch ones, never silently drop. The `iw-reminder` hook now names threads with `⚠ UN-DRAINED QUEUED FOLLOW-UPS` every turn — act on it, don't read-past it. Folding the facts but skipping the queue-drain is HALF the job, not the job.
+- **RE-READ THE WHOLE THREAD `.md` ON EVERY RETURN, THEN DISPATCH ITS QUEUED FOLLOW-UPS — NON-NEGOTIABLE, the #1 priority the instant an agent completes.** Follow-ups get ENQUEUED *during* the agent's run — by you while it ran, and in the agent's own returned `## Follow-ups` (a self-review/integration rec, a fixture, the next link in the chain). If you reconcile from MEMORY instead of opening the file, you WILL miss them and they silently rot — the exact failure this rule guards against. Mechanically, on each return: (1) open the thread `.md`; (2) scan `## Steps` for every `[ ]`/`QUEUED` item AND the returner's `## Follow-ups`; (3) **DISPATCH each actionable autonomous one as a sub-agent THIS turn** — START THE SUB-AGENTS FIRST (top priority), then do any orchestration bookkeeping while they run, never the reverse (an idle fleet while you do meta-work is the anti-pattern); a mandated self-review IS a queued follow-up — dispatch it; (4) surface the human-gated/post-launch ones, never silently drop. The `fray-reminder` hook now names threads with `⚠ UN-DRAINED QUEUED FOLLOW-UPS` every turn — act on it, don't read-past it. Folding the facts but skipping the queue-drain is HALF the job, not the job.
 - **Verify status with the task-status tool, NOT file mtime.** A blocked-on-child agent writes no output, so its file looks stale though it's still running.
 - **Never Read a local agent's `.output` file directly** — it's the full JSONL transcript and overflows your context. Use the task-status tool; rely on the completion notification / returned final message for the result.
 - **If a completion was missed, recover it** via the task tool and fold it. Do not re-dispatch a duplicate.
@@ -195,7 +195,7 @@ If a question goes unanswered, assume *missed, not declined*, and re-surface it 
 
 ## Autonomous mode — when the human steps away
 
-The human can flip `autonomous_mode: on` in `.fray/config.yml` ("I'm away for hours — keep making progress"). The `iw-reminder` hook reads it and switches its whole nudge. What changes:
+The human can flip `autonomous_mode: on` in `.fray/config.yml` ("I'm away for hours — keep making progress"). The `fray-reminder` hook reads it and switches its whole nudge. What changes:
 
 - **Never ask the human a question.** Before any would-be `AskUserQuestion`, check the flag; if on, you do NOT ask (a blocking modal stalls ALL progress for hours).
 - **Bias HARD toward action.** Default is *resolve and proceed*. Keep the fleet busy; run the queue as a continuous series; on running dry, do a completeness pass and generate more work. Resolve decisions yourself or via a strong (Opus/Fable) sub-agent, **then make the call** — and DOCUMENT every autonomous decision + rationale in the thread's `## Decisions` so the human can override on return.

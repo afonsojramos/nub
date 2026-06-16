@@ -7,7 +7,7 @@
 // Fires on EVERY session start (startup/resume/clear/compact — enumerated in
 // settings.json). It injects two layers:
 //   1. `core` — the static orchestrator role + hygiene doctrine, on EVERY session start.
-//      This used to be re-injected per-message by iw-reminder (UserPromptSubmit); it is
+//      This used to be re-injected per-message by fray-reminder (UserPromptSubmit); it is
 //      static within a session, so it belongs here (once at session start + once after each
 //      compaction, exactly the cadence static doctrine wants) — NOT re-paid every turn.
 //   2. `grounding` — the deep nub<->aube architecture model, ADDITIONALLY when
@@ -33,7 +33,7 @@ if (input.agent_id ?? input.agentId) process.exit(0);
 // fray kill-switch — `enabled: false` silences the hook (missing/unparseable → defaults → enabled, fail-safe).
 if (loadConfig(process.env.CLAUDE_PROJECT_DIR ?? '.').enabled === false) process.exit(0);
 
-// The static orchestrator role + hygiene doctrine. Lifted VERBATIM from iw-reminder.mjs
+// The static orchestrator role + hygiene doctrine. Lifted VERBATIM from fray-reminder.mjs
 // (the former authoritative copy) — it does not change within a session, so it seeds ONCE
 // here instead of being re-injected on every prompt.
 const core =

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // @ts-check
 // UserPromptSubmit hook — injects the DYNAMIC, per-turn orchestrator pulse each turn.
-// Run directly with node: `node .claude/hooks/iw-reminder.mjs` (no transpiler — max
+// Run directly with node: `node .claude/hooks/fray-reminder.mjs` (no transpiler — max
 // Node compat; fray's own hooks never depend on nub to run).
 //
 // Carries ONLY the genuinely-dynamic, anti-drop bits that can change turn-to-turn:
