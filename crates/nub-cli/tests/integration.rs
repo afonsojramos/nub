@@ -1362,16 +1362,43 @@ fn workspace_topological_order() {
 
 /// --parallel runs all packages concurrently — wall clock should be
 /// ~1 script duration, not N * duration.
+///
+/// The intent is a RELATIVE speedup: the three `slow` scripts each sleep
+/// ~1s, so a parallel run is bounded by a single sleep (~1s of work) while a
+/// sequential run pays all three (~3s). We assert parallel is meaningfully
+/// faster than serial on the SAME fixture rather than against an absolute
+/// wall-clock budget — the old `< 3s` budget conflated the runner's parallel
+/// speedup with cold debug-binary transpile/startup (~3.4s cold, ~1.1s warm),
+/// which made it flake under test-harness parallelism. A warm-up run primes
+/// the cache so both timed runs measure the steady-state path, and the
+/// comparison stays robust regardless of absolute startup cost.
 #[test]
 fn workspace_parallel_timing() {
     let fixture = fixtures_dir().join("monorepo-deps");
+
+    // Warm-up: prime the transpile/startup cache so the timed runs below
+    // measure steady-state execution, not first-run cold startup.
+    let warm = Command::new(nub_binary())
+        .args(["run", "-r", "--parallel", "slow"])
+        .current_dir(&fixture)
+        .output()
+        .expect("failed to spawn nub");
+    assert_eq!(
+        warm.status.code(),
+        Some(0),
+        "warm-up run failed: stderr={}\nstdout={}",
+        String::from_utf8_lossy(&warm.stderr),
+        String::from_utf8_lossy(&warm.stdout)
+    );
+
+    // Timed parallel run.
     let start = std::time::Instant::now();
     let output = Command::new(nub_binary())
         .args(["run", "-r", "--parallel", "slow"])
         .current_dir(&fixture)
         .output()
         .expect("failed to spawn nub");
-    let elapsed = start.elapsed();
+    let parallel_elapsed = start.elapsed();
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(
@@ -1382,10 +1409,34 @@ fn workspace_parallel_timing() {
     assert!(stdout.contains("core-done"), "core missing: {stdout}");
     assert!(stdout.contains("utils-done"), "utils missing: {stdout}");
     assert!(stdout.contains("app-done"), "app missing: {stdout}");
+
+    // Timed serial run (concurrency=1) on the now-warm cache for the
+    // relative comparison.
+    let start = std::time::Instant::now();
+    let serial = Command::new(nub_binary())
+        .args(["run", "-r", "--parallel", "--workspace-concurrency=1", "slow"])
+        .current_dir(&fixture)
+        .output()
+        .expect("failed to spawn nub");
+    let serial_elapsed = start.elapsed();
+    assert_eq!(
+        serial.status.code(),
+        Some(0),
+        "serial run failed: stderr={}\nstdout={}",
+        String::from_utf8_lossy(&serial.stderr),
+        String::from_utf8_lossy(&serial.stdout)
+    );
+
+    // Parallel must be meaningfully faster than serial. Three 1s sleeps mean
+    // serial pays ~3s of sleep + 3 startups while parallel pays ~1s of sleep
+    // + 1 startup-batch; a >=1s gap is a conservative floor that catches a
+    // genuine regression (parallelism broken → both ~equal) without flaking
+    // on absolute startup cost.
     assert!(
-        elapsed.as_secs() < 3,
-        "parallel should take ~1s, took {}s — not concurrent",
-        elapsed.as_secs()
+        parallel_elapsed + std::time::Duration::from_secs(1) <= serial_elapsed,
+        "parallel ({}ms) should be >=1s faster than serial ({}ms) — not concurrent",
+        parallel_elapsed.as_millis(),
+        serial_elapsed.as_millis()
     );
 }
 
