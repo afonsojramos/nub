@@ -15,12 +15,28 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 /**
- * The thread-status vocabulary. `done` (completed) and `dismissed` (decided NOT
- * to pursue) are both TERMINAL — kept, never deleted, excluded from the active
- * board's pending views.
+ * The thread-status vocabulary.
+ * - `todo` — not started; no agent dispatched, nothing blocking it.
+ * - `enqueued` — READY to run (work fully scoped + decided) but deliberately held
+ *   until a NAMED in-flight agent/thread completes — a sequencing dependency
+ *   (same-file serialization, or it needs the prior agent's output). Distinct from
+ *   `blocked`: an `enqueued` thread has a concrete auto-trigger (agent X returns →
+ *   dispatch it), it is NOT waiting on a human/decision. The thread's `## Next step`
+ *   must name the agent/thread it is waiting on. PREFER messaging the in-flight
+ *   agent to fold the work in over enqueuing-then-dispatching, when the work fits
+ *   that agent's scope (see the fray skill — steer-in-flight beats spawn-fresh).
+ * - `blocked` — cannot proceed; waiting on a human decision, an answer, or an
+ *   external event with no in-session auto-trigger.
+ * - `needs-decision` — surfaced a question the human owns; recommend-only until answered.
+ * - `planned` — DECIDED to do, but deliberately deferred (not immediate). Not blocked,
+ *   not awaiting a decision, not ready-to-fire — a committed-to backlog item with a
+ *   written plan, to pick up in a later cycle. Distinct from `todo` (which is "could
+ *   start now, just hasn't") and `needs-decision` (which is gated on a human call).
+ * - `done` / `dismissed` — TERMINAL (completed / decided-against): kept, never
+ *   deleted, excluded from the active board's pending views.
  * @type {readonly string[]}
  */
-export const STATUS = ['todo', 'active', 'blocked', 'needs-decision', 'done', 'dismissed'];
+export const STATUS = ['todo', 'planned', 'enqueued', 'active', 'blocked', 'needs-decision', 'done', 'dismissed'];
 
 /**
  * The terminal subset of {@link STATUS}: completed OR decided-against. Both are
