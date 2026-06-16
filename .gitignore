@@ -21,23 +21,21 @@
 !.opencode/skills/opencode-fray/SKILL.md
 !.opencode/plugins/
 !.opencode/plugins/fray.ts
+!.opencode/fray/
+!.opencode/fray/core.mjs
+!.opencode/fray/index.mjs
 !.opencode/commands/
 !.opencode/commands/fray.md
 !.opencode/commands/fray-validate.md
 .opencode/node_modules/
-.opencode/package.json
-.opencode/package-lock.json
 .opencode/bun.lock
 .claude/worktrees/
 
-# fray control surface: the live board + thread files are force-committed (durable across parallel agents on main, same regime as the old epics/final-polish/todo.md); the churn stays ignored. Order matters — negations follow the broad `.*` ignore above, then the churn re-ignores follow the negations.
-!.fray/
-!.fray/_board.md
-!.fray/*.md
-.fray/_board-*.md
-.fray/.dispatch-ledger.jsonl
-.fray/*.findings/
-.fray/**/*.snapshot
+# fray control surface (board + thread files): LOCAL ONLY — never published. It
+# holds internal orchestration + competitive/strategy deliberation, and the repo
+# is PUBLIC. .fray/ is a dot-dir caught by the broad `.*` ignore above, so it
+# needs no rule here — do NOT re-add `!.fray/` negations (that re-publishes it).
+# Kept on disk for the local fray tooling; same regime as wiki/ and epics/ below.
 
 # === Global cruft ===
 *.pyc

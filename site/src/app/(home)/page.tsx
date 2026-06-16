@@ -1168,7 +1168,7 @@ function HypermanagerBand() {
               <div className="rounded-xl border border-fd-border bg-[#0b0a08] p-6">
                 {/* Source: tests/bench/run.sh (warm leg, GVS on) + tests/bench/results/linux-warm-large-aarch64-20260613.json.
                     CAVEAT (wiki/research/benchmark-credibility.md §3): the 10× is the GVS-on (default) symlink-farm path;
-                    fair materialized config is ~tie with pnpm. (Next/Nuxt opt-out line removed per the maintainer — marketing copy keeps the headline.) */}
+                    the materialized (GVS-off) config is ~tie with pnpm. GVS auto-disables for Next/Nuxt/Parcel projects. */}
                 <p className="mb-5 font-mono text-[0.7rem] uppercase tracking-[0.14em] text-fd-muted-foreground">
                   warm install · 1,168 deps · Linux · hyperfine
                 </p>

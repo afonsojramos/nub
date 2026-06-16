@@ -5,8 +5,7 @@ import { useState } from 'react';
 /* The prompt copied to the clipboard. People read this before running it, so
    it's formatted as a numbered checklist (newlines survive the copy). It points
    an AI coding agent at the onboarding doc, installs the skill, then runs an
-   education pass before any opt-in migration. DRAFT wording — the maintainer owns the
-   final voice. */
+   education pass before any opt-in migration. */
 const PROMPT = [
   'Adopt Nub (https://nubjs.com) in this Node.js project by working through these steps:',
   '',
