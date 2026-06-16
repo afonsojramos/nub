@@ -1703,23 +1703,47 @@ pub(crate) fn with_fd_captured<T>(fd: libc::c_int, f: impl FnOnce() -> T) -> (T,
     }
 }
 
-/// Windows counterpart of the Unix [`with_fd_captured`], built on the CRT
-/// fd surface (`_dup`/`_dup2`/`_pipe`/`_read`). Rust's `println!`/`print!`
-/// write through CRT fd 1 on Windows, so the same dup2-swap-into-a-pipe
-/// strategy captures the engine's raw prints there too. This is load-bearing
+/// Windows counterpart of the Unix [`with_fd_captured`]. This is load-bearing
 /// for `config get registry`: its default-registry substitution detects the
-/// engine's `undefined` print *from the capture*, so an empty capture (the
-/// old stub) silently dropped the substitution and surfaced `undefined`.
+/// engine's `undefined` print *from the capture*, so an empty capture (the old
+/// no-op stub) silently dropped the substitution and surfaced `undefined`.
 ///
-/// The captured payloads here are tiny (`undefined\n`, a registry URL, a
-/// short hint), so — unlike the Unix path's concurrent drain — the pipe is
-/// given a large buffer and read after `f` returns and the fd is restored;
-/// the small fixed payloads can't fill a 1 MiB pipe, so no deadlock. Any
-/// setup failure degrades to running `f` unredirected with an empty capture,
-/// exactly like the Unix path.
+/// Two redirections are needed, because two distinct writer families have to
+/// land in the pipe:
+///
+/// 1. **The Win32 std handle.** Rust's `println!`/`print!` (and so the engine's
+///    `println!("undefined")`) do NOT go through CRT fd 1 on Windows — Rust's
+///    `std::io::Stdout` writes to `GetStdHandle(STD_OUTPUT_HANDLE)` directly
+///    via `WriteFile`/`WriteConsole`, bypassing the CRT fd table entirely. So
+///    a CRT `_dup2` of fd 1 alone (the obvious mirror of the Unix path) would
+///    capture nothing from `println!`. We must also point the std handle at the
+///    pipe with `SetStdHandle`; Rust re-reads the handle on every write (it does
+///    not cache it), so the swap takes effect immediately.
+/// 2. **CRT fd 1.** Any engine code that writes via raw CRT fds (`libc::write`,
+///    C stdio) goes through the fd table, which `SetStdHandle` does NOT affect.
+///    The `_dup2` swap covers that family, mirroring the Unix path.
+///
+/// The captured payloads here are tiny (`undefined\n`, a registry URL, a short
+/// hint), so — unlike the Unix path's concurrent drain — the pipe is given a
+/// large buffer and read after `f` returns and the redirections are restored;
+/// the small fixed payloads can't fill a 1 MiB pipe, so no deadlock. Any setup
+/// failure degrades to running `f` unredirected with an empty capture, exactly
+/// like the Unix path.
 #[cfg(windows)]
 pub(crate) fn with_fd_captured<T>(fd: i32, f: impl FnOnce() -> T) -> (T, String) {
     use std::io::Write as _;
+
+    // Minimal kernel32 / msvcrt surface not exposed by the `libc` crate.
+    // `_get_osfhandle` (CRT) maps a CRT fd to its underlying OS HANDLE so we
+    // can hand the pipe's write end to `SetStdHandle`.
+    type Handle = *mut core::ffi::c_void;
+    const STD_OUTPUT_HANDLE: u32 = 0xFFFF_FFF5; // -11
+    const STD_ERROR_HANDLE: u32 = 0xFFFF_FFF4; // -12
+    const INVALID_HANDLE_VALUE: Handle = (-1isize) as Handle;
+    unsafe extern "system" {
+        fn GetStdHandle(nStdHandle: u32) -> Handle;
+        fn SetStdHandle(nStdHandle: u32, hHandle: Handle) -> i32;
+    }
 
     static FD_SWAP: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _guard = FD_SWAP.lock().unwrap_or_else(|p| p.into_inner());
@@ -1727,7 +1751,14 @@ pub(crate) fn with_fd_captured<T>(fd: i32, f: impl FnOnce() -> T) -> (T, String)
     let flush = |fd: libc::c_int| {
         if fd == 1 {
             let _ = std::io::stdout().flush();
+        } else if fd == 2 {
+            let _ = std::io::stderr().flush();
         }
+    };
+    let std_handle_id = match fd {
+        1 => Some(STD_OUTPUT_HANDLE),
+        2 => Some(STD_ERROR_HANDLE),
+        _ => None,
     };
 
     // Generous pipe buffer: the payloads captured here are a few bytes, so a
@@ -1736,13 +1767,25 @@ pub(crate) fn with_fd_captured<T>(fd: i32, f: impl FnOnce() -> T) -> (T, String)
     // _O_BINARY (0x8000): no CRLF translation, so the capture is byte-exact.
     const O_BINARY: libc::c_int = 0x8000;
 
-    // SAFETY: plain CRT fd plumbing on fds this function owns end-to-end.
+    // SAFETY: plain CRT/Win32 fd-and-handle plumbing on objects this function
+    // owns end-to-end; the swaps are serialized by FD_SWAP and fully restored.
     unsafe {
         let mut ends = [0 as libc::c_int; 2];
         if libc::pipe(ends.as_mut_ptr(), PIPE_BUF, O_BINARY) != 0 {
             return (f(), String::new());
         }
         let (read_end, write_end) = (ends[0], ends[1]);
+
+        // The pipe's write end as an OS HANDLE, for the std-handle swap.
+        // `_get_osfhandle` returns -1 or -2 on a bad fd; `write_end` is a fresh
+        // valid pipe fd, so this is real, but guard the sentinels regardless.
+        let osf = libc::get_osfhandle(write_end);
+        let write_handle = if osf == -1 || osf == -2 {
+            INVALID_HANDLE_VALUE
+        } else {
+            osf as Handle
+        };
+
         flush(fd); // pre-swap: drain pending bytes to the real target
         let saved = libc::dup(fd);
         if saved < 0 || libc::dup2(write_end, fd) < 0 {
@@ -1753,12 +1796,33 @@ pub(crate) fn with_fd_captured<T>(fd: i32, f: impl FnOnce() -> T) -> (T, String)
             }
             return (f(), String::new());
         }
+
+        // Redirect the Win32 std handle too (this is what Rust's `println!`
+        // actually targets). Save the prior handle so we can restore it.
+        let saved_std = std_handle_id.map(|id| GetStdHandle(id));
+        if let (Some(id), Some(h)) = (std_handle_id, saved_std) {
+            // Only swap when we hold a usable handle and the pipe handle is
+            // valid; on failure we still have the CRT fd swap (best effort).
+            if h != INVALID_HANDLE_VALUE && write_handle != INVALID_HANDLE_VALUE {
+                let _ = SetStdHandle(id, write_handle);
+            }
+        }
+
         let result = f();
         flush(fd); // push f's buffered tail into the pipe
-        // Restore the real fd and close our write end so the read sees EOF.
+
+        // Restore the std handle first (so subsequent prints during teardown go
+        // to the real target), then the CRT fd, then close our write end so the
+        // read sees EOF.
+        if let (Some(id), Some(h)) = (std_handle_id, saved_std) {
+            if h != INVALID_HANDLE_VALUE {
+                let _ = SetStdHandle(id, h);
+            }
+        }
         libc::dup2(saved, fd);
         libc::close(saved);
         libc::close(write_end);
+
         let mut buf = Vec::new();
         let mut chunk = [0u8; 8192];
         loop {
