@@ -97,9 +97,9 @@ const buildPieces = (node: NodeVersion): {
     title: 'A built-in package manager',
     blurb: (
       <>
-        A pnpm-compatible package manager, built in. <Mono>nub install</Mono>{' '}reads the lockfile
-        your project already has — pnpm, npm, or bun, with yarn honored read-only — writes the same
-        format back, and configures itself from your <Mono>.npmrc</Mono>{' '}and workspaces.
+        A pnpm-compatible package manager, built in. It reads the lockfile your project already
+        has — pnpm, npm, or bun — writes the same format back, and configures itself from your{' '}
+        <Mono>.npmrc</Mono>{' '}and workspaces.
       </>
     ),
     replaces: ['pnpm install', 'npm install', 'corepack'],

@@ -1087,9 +1087,9 @@ function HypermanagerBand() {
           subhead={
             <>
               A pnpm-compatible package manager, built in. It reads the lockfile your project
-              already has — <Mono>pnpm</Mono>, <Mono>npm</Mono>, or <Mono>bun</Mono>, with{' '}
-              <Mono>yarn</Mono>{' '}honored read-only — writes the same format back, and configures
-              itself from your <Mono>.npmrc</Mono>{' '}and <Mono>workspaces</Mono>. Powered by the{' '}
+              already has — <Mono>pnpm</Mono>, <Mono>npm</Mono>, or <Mono>bun</Mono> — writes the
+              same format back, and configures itself from your <Mono>.npmrc</Mono>{' '}and{' '}
+              <Mono>workspaces</Mono>. Powered by the{' '}
               <a
                 href="https://github.com/jdx/aube"
                 target="_blank"
