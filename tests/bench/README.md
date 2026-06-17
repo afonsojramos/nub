@@ -43,10 +43,12 @@ cargo build --release -p nub-cli
 NUB="$PWD/target/release/nub" bash tests/bench/run-script-runner-vs-node.sh --runs 100 --warmup 10
 ```
 
+`NUB` is the absolute path to the Nub binary being benchmarked. If it is unset, the harness defaults to `target/release/nub` inside the repo. Setting it explicitly makes the command work even though the benchmark itself runs from temporary fixture directories.
+
 For a quick smoke test, lower the sample count and bypass the quiet-machine gate:
 
 ```bash
-NUB=target/release/nub bash tests/bench/run-script-runner-vs-node.sh --runs 1 --warmup 0 --max-load 999
+NUB="$PWD/target/release/nub" bash tests/bench/run-script-runner-vs-node.sh --runs 1 --warmup 0 --max-load 999
 ```
 
 The wrapper runs this `hyperfine` shape for each fixture:
