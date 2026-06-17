@@ -895,12 +895,12 @@ function NubxBand() {
 
 /* Source: the Deno cross-runtime Node-compat corpus (colinhacks/node_test @ node-25.8.1), node-relative.
    nub + Node are OUR fresh measurement (tests/cross-runtime/ run.mjs, quiet-box, Node 25.8.1):
-   nub 4323 / node 4376 = 98.8%. The Deno and Bun figures are Deno's own published numbers
+   nub 4315 / node 4368 = 98.8%. The Deno and Bun figures are Deno's own published numbers
    (deno.com/blog/v2.8) — NOT re-measured here. Rates = runtime_pass / node_pass. The same 98.8%
    nub figure is the headline in the blog. */
 const COMPAT = [
-  { name: 'Node 25.8', rate: 100, tests: '4,376 / 4,376', us: false, dim: false },
-  { name: 'Nub', rate: 98.8, tests: '4,323 / 4,376', us: true, dim: false },
+  { name: 'Node 25.8', rate: 100, tests: '4,368 / 4,368', us: false, dim: false },
+  { name: 'Nub', rate: 98.8, tests: '4,315 / 4,368', us: true, dim: false },
   { name: 'Deno 2.8', rate: 77.9, tests: '3,370 / 4,324', us: false, dim: true },
   { name: 'Bun 1.3.14', rate: 40.7, tests: '1,760 / 4,324', us: false, dim: true },
 ];

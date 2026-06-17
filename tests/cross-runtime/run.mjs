@@ -463,7 +463,9 @@ async function main() {
     }
   }
 
-  // node-fails are corpus/version artifacts (corpus pinned v25.8.1, binary 26.2.0).
+  // node-fails are corpus/version artifacts. Run node + nub on Node v25.8.1 (the
+  // corpus version) so node and binary align — a newer Node (26+) introduces
+  // version-skew failures in the compat suite that aren't nub's concern.
   const nodeFailSet = new Set(fails.node || []);
 
   const denom = runList.length;
