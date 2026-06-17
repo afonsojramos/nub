@@ -28,7 +28,9 @@ Two PMs' lockfiles side by side (`pnpm-lock.yaml` and `package-lock.json`) is am
 A committed Berry release (`.yarnrc.yml` `yarnPath`) wins over the pin fields above. Nub runs the committed file directly and never provisions Berry, so a `yarn@2+` pin without a committed release errors. Yarn classic (1.x) provisions like any other manager.
 </Callout>
 
-## `nub pm which`
+## CLI
+
+### `nub pm which`
 
 Print the resolved package manager — path on stdout, provenance on stderr, so `PM=$(nub pm which)` captures just the path. Provisions the pinned version if it isn't cached yet.
 
@@ -38,7 +40,7 @@ $ nub pm which
 » resolved from packageManager (pnpm@9.15.4)
 ```
 
-## `nub pm use`
+### `nub pm use`
 
 Declare the project's package manager — npm, pnpm, Yarn, or Bun. One command resolves the version (exact, range, or dist-tag; bare means `latest`), fetches and verifies it, writes `packageManager`, and aligns the lockfile.
 
@@ -79,7 +81,7 @@ Every file written or removed is named in the output; rerunning is a no-op. The 
 
 A converting `use yarn` is otherwise fine — Nub writes a classic `yarn.lock` directly. Running `use bun` writes the pin and lockfile but doesn't provision bun.
 
-## `nub pm update`
+### `nub pm update`
 
 Bump the pin: resolve the newest version satisfying the `devEngines` range (or the registry `latest` if there's no range), provision it, and rewrite `packageManager` with a fresh hash. Alias: `nub pm up`.
 
@@ -89,7 +91,7 @@ Fetching pnpm 9.15.9 (4 MB)...
 updated pnpm 9.15.4 → 9.15.9
 ```
 
-## `nub pm cache`
+### `nub pm cache`
 
 Inspect or clear the package-manager cache.
 
@@ -102,6 +104,10 @@ $ nub pm cache clear
 
 Versions live at `~/.cache/nub/pm/<pm>/<version>`. A cached exact pin runs fully offline — the registry is only contacted to resolve ranges and fetch missing versions. Provisioned managers run with a warm V8 compile cache (`NODE_COMPILE_CACHE`), so the PM's multi-megabyte bundle loads as cached bytecode instead of re-parsing on every call.
 
+### `nub pm shim`
+
+The shims are an opt-in: run `nub pm shim` and a bare `pnpm`, `npm`, or `yarn` command routes through Nub to the pinned manager, with `nub pm unshim` to remove them. Default usage needs none of this — `nub install` and `nub run` already run the pin. See [Package-manager shims](/docs/pm-shim) for the install, the strict-by-default refusal, and the per-invocation overhead.
+
 ## `.npmrc`
 
 The PM download — packument and tarball — goes through your `.npmrc`: `registry=` picks the mirror, `//host/:_authToken=` authenticates. An auth-required Artifactory/Nexus mirror works with the config you already have:
@@ -112,7 +118,3 @@ registry=https://npm.corp.example
 ```
 
 To fetch package managers from a different registry than your dependencies, `COREPACK_NPM_REGISTRY` (+ `COREPACK_NPM_TOKEN`) overrides the PM-download registry — teams migrating off corepack keep their existing CI vars.
-
-## `nub pm shim`
-
-The shims are an opt-in: run `nub pm shim` and a bare `pnpm`, `npm`, or `yarn` command routes through Nub to the pinned manager, with `nub pm unshim` to remove them. Default usage needs none of this — `nub install` and `nub run` already run the pin. See [Package-manager shims](/docs/pm-shim) for the install, the strict-by-default refusal, and the per-invocation overhead.
