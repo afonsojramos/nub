@@ -45,6 +45,20 @@ pub fn npm_env(
         env_vars.insert("npm_package_version".to_string(), version.to_string());
     }
 
+    // pnpm/npm export the manifest's `engines`, `config`, and `bin` fields
+    // deep-flattened into the `npm_package_*` namespace so dep postinstalls
+    // and `package.json#config` consumers (`node-pre-gyp`, scripts reading
+    // `$npm_package_config_<key>`, …) behave identically under nub. The
+    // allowlist mirrors pnpm 11.5 exactly (name/version above, then
+    // engines/config/bin); whole-manifest flattening was dropped by pnpm and
+    // is intentionally NOT replicated. A string `bin` flattens to an
+    // unsuffixed `npm_package_bin`; an object `bin` to `npm_package_bin_<key>`.
+    for field in ["engines", "config", "bin"] {
+        if let Some(value) = manifest.get(field) {
+            flatten_npm_package_env(&format!("npm_package_{field}"), value, &mut env_vars);
+        }
+    }
+
     env_vars.insert(
         "npm_lifecycle_event".to_string(),
         lifecycle_event.to_string(),
@@ -120,6 +134,54 @@ fn node_arch() -> &'static str {
         "aarch64" => "arm64",
         "x86" => "ia32",
         other => other,
+    }
+}
+
+/// Envify a manifest key the npm way: every character outside `[A-Za-z0-9_]`
+/// becomes `_`, so `config.my-key` → `npm_package_config_my_key`.
+fn envify_env_key(key: &str) -> String {
+    key.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// Deep-flatten a JSON value into `prefix`-rooted `npm_package_*` pairs,
+/// npm-style: objects recurse with `_`-joined envified keys, arrays index with
+/// `_<i>`, scalars stringify, `null` is skipped. Matches aube's
+/// `flatten_json_env` (the lifecycle path) so the run and lifecycle paths emit
+/// byte-identical `npm_package_*` environments.
+fn flatten_npm_package_env(
+    prefix: &str,
+    value: &serde_json::Value,
+    out: &mut HashMap<String, String>,
+) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (k, v) in map {
+                flatten_npm_package_env(&format!("{prefix}_{}", envify_env_key(k)), v, out);
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for (i, v) in arr.iter().enumerate() {
+                flatten_npm_package_env(&format!("{prefix}_{i}"), v, out);
+            }
+        }
+        serde_json::Value::String(s) => {
+            out.insert(prefix.to_string(), s.clone());
+        }
+        serde_json::Value::Number(n) => {
+            out.insert(prefix.to_string(), n.to_string());
+        }
+        serde_json::Value::Bool(b) => {
+            out.insert(prefix.to_string(), b.to_string());
+        }
+        serde_json::Value::Null => {}
     }
 }
 
@@ -220,8 +282,62 @@ pub fn script_shell(project_root: &Path) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{find_bin, npmrc_value, script_shell};
+    use super::{find_bin, npm_env, npmrc_value, script_shell};
     use std::fs;
+
+    #[test]
+    fn npm_env_flattens_engines_config_and_bin() {
+        // pnpm/npm export the manifest's engines/config/bin deep-flattened into
+        // the `npm_package_*` namespace; a script reading `$npm_package_config_foo`
+        // must see the value. Mirrors pnpm 10.15: an object `bin` →
+        // `npm_package_bin_<key>` (verbatim path), non-word chars in keys → `_`.
+        let manifest = serde_json::json!({
+            "name": "pkg",
+            "version": "1.0.0",
+            "engines": { "node": ">=18" },
+            "config": { "foo": "barval", "my-key": "v" },
+            "bin": { "mytool": "./cli.js" },
+        });
+        let tmp = std::env::temp_dir();
+        let env = npm_env(
+            &manifest,
+            &tmp,
+            "test",
+            None,
+            "/usr/bin/node",
+            "nub/0 node/v0",
+        );
+
+        assert_eq!(
+            env.get("npm_package_config_foo").map(String::as_str),
+            Some("barval")
+        );
+        assert_eq!(
+            env.get("npm_package_config_my_key").map(String::as_str),
+            Some("v")
+        );
+        assert_eq!(
+            env.get("npm_package_engines_node").map(String::as_str),
+            Some(">=18")
+        );
+        assert_eq!(
+            env.get("npm_package_bin_mytool").map(String::as_str),
+            Some("./cli.js")
+        );
+    }
+
+    #[test]
+    fn npm_env_string_bin_is_unsuffixed() {
+        // A string `bin` flattens to a bare `npm_package_bin` (no key suffix),
+        // matching pnpm. (npm normalizes the value to the unscoped package name;
+        // nub matches pnpm, which keeps the verbatim path.)
+        let manifest = serde_json::json!({ "name": "pkg", "bin": "./cli.js" });
+        let env = npm_env(&manifest, &std::env::temp_dir(), "test", None, "", "ua");
+        assert_eq!(
+            env.get("npm_package_bin").map(String::as_str),
+            Some("./cli.js")
+        );
+    }
 
     #[test]
     fn npmrc_value_reads_keys_and_script_shell_delegates() {

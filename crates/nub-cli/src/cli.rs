@@ -2685,6 +2685,36 @@ fn build_script_command(
         });
     }
 
+    // `npm_config_node_gyp`: npm/pnpm always point this at a runnable node-gyp
+    // (their bundled `node-gyp/bin/node-gyp.js`) so a script's `node
+    // $npm_config_node_gyp …` resolves without a global node-gyp install. nub
+    // hands out the engine's lazy `node-gyp.js` shim, which trampolines back
+    // into nub via `AUBE_NODE_GYP_EXE` (handled by `__node-gyp-bootstrap`) to
+    // bootstrap the real node-gyp on first use. Mirrors what the engine's
+    // lifecycle path stamps (`aube-scripts::apply_script_settings_env`) so the
+    // run and lifecycle paths agree. Set before the `npm_env` loop so a
+    // user-set value still wins; the bootstrap markers are nub-internal env
+    // (brand-exempt) and only meaningful to the shim. Failure to write the
+    // (cheap) shim degrades to leaving the var unset — same as a plain Node.
+    if let Ok(node_gyp_js) = aube::commands::install::node_gyp_bootstrap::lazy_js_shim_path() {
+        command.env("npm_config_node_gyp", node_gyp_js);
+        command.env("AUBE_NODE_GYP_EXE", &nub_binary);
+        command.env("AUBE_NODE_GYP_PROJECT_DIR", &project.root);
+    }
+
+    // `npm_config_registry`: pnpm always exports the resolved registry to a
+    // script's environment (defaulting to `https://registry.npmjs.org/`); npm
+    // exports it whenever a registry is configured. nub left it unset, so a
+    // script reading `$npm_config_registry` (publish wrappers, custom fetch
+    // tooling) saw `undefined` under nub but a real URL under npm/pnpm. Read
+    // the resolved registry from the project's `.npmrc`/config chain — the same
+    // `NpmConfig` the engine resolves installs against — and export it. Set
+    // before the `npm_env` loop so a user-set value still wins.
+    let registry = aube_registry::config::NpmConfig::load(&project.root)
+        .registry_for("")
+        .to_string();
+    command.env("npm_config_registry", registry);
+
     for (k, v) in &env_vars {
         command.env(k, v);
     }
