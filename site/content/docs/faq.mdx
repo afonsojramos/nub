@@ -80,6 +80,10 @@ On Node older than 18.19, augmented commands emit a tagged error telling you to 
 
 Yes — Linux (x64, arm64), macOS (x64, arm64), Windows (x64). Same platforms the underlying Node + `napi-rs` ecosystem already targets. Nub is distributed as prebuilt Rust binaries via `npm install -g --ignore-scripts=false @nubjs/nub`, with platform-specific N-API addons resolved at install time.
 
+## How do I use it in CI / GitHub Actions?
+
+Swap `actions/setup-node` for [`nubjs/setup-nub`](/docs/setup-nub) — it installs the nub CLI onto the runner, and from there Nub provisions the project's pinned Node itself. The action also pre-provisions a warm-up Node version and caches Nub's store across runs. See the [GitHub Action](/docs/setup-nub) page for the full input surface.
+
 ## Does it replace my package manager?
 
 It can — `nub install` is a full package manager, powered by the embedded aube engine — pnpm's CLI surface, your project's lockfile. It detects the lockfile your project already has and writes the same format back: `pnpm-lock.yaml`, `package-lock.json`, and `bun.lock` round-trip in place, never replaced with a foreign file (`yarn.lock` is honored read-only — an install that would rewrite it is refused, with the exact yarn command to run instead).
