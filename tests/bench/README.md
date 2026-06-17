@@ -35,17 +35,28 @@ NUB=… bash tests/bench/run-warm-gvs.sh --fixture gvs-eligible --runs 12 --warm
 
 ### Script-runner dispatch — `nub run` vs `node --run`
 
-The canonical script-runner benchmark measures how fast each tool looks up a `package.json` script and dispatches it. It runs two no-dependency fixtures: a pure-shell script (`"noop": "true"`) that isolates runner dispatch, and an empty Node body (`"noop": "node -e \"\""`) that shows how much the dispatch delta is diluted once the script itself also boots Node. The same harness compares `nub run`, `node --run`, `npm run`, and `pnpm run`, verifies every command exits 0 before timing, and writes hyperfine JSON to `tests/bench/results/`.
+The canonical script-runner benchmark measures how fast each tool looks up a `package.json` script and dispatches it. It runs two no-dependency fixtures: a pure-shell script (`"noop": "true"`) that isolates runner dispatch, and an empty Node body (`"noop": "node -e \"\""`) that shows how much the dispatch delta is diluted once the script itself also boots Node. The checked-in script is a thin `hyperfine` wrapper: it creates the fixtures, verifies every command exits 0 before timing, then runs `hyperfine` and writes JSON to `tests/bench/results/`.
 
 ```bash
+git submodule update --init --depth 1 vendor/aube
 cargo build --release -p nub-cli
-NUB=target/release/nub bash tests/bench/run-script-runner-vs-node.sh --runs 100 --warmup 10
+NUB="$PWD/target/release/nub" bash tests/bench/run-script-runner-vs-node.sh --runs 100 --warmup 10
 ```
 
 For a quick smoke test, lower the sample count and bypass the quiet-machine gate:
 
 ```bash
 NUB=target/release/nub bash tests/bench/run-script-runner-vs-node.sh --runs 1 --warmup 0 --max-load 999
+```
+
+The wrapper runs this `hyperfine` shape for each fixture:
+
+```bash
+hyperfine --warmup "$WARMUP" --runs "$RUNS" --export-json "$OUT" \
+  --command-name "nub run"    "cd '$FIXTURE' && '$NUB' run noop" \
+  --command-name "node --run" "cd '$FIXTURE' && node --run noop" \
+  --command-name "npm run"    "cd '$FIXTURE' && npm run noop" \
+  --command-name "pnpm run"   "cd '$FIXTURE' && pnpm run noop"
 ```
 
 The older `run-script-runner-pure.sh` and `run-script-runner.sh` harnesses are kept for historical comparisons against npm/pnpm-only runs; use `run-script-runner-vs-node.sh` for the published `node --run` comparison.
