@@ -97,7 +97,38 @@ fn entries_from_bunfig(root: &Value) -> Vec<(String, String)> {
             _ => {}
         }
     }
+    push_tls_entries(&mut out, install);
     out
+}
+
+/// Map bunfig's `[install] cafile` / `ca` onto the unscoped npmrc TLS keys the
+/// engine already wires into its rustls client (`cafile` and `ca`/`ca[]`).
+/// Mirrors Bun's `cli/bunfig.zig`: `cafile` is a path to a PEM file; `ca` is
+/// either a single inline PEM string or an array of them.
+fn push_tls_entries(out: &mut Vec<(String, String)>, install: &toml::map::Map<String, Value>) {
+    if let Some(cafile) = install
+        .get("cafile")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        out.push(("cafile".to_string(), cafile.to_string()));
+    }
+    match install.get("ca") {
+        Some(Value::String(ca)) if !ca.is_empty() => {
+            out.push(("ca".to_string(), ca.clone()));
+        }
+        Some(Value::Array(items)) => {
+            // npm/pnpm build up the trust list from repeated `ca[]=...` lines;
+            // emit one per inline PEM so the engine's `ca`/`ca[]` apply arm
+            // pushes them all.
+            for item in items {
+                if let Some(pem) = item.as_str().filter(|s| !s.is_empty()) {
+                    out.push(("ca[]".to_string(), pem.to_string()));
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 fn scope_auth_registry_counts(scopes: &[(String, BunRegistry)]) -> BTreeMap<String, usize> {
@@ -280,6 +311,43 @@ mod tests {
             "https://plain.example.com/".to_string()
         )));
         assert!(entries.contains(&("nodeLinker".to_string(), "isolated".to_string())));
+    }
+
+    #[test]
+    fn maps_cafile_and_inline_ca_string() {
+        let entries = parsed(
+            r#"
+            [install]
+            cafile = "/etc/ssl/corp-ca.pem"
+            ca = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----"
+            "#,
+        );
+
+        assert!(entries.contains(&("cafile".to_string(), "/etc/ssl/corp-ca.pem".to_string())));
+        assert!(
+            entries
+                .iter()
+                .any(|(k, v)| k == "ca" && v.contains("BEGIN CERTIFICATE"))
+        );
+    }
+
+    #[test]
+    fn maps_inline_ca_array_to_repeated_ca_entries() {
+        let entries = parsed(
+            r#"
+            [install]
+            ca = ["-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----", "-----BEGIN CERTIFICATE-----\nBBBB\n-----END CERTIFICATE-----"]
+            "#,
+        );
+
+        let ca_entries: Vec<_> = entries.iter().filter(|(k, _)| k == "ca[]").collect();
+        assert_eq!(
+            ca_entries.len(),
+            2,
+            "each inline PEM becomes one ca[] entry"
+        );
+        assert!(ca_entries.iter().any(|(_, v)| v.contains("AAAA")));
+        assert!(ca_entries.iter().any(|(_, v)| v.contains("BBBB")));
     }
 
     #[test]

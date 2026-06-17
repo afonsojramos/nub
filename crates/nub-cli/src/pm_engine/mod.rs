@@ -1250,10 +1250,15 @@ pub(crate) fn engine_brand_preflight() {
     };
     let read_manifest_root_config = matches!(surface, ConfigSurface::NubIdentity(_));
     let pnpmfile_default_enabled = matches!(surface, ConfigSurface::PnpmOrFresh);
+    // Honor Bun's `BUN_CONFIG_REGISTRY` / `BUN_CONFIG_TOKEN` only under a Bun
+    // incumbent; under any other surface those Bun-named env vars are another
+    // tool's state and must not be read (name-based policy, like `read_yarn_config`).
+    let read_bun_config = read_bun_config_for_surface(&surface);
     aube_util::update_engine_context(|c| {
         c.read_branded_pnpm_config = read_branded_pnpm_config;
         c.read_yarn_config = read_yarn_config;
         c.yarn_is_classic = yarn_is_classic;
+        c.read_bun_config = read_bun_config;
         c.read_manifest_root_config = read_manifest_root_config;
         c.pnpmfile_default_enabled = pnpmfile_default_enabled;
         c.synthetic_user_npmrc_entries = bunfig.user;
@@ -1439,6 +1444,14 @@ fn resolve_config_surface(cwd: &Path) -> ConfigSurface {
 
 fn read_yarn_config_for_surface(surface: &ConfigSurface) -> bool {
     matches!(surface, ConfigSurface::NonPnpmCompat { role: "yarn", .. })
+}
+
+/// Whether the engine should honor Bun's `BUN_CONFIG_REGISTRY` /
+/// `BUN_CONFIG_TOKEN` environment variables — true only under a Bun incumbent.
+/// Under any other surface those Bun-named env vars are another tool's state
+/// (name-based policy, mirroring [`read_yarn_config_for_surface`]).
+fn read_bun_config_for_surface(surface: &ConfigSurface) -> bool {
+    matches!(surface, ConfigSurface::NonPnpmCompat { role: "bun", .. })
 }
 
 /// Whether the yarn-incumbent project rooted at `dir` is *classic* (v1) — the
@@ -2369,6 +2382,35 @@ mod tests {
             }
         ));
         assert!(!read_yarn_config_for_surface(&ConfigSurface::PnpmOrFresh));
+    }
+
+    #[test]
+    fn bun_config_read_gate_is_bun_incumbent_only() {
+        // The gate controlling `EngineContext::read_bun_config`: Bun's
+        // `BUN_CONFIG_REGISTRY`/`BUN_CONFIG_TOKEN` env vars are honored only when
+        // Bun is the incumbent, and ignored under nub identity or any other
+        // (non-bun) compat role, where they are another tool's state.
+        let root = tempfile::tempdir().unwrap();
+        assert!(read_bun_config_for_surface(&ConfigSurface::NonPnpmCompat {
+            role: "bun",
+            dir: root.path().to_path_buf(),
+        }));
+        assert!(!read_bun_config_for_surface(&ConfigSurface::NubIdentity(
+            root.path().to_path_buf()
+        )));
+        assert!(!read_bun_config_for_surface(
+            &ConfigSurface::NonPnpmCompat {
+                role: "npm",
+                dir: root.path().to_path_buf(),
+            }
+        ));
+        assert!(!read_bun_config_for_surface(
+            &ConfigSurface::NonPnpmCompat {
+                role: "yarn",
+                dir: root.path().to_path_buf(),
+            }
+        ));
+        assert!(!read_bun_config_for_surface(&ConfigSurface::PnpmOrFresh));
     }
 
     #[test]
