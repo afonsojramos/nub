@@ -1,0 +1,66 @@
+name: Download stats snapshot
+
+on:
+  schedule:
+    # Daily at 00:15 UTC — slightly offset from the hour to avoid GH cron pile-ups
+    - cron: "15 0 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  snapshot:
+    name: Snapshot download counts
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set snapshot timestamp
+        id: ts
+        run: echo "value=$(date -u +"%Y%m%dT%H%M%SZ")" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch GitHub release download counts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # Writes /tmp/gh-releases.json: array of { tag, assets: [{ name, download_count }] }
+        run: |
+          gh api repos/nubjs/nub/releases --paginate \
+            --jq '[.[] | {tag: .tag_name, assets: [.assets[] | {name: .name, download_count: .download_count}]}]' \
+            > /tmp/gh-releases.json
+
+      - name: Fetch npm download counts
+        # npm public downloads API — last-30-days count for @nubjs/nub.
+        # Falls back to {} if the package has no data yet (pre-launch).
+        run: |
+          last30=$(curl -fsSL "https://api.npmjs.org/downloads/point/last-month/@nubjs/nub" 2>/dev/null || echo '{}')
+          echo "$last30" > /tmp/npm-counts.json
+
+      - name: Write snapshot
+        run: |
+          ts="${{ steps.ts.outputs.value }}"
+          node - "$ts" <<'EOF'
+          const fs = require("fs");
+          const ts = process.argv[1];
+          const gh = JSON.parse(fs.readFileSync("/tmp/gh-releases.json", "utf8"));
+          const npm = JSON.parse(fs.readFileSync("/tmp/npm-counts.json", "utf8"));
+          const snapshot = {
+            timestamp: new Date().toISOString(),
+            github_releases: gh,
+            npm,
+          };
+          const outPath = `stats/download-counts/${ts}.json`;
+          fs.writeFileSync(outPath, JSON.stringify(snapshot, null, 2) + "\n");
+          console.log(`Wrote ${outPath}`);
+          EOF
+
+      - name: Commit snapshot
+        run: |
+          ts="${{ steps.ts.outputs.value }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "stats/download-counts/${ts}.json"
+          git diff --cached --quiet && echo "No new data, nothing to commit." && exit 0
+          git commit -m "stats: download snapshot ${ts}"
+          git push
