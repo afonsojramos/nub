@@ -672,6 +672,40 @@ mod tests {
         let _ = std::fs::remove_dir_all(&store);
     }
 
+    #[test]
+    fn on_resolved_hook_fires_with_the_concrete_version_on_offline_range_fallback() {
+        if ambient_registry_override() {
+            return; // env registry outranks the dead-registry .npmrc — see helper
+        }
+        // The offline range-fallback path (registry unreachable + range pin + cached
+        // version present) must fire `on_resolved` with the resolved concrete version
+        // so the PM-shim header (`pnpm@9.5.0 (via nub shim)`) still prints even when
+        // the registry is down and the version was inferred from the cache.
+        let store = offline_store_with("hook-offline-range", "9.5.0");
+        let pin = PmPin {
+            pm: Pm::Pnpm,
+            version: Some("^9".to_string()),
+        };
+        let seen = std::cell::RefCell::new(Vec::<String>::new());
+        let prov = provision_pm_announced(
+            &pin,
+            &store,
+            &store,
+            None,
+            Some(&|v: &str| {
+                seen.borrow_mut().push(v.to_string());
+            }),
+        )
+        .expect("offline range fallback with on_resolved hook");
+        assert_eq!(prov.version, "9.5.0");
+        assert_eq!(
+            *seen.borrow(),
+            vec!["9.5.0".to_string()],
+            "the hook fires exactly once with the concrete cached version"
+        );
+        let _ = std::fs::remove_dir_all(&store);
+    }
+
     /// Author a `package/`-rooted pnpm-shaped `.tgz` (gzip + tar) on disk — what
     /// the registry serves and what `nub pm use` downloads once, then hands to
     /// [`provision_pm_from_tarball`]. Same shape `extract.rs` authors in its own
