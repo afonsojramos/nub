@@ -2925,7 +2925,7 @@ dependencies = [
 
 [[package]]
 name = "nub-cli"
-version = "0.0.48"
+version = "0.0.49"
 dependencies = [
  "anyhow",
  "aube",
@@ -2957,7 +2957,7 @@ dependencies = [
 
 [[package]]
 name = "nub-core"
-version = "0.0.48"
+version = "0.0.49"
 dependencies = [
  "anyhow",
  "camino",
@@ -2982,7 +2982,7 @@ dependencies = [
 
 [[package]]
 name = "nub-native"
-version = "0.0.48"
+version = "0.0.49"
 dependencies = [
  "json5",
  "jsonc-parser",
