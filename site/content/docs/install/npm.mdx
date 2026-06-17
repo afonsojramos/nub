@@ -83,4 +83,4 @@ Everything at those scopes works — default and scoped registries, auth tokens,
 
 - **lockfileVersion 1** (npm ≤ 6) errors, not migrated — run `npm install` once to upgrade first.
 - **A v2 lock becomes v3** on the first mutating install (preserved on no-op installs only).
-- **No drop-in `npm` CLI grammar.** npm-specific subcommands/flags and `npm-shrinkwrap.json` are not emulated; the CLI is pnpm-shaped.
+- **No drop-in `npm` CLI grammar.** npm-specific subcommands/flags are not emulated; the CLI is pnpm-shaped. (`npm-shrinkwrap.json` is read and preserved as-is.)
