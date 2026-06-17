@@ -1,0 +1,30 @@
+# The canonical container case the host CANNOT reproduce: root lands a 0o644 native
+# binary it OWNS, then the image drops to a non-root user whose first `nub` can
+# neither run the 0o644 binary nor chmod a file it doesn't own. ensureExecutable's
+# non-owner branch must stage a user-owned 0o755 copy in ~/.cache/nub/bin/<tag>/ and
+# exec THAT. This also covers the --ignore-scripts case: postinstall never runs, so
+# the runtime heal is the ONLY thing that makes `nub` work.
+#
+# Built+run by docker-non-owner.sh, which COPYs the launcher package + a fake native
+# in (no real platform build needed — the heal is binary-agnostic).
+FROM node:22-slim
+
+# 1. As root, lay down the install tree (a stand-in for `npm i -g --ignore-scripts`).
+#    The fake native is mode 0o644 and root-owned; postinstall is NOT run.
+WORKDIR /opt/nub
+COPY fixture/ /opt/nub/
+RUN chmod +x /opt/nub/node_modules/@nubjs/nub/bin/nub /opt/nub/node_modules/@nubjs/nub/bin/nubx \
+ && (chmod +x /opt/nub/bin/nub /opt/nub/bin/nubx 2>/dev/null || true) \
+ && chmod 0644 /opt/nub/node_modules/@nubjs/nub-host/bin/nub /opt/nub/node_modules/@nubjs/nub-host/bin/nubx \
+ && chown -R root:root /opt/nub
+
+# 2. Drop to a non-root user (the `USER app` half of the canonical pattern).
+RUN useradd -m app
+USER app
+ENV HOME=/home/app
+ENV PATH=/opt/nub/bin:/usr/local/bin:/usr/bin:/bin
+
+# 3. The test: a non-root first `nub` must SUCCEED via the staged ~/.cache copy, and
+#    that copy must live under ~/.cache/nub/bin/. assert.sh runs as `app`.
+COPY assert.sh /assert.sh
+CMD ["sh", "/assert.sh"]

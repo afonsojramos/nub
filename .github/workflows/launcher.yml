@@ -1,24 +1,27 @@
 name: Launcher heal
 
-# Validates the POSIX self-heal launcher (npm/nub/bin/launch.js): first call runs
-# and rewrites the on-PATH bin entry (pnpm cmd-shim or npm/bun symlink) into a
-# minimal #!/bin/sh trampoline -> native, later calls spawn ZERO node, nubx keeps
-# its verb, and a foreign `nub` is never clobbered. Runs on ubuntu (dash) and macos
-# (bash) — the same launcher JS, exercised against both PM shim shapes with a fake
-# native (the heal is binary-agnostic). Windows is intentionally excluded: the heal
-# is a no-op there (no shebang/symlink fast path), so Windows keeps the JS launcher
-# and is covered by release.yml's `npm install -g` smoke.
+# Validates the POSIX self-heal launcher (npm/nub/bin/launch.js): the first call runs
+# and rewrites the on-PATH bin entry (pnpm cmd-shim or npm/bun symlink) into a minimal
+# sh/node polyglot trampoline -> native, later calls spawn ZERO node, nubx keeps its
+# verb, a foreign `nub` is never clobbered, N concurrent first-calls hit 0 failures,
+# and the 0o644 native is recovered (in-place chmod when owned, staged user-owned copy
+# when not). The host legs run on ubuntu (dash) and macos (bash) against both PM shim
+# shapes with a fake native (the heal is binary-agnostic); the non-owner staged-copy
+# leg needs a privilege drop, so it runs in a Linux container. Windows is intentionally
+# excluded: the heal is a no-op there (no shebang/symlink fast path), so Windows keeps
+# the JS launcher (working-but-taxed by design) and is covered by the `npm install -g`
+# smoke in release.yml / verify-install.yml. Full rationale + gaps: tests/launcher/README.md.
 
 on:
   push:
     paths:
       - npm/nub/**
-      - .github/scripts/heal-test.sh
+      - tests/launcher/**
       - .github/workflows/launcher.yml
   pull_request:
     paths:
       - npm/nub/**
-      - .github/scripts/heal-test.sh
+      - tests/launcher/**
   workflow_dispatch:
 
 permissions:
@@ -37,5 +40,16 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 22
-      - name: Validate self-heal launcher
-        run: bash .github/scripts/heal-test.sh
+      - name: Host self-heal matrix (both PM shim shapes)
+        run: bash tests/launcher/run-launcher-matrix.sh "$(dirname "$(command -v node)")"
+
+  non-owner:
+    name: non-owner staged copy · docker
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Non-owner staged-copy fallback (root install -> non-root run, no postinstall)
+        run: bash tests/launcher/docker-non-owner.sh
