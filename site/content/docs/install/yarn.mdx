@@ -19,55 +19,43 @@ Both formats are read:
 - **Classic** — `yarn.lock` with no `__metadata` block (Yarn 1.x).
 - **Berry** — the `__metadata` / `version` format (Yarn 2+).
 
+## Configuration
+
 <CompatTable
   incumbent="yarn"
   rows={[
-    // ── Commands ──────────────────────────────────────────────────────
-    { feature: <><code>install</code> / <code>i</code> / <code>ci</code></>, status: 'yes', note: 'Resolve and link from a satisfiable yarn.lock without rewriting it. ci is a frozen install — yarn.lock is law. A fresh or drifted lockfile that would force a rewrite is refused; run yarn install for those.' },
-    { feature: <><code>add</code> / <code>remove</code> / <code>update</code></>, status: 'yes', note: 'Resolve fully; the yarn.lock write is refused, so run yarn add / yarn remove / yarn upgrade to persist the change.' },
-    { feature: <><code>dedupe</code></>, status: 'yes', note: 'dedupe --check reports duplicate ranges without writing; the default rewrite of yarn.lock is refused.' },
-    { feature: <><code>import</code></>, status: 'yes', note: 'Reads yarn.lock (Classic or Berry) and writes a pnpm-lock.yaml. There is no path that converts to yarn.lock.' },
-    { feature: <><code>rebuild</code> / <code>fetch</code></>, status: 'yes', note: 'rebuild reruns build scripts for installed packages; fetch populates the store from the lockfile. Neither rewrites yarn.lock.' },
-    { feature: <><code>link</code> / <code>unlink</code></>, status: 'yes', note: 'Symlink a local package into a project and remove it again.' },
-    { feature: <><code>patch</code> / <code>patch-commit</code> / <code>patch-remove</code></>, status: 'yes', note: 'Edit a dependency in a temp dir, commit a .patch, and remove it. The chained install reads yarn.lock without rewriting it.' },
-    { feature: <><code>dlx</code> / <code>create</code></>, status: 'yes', note: 'Fetch-and-run a package in a temp environment; scaffold from a create-* starter.' },
-    { feature: <><code>list</code> / <code>why</code> / <code>outdated</code></>, status: 'yes', note: 'Read-only queries over the installed tree: list (ls), dependency paths (why), and out-of-date packages.' },
-    { feature: <><code>audit</code> / <code>licenses</code></>, status: 'yes', note: 'Vulnerability audit and license report run on the real engine.' },
-    { feature: <><code>publish</code> / <code>pack</code></>, status: 'yes', note: 'Registry publish and tarball packing.' },
-    { feature: <>recursive workspace runs</>, status: 'yes', note: 'Spelled as the -r / --filter flags on a verb (nub -r run build), like pnpm.' },
     // ── Dependency fields ─────────────────────────────────────────────
-    { feature: <><code>dependencies</code> / <code>devDependencies</code></>, status: 'yes', note: 'Resolved and installed from yarn.lock, with dev/prod splits honored by --prod.' },
-    { feature: <><code>optionalDependencies</code></>, status: 'yes', note: 'Installed when the platform matches; skipped silently otherwise.' },
-    { feature: <><code>peerDependencies</code> / <code>peerDependenciesMeta</code></>, status: 'yes', note: 'Peer ranges resolved; peerDependenciesMeta.optional suppresses missing-peer warnings.' },
-    { feature: <code>resolutions</code>, status: 'yes', note: 'Yarn-style top-level pins applied during resolution, the way Yarn does.' },
-    { feature: <code>overrides</code>, status: 'yes', note: 'The npm/Bun field is ignored under a Yarn incumbent, mirroring Yarn. Use resolutions.' },
-    { feature: <code>dependenciesMeta.*.built</code>, status: 'yes', note: 'Gates which packages run build scripts.' },
-    { feature: <code>packageExtensions</code>, status: 'yes', note: 'Merged into resolution the same way pnpm and Yarn apply it.' },
-    { feature: <code>packageManager</code>, status: 'yes', note: 'A packageManager: yarn@… declaration selects the Yarn incumbent.' },
-    { feature: <><code>scripts</code> + lifecycle</>, status: 'yes', note: 'package.json scripts run through nub run with pre/post lifecycle ordering.' },
+    { feature: <><code>dependencies</code> / <code>devDependencies</code></>, status: 'yes' },
+    { feature: <><code>optionalDependencies</code></>, status: 'yes' },
+    { feature: <><code>peerDependencies</code> / <code>peerDependenciesMeta</code></>, status: 'yes' },
+    { feature: <code>resolutions</code>, status: 'yes' },
+    { feature: <code>overrides</code>, status: 'yes' },
+    { feature: <code>dependenciesMeta.*.built</code>, status: 'yes' },
+    { feature: <code>packageExtensions</code>, status: 'yes' },
+    { feature: <code>packageManager</code>, status: 'yes' },
+    { feature: <><code>scripts</code> + lifecycle</>, status: 'yes' },
     // ── Protocol specifiers ───────────────────────────────────────────
-    { feature: <><code>workspace:</code> protocol</>, status: 'yes', note: 'workspace:* / workspace:^ ranges link local members.' },
-    { feature: <><code>npm:</code> alias</>, status: 'yes', note: 'Aliased dependency specifiers resolve to the aliased package.' },
-    { feature: <><code>portal:</code> / <code>patch:</code></>, status: 'yes', note: 'Berry-only specifiers. portal: resolves like a link; patch: applies via the patch verb. The yarn.lock write stays refused.' },
+    { feature: <><code>workspace:</code> protocol</>, status: 'yes' },
+    { feature: <><code>npm:</code> alias</>, status: 'yes' },
+    { feature: <><code>portal:</code> / <code>patch:</code></>, status: 'yes' },
     // ── Workspaces ────────────────────────────────────────────────────
-    { feature: <><code>workspaces</code></>, status: 'yes', note: 'Workspace membership from the package.json workspaces globs.' },
-    { feature: <>workspace selectors</>, status: 'yes', note: 'Name, glob (*), directory, exclusion (!pkg), and dependency traversal (...pkg) all work, plus -r and --include-workspace-root.' },
+    { feature: <><code>workspaces</code></>, status: 'yes' },
+    { feature: <>workspace selectors</>, status: 'yes' },
     // ── Config files ──────────────────────────────────────────────────
-    { feature: <code>.npmrc</code>, status: 'yes', note: 'Registry, auth tokens, TLS (cafile, strict-ssl), and proxy are read.' },
-    { feature: <code>.yarnrc.yml</code>, status: 'yes', note: 'Read in Yarn-incumbent projects for registry, scoped and registry-keyed auth, CA file path, http/https proxy, strict-SSL, the node-modules/pnpm linker, and packageExtensions. The arch-download, file-path TLS client cert/key, per-host proxy, constraints, and plugin keys have no effect.' },
-    { feature: <code>.yarnrc</code>, status: 'yes', note: 'Classic Yarn 1 projects read the default registry, scoped registries, and registry-keyed or top-level auth. Other classic keys (network-timeout, save-prefix, offline mirror) have no effect.' },
+    { feature: <code>.npmrc</code>, status: 'yes' },
+    { feature: <code>.yarnrc.yml</code>, status: 'yes' },
+    { feature: <code>.yarnrc</code>, status: 'yes' },
     // ── Environment variables ─────────────────────────────────────────
-    { feature: <><code>npm_config_*</code></>, status: 'yes', note: 'The npm-config env surface overrides the corresponding .npmrc key.' },
-    { feature: <><code>YARN_*</code> config env</>, status: 'yes', note: 'YARN_NPM_REGISTRY_SERVER, YARN_NPM_AUTH_TOKEN, YARN_NPM_AUTH_IDENT, YARN_NODE_LINKER, and the top-level CA, proxy, and strict-SSL values map to the supported subset. Scoped and map-shaped Yarn env config is not translated.' },
+    { feature: <><code>npm_config_*</code></>, status: 'yes' },
+    { feature: <><code>YARN_*</code> config env</>, status: 'yes' },
     // ── Lockfiles ─────────────────────────────────────────────────────
-    { feature: <><code>yarn.lock</code> read</>, status: 'yes', note: 'Both formats read: Classic (no __metadata block, Yarn 1.x) and Berry (__metadata / version, Yarn 2+).' },
-    { feature: <><code>yarn.lock</code> write</>, status: 'yes', note: 'Read-only by design: nub never rewrites an existing yarn.lock. Mutating commands route to yarn, so install and run stay fully usable.' },
-    { feature: <>npm / Bun lockfile round-trip</>, status: 'yes', note: 'package-lock.json v3 and bun.lock round-trip via import; yarn.lock is read-only.' },
+    { feature: <><code>yarn.lock</code></>, status: 'yes' },
+    { feature: <>npm / Bun lockfile round-trip</>, status: 'yes' },
     // ── Linking / install behavior ────────────────────────────────────
-    { feature: <code>nodeLinker: node-modules</code>, status: 'yes', note: 'Maps to the hoisted, flat npm-style node_modules layout.' },
-    { feature: <code>nodeLinker: pnpm</code>, status: 'yes', note: 'Maps to the isolated symlink-into-a-virtual-store layout.' },
+    { feature: <code>nodeLinker: node-modules</code>, status: 'yes' },
+    { feature: <code>nodeLinker: pnpm</code>, status: 'yes' },
     { feature: <code>nodeLinker: pnp</code>, status: 'no', note: 'Nub cannot produce a Plug-n-Play install; it warns and links a node_modules tree instead. A PnP project already installed by Yarn still runs under Nub.' },
-    { feature: <code>supportedArchitectures</code>, status: 'yes', note: 'The platform/arch download controls have no effect; nub resolves optionals against the host platform instead.' },
+    { feature: <code>supportedArchitectures</code>, status: 'yes' },
   ]}
 />
 

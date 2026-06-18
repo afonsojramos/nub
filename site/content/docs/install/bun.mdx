@@ -5,54 +5,42 @@ description: When Bun is the incumbent, Nub installs against it — Bun's text l
 
 When Bun is the incumbent package manager, Nub installs against it and writes no lockfile of its own. The `bun.lock` text lockfile round-trips byte-for-byte; `trustedDependencies`, `overrides` / `resolutions`, `patchedDependencies`, and workspaces + catalogs all resolve the way Bun resolves them. Everything below is gated on Bun being the incumbent — a `packageManager: "bun@…"` field or an existing `bun.lock`.
 
+## Configuration
+
 <CompatTable
   incumbent="bun"
   rows={[
-    // ── Commands ──────────────────────────────────────────────────────
-    { feature: <><code>install</code> / <code>i</code></>, status: 'yes', note: 'Resolves, links, and writes bun.lock on the real engine. Reuses an up-to-date lockfile without re-resolving.' },
-    { feature: <><code>add</code> / <code>remove</code> / <code>update</code></>, status: 'yes', note: 'Mutate the dependency graph, rewrite package.json, and update bun.lock. Aliases a, rm/uninstall, up all resolve.' },
-    { feature: <><code>import</code></>, status: 'yes', note: 'Converts an existing npm, pnpm, or Yarn lockfile into the project lockfile.' },
-    { feature: <><code>dedupe</code> / <code>prune</code></>, status: 'yes', note: 'dedupe collapses duplicate ranges; prune removes extraneous packages.' },
-    { feature: <><code>rebuild</code> / <code>fetch</code></>, status: 'yes', note: 'rebuild reruns build scripts for installed packages; fetch populates the store from the lockfile without linking.' },
-    { feature: <><code>link</code> / <code>unlink</code></>, status: 'yes', note: 'Symlink a local package into a project and remove it again.' },
-    { feature: <><code>patch</code> / <code>patch-commit</code> / <code>patch-remove</code></>, status: 'yes', note: 'The full patch-dependency workflow: edit in a temp dir, commit a .patch, and remove it. patchedDependencies entries apply on install.' },
-    { feature: <><code>approve-builds</code> / <code>ignored-builds</code></>, status: 'yes', note: 'Manage the build-script allowlist interactively and list packages whose build scripts were skipped.' },
-    { feature: <><code>dlx</code> / <code>create</code></>, status: 'yes', note: 'Fetch-and-run a package in a temp environment; scaffold from a create-* starter.' },
-    { feature: <><code>list</code> / <code>why</code> / <code>outdated</code></>, status: 'yes', note: 'Read-only queries over the installed tree: list (ls), dependency paths (why), and out-of-date packages.' },
-    { feature: <><code>audit</code> / <code>licenses</code> / <code>peers</code></>, status: 'yes', note: 'Vulnerability audit, license report, and peer-dependency inspection.' },
-    { feature: <><code>publish</code> / <code>pack</code> / <code>version</code></>, status: 'yes', note: 'Registry publish, tarball packing, and version bumping run on the real engine.' },
-    { feature: <><code>recursive</code> meta-verb</>, status: 'yes', note: 'Spelled as the -r / --filter flags on a verb (nub -r run build), not a recursive subcommand.' },
     // ── Dependency fields ─────────────────────────────────────────────
-    { feature: <><code>dependencies</code> / <code>devDependencies</code></>, status: 'yes', note: 'Resolved and installed exactly as Bun does, with dev/prod splits honored by --prod.' },
-    { feature: <><code>optionalDependencies</code></>, status: 'yes', note: 'Installed when the platform matches; skipped silently otherwise, like Bun.' },
-    { feature: <><code>peerDependencies</code> / <code>peerDependenciesMeta</code></>, status: 'yes', note: 'Peer ranges resolved per Bun rules; peerDependenciesMeta.optional suppresses missing-peer warnings.' },
-    { feature: <code>trustedDependencies</code>, status: 'yes', note: 'The build-script allowlist: listed packages run install/postinstall, everything else installs without building. Honored for bun under v10; bun@10 dropped the field.' },
-    { feature: <code>overrides</code>, status: 'yes', note: 'Version pins applied during resolution. Bun honors top-level overrides and so does Nub under a Bun incumbent.' },
-    { feature: <code>resolutions</code>, status: 'yes', note: 'The Yarn-style top-level field; Bun honors it and so does Nub. overrides wins when both are present, matching Bun.' },
-    { feature: <code>patchedDependencies</code>, status: 'yes', note: 'Patch files declared in package.json apply during install, matching Bun.' },
-    { feature: <><code>packageManager</code> / <code>engines</code></>, status: 'yes', note: 'A packageManager: bun@… declaration selects the Bun incumbent; engines is respected.' },
-    { feature: <><code>scripts</code> + lifecycle</>, status: 'yes', note: 'package.json scripts run through nub run with pre/post lifecycle ordering.' },
+    { feature: <><code>dependencies</code> / <code>devDependencies</code></>, status: 'yes' },
+    { feature: <><code>optionalDependencies</code></>, status: 'yes' },
+    { feature: <><code>peerDependencies</code> / <code>peerDependenciesMeta</code></>, status: 'yes' },
+    { feature: <code>trustedDependencies</code>, status: 'yes' },
+    { feature: <code>overrides</code>, status: 'yes' },
+    { feature: <code>resolutions</code>, status: 'yes' },
+    { feature: <code>patchedDependencies</code>, status: 'yes' },
+    { feature: <><code>packageManager</code> / <code>engines</code></>, status: 'yes' },
+    { feature: <><code>scripts</code> + lifecycle</>, status: 'yes' },
     // ── Workspaces ────────────────────────────────────────────────────
-    { feature: <code>workspaces</code>, status: 'yes', note: 'Workspace membership from the package.json workspaces array, with glob package paths.' },
-    { feature: <code>catalog</code>, status: 'yes', note: 'Bun catalog and named catalogs resolve catalog: dependency ranges; round-trips through bun.lock.' },
-    { feature: <><code>workspace:</code> protocol</>, status: 'yes', note: 'workspace:* / workspace:^ ranges link local members and rewrite to concrete versions on publish.' },
-    { feature: <>workspace selectors</>, status: 'yes', note: 'Name, glob, directory, exclusion, and dependency-traversal selectors all work, plus -r and --filter.' },
+    { feature: <code>workspaces</code>, status: 'yes' },
+    { feature: <code>catalog</code>, status: 'yes' },
+    { feature: <><code>workspace:</code> protocol</>, status: 'yes' },
+    { feature: <>workspace selectors</>, status: 'yes' },
     // ── Config files ──────────────────────────────────────────────────
-    { feature: <code>.npmrc</code>, status: 'yes', note: 'Registry, auth tokens, TLS (cafile, ca, strict-ssl), proxy, and install settings are all read — the most portable home for shared config.' },
-    { feature: <code>bunfig.toml</code>, status: 'yes', note: 'Read in Bun-incumbent projects: [install] registry, scopes, linker, and TLS (cafile path and inline ca PEM). The runtime/test/serve, security-scanner, and cache/global-dir keys have no effect — they are Bun runtime config, not install config.' },
+    { feature: <code>.npmrc</code>, status: 'yes' },
+    { feature: <code>bunfig.toml</code>, status: 'yes' },
     // ── Environment variables ─────────────────────────────────────────
-    { feature: <><code>npm_config_*</code></>, status: 'yes', note: 'The npm-config env surface (npm_config_registry, …) overrides the corresponding .npmrc key.' },
-    { feature: <><code>BUN_CONFIG_REGISTRY</code> / <code>BUN_CONFIG_TOKEN</code></>, status: 'yes', note: 'Set the default registry and its auth token, outranking the file config. Read while Bun is the incumbent.' },
-    { feature: <>wider <code>BUN_CONFIG_*</code> family</>, status: 'yes', note: 'Registry and token are read; the further install-behavior toggles (retry, lockfile, and skip) have no effect. Use .npmrc or the corresponding flags instead.' },
+    { feature: <><code>npm_config_*</code></>, status: 'yes' },
+    { feature: <><code>BUN_CONFIG_REGISTRY</code> / <code>BUN_CONFIG_TOKEN</code></>, status: 'yes' },
+    { feature: <>wider <code>BUN_CONFIG_*</code> family</>, status: 'yes' },
     // ── Lockfiles ─────────────────────────────────────────────────────
-    { feature: <code>bun.lock</code>, status: 'yes', note: 'The Bun 1.2+ text lockfile is read, written, and preserved byte-for-byte.' },
+    { feature: <code>bun.lock</code>, status: 'yes' },
     { feature: <code>bun.lockb</code>, status: 'no', note: 'The legacy binary lockfile is refused, not migrated — run bun install --save-text-lockfile to produce a bun.lock first.' },
-    { feature: <>npm / pnpm lockfile round-trip</>, status: 'yes', note: 'package-lock.json v3 and pnpm-lock.yaml v9 round-trip via import; yarn.lock is read-only.' },
+    { feature: <>npm / pnpm lockfile round-trip</>, status: 'yes' },
     // ── Install behavior ──────────────────────────────────────────────
-    { feature: <><code>linker = "hoisted"</code></>, status: 'yes', note: 'The flat npm-style layout, mapped from bunfig [install].linker onto Nub nodeLinker.' },
-    { feature: <><code>linker = "isolated"</code></>, status: 'yes', note: 'The symlink-into-a-virtual-store layout, mapped from bunfig [install].linker.' },
-    { feature: <>content-addressed store</>, status: 'yes', note: 'A global content-addressed store with hardlink/clone linking into node_modules.' },
-    { feature: <>default-trust floor over <code>bun.lock</code></>, status: 'yes', note: 'The curated auto-trust floor is on; over bun.lock it is inert because the cooling-window gate needs per-package publish-time data the text lockfile carries none of, so trustedDependencies is the allowlist that builds — exactly Bun model.' },
+    { feature: <><code>linker = "hoisted"</code></>, status: 'yes' },
+    { feature: <><code>linker = "isolated"</code></>, status: 'yes' },
+    { feature: <>content-addressed store</>, status: 'yes' },
+    { feature: <>default-trust floor over <code>bun.lock</code></>, status: 'yes' },
   ]}
 />
 

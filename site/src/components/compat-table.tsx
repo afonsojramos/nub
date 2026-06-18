@@ -168,7 +168,7 @@ export function CompatTable({
         <tbody>
           {rows.map((row, i) => (
             <tr key={i} className="border-b border-fd-border/60 last:border-0">
-              <td className="px-4 py-2.5 align-top font-mono text-fd-foreground [&_code]:bg-transparent [&_code]:p-0">
+              <td className="px-4 py-2.5 align-top text-fd-foreground">
                 {row.feature}
               </td>
               {incumbent ? (

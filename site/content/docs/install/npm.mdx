@@ -5,56 +5,40 @@ description: Nub speaks npm's on-disk formats — the version-2 and version-3 lo
 
 The CLI you type is pnpm-shaped; the files Nub reads and writes are npm's. When npm is the incumbent — a `packageManager: "npm@…"` field or an existing `package-lock.json` — Nub reads and writes npm's own `package-lock.json` in its native format, honors npm's config cascade, and introduces no `pnpm-lock.yaml`. Everything below is gated on that.
 
+## Configuration
+
 <CompatTable
   incumbent="npm"
   rows={[
-    // ── Commands ──────────────────────────────────────────────────────
-    { feature: <><code>install</code> / <code>i</code> / <code>ci</code></>, status: 'yes', note: 'Resolves, links, and writes package-lock.json on the real engine. ci installs strictly from the lockfile.' },
-    { feature: <><code>install &lt;pkg&gt;</code> / <code>uninstall</code> / <code>update</code></>, status: 'yes', note: 'Mutate the dependency graph, rewrite package.json, and update the lockfile. Aliases add/a, remove/rm/un, up all resolve.' },
-    { feature: <><code>import</code></>, status: 'yes', note: 'Converts an existing pnpm, Yarn, or Bun lockfile into a package-lock.json.' },
-    { feature: <><code>dedupe</code> / <code>prune</code></>, status: 'yes', note: 'dedupe collapses duplicate ranges; prune removes extraneous packages.' },
-    { feature: <><code>rebuild</code> / <code>fetch</code></>, status: 'yes', note: 'rebuild reruns build scripts for installed packages; fetch populates the store from the lockfile without linking.' },
-    { feature: <><code>link</code> / <code>unlink</code></>, status: 'yes', note: 'Symlink a local package into a project and remove it again.' },
-    { feature: <><code>ls</code> / <code>why</code> / <code>outdated</code></>, status: 'yes', note: 'Read-only queries over the installed tree: ls (list/la/ll), dependency paths (why), and out-of-date packages.' },
-    { feature: <><code>view</code> / <code>search</code></>, status: 'yes', note: 'view (info/show) reads registry metadata; search delegates to npm.' },
-    { feature: <><code>audit</code> / <code>licenses</code></>, status: 'yes', note: 'Vulnerability audit and license report run on the real engine.' },
-    { feature: <><code>publish</code> / <code>pack</code> / <code>version</code></>, status: 'yes', note: 'Registry publish, tarball packing, and version bumping.' },
-    { feature: <><code>dist-tag</code> / <code>deprecate</code> / <code>unpublish</code></>, status: 'yes', note: 'Registry tag management, deprecation, and unpublish.' },
-    { feature: <><code>login</code> / <code>logout</code></>, status: 'yes', note: 'Registry auth, writing the token into the npmrc cascade.' },
-    { feature: <><code>config</code> / <code>get</code> / <code>set</code></>, status: 'yes', note: 'Read and write config across the npmrc scopes.' },
-    { feature: <><code>cache</code></>, status: 'yes', note: 'Content-addressed store and cache forensics.' },
-    { feature: <><code>exec</code> / <code>dlx</code></>, status: 'yes', note: 'Fetch-and-run a package in a temp environment; nubx is the run-it-once spelling.' },
-    { feature: <><code>create</code></>, status: 'yes', note: 'Scaffold from a create-* starter.' },
-    { feature: <><code>run</code> + lifecycle</>, status: 'yes', note: 'package.json scripts run through nub run with pre/post lifecycle ordering.' },
     // ── Dependency fields ─────────────────────────────────────────────
-    { feature: <><code>dependencies</code> / <code>devDependencies</code></>, status: 'yes', note: 'Resolved and installed exactly as npm does, with the dev/prod split honored by --omit=dev / --production.' },
-    { feature: <><code>optionalDependencies</code></>, status: 'yes', note: 'Installed when the platform matches; skipped silently otherwise, like npm.' },
-    { feature: <><code>peerDependencies</code> / <code>peerDependenciesMeta</code></>, status: 'yes', note: 'Peer ranges resolved per npm rules; peerDependenciesMeta.optional suppresses missing-peer warnings.' },
-    { feature: <code>overrides</code>, status: 'yes', note: 'npm\'s own override field, applied during resolution and written into the lockfile (npm 8.3+).' },
-    { feature: <code>resolutions</code>, status: 'yes', note: 'npm ignores this Yarn-style field; Nub mirrors that and drops it with a warning. Use overrides.' },
-    { feature: <><code>engines</code> / <code>os</code> / <code>cpu</code> / <code>libc</code></>, status: 'yes', note: 'Platform fields enforced during resolution; engine-strict honored.' },
-    { feature: <><code>packageManager</code></>, status: 'yes', note: 'A packageManager: npm@… declaration selects the npm incumbent.' },
-    { feature: <><code>bundleDependencies</code></>, status: 'yes', note: 'Bundled deps round-trip through the lockfile and tarball, as npm packs them.' },
+    { feature: <><code>dependencies</code> / <code>devDependencies</code></>, status: 'yes' },
+    { feature: <><code>optionalDependencies</code></>, status: 'yes' },
+    { feature: <><code>peerDependencies</code> / <code>peerDependenciesMeta</code></>, status: 'yes' },
+    { feature: <code>overrides</code>, status: 'yes' },
+    { feature: <code>resolutions</code>, status: 'yes' },
+    { feature: <><code>engines</code> / <code>os</code> / <code>cpu</code> / <code>libc</code></>, status: 'yes' },
+    { feature: <><code>packageManager</code></>, status: 'yes' },
+    { feature: <><code>bundleDependencies</code></>, status: 'yes' },
     // ── Workspaces ────────────────────────────────────────────────────
-    { feature: <><code>workspaces</code></>, status: 'yes', note: 'The neutral workspaces array (and the {packages: […]} object form) defines membership, like npm.' },
-    { feature: <>workspace ranges</>, status: 'yes', note: 'Local members are linked and a published range is written, matching npm\'s workspace resolution.' },
-    { feature: <>workspace selectors</>, status: 'yes', note: 'Name, glob, directory, exclusion, and dependency traversal selectors work, plus -r and --include-workspace-root. npm\'s own --workspace / --workspaces flags resolve too.' },
+    { feature: <><code>workspaces</code></>, status: 'yes' },
+    { feature: <>workspace ranges</>, status: 'yes' },
+    { feature: <>workspace selectors</>, status: 'yes' },
     // ── Config files ──────────────────────────────────────────────────
-    { feature: <>project + user <code>.npmrc</code></>, status: 'yes', note: 'Registry, scoped registries, auth tokens, TLS (cafile, ca, strict-ssl), proxy, and install-shaping keys are all read.' },
-    { feature: <>global + builtin <code>.npmrc</code></>, status: 'yes', note: 'The $PREFIX/etc/npmrc and npm-builtin scopes are read, with npm\'s precedence: CLI flags, env, project, user, global, builtin.' },
+    { feature: <>project + user <code>.npmrc</code></>, status: 'yes' },
+    { feature: <>global + builtin <code>.npmrc</code></>, status: 'yes' },
     // ── Environment variables ─────────────────────────────────────────
-    { feature: <><code>npm_config_*</code></>, status: 'yes', note: 'The npm-config env surface (npm_config_registry, npm_config_cache, …) overrides the corresponding .npmrc key.' },
-    { feature: <><code>NPM_CONFIG_*</code> / <code>NPM_TOKEN</code></>, status: 'yes', note: 'Upper-case config vars and the registry auth token are read.' },
+    { feature: <><code>npm_config_*</code></>, status: 'yes' },
+    { feature: <><code>NPM_CONFIG_*</code> / <code>NPM_TOKEN</code></>, status: 'yes' },
     // ── Lockfiles ─────────────────────────────────────────────────────
-    { feature: <><code>package-lock.json</code> v3</>, status: 'yes', note: 'Read and write in npm\'s native lockfileVersion 3 (npm 9+ default), accepted by npm ci byte-for-byte.' },
-    { feature: <><code>package-lock.json</code> v2</>, status: 'yes', note: 'Read and reproduced byte-for-byte on a no-op install; the first mutating install rewrites it as v3.' },
-    { feature: <><code>npm-shrinkwrap.json</code></>, status: 'yes', note: 'Read and preserved as-is alongside or in place of package-lock.json.' },
+    { feature: <><code>package-lock.json</code> v3</>, status: 'yes' },
+    { feature: <><code>package-lock.json</code> v2</>, status: 'yes' },
+    { feature: <><code>npm-shrinkwrap.json</code></>, status: 'yes' },
     { feature: <>lockfileVersion 1</>, status: 'no', note: 'npm 5–6 format. Re-lock under npm 7+ first; a v1 lockfile is refused rather than misread.' },
-    { feature: <>pnpm / Bun lockfile round-trip</>, status: 'yes', note: 'pnpm-lock.yaml and bun.lock round-trip via import; yarn.lock is read-only (writes refused).' },
+    { feature: <>pnpm / Bun lockfile round-trip</>, status: 'yes' },
     // ── Install behavior ──────────────────────────────────────────────
-    { feature: <>hoisted <code>node_modules</code></>, status: 'yes', note: 'The flat npm-style layout is the default under an npm incumbent.' },
-    { feature: <>lifecycle build scripts</>, status: 'yes', note: 'Run under a deny-by-default trust posture with a curated default-trust floor, not npm\'s run-everything default; nub approve-builds adds an entry. Override per package as needed.' },
-    { feature: <>content-addressed store</>, status: 'yes', note: 'A global content-addressed store with hardlink/clone linking into node_modules, saving disk over npm\'s per-project copies.' },
+    { feature: <>hoisted <code>node_modules</code></>, status: 'yes' },
+    { feature: <>lifecycle build scripts</>, status: 'yes' },
+    { feature: <>content-addressed store</>, status: 'yes' },
   ]}
 />
 
