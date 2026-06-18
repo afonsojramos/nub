@@ -5,13 +5,6 @@
 # All entries are fixable lockfile-writer bugs (vendor/aube fork); scenarios
 # the ecosystem makes impossible are skip_reason() in run.sh instead.
 
-# patched-deps Direction B (#23): nub writes the pnpm patchedDependencies entry
-# as a bare-scalar hash, but pnpm 10.x writes/requires the hash:/path: MAP form,
-# so `pnpm install --frozen-lockfile` rejects nub's lockfile with
-# ERR_PNPM_LOCKFILE_CONFIG_MISMATCH. Write-side inverse of #15. Direction A (nub
-# reads a real pnpm map-form lockfile) passes.
-patched-deps B pnpm #23 nub writes scalar patchedDependencies hash; pnpm 10.x wants the hash/path map
-
 # overrides-ref Direction A is no longer gated: the pnpm.overrides $-ref
 # read-as-drift bug (#16) was fixed by the vendor/aube pin bump c948a38. Its
 # Direction B stays an intended brand-boundary divergence (skip_reason in
