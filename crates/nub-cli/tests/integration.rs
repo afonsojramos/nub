@@ -2949,14 +2949,12 @@ fn provision_failure_carries_branded_code() {
 /// positional before ever checking for the meta-flags, so the two invocations
 /// every CLI is expected to answer (matching `nub --help` / `nub --version`)
 /// failed. argv0 dispatch decides nubx-mode by the binary's file_stem, so the
-/// only faithful test copies the binary to a `nubx`-named path and runs that.
+/// faithful test runs the same binary through a `nubx`-named path.
 #[test]
 fn nubx_help_and_version_do_not_error_on_missing_bin() {
     // Use a thread-unique suffix (PID + monotonic counter) so parallel test
-    // threads never share the same copy target. PID alone is not enough: cargo
-    // test runs threads in one process, and two threads racing on the same copy
-    // destination trigger ETXTBSY on Linux (one fd still open for writing while
-    // another thread tries to exec the file).
+    // threads never share the same alias path. PID alone is not enough: cargo
+    // test runs threads in one process.
     use std::sync::atomic::{AtomicU64, Ordering};
     static NUBX_N: AtomicU64 = AtomicU64::new(0);
     let dir = std::env::temp_dir().join(format!(
@@ -2966,6 +2964,9 @@ fn nubx_help_and_version_do_not_error_on_missing_bin() {
     ));
     std::fs::create_dir_all(&dir).unwrap();
     let nubx = dir.join(if cfg!(windows) { "nubx.exe" } else { "nubx" });
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(nub_binary(), &nubx).expect("symlink nub → nubx");
+    #[cfg(windows)]
     std::fs::copy(nub_binary(), &nubx).expect("copy nub → nubx");
 
     let help = Command::new(&nubx)
