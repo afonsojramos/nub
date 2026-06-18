@@ -143,7 +143,7 @@ pub fn parse_env(content: &str) -> Vec<(String, String)> {
             continue;
         }
 
-        let Some(equal_or_newline) = rest.find(|c| c == '=' || c == '\n') else {
+        let Some(equal_or_newline) = rest.find(['=', '\n']) else {
             break;
         };
         if rest.as_bytes()[equal_or_newline] == b'\n' {
