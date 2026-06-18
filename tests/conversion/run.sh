@@ -134,8 +134,21 @@ assert_node_modules() {
   return $failed
 }
 
+# expected_reason <fixture> <src_pm> <tgt_pm> — look up a known-red conversion.
+# Lines in expected-failures.txt: "<fixture> <src> <tgt> <reason...>".
+# Mirrors the discipline in tests/conformance/expected-failures.txt — the list
+# must SHRINK: a listed leg that now passes is reported XPASS-STALE and fails
+# the run, so the green flip is recorded by deleting the entry in the same
+# commit as the fix.
+expected_reason() {
+  awk -v f="$1" -v s="$2" -v t="$3" \
+    '$1==f && $2==s && $3==t { $1=""; $2=""; $3=""; sub(/^  */,""); print; exit }' \
+    "$HERE/expected-failures.txt" 2>/dev/null
+}
+
 RESULTS=()
 FAILS=0
+XPASSES=0
 
 # leg <fixture> <source_pm> <target_pm> <proj> <log>
 # Runs one conversion leg: source PM installs → nub converts → target PM frozen-installs.
@@ -291,9 +304,18 @@ for fixture in "${FIXTURES[@]}"; do
       ok=0
       leg "$fixture" "$src_pm" "$tgt_pm" "$proj" "$log" || ok=$?
 
-      if [ "$ok" -eq 0 ]; then
+      reason="$(expected_reason "$fixture" "$src_pm" "$tgt_pm")"
+      if [ "$ok" -eq 0 ] && [ -z "$reason" ]; then
         echo "    PASS"
         RESULTS+=("$fixture|${src_pm}→${tgt_pm}|PASS|-")
+      elif [ "$ok" -eq 0 ] && [ -n "$reason" ]; then
+        # Stale expected-failure entry: fix landed without removing the entry.
+        echo "    XPASS-STALE: now passes — remove from expected-failures.txt: $reason"
+        XPASSES=$((XPASSES + 1))
+        RESULTS+=("$fixture|${src_pm}→${tgt_pm}|XPASS-STALE|$reason")
+      elif [ -n "$reason" ]; then
+        echo "    expected red: $reason"
+        RESULTS+=("$fixture|${src_pm}→${tgt_pm}|RED (expected)|$reason")
       else
         FAILS=$((FAILS + 1))
         echo "    FAIL — log: $log"
@@ -325,13 +347,13 @@ for row in "${RESULTS[@]}"; do
 done
 echo ""
 
-if [ "$FAILS" -gt 0 ]; then
-  echo "RESULT: FAIL ($FAILS failure(s))"
+if [ "$FAILS" -gt 0 ] || [ "$XPASSES" -gt 0 ]; then
+  echo "RESULT: FAIL ($FAILS unexpected failure(s), $XPASSES stale expected-failure entry/entries)"
   echo "sandbox kept for forensics: $SANDBOX_ROOT"
   exit 1
 fi
 
-echo "RESULT: OK"
+echo "RESULT: OK (expected reds, if any, are listed above and tracked in expected-failures.txt)"
 if [ "$CREATED_SANDBOX" -eq 1 ] && [ "${KEEP:-0}" != "1" ]; then
   rm -rf "$SANDBOX_ROOT"
 else

@@ -17,40 +17,46 @@ For each ordered pair (source, target) over {npm, pnpm, bun, yarn}:
 
 Same-format pairs (npm→npm etc.) are skipped since no conversion occurs — those are tested by `tests/conformance/`.
 
-## Result matrix (as of 2026-06-11, nub v0.0.33)
+## Result matrix (as of 2026-06-18)
+
+Every leg passes for both fixtures. The npm→pnpm (BUG-1, #19) and npm→bun (BUG-2, #20) legs that failed under nub v0.0.33 are now fixed (the npm lockfile reader populates the importer/packages graph the pnpm/bun writers need). The expected-failures mechanism is wired in (`expected-failures.txt`) and currently empty. Note: the yarn-as-target legs are now the classic-yarn convert→frozen-accept path (the old "must refuse" contract was lifted), not a refusal assertion.
 
 | fixture | conversion | result | notes |
 | --- | --- | --- | --- |
-| simple | npm→pnpm | **FAIL** | BUG-1: importer block empty in converted lockfile |
-| simple | npm→bun | **FAIL** | BUG-2: packages block empty in converted bun.lock |
-| simple | npm→yarn | PASS | (refusal assertion — nub correctly refuses) |
+| simple | npm→pnpm | PASS | (was BUG-1 #19: empty importer — fixed) |
+| simple | npm→bun | PASS | (was BUG-2 #20: empty packages — fixed) |
+| simple | npm→yarn | PASS | (classic yarn.lock, frozen-accepted) |
 | simple | pnpm→npm | PASS | |
 | simple | pnpm→bun | PASS | |
-| simple | pnpm→yarn | PASS | (refusal assertion) |
+| simple | pnpm→yarn | PASS | (classic yarn.lock, frozen-accepted) |
 | simple | bun→npm | PASS | |
 | simple | bun→pnpm | PASS | |
-| simple | bun→yarn | PASS | (refusal assertion) |
+| simple | bun→yarn | PASS | (classic yarn.lock, frozen-accepted) |
 | simple | yarn→npm | PASS | |
 | simple | yarn→pnpm | PASS | |
 | simple | yarn→bun | PASS | |
 | simple | yarn→yarn | PASS | (lockfile kept as-is) |
-| peers | npm→pnpm | **FAIL** | BUG-1: same importer-empty bug |
-| peers | npm→bun | **FAIL** | BUG-2: same packages-empty bug |
-| peers | npm→yarn | PASS | (refusal assertion) |
+| peers | npm→pnpm | PASS | (was BUG-1 #19 — fixed) |
+| peers | npm→bun | PASS | (was BUG-2 #20 — fixed) |
+| peers | npm→yarn | PASS | (classic yarn.lock, frozen-accepted) |
 | peers | pnpm→npm | PASS | |
 | peers | pnpm→bun | PASS | |
-| peers | pnpm→yarn | PASS | (refusal assertion) |
+| peers | pnpm→yarn | PASS | (classic yarn.lock, frozen-accepted) |
 | peers | bun→npm | PASS | |
 | peers | bun→pnpm | PASS | |
-| peers | bun→yarn | PASS | (refusal assertion) |
+| peers | bun→yarn | PASS | (classic yarn.lock, frozen-accepted) |
 | peers | yarn→npm | PASS | |
 | peers | yarn→pnpm | PASS | |
 | peers | yarn→bun | PASS | |
 | peers | yarn→yarn | PASS | (lockfile kept as-is) |
 
-Tool/version matrix: nub v0.0.33, npm 11.13.0, pnpm 10.15.1, yarn 1.13.0, bun 1.3.14.
+Tool/version matrix (2026-06-18): npm 11.13.0, pnpm 10.15.1, yarn 1.13.0, bun 1.3.14.
 
-## Findings (do NOT fix here — separate landing work)
+## Findings
+
+### BUG-1 (#19) and BUG-2 (#20) — FIXED
+
+The two npm-source conversion bugs documented below are fixed as of 2026-06-18: npm→pnpm now writes a fully-populated importer block, and npm→bun a populated packages block. Both legs pass for the simple and peers fixtures (pnpm/bun frozen-accept the converted file). The original analysis is retained below for the record; the `expected-failures.txt` entries that gated them have been removed.
 
 ### BUG-1: npm→pnpm — importer block written empty, pnpm rejects with ERR_PNPM_OUTDATED_LOCKFILE
 

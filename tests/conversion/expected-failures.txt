@@ -1,0 +1,11 @@
+# Known-red cross-format conversion legs: "<fixture> <src_pm> <tgt_pm> <reason>".
+# Same discipline as tests/conformance/expected-failures.txt — this list must
+# SHRINK. A listed leg that now passes is reported XPASS-STALE and fails the
+# run, so the green flip is recorded by deleting the entry in the same commit
+# as the fix. Reasons cite the tracking issue.
+#
+# Currently empty: the previously-documented npm→pnpm (empty importer, #19) and
+# npm→bun (empty packages, #20) conversion bugs are fixed in the current binary
+# — both legs now pass for the simple and peers fixtures (verified 2026-06-18),
+# so they are NOT gated. The mechanism above stays in place for the next
+# regression.
