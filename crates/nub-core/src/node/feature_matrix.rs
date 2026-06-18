@@ -415,6 +415,25 @@ pub fn unflag_flags_for(node_version: &NodeVersion) -> Vec<&'static str> {
         .collect()
 }
 
+/// The lowest Node version at which `flag` EXISTS — the minimum `lo` across every
+/// `Unflag(flag)` band in the matrix — or `None` if no band unflags `flag`.
+///
+/// Once Node ships an experimental flag it keeps ACCEPTING it (as a default-true
+/// no-op bool) at every higher version, so the band where Node REJECTS the flag is
+/// exactly `[0, floor)`. [`super::flags::strip_unsupported_node_options`] uses this
+/// to snip a below-floor gated flag out of an inherited NODE_OPTIONS. Derived from
+/// the same matrix the inject path reads — no parallel floor table.
+pub fn unflag_floor(flag: &str) -> Option<NodeVersion> {
+    FEATURES
+        .iter()
+        .flat_map(|f| f.mitigations.iter())
+        .filter_map(|(band, m)| match m {
+            Mitigation::Unflag(f) if *f == flag => Some(band.lo.clone()),
+            _ => None,
+        })
+        .min()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

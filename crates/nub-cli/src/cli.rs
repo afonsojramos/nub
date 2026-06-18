@@ -3382,6 +3382,16 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     for (k, v) in &env_vars {
         cmd.env(k, v);
     }
+    // This path spawns `node` directly and otherwise relies on OS env inheritance
+    // for NODE_OPTIONS, so an inherited below-floor version-gated flag (e.g.
+    // --experimental-webstorage on Node <22.4) would reach the child unstripped and
+    // abort it with exit 9 ("not allowed in NODE_OPTIONS"). Snip such flags against
+    // this watch invocation's resolved Node version before spawning — mirror of the
+    // two direct-spawn sites in spawn.rs. See flags::strip_unsupported_node_options.
+    if let Some(existing) = &node_options {
+        let stripped = nub_core::node::flags::strip_unsupported_node_options(existing, &node.version);
+        cmd.env("NODE_OPTIONS", stripped);
+    }
     let status = cmd.status()?;
 
     // PATH shim cleanup is handled once at the top level (see `run`).

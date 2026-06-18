@@ -553,7 +553,16 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
             node_opts_parts.push("--experimental-webstorage".to_string());
         }
         if let Some(existing) = existing_opts {
-            node_opts_parts.push(existing);
+            // An INHERITED NODE_OPTIONS (ancestor nub or user-set) is appended
+            // verbatim EXCEPT we first snip any version-gated flag whose floor
+            // exceeds the child's Node version — otherwise a gated flag the child
+            // can't parse (e.g. --experimental-webstorage on Node <22.4) aborts it
+            // with exit 9 ("not allowed in NODE_OPTIONS"). See
+            // flags::strip_unsupported_node_options.
+            let stripped = flags::strip_unsupported_node_options(&existing, &config.node.version);
+            if !stripped.is_empty() {
+                node_opts_parts.push(stripped);
+            }
         }
         if !node_opts_parts.is_empty() {
             cmd.env("NODE_OPTIONS", node_opts_parts.join(" "));
@@ -845,7 +854,14 @@ pub fn compute_augmentation_env(
     let neutralize_localstorage =
         should_neutralize_localstorage(&node_version, &[], existing_node_options.as_deref());
     if let Some(existing) = existing_node_options {
-        node_opts_parts.push(existing);
+        // Snip below-floor version-gated flags out of the inherited NODE_OPTIONS
+        // before appending (mirror of the direct-spawn site above) — a gated flag
+        // the child Node can't parse otherwise aborts it with exit 9. See
+        // flags::strip_unsupported_node_options.
+        let stripped = flags::strip_unsupported_node_options(&existing, &node_version);
+        if !stripped.is_empty() {
+            node_opts_parts.push(stripped);
+        }
     }
 
     let node_options = if node_opts_parts.is_empty() {

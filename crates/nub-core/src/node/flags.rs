@@ -183,6 +183,84 @@ pub fn compute_inject_flags(
     flags
 }
 
+/// The minimum Node version at which `flag` EXISTS (is accepted, not "bad option"
+/// / "not allowed in NODE_OPTIONS") — `None` if `flag` is not a version-gated flag
+/// nub knows about.
+///
+/// This is the SINGLE SOURCE OF TRUTH for gated-flag floors, shared by the inject
+/// path (which adds a gated flag only at/above its floor) and the strip path
+/// (`strip_unsupported_node_options`, which removes a gated flag from an inherited
+/// NODE_OPTIONS when the child Node sits below its floor). It is DERIVED, not a
+/// hand-maintained parallel list:
+///   * the experimental `Unflag(flag)` families come straight from the feature
+///     matrix — a flag's existence floor is the LOWEST `lo` of any band that
+///     unflags it. Once a flag exists Node keeps ACCEPTING it (as a default-true
+///     no-op bool) at every higher version, so the "rejected" band is exactly
+///     `[0, floor)` and a single floor per flag is sufficient.
+///   * `--disable-warning` and `--test-coverage-exclude` are nub's own hygiene
+///     injections (not user-facing *features*), so their floors live as consts in
+///     this module; they are reused here rather than duplicated.
+fn flag_existence_floor(flag: &str) -> Option<NodeVersion> {
+    // nub's own hygiene flags (consts above), not in the feature matrix.
+    if flag == "--disable-warning" {
+        return Some(MIN_DISABLE_WARNING);
+    }
+    if flag == "--test-coverage-exclude" {
+        return Some(MIN_TEST_COVERAGE_EXCLUDE);
+    }
+    // Experimental unflag families: the floor is the lowest `lo` across every
+    // band that unflags this exact flag. Derived from the matrix — no parallel
+    // table. (Webstorage's `--experimental-webstorage` is in the matrix too; its
+    // floor of 22.4.0 is recovered here just like the rest.)
+    feature_matrix::unflag_floor(flag)
+}
+
+/// Remove from an inherited `NODE_OPTIONS` string any version-gated flag whose
+/// existence floor EXCEEDS the child's Node version, preserving every other token
+/// in order. Returns the rewritten string (possibly empty).
+///
+/// ## Why
+/// nub propagates flags to child Node processes via `NODE_OPTIONS`. Flags nub ITSELF
+/// adds this hop are already version-floor-gated. But an INHERITED `NODE_OPTIONS`
+/// (set by an ancestor nub, or genuinely by the user) is otherwise appended
+/// verbatim — so a gated flag in it (`--experimental-webstorage`, `--disable-warning`,
+/// `--test-coverage-exclude`, `--experimental-sqlite`, …) reaches a child Node too
+/// old to parse it and aborts with exit 9 ("not allowed in NODE_OPTIONS"). Snipping
+/// the below-floor flag is strictly better than exit-9, regardless of who set it.
+///
+/// ## Token forms handled
+/// * bare valueless flag — `--experimental-webstorage` (the whole `--experimental-*`
+///   family is boolean): the single token is dropped.
+/// * `--flag=value` — `--disable-warning=ExperimentalWarning`,
+///   `--test-coverage-exclude=glob`: matched by the exact flag name followed by `=`,
+///   then the whole token is dropped.
+///
+/// ## Documented v1 gap (simple path + a loud note, per repo style)
+/// The rare SPACE-separated `--flag value` form (e.g. `--disable-warning Foo` as two
+/// tokens) is OUT OF SCOPE: we do not detect/drop a following value token. `=` is the
+/// conventional NODE_OPTIONS spelling for value-bearing flags, so this gap is uncommon.
+/// If a space-separated below-floor value flag ever appears in an inherited
+/// NODE_OPTIONS, its value token survives and Node may complain about the stray value
+/// — but the gated flag itself (the exit-9 trigger) is still removed.
+pub fn strip_unsupported_node_options(node_options: &str, node_version: &NodeVersion) -> String {
+    node_options
+        .split_whitespace()
+        .filter(|token| {
+            // The flag name is the token up to the first `=` (value form) or the
+            // whole token (valueless form). Match the EXACT name against the floor
+            // table; never a prefix, so an unrelated longer token isn't mangled.
+            let name = token.split('=').next().unwrap_or(token);
+            match flag_existence_floor(name) {
+                // Gated flag below the child's floor → snip it.
+                Some(floor) => *node_version >= floor,
+                // Not a gated flag nub knows about → always preserve.
+                None => true,
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Collect all `--no-experimental-*` and other negation flags from
 /// the user's argv and NODE_OPTIONS.
 fn collect_negations(user_argv: &[String], node_options: Option<&str>) -> Vec<String> {
@@ -455,6 +533,63 @@ mod tests {
         assert!(test_coverage_exclude_supported(&v(22, 5, 0)));
         assert!(test_coverage_exclude_supported(&v(22, 15, 0)));
         assert!(test_coverage_exclude_supported(&v(24, 0, 0)));
+    }
+
+    #[test]
+    fn strips_gated_node_options_flag_below_floor_both_token_forms() {
+        // Node 20.0 is below --experimental-webstorage (22.4), --disable-warning
+        // (20.11), and --test-coverage-exclude (22.5). Both the valueless and the
+        // `=value` forms must be removed, or the child aborts with exit 9.
+        let opts = "--experimental-webstorage --disable-warning=ExperimentalWarning --test-coverage-exclude=foo/**";
+        assert_eq!(strip_unsupported_node_options(opts, &v(20, 0, 0)), "");
+    }
+
+    #[test]
+    fn preserves_gated_node_options_flag_at_or_above_floor() {
+        // On 22.15 all three are at/above floor → kept verbatim, in order.
+        let opts = "--experimental-webstorage --disable-warning=ExperimentalWarning --test-coverage-exclude=foo/**";
+        assert_eq!(strip_unsupported_node_options(opts, &v(22, 15, 0)), opts);
+    }
+
+    #[test]
+    fn preserves_non_gated_node_options_tokens() {
+        // --max-old-space-size is not version-gated by nub; it must survive on any
+        // version, and an unrelated longer token must not be prefix-mangled by the
+        // --experimental-webstorage match.
+        let opts = "--max-old-space-size=4096 --experimental-webstorage-extra=1";
+        assert_eq!(strip_unsupported_node_options(opts, &v(18, 19, 0)), opts);
+    }
+
+    #[test]
+    fn strips_only_the_below_floor_token_keeping_neighbors() {
+        // On 20.11: --disable-warning is now at floor (kept) but
+        // --experimental-webstorage (22.4) and --test-coverage-exclude (22.5) are
+        // still below floor (dropped). Surviving tokens keep their order.
+        let opts = "--experimental-webstorage --disable-warning=ExperimentalWarning --max-old-space-size=2048 --test-coverage-exclude=x";
+        assert_eq!(
+            strip_unsupported_node_options(opts, &v(20, 11, 0)),
+            "--disable-warning=ExperimentalWarning --max-old-space-size=2048"
+        );
+    }
+
+    #[test]
+    fn strip_is_a_no_op_on_empty_node_options() {
+        assert_eq!(strip_unsupported_node_options("", &v(18, 19, 0)), "");
+    }
+
+    #[test]
+    fn watch_file_path_strips_below_floor_node_options_before_child_spawn() {
+        // The `nub watch <file>` path spawns `node` directly and explicitly sets the
+        // stripped NODE_OPTIONS on the child (cli.rs run_watch_file), routing the
+        // inherited value through this fn against the watch invocation's resolved
+        // Node version. On a pin below 22.4, an inherited --experimental-webstorage
+        // must be snipped or the watch child aborts with exit 9; the non-gated
+        // --max-old-space-size neighbor must survive.
+        let inherited = "--experimental-webstorage --max-old-space-size=4096";
+        assert_eq!(
+            strip_unsupported_node_options(inherited, &v(20, 19, 0)),
+            "--max-old-space-size=4096"
+        );
     }
 
     #[test]
