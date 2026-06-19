@@ -211,7 +211,7 @@ What Nub reads and writes keys off the project's incumbent package manager — i
           code: 'YARN_*',
           ok: true,
           partial: true,
-          note: 'Top-level scalar settings only; map-shaped settings not read.',
+          note: 'Reads the registry, auth token/ident, node-linker, CA file, proxy, and strict-SSL env values; map-shaped and scoped env config is not translated.',
         },
         { code: '.npmrc', ok: true },
         { code: 'resolutions', ok: true },

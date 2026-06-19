@@ -46,7 +46,7 @@ Both formats are read:
     { feature: <code>.yarnrc</code>, status: 'partial', note: 'Registry and auth keys only.' },
     // ── Environment variables ─────────────────────────────────────────
     { feature: <><code>npm_config_*</code></>, status: 'yes' },
-    { feature: <><code>YARN_*</code></>, status: 'partial', note: 'Top-level scalar settings only; map-shaped settings not read.' },
+    { feature: <><code>YARN_*</code></>, status: 'partial', note: 'Reads the registry, auth token/ident, node-linker, CA file, proxy, and strict-SSL env values; map-shaped and scoped env config is not translated.' },
     // ── Lockfiles ─────────────────────────────────────────────────────
     { feature: <><code>yarn.lock</code></>, status: 'partial', note: 'Read-only; writes refused.' },
     // ── Linking / install behavior ────────────────────────────────────
