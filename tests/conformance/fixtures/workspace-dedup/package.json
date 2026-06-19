@@ -1,0 +1,12 @@
+{
+  "name": "conform-workspace-dedup",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Drop-in PM conformance fixture (catalogue 3.4): a multi-package `workspaces` monorepo where a dependency resolves to TWO DIFFERENT major versions across the workspace packages — pkg-a depends on lodash@^3.10.1 (resolves 3.10.1), pkg-b on lodash@^4.17.0 (resolves 4.18.1). The real PM must encode BOTH versions in one lockfile (pnpm `lodash@3.10.1` + `lodash@4.18.1` package entries; npm hoists one to the root `node_modules/lodash` packages key and nests the other under `packages/pkg-b/node_modules/lodash`; bun keeps both `lodash@3.x` / `lodash@4.x` keys). This is where hoisting / de-dup divergences live: Direction A asserts nub frozen-reads the two-version lockfile + resolves correct node_modules; Direction B asserts the real PM frozen-accepts nub's two-version lockfile with zero churn. The children use plain registry deps (no `workspace:` protocol) so npm/pnpm/bun all RUN both directions. The root carries one real registry dep (ms) so the node_modules assertion is meaningful.",
+  "workspaces": [
+    "packages/*"
+  ],
+  "dependencies": {
+    "ms": "^2.1.3"
+  }
+}

@@ -36,7 +36,7 @@ NUB="$(cd "$(dirname "$NUB")" && pwd)/$(basename "$NUB")"
 NUB_VERSION="$("$NUB" --version 2>/dev/null || echo '?')"
 
 # Fixture list — each is a subdirectory of fixtures/
-ALL_FIXTURES=(simple peers scoped optional-deps alias file-dep peer-meta deep-graph postinstall overrides-ref overrides-nested patched-deps catalog workspace git-dep platform-optional dist-tag-spec range-forms alias-scoped)
+ALL_FIXTURES=(simple peers scoped optional-deps alias file-dep peer-meta deep-graph postinstall overrides-ref overrides-nested patched-deps catalog workspace workspace-dedup empty-root-importer git-dep platform-optional dist-tag-spec range-forms alias-scoped)
 FIXTURES=("$@")
 [ ${#FIXTURES[@]} -gt 0 ] || FIXTURES=("${ALL_FIXTURES[@]}")
 

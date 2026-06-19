@@ -4,8 +4,56 @@
 # run, so the green flip is recorded by deleting the entry in the same commit
 # as the fix. Reasons cite the tracking issue.
 #
-# Currently empty: the previously-documented npm→pnpm (empty importer, #19) and
-# npm→bun (empty packages, #20) conversion bugs are fixed in the current binary
-# — both legs now pass for the simple and peers fixtures (verified 2026-06-18),
-# so they are NOT gated. The mechanism above stays in place for the next
-# regression.
+# The #19/#20 conversion bugs (npm→pnpm empty importer, npm→bun empty packages)
+# are fixed for the SINGLE-PACKAGE simple/peers fixtures (verified 2026-06-18),
+# so those legs are NOT gated. But the empty-importer bug class is still LIVE on
+# a real WORKSPACE shape — the empty-root-importer fixture (root has no deps,
+# children do) surfaces two distinct conversion-writer defects below.
+
+# empty-root-importer npm→pnpm: nub's pnpm-lockfile writer FABRICATES phantom
+# root dependencies. The root package.json declares NO deps, but the converted
+# pnpm-lock writes the workspace MEMBERS as deps of the root `.` importer:
+#   .:
+#     dependencies:
+#       '@empty/pkg-a': { specifier: '*', version: link:packages/pkg-a }
+#       '@empty/pkg-b': { specifier: '*', version: link:packages/pkg-b }
+# Real pnpm writes `.: {}` for an empty root. pnpm's frozen check then sees
+# specifiers in the lockfile that aren't in package.json →
+# ERR_PNPM_OUTDATED_LOCKFILE ("specifiers in the lockfile don't match
+# specifiers in package.json"). The child importers + package entries (ms,
+# kleur) ARE now written correctly; the bug is the phantom root `link:` deps.
+# (npm→bun PASSES — bun's converted lock keeps the root workspace block empty.)
+# Fixable in the pnpm-lockfile conversion writer (vendor/aube fork): do not
+# inject workspace members into the root importer when the root has no deps.
+empty-root-importer npm pnpm nub injects phantom workspace-member link: deps into the empty root `.` importer; pnpm frozen-rejects ERR_PNPM_OUTDATED_LOCKFILE (specifiers don't match package.json)
+
+# empty-root-importer pnpm→npm (and any *→npm workspace conversion): SAME root
+# cause as the conformance workspace-dedup/empty-root-importer Direction-B npm
+# failures — nub's npm-lockfile writer drops all workspace MEMBER entries. The
+# converted package-lock has only a lone `packages[""]`; the member importers
+# (`packages/pkg-a`, `packages/pkg-b`), workspace symlink entries, and child
+# deps (ms@2.1.3, kleur@4.1.5) are all missing, so `npm ci` reports
+# "Missing: @empty/pkg-a, @empty/pkg-b, ms@2.1.3, kleur@4.1.5 from lock file".
+# (bun→npm PASSES for this fixture, so the converted graph itself is sound when
+# read from bun; the defect is specifically the npm-lockfile WRITE of a
+# workspace.) Same fix as the conformance npm-writer gate: emit member importers
+# + child package entries in the npm-lockfile writer (vendor/aube fork).
+empty-root-importer pnpm npm nub's npm-lockfile writer omits workspace member importers + child dep entries; npm ci reports Missing @empty/pkg-a, @empty/pkg-b, ms@2.1.3, kleur@4.1.5
+
+# empty-root-importer yarn→{npm,pnpm,bun}: converting a yarn-SOURCE workspace
+# drops every workspace MEMBER. A yarn v1 `yarn.lock` encodes NO workspace
+# structure — it is a flat resolution list (`ms@^2.1.3`, `kleur@^4.1.5`) with no
+# importer/member mapping; workspace membership lives only in package.json
+# `workspaces` + the on-disk tree. nub reconstructs ONLY the root importer
+# (pnpm `.: {}`, bun `workspaces: {"":...}`, npm lone `packages[""]`) and loses
+# `packages/pkg-a` / `packages/pkg-b` and their deps entirely, so the target PM
+# frozen-rejects (pnpm ERR_PNPM_OUTDATED_LOCKFILE on the child package.json; npm
+# "Missing" members; bun "lockfile had changes"). (yarn→yarn PASSES — the flat
+# yarn.lock round-trips unchanged; non-yarn sources convert their workspace
+# members fine, so this is specifically the yarn-source workspace-reconstruction
+# path.) Fixable in the yarn-source conversion reader (vendor/aube fork):
+# reconstruct member importers from package.json `workspaces` + the on-disk
+# package tree, not just the flat yarn.lock.
+empty-root-importer yarn npm yarn-source workspace conversion drops all members (yarn.lock encodes no workspace structure); npm ci reports Missing members
+empty-root-importer yarn pnpm yarn-source workspace conversion drops all members (yarn.lock encodes no workspace structure); pnpm frozen-rejects ERR_PNPM_OUTDATED_LOCKFILE on child package.json
+empty-root-importer yarn bun yarn-source workspace conversion drops all members (yarn.lock encodes no workspace structure); bun frozen-rejects lockfile had changes

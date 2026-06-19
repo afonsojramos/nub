@@ -89,7 +89,7 @@ jobs:
         # keep the PR gate fast; the nightly job runs it.
         env:
           SKIP_YARN: "1"
-        run: tests/conformance/run.sh target/debug/nub simple scoped peers overrides-ref overrides-nested patched-deps catalog workspace git-dep platform-optional dist-tag-spec range-forms alias-scoped
+        run: tests/conformance/run.sh target/debug/nub simple scoped peers overrides-ref overrides-nested patched-deps catalog workspace workspace-dedup empty-root-importer git-dep platform-optional dist-tag-spec range-forms alias-scoped
 
   # ── Nightly: full conformance matrix + full conversion matrix ─────────────
   conformance-nightly:

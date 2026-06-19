@@ -49,7 +49,7 @@ NUB="$(cd "$(dirname "$NUB")" && pwd)/$(basename "$NUB")"
 
 NUB_VERSION="$("$NUB" --version 2>/dev/null || echo '?')"
 
-ALL_FIXTURES=(simple peers)
+ALL_FIXTURES=(simple peers empty-root-importer)
 FIXTURES=("$@")
 [ ${#FIXTURES[@]} -gt 0 ] || FIXTURES=("${ALL_FIXTURES[@]}")
 
@@ -158,8 +158,14 @@ leg() {
   # ── Step 1: source PM writes its lockfile ─────────────────────────────────
   case "$src_pm" in
     npm)
-      step "$log" "npm install (write lockfile)" \
-        npm install --prefix "$proj" \
+      # Run npm in-place (cd), NOT via `npm install --prefix "$proj"`: for a
+      # WORKSPACE fixture `--prefix <abs-path>` makes npm key the lockfile by
+      # absolute `../../<path>/node_modules/...` paths and drop the workspace
+      # children's transitive package entries — a malformed source lockfile that
+      # has nothing to do with nub. `cd` (like every other src PM below) yields
+      # npm's real in-place workspace lockfile.
+      ( cd "$proj" && step "$log" "npm install (write lockfile)" \
+        npm install ) \
         || { echo "FAILED: npm install failed" >>"$log"; return 1; }
       [ -f "$proj/package-lock.json" ] \
         || { echo "FAILED: no package-lock.json written" >>"$log"; return 1; }

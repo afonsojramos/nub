@@ -9,3 +9,32 @@
 # read-as-drift bug (#16) was fixed by the vendor/aube pin bump c948a38. Its
 # Direction B stays an intended brand-boundary divergence (skip_reason in
 # run.sh), not a bug.
+
+# workspace-dedup Direction B on npm: nub's npm-format (package-lock.json)
+# writer does not emit workspace MEMBER entries. For a `workspaces` monorepo it
+# writes only the root importer ("" + root deps); it omits the per-member
+# importer entries (`packages/pkg-a`, `packages/pkg-b`), the workspace symlink
+# entries (`node_modules/@dedup/pkg-a`, …), AND every child dependency package
+# entry — here both deduped lodash versions (`node_modules/lodash` 3.10.1 hoisted
+# + `packages/pkg-b/node_modules/lodash` 4.18.1 nested). `npm ci` then reports
+# "Missing: @dedup/pkg-a@1.0.0 / lodash@3.10.1 / lodash@4.18.1 from lock file"
+# and refuses. (pnpm + bun Direction B PASS — their writers emit both importers
+# and both lodash version keys; npm Direction A PASSES — nub frozen-READS npm's
+# two-version workspace lockfile fine. This is specifically the npm-lockfile
+# WRITE path for workspaces.) Fixable in the npm-lockfile writer (vendor/aube
+# fork): emit member importer entries + child package entries (incl. the nested
+# de-duped second version) the way `npm install` does for a workspace.
+workspace-dedup B npm nub's npm-lockfile writer omits workspace member importers + child dep entries (incl. both deduped lodash versions); npm ci reports Missing @dedup/pkg-a, lodash@3.10.1, lodash@4.18.1
+
+# empty-root-importer Direction B on npm: SAME root cause as workspace-dedup B
+# npm — the npm-lockfile writer drops all workspace members. Here the root has
+# NO deps, so nub writes a lone `packages[""]` (name/version only) and omits the
+# `packages/pkg-a` / `packages/pkg-b` importer entries, the `node_modules/@empty/*`
+# symlink entries, and the child deps (`ms@2.1.3`, `kleur@4.1.5`). `npm ci`
+# reports "Missing: @empty/pkg-a, @empty/pkg-b, ms@2.1.3, kleur@4.1.5 from lock
+# file". (Direction A PASSES — nub frozen-READS npm's empty-root workspace
+# lockfile fine, so the empty-`.`-importer READ path is healthy; this is the
+# WRITE path only. pnpm/bun/yarn Direction B PASS.) Same fix as workspace-dedup B
+# npm: emit workspace member importer entries + child package entries in the
+# npm-lockfile writer (vendor/aube fork).
+empty-root-importer B npm nub's npm-lockfile writer omits workspace member importers + child dep entries (empty-root case); npm ci reports Missing @empty/pkg-a, @empty/pkg-b, ms@2.1.3, kleur@4.1.5

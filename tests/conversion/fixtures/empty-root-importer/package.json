@@ -1,0 +1,9 @@
+{
+  "name": "conversion-empty-root-importer",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Cross-format conversion fixture (catalogue 3.7 / conversion BUG-1/BUG-2 class): a `workspaces` monorepo with an EMPTY root importer (root has no deps; children pkg-a→ms, pkg-b→kleur). The empty-`.`-importer / empty-root-`packages` shape is the original npm->pnpm (empty importer, #19) and npm->bun (empty packages, #20) conversion trouble spot. A source PM writes its workspace lockfile, `nub pm use <target>` converts it, the target PM frozen-accepts. Regression guard for the empty-importer conversion bug class on a real workspace shape (the simple/peers conversion fixtures are single-package and never exercise an empty root importer).",
+  "workspaces": [
+    "packages/*"
+  ]
+}

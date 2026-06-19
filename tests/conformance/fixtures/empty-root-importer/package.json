@@ -1,0 +1,9 @@
+{
+  "name": "conform-empty-root-importer",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Drop-in PM conformance fixture (catalogue 3.7): a `workspaces` monorepo whose ROOT package has NO dependencies, while the child packages do (pkg-a → ms, pkg-b → kleur). The real PM serializes an EMPTY root importer — pnpm writes `.: {}` in its `importers:` map; npm writes a root `packages[\"\"]` entry with no `dependencies` key; bun writes an empty root workspace block. This empty-`.`-importer / empty-root-packages shape is exactly the npm→pnpm / npm→bun conversion trouble spot (the empty-importer / empty-packages conversion bug class). Direction A asserts nub frozen-reads the empty-root lockfile + populates the child node_modules; Direction B asserts the real PM frozen-accepts nub's lockfile with zero churn. Children use plain registry deps (no `workspace:` protocol) so npm/pnpm/bun all RUN both directions. The root deliberately carries no deps — the empty importer IS the fixture.",
+  "workspaces": [
+    "packages/*"
+  ]
+}
