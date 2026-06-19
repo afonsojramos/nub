@@ -17,3 +17,16 @@
 # the key mismatch. Fixable in the yarn-classic conversion writer (vendor/aube
 # fork): emit the declared-spec key + real version + resolved URL for git deps.
 git-dep B yarn nub pm use yarn keys git deps by tarball URL with version 0.0.0; yarn expects the declared git-spec key + real version + resolved URL
+
+# git-dep Direction B on bun: nub COLLAPSES a git dependency into its resolved
+# npm-REGISTRY entry — it writes `is-number@7.0.0` / `ms@2.1.3` with the
+# registry tarball integrity, instead of bun's git form
+# (`is-number@github:jonschlinkert/is-number#98e8ff1` with the github tarball
+# tag + the git-tarball integrity). bun then fetches from github per the
+# package.json spec and the registry integrity does not match the github
+# tarball -> IntegrityCheckFailed on `bun install --frozen-lockfile`. (Passes
+# spuriously on a dev host whose bun cache already holds the extracted packages
+# and skips re-verification; fails deterministically on a clean Linux/CI box.)
+# Fixable in the bun-lockfile writer (vendor/aube fork): emit the git-spec key +
+# git-tarball integrity for github/git deps, not the resolved registry entry.
+git-dep B bun nub collapses git deps into the resolved npm-registry entry+integrity; bun expects the git-spec key + git-tarball integrity -> IntegrityCheckFailed on clean Linux

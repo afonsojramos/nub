@@ -303,7 +303,14 @@ dir_b() {
         || { echo "FAILED: npm rejected nub's lockfile (ci)" >>"$log"; return 1; }
       ;;
     bun)
-      ( cd "$proj" && step "$log" "bun frozen accept" \
+      # Frozen-accept must verify package integrity from a COLD cache — exactly
+      # what a clean CI box does. A warm dev-host bun cache (packages already
+      # extracted) skips re-verification and would mask a wrong-integrity
+      # lockfile (e.g. nub collapsing a git dep into its registry entry), making
+      # the result diverge from CI. Point bun at a throwaway cache dir so the
+      # integrity check is real on every platform.
+      ( cd "$proj" && step "$log" "bun frozen accept (cold cache)" \
+        env BUN_INSTALL_CACHE_DIR="$proj/.bun-cold-cache" \
         bun install --frozen-lockfile ) \
         || { echo "FAILED: bun rejected nub's lockfile (--frozen-lockfile)" >>"$log"; return 1; }
       ;;
