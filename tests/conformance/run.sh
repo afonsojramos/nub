@@ -36,7 +36,7 @@ NUB="$(cd "$(dirname "$NUB")" && pwd)/$(basename "$NUB")"
 NUB_VERSION="$("$NUB" --version 2>/dev/null || echo '?')"
 
 # Fixture list — each is a subdirectory of fixtures/
-ALL_FIXTURES=(simple peers scoped optional-deps alias file-dep peer-meta deep-graph postinstall overrides-ref overrides-nested patched-deps catalog workspace workspace-dedup empty-root-importer git-dep platform-optional dist-tag-spec range-forms alias-scoped has-install-script)
+ALL_FIXTURES=(simple peers scoped optional-deps alias file-dep peer-meta deep-graph postinstall overrides-ref overrides-nested patched-deps catalog workspace workspace-dedup empty-root-importer git-dep platform-optional dist-tag-spec range-forms alias-scoped has-install-script injected-deps)
 FIXTURES=("$@")
 [ ${#FIXTURES[@]} -gt 0 ] || FIXTURES=("${ALL_FIXTURES[@]}")
 
@@ -170,6 +170,17 @@ skip_reason() {
       # has meaning against npm.
       [ "$pm" != "npm" ] && echo "$fixture exercises npm-only package-lock.json keys; not represented in $pm"
       ;;
+    injected-deps)
+      # dependenciesMeta.injected is a pnpm-only mechanism — npm/yarn/bun have
+      # no equivalent (and reject the workspace:* protocol the fixture uses).
+      # pnpm records no inject entry in the lockfile (the dep is a plain
+      # `link:`), so the round-trip is stable and pnpm-scoped: it guards that
+      # nub frozen-reads pnpm's injected-workspace lockfile (dir A) and pnpm
+      # frozen-accepts nub's with zero churn (dir B). The hard-copy-vs-symlink
+      # layout is config/version-sensitive and outside the lockfile — not
+      # asserted here.
+      [ "$pm" != "pnpm" ] && echo "$fixture exercises pnpm-only injected deps; not represented in $pm"
+      ;;
   esac
 
   # overrides-ref carries a `pnpm.overrides` block. A nub-identity project
@@ -184,6 +195,18 @@ skip_reason() {
   # now its regression guard.)
   case "$fixture--$dir" in
     overrides-ref--B) echo "nub-identity ignores pnpm.overrides by design (brand boundary); pnpm honors it" ;;
+
+    # injected-deps Direction B is an ecosystem impossibility, not a nub bug:
+    # pnpm 10.15.1 cannot round-trip dependenciesMeta.injected under
+    # --frozen-lockfile even from ITS OWN lockfile. It writes a lockfile whose
+    # importer block omits the `dependenciesMeta` field, then on frozen-verify
+    # demands it back and self-rejects with ERR_PNPM_OUTDATED_LOCKFILE
+    # ("importer dependencies meta (undefined) doesn't match package manifest").
+    # nub's lockfile is byte-identical to pnpm's here, so no lockfile nub could
+    # write would frozen-pass — a pnpm self-inconsistency. Direction A (nub
+    # frozen-READS pnpm's injected-workspace lockfile and materializes the dep)
+    # is the meaningful guard and passes.
+    injected-deps--B) echo "pnpm 10.15.1 self-rejects injected dependenciesMeta under --frozen-lockfile (writes a lockfile it then won't frozen-accept); not a nub bug" ;;
   esac
 }
 

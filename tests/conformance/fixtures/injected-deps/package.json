@@ -1,0 +1,12 @@
+{
+  "name": "conform-injected-deps",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Drop-in PM conformance fixture: a workspace where the app consumes a sibling lib via `workspace:*` AND marks it `dependenciesMeta.injected`. Injection is a pnpm-only mechanism (npm/yarn/bun have no equivalent), so npm/yarn/bun are pnpm-scoped out via skip_reason. Direction A (pnpm writes pnpm-lock.yaml → nub frozen-reads it and materializes the injected dep) is the meaningful guard and passes. Direction B is skip-by-design: pnpm 10.15.1 cannot round-trip dependenciesMeta.injected under --frozen-lockfile even from its OWN lockfile — it writes an importer block that omits the dependenciesMeta field, then on frozen-verify demands it back and self-rejects with ERR_PNPM_OUTDATED_LOCKFILE. nub's lockfile is byte-identical to pnpm's, so no nub-written lockfile could frozen-pass; this is a pnpm self-inconsistency, not a nub bug. The on-disk hard-copy-vs-symlink layout is config/version-sensitive and lives outside the lockfile, so it is NOT asserted here. The root carries one registry dep so the node_modules assertion is meaningful.",
+  "workspaces": [
+    "packages/*"
+  ],
+  "dependencies": {
+    "ms": "^2.1.3"
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "name": "@conform/lib",
+  "version": "1.0.0",
+  "dependencies": {
+    "kleur": "^4.1.5"
+  }
+}
