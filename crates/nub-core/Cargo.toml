@@ -16,6 +16,7 @@ flate2.workspace = true
 glob-match = "0.2"
 liblzma.workspace = true
 reqwest.workspace = true
+rustc-hash.workspace = true
 semver = "1"
 serde.workspace = true
 # `preserve_order` makes serde_json::Map keep INSERTION order (IndexMap-backed).
@@ -39,3 +40,15 @@ tracing.workspace = true
 # Gated so the Windows build (which uses a different ctrl_c path) doesn't pull it.
 [target.'cfg(unix)'.dependencies]
 signal-hook = "0.3"
+
+[dev-dependencies]
+criterion.workspace = true
+blake3 = { workspace = true }
+
+[[bench]]
+name = "workspace_filter"
+harness = false
+
+[[bench]]
+name = "cache_hash"
+harness = false

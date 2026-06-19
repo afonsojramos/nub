@@ -11,6 +11,17 @@ members = ["crates/nub-cli", "crates/nub-core", "crates/nub-native"]
 exclude = ["vendor/aube"]
 resolver = "3"
 
+# Tier-0 release tuning. `panic` is intentionally left at the default "unwind":
+# Cargo's panic setting is profile-global (not per-crate), and crates/nub-native
+# is a cdylib loaded INTO the user's Node process via napi — abort-on-panic there
+# would kill the Node process instead of surfacing a JS error. Governs the nub
+# workspace only; vendor/aube is a separate workspace.
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+
 [workspace.package]
 version = "0.1.3"
 edition = "2024"
@@ -20,6 +31,9 @@ repository = "https://github.com/nubjs/nub"
 
 [workspace.dependencies]
 anyhow = "1"
+# Benchmark harness (dev-only). `harness = false` benches drive criterion's own
+# main(); see crates/*/benches and benches/README.md.
+criterion = "0.5"
 camino = "1"
 ctrlc = "3"
 libc = "0.2"
@@ -52,6 +66,9 @@ yaml-rust2 = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+# blake3 content hash for the transpile-cache key + integrity prefix (SIMD,
+# replaced SHA-256 on the warm path; schema v4).
+blake3 = "1"
 # Node provisioning download (wiki/research/node-provisioning-implementation.md):
 # blocking + rustls (no OpenSSL/cross-compile pain), native roots so corporate
 # MITM CAs work, socks for SOCKS proxies. reqwest gives HTTP(S)_PROXY/NO_PROXY
@@ -60,10 +77,10 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 # xz extraction of the dist tarball. liblzma's "static" vendors its own C liblzma
 # (no system dependency, no shell-out to tar/xz); the maintained xz2 successor.
 liblzma = { version = "0.4", features = ["static"] }
-# gzip decode of PM registry tarballs (npm publishes .tgz = gzip+tar). Pure Rust
-# (miniz_oxide backend), no system zlib / shell-out — mirrors the in-process,
-# verify-then-extract posture of the Node xz path.
-flate2 = "1"
+# gzip decode of PM registry tarballs (npm publishes .tgz = gzip+tar). zlib-ng
+# backend (built from bundled C via cmake/cc), no system zlib / shell-out —
+# mirrors the in-process, verify-then-extract posture of the Node xz path.
+flate2 = { version = "1", default-features = false, features = ["zlib-ng"] }
 tar = "0.4"
 # Windows .zip Node-dist extraction (pure Rust, no shell-out to Expand-Archive /
 # tar.exe). default-features off + `deflate` only: Node's win-<arch>.zip uses
