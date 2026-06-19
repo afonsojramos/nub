@@ -76,7 +76,11 @@ pub fn transform_cached(
     format_byte: String,
     cache_dir: Option<String>,
 ) -> Result<CachedTransformResult> {
-    let format = if format_byte == "c" { "commonjs" } else { "module" };
+    let format = if format_byte == "c" {
+        "commonjs"
+    } else {
+        "module"
+    };
 
     let key = cache_key(&source, &ext, &tsconfig_hash, &pkg_type);
 

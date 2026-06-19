@@ -443,7 +443,7 @@ fn npmrc_value_in(paths: &[PathBuf], key: &str) -> Option<String> {
             let content = std::fs::read_to_string(path).ok()?;
             npmrc_scalar(&content, key)
         })
-        .last()
+        .next_back()
 }
 
 fn npmrc_bool_set_in(paths: &[PathBuf], key: &str) -> bool {
