@@ -3874,15 +3874,15 @@ fn run_upgrade(version: Option<&str>, dry_run: bool, _yes: bool) -> Result<i32> 
     if dry_run {
         match &channel {
             UpgradeChannel::Npm => {
-                println!("nub upgrade: would upgrade to {target} via npm");
+                println!("would upgrade to {target} via npm");
                 println!("  command: {}", npm_upgrade_command(target));
             }
             UpgradeChannel::Homebrew => {
-                println!("nub upgrade: would upgrade to {target} via homebrew");
+                println!("would upgrade to {target} via homebrew");
                 println!("  command: brew upgrade nub");
             }
             UpgradeChannel::SelfOwned { install_dir } => {
-                println!("nub upgrade: would upgrade to {target} via self-owned (~/.nub)");
+                println!("would upgrade to {target} via self-owned (~/.nub)");
                 if cfg!(windows) {
                     println!(
                         "  note: a real self-owned upgrade is unsupported on Windows; \
@@ -3918,9 +3918,7 @@ fn run_upgrade(version: Option<&str>, dry_run: bool, _yes: bool) -> Result<i32> 
                 }
             }
             UpgradeChannel::Unknown => {
-                println!(
-                    "nub upgrade: would upgrade to {target}, but the install channel is unknown"
-                );
+                println!("would upgrade to {target}, but the install channel is unknown");
                 println!("  binary: {bin_str}");
                 println!("  manual: {}", npm_upgrade_command(target));
             }
@@ -3931,7 +3929,7 @@ fn run_upgrade(version: Option<&str>, dry_run: bool, _yes: bool) -> Result<i32> 
     match channel {
         UpgradeChannel::Npm => {
             let cmd = npm_upgrade_command(target);
-            println!("nub upgrade: running `{cmd}`");
+            println!("running `{cmd}`");
             let status = npm_upgrade_command_invocation(target).status()?;
             let code = nub_core::node::spawn::exit_code_from_status(&status);
             // npm wrote a NEW inode; existing shim hardlinks still carry the
@@ -3944,7 +3942,7 @@ fn run_upgrade(version: Option<&str>, dry_run: bool, _yes: bool) -> Result<i32> 
             Ok(code)
         }
         UpgradeChannel::Homebrew => {
-            println!("nub upgrade: running `brew upgrade nub`");
+            println!("running `brew upgrade nub`");
             let status = std::process::Command::new("brew")
                 .arg("upgrade")
                 .arg("nub")
@@ -4066,7 +4064,7 @@ fn perform_selfowned_upgrade(install_dir: &Path, version_spec: &str) -> Result<(
     let url = tarball_url(&version, target);
     let sha_url = checksum_url(&version, target);
 
-    println!("nub upgrade: upgrading to v{version} ({target})");
+    println!("upgrading to v{version} ({target})");
 
     // Stage downloads + extraction in a sibling temp dir on the same filesystem
     // as the install so the final swap is a same-filesystem rename (atomic).
@@ -4147,10 +4145,7 @@ fn perform_selfowned_upgrade(install_dir: &Path, version_spec: &str) -> Result<(
         })?;
     }
 
-    println!(
-        "nub upgrade: installed v{version} to {}",
-        install_dir.display()
-    );
+    println!("installed v{version} to {}", install_dir.display());
     Ok(())
 }
 
@@ -5275,7 +5270,7 @@ fn run_pm_shim_install() -> Result<i32> {
         parts.push(format!("{current} already current"));
     }
     println!(
-        "nub pm shim: {} entries in {} ({})",
+        "{} entries in {} ({})",
         report.len(),
         dir.display(),
         parts.join(", ")
@@ -5370,9 +5365,9 @@ fn run_pm_unshim() -> Result<i32> {
     let existed = shim::remove_shims()?;
     let changed = shim::remove_path_block()?;
     if existed {
-        println!("nub pm unshim: removed {}", dir.display());
+        println!("removed {}", dir.display());
     } else {
-        println!("nub pm unshim: {} was already gone", dir.display());
+        println!("{} was already gone", dir.display());
     }
     for profile in &changed {
         println!("  PATH: removed the shims block from {}", profile.display());
@@ -5848,9 +5843,9 @@ fn relink_shims_after_selfowned(install_dir: &Path) {
     }
     let new_bin = install_dir.join("bin").join("nub");
     match nub_core::pm::shim::install_shims(&new_bin) {
-        Ok(_) => println!("nub upgrade: re-linked the PM shims in {}", dir.display()),
+        Ok(_) => println!("re-linked the PM shims in {}", dir.display()),
         Err(e) => {
-            eprintln!("nub upgrade: could not re-link the PM shims: {e:#} — run `nub pm shim`.")
+            eprintln!("could not re-link the PM shims: {e:#} — run `nub pm shim`.")
         }
     }
 }
