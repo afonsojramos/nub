@@ -9,6 +9,11 @@ name: Lockfile round-trip
 #     churn (`cmp`). The real PM judges BOTH directions.
 #   tests/conversion/run.sh — cross-format migration: a source PM writes its
 #     lockfile, `nub pm use <target>` converts it, the target PM frozen-accepts.
+#   tests/mutation/run-mutations.sh — the WRITE-PATH differential: a real PM
+#     installs, nub MUTATES (`nub add`/`remove`/`update`), the real PM frozen-
+#     accepts nub's mutated lockfile AND the mutated graph is semantically equal
+#     to what the real PM produces for the same mutation. NIGHTLY only (heavier:
+#     two installs + a mutation per leg).
 #
 # Both harnesses invoke pnpm/npm/bun/yarn by name off PATH (NOT npx-pinned like
 # tests/aube-conformance/run.sh), so this workflow pins each one deterministically
@@ -19,7 +24,9 @@ name: Lockfile round-trip
 # Two cadences:
 #   per-PR  — the conformance harness on a TIGHT, fast fixture set, so it doesn't
 #             heavily gate every push. Skips yarn (slowest leg) to stay quick.
-#   nightly — the FULL conformance matrix + the full conversion matrix, all PMs.
+#   nightly — the FULL conformance matrix + the full conversion matrix + the
+#             mutation differential, all PMs. The mutation leg is nightly-only
+#             (no per-PR gate) because it is heavier than a static round-trip.
 #
 # Real registry installs run, so these need network. Known-red scenarios live in
 # each harness's expected-failures.txt and must shrink (a stale entry fails the
@@ -31,6 +38,7 @@ on:
     paths:
       - "tests/conformance/**"
       - "tests/conversion/**"
+      - "tests/mutation/**"
       - "crates/**"
       - "vendor/aube"
       - "Cargo.lock"
@@ -40,6 +48,7 @@ on:
     paths:
       - "tests/conformance/**"
       - "tests/conversion/**"
+      - "tests/mutation/**"
       - ".github/workflows/lockfile-roundtrip.yml"
   schedule:
     # Nightly full matrix at 07:00 UTC.
@@ -152,3 +161,35 @@ jobs:
         # env above) to pin the packageManager declaration nub writes — aligned
         # with the PATH-installed versions.
         run: tests/conversion/run.sh target/debug/nub
+
+  # ── Nightly: lockfile MUTATION differential (write-path) ──────────────────
+  # Heavier than a static round-trip (two installs + a mutation per leg), so it
+  # is nightly/dispatch only — no per-PR gate. yarn is read-only in nub (no
+  # write-path mutation), so this matrix is npm/pnpm/bun and skips the yarn pin.
+  mutation-nightly:
+    name: lockfile mutation differential, full matrix (ubuntu)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - name: Init vendor/aube submodule
+        run: git submodule update --init vendor/aube
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_PIN }}
+      - name: Pin package managers on PATH
+        run: |
+          npm install -g "npm@${NPM_PIN}" "pnpm@${PNPM_PIN}"
+          echo "npm:  $(npm --version)"
+          echo "pnpm: $(pnpm --version)"
+          echo "bun:  $(bun --version)"
+      - name: Build nub
+        run: cargo build -p nub-cli
+      - name: Lockfile mutation differential (add / remove / update)
+        run: tests/mutation/run-mutations.sh target/debug/nub

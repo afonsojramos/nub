@@ -1,0 +1,31 @@
+# Known-red nub MUTATION scenarios: "<fixture> <pm> <reason>".
+# Same discipline as tests/conformance/expected-failures.txt — this list must
+# SHRINK. A listed scenario that passes fails the run (XPASS-STALE) so the green
+# flip is recorded by deleting the entry in the same commit as the fix.
+#
+# A red here is a nub WRITE-PATH divergence the differential caught: nub's
+# mutated lockfile/manifest does not match what the real PM produces for the
+# SAME mutation (add/remove/update). Each entry names the exact divergence
+# richly enough to open a fix thread.
+
+# -- npm save-prefix: bare-version add does not apply npm's `^` save-prefix --
+# When the user runs `nub add <pkg>@<exact>` or `nub add <pkg>` (a BARE version,
+# no range operator), nub writes the resolved version VERBATIM to package.json
+# dependencies (e.g. `"ms": "2.1.3"`). Real npm's `npm install <pkg>` applies its
+# save-prefix default (`^`) and writes `"ms": "^2.1.3"`. nub instead mirrors
+# PNPM's convention (preserve the user-typed spec literally -- pnpm/bun legs PASS
+# because real pnpm/bun ALSO write bare `2.1.3` for an explicit version), and
+# applies that one convention regardless of the active PM. So on an npm-format
+# project the manifest spec diverges: nub `2.1.3` vs npm `^2.1.3`.
+#   - An EXPLICIT range is preserved correctly by nub on all PMs (verified:
+#     `nub add ms@^2.1.3` -> `^2.1.3`, `nub add ms@~2.1.0` -> `~2.1.0`). The bug
+#     is ONLY the bare-exact-version -> save-prefix-default path, and ONLY npm.
+#   - Per-PM CONVENTION question (mirror each PM's save-prefix when nub mirrors
+#     that PM, vs one universal literal-preserve rule) -> product decision,
+#     recommend-only. Fix candidate: when the target lockfile is npm-format and
+#     the user supplied a bare version, default the saved spec to `^<version>`.
+# Both npm legs below are the SAME root cause (m1 = top-level bare add; m3 = bare
+# add that also pulls a second is-odd version -- dedup is correct, only the
+# manifest spec diverges).
+m1-add-noconflict npm bare-version add writes literal 2.1.3 to package.json; npm applies its ^ save-prefix and writes ^2.1.3 (nub mirrors pnpm literal-preserve regardless of active PM; npm-save-prefix convention question -- recommend-only)
+m3-add-dedup npm bare-version add of is-even writes literal 1.0.0 to package.json; npm writes ^1.0.0 (same npm save-prefix divergence as m1; de-dup itself is correct -- frozen npm ci accepts, only manifest spec differs)

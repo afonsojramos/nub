@@ -1,0 +1,3 @@
+# M.1 — add a dep with no graph overlap. The new dep (ms@2.1.3, zero deps)
+# must appear; the existing is-odd subtree must NOT churn.
+add: ms@2.1.3

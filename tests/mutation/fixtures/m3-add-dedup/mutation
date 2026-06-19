@@ -1,0 +1,5 @@
+# M.3 — adding is-even@1.0.0 pulls is-odd@^0.1.2 (a SECOND is-odd version,
+# distinct from the root's is-odd@3.0.1) plus is-number@3 (vs is-odd@3's
+# is-number@6). The de-dup decision — keep two is-odd / two is-number versions
+# vs collapse — must match the real PM. THE hardest, highest-signal mutation.
+add: is-even@1.0.0

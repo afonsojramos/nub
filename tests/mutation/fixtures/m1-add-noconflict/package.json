@@ -1,0 +1,8 @@
+{
+  "name": "m1-add-noconflict",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "is-odd": "3.0.1"
+  }
+}

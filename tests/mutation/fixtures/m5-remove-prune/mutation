@@ -1,0 +1,5 @@
+# M.5 — removing is-even must prune its exclusive subtree (is-odd@0.1.2,
+# is-number@3.0.0, kind-of@3.2.2, is-buffer@1.1.6) but MUST keep the still-
+# needed is-odd@3.0.1 + is-number@6.0.0 (is-odd@3's subtree). Over-prune
+# (drops a still-needed pkg) or under-prune (leaves an orphan) both diverge.
+remove: is-even
