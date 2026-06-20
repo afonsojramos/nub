@@ -36,7 +36,7 @@ NUB="$(cd "$(dirname "$NUB")" && pwd)/$(basename "$NUB")"
 NUB_VERSION="$("$NUB" --version 2>/dev/null || echo '?')"
 
 # Fixture list — each is a subdirectory of fixtures/
-ALL_FIXTURES=(simple peers scoped optional-deps alias file-dep peer-meta deep-graph postinstall overrides-ref overrides-nested patched-deps catalog workspace workspace-dedup empty-root-importer git-dep platform-optional dist-tag-spec range-forms alias-scoped has-install-script injected-deps)
+ALL_FIXTURES=(simple peers scoped optional-deps alias file-dep peer-meta deep-graph postinstall overrides-ref overrides-nested patched-deps patched-deps-no-newline catalog workspace workspace-dedup empty-root-importer git-dep platform-optional dist-tag-spec range-forms alias-scoped has-install-script injected-deps)
 FIXTURES=("$@")
 [ ${#FIXTURES[@]} -gt 0 ] || FIXTURES=("${ALL_FIXTURES[@]}")
 
@@ -154,12 +154,12 @@ skip_reason() {
   # Feature fixtures are scoped to the PM whose lockfile encodes the diverging
   # field — running them against the other PMs would test nothing. Skip the
   # off-PM combos by design (the field has no representation there).
-  #   overrides-ref / overrides-nested / patched-deps / catalog : pnpm-only
-  #     (pnpm.overrides $-refs, nested overrides, patchedDependencies, and
-  #     catalogs live in pnpm-workspace.yaml / pnpm-lock.yaml — no npm/bun/yarn
-  #     lockfile representation).
+  #   overrides-ref / overrides-nested / patched-deps / patched-deps-no-newline
+  #   / catalog : pnpm-only (pnpm.overrides $-refs, nested overrides,
+  #     patchedDependencies, and catalogs live in pnpm-workspace.yaml /
+  #     pnpm-lock.yaml — no npm/bun/yarn lockfile representation).
   case "$fixture" in
-    overrides-ref|overrides-nested|patched-deps|catalog)
+    overrides-ref|overrides-nested|patched-deps|patched-deps-no-newline|catalog)
       [ "$pm" != "pnpm" ] && echo "$fixture exercises a pnpm-only lockfile field; not represented in $pm"
       ;;
     has-install-script)

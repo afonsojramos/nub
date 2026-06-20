@@ -1,0 +1,9 @@
+{
+  "name": "conform-patched-deps-no-newline",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Drop-in PM conformance fixture for issue #25: a pnpm patchedDependencies patch whose final hunk context line is the patched file's last line with NO trailing newline, and pnpm omits the `\\ No newline at end of file` marker. is-odd@3.0.1's README.md ends without a trailing newline. pnpm + GNU patch apply this; git apply (and a strict applier) reject it with `error applying hunk #1`. nub must apply it with pnpm's tolerance so a pnpm-patched dep that installs under pnpm also installs under nub.",
+  "dependencies": {
+    "is-odd": "3.0.1"
+  }
+}

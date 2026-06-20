@@ -69,6 +69,7 @@ These exercise the bug-prone pnpm lockfile fields. Each is scoped to pnpm via `s
 | `catalog` | a pnpm catalog (`ms: catalog:` resolved through the default catalog in `pnpm-workspace.yaml`); the `catalogs:` lockfile section | PASS A+B |
 | `overrides-nested` | a scoped nested override (`debug>ms: 2.1.3` in `pnpm-workspace.yaml`); the `overrides:` lockfile block | PASS A+B |
 | `patched-deps` | `patchedDependencies` (a real `is-odd@3.0.1` patch declared in `pnpm-workspace.yaml`); the hash/path patch map | A: PASS; B: known-red (#23) |
+| `patched-deps-no-newline` | issue #25: a `patchedDependencies` patch (a real `pnpm patch` of `is-odd@3.0.1`) whose final hunk context line is the patched file's last line with no trailing newline, where pnpm omits the `\ No newline at end of file` marker. `is-odd`'s `README.md` ships without a trailing newline. pnpm + GNU `patch` apply this; `git apply` and a strict byte-exact applier reject it (`error applying hunk #1`). Guards that nub applies it with pnpm's tolerance. | A: PASS |
 | `overrides-ref` | a `pnpm.overrides` `$`-ref (`ms: $ms`) recorded resolved in the lockfile but literal in `package.json` | A: PASS (was #16); B: skip-by-design |
 | `injected-deps` | a workspace consuming a sibling via `workspace:*` + `dependenciesMeta.injected`; guards that nub frozen-reads pnpm's injected-workspace lockfile and materializes the dep. The hard-copy-vs-symlink layout is config/version-sensitive and outside the lockfile, so it is not asserted. | A: PASS; B: skip-by-design |
 
