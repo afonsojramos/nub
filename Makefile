@@ -17,6 +17,12 @@ build: addon
 addon:
 	$(CARGO) build -p nub-native $(CARGO_FLAGS)
 	@mkdir -p runtime/addons
+	@# rm before cp: overwriting the .node in place keeps the old inode, and on
+	@# macOS the kernel's cached code-signing validation is keyed to that inode's
+	@# original cs_mtime. A new dylib written to the same inode trips a cs_mtime
+	@# mismatch -> tainted pages -> the loading process is SIGKILLed (exit 137).
+	@# Removing first forces a fresh inode with a clean code-signing cache.
+	@rm -f runtime/addons/nub-native.node
 	@cp target/$(PROFILE)/libnub_native.dylib runtime/addons/nub-native.node 2>/dev/null || \
 	 cp target/$(PROFILE)/libnub_native.so runtime/addons/nub-native.node 2>/dev/null || \
 	 cp target/$(PROFILE)/nub_native.dll runtime/addons/nub-native.node 2>/dev/null || \
