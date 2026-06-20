@@ -49,6 +49,8 @@ make version-check        # MUST pass: cross-package consistency + @oxc-project/
 
 ## Step 3 — Commit, tag, push (this triggers CI)
 
+The release version-bump + tag commit is a deliberate EXCEPTION to the repo's PR-default flow (AGENTS.md "Default to a PR flow") — it commits DIRECTLY to `main`. The release is tag-triggered and not a reviewable feature diff, so no PR.
+
 ```bash
 git add -A
 git status                # SANITY: commit ONLY the version-bump files. If unrelated WIP is in the

@@ -25,9 +25,45 @@ These are the load-bearing, always-true architectural premises of nub. They are 
 - [`wiki/whitepaper.md`](wiki/whitepaper.md) — the framing / pitch / launch post. The current ship-scope intent in user-facing form.
 - [`epics/v0.1/todo.md`](epics/v0.1/todo.md) — the v0.1 implementation epic; the to-do list driving the build. Each epic lives in its own subdirectory under `epics/` (the version dimension is in the directory name, not the filename), with a `prompt.md` (framing + how-to-execute) alongside `todo.md` (the phase-by-phase work). Successor epics (`epics/v0.2/`, `epics/v0.1-edits/`, etc.) land as sibling directories.
 
-## Work directly on `main` — no branches, no stashes, no worktrees
+## Default to a PR flow (from a git WORKTREE) — never branch/reset/stash the SHARED `main` tree
 
-**All work happens on `main`.** This is a pre-release product with multiple agents often running in parallel, and the trunk is `main`. Do **not** `git checkout -b`, do **not** `git stash`, do **not** switch branches, and do **not** create git worktrees for isolation. Those operations on a shared working tree cause parallel agents to clobber each other's uncommitted work and orphan commits onto dead branches. The rule that prevents it: **commit small and often, directly to `main`.** In an interactive foreground session, do not commit unless the user explicitly asks you to commit/push; leave verified edits uncommitted and report the status. Committed work cannot be clobbered; frequent commits shrink the window where loose uncommitted work can be lost to near-zero. If you need to preserve WIP, *commit* it — never stash it. Releases are tag-triggered and deliberate (see [Releasing](#releasing)), so a busy `main` with in-progress work is expected and fine.
+**Substantive nub-repo work lands via a PULL REQUEST opened from an isolated git WORKTREE; the SHARED working tree always stays on `main` and is NEVER branched, reset, or stashed.** (This REVERSES the long-standing "all work on `main`, no branches/worktrees" rule — but ONLY for the nub repo's own work; `vendor/aube` keeps its existing `nub-fork` workflow, below.) The PR flow buys visibility, trackability, and a shareable link to announce a feature landing. The old rule existed because branching/resetting/stashing a SHARED working tree clobbers parallel agents and orphans their WIP — the PR flow MUST NOT reintroduce that, so the isolation is structural: each landing agent works in its OWN worktree, and the shared tree is left alone.
+
+**The proven worktree workflow (copy-pasteable; validated end-to-end 2026-06-20, submodule + build + push + PR all clean):**
+
+```sh
+# 1. From the shared main tree — create a worktree on a new branch. This checks out ONLY tracked
+#    source (NOT target/ .repos/ node_modules) and shares the .git object store — no re-clone, no
+#    re-fetch. The shared main tree is UNTOUCHED and stays on main.
+git worktree add /tmp/nub-wt-<slug> -b <branch-slug>
+
+# 2. The aube submodule is NOT auto-populated in a new worktree — init it explicitly (re-clones into
+#    the worktree's own vendor/aube; required for any build that touches the PM engine).
+git -C /tmp/nub-wt-<slug> submodule update --init vendor/aube
+
+# 3. Give the worktree its OWN target dir so a sibling's build can't contaminate it.
+cd /tmp/nub-wt-<slug> && export CARGO_TARGET_DIR=/tmp/nub-wt-<slug>-target
+cargo check -p nub-cli                       # or the scoped test for what changed
+
+# 4. Commit your work, push the branch, open the PR — then REPORT the URL. Do NOT merge your own PR.
+git add <your files> && git commit -m "<subject>"
+git push -u origin <branch-slug>
+gh pr create --title "<title>" --body "<body>"   # report the returned URL to the orchestrator
+
+# 5. After the orchestrator merges, clean up (orchestrator or agent):
+git worktree remove /tmp/nub-wt-<slug> --force && rm -rf /tmp/nub-wt-<slug>-target
+```
+
+The rules around it:
+
+- **NEVER `git checkout -b` / `git reset` / `git checkout <ref>` / `git stash` / `git branch` on the SHARED working tree.** Those bypass the file-tool clobber safety and wipe concurrent agents' uncommitted WIP. The shared tree stays on `main`; all branching happens in a worktree.
+- **The orchestrator reviews + merges the PR.** A landing agent OPENS the PR and reports the URL; it does NOT merge its own PR. Merge once green + reviewed.
+- **EXCEPTIONS that still commit DIRECTLY to `main`** (no PR): the orchestrator's own control-surface edits (`.fray/` threads, the fray skill, hooks, `AGENTS.md`, memory); trivial doc/typo fixes; and the version-bump + tag release commits (the release flow is its own tag-triggered thing — see [Releasing](#releasing)). Use judgment: a PR is for substantive code/feature/behavior changes where a reviewable, announceable diff adds value.
+- **`vendor/aube` changes do NOT use this PR flow** — they keep the `nub-fork` workflow (commits on `nub-fork`, push before pin bump, contribution PRs to `jdx/aube`; see the aube section below).
+- **Full `git clone --depth 1 "file://$PWD"` + own `CARGO_TARGET_DIR` is reserved for the fully-isolated trustworthy-build case** (aube fork patches whose deliverable is "passes tests + preserves upstream behavior"). Worktrees are the default for ordinary PR-landing work; a clone is the heavier tool for when an agent needs a tree no sibling can touch at all.
+- **Commit small and often within your worktree; never stash.** In an interactive foreground session, do not push/PR unless the user asks; leave verified edits committed in the worktree (or uncommitted on the shared tree for tiny exception-class edits) and report status. Committed work cannot be clobbered; if you need to preserve WIP, *commit* it.
+
+A busy `main` with several open PRs and in-progress worktrees is expected and fine.
 
 ## The repo is PUBLIC — never commit internal discussion (HIGH PRIORITY)
 
