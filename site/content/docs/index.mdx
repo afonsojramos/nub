@@ -25,6 +25,22 @@ There is no new runtime to adopt and no lock-in: every augmentation rides on Nod
 - **A watcher** — restart on changes to your source, your `.env*` files, and your `tsconfig.json`, driven by the dependency graph. See [watch](/docs/watch).
 - **A GitHub Action** — swap `actions/setup-node` for `nubjs/setup-nub` to install Nub, warm the project's Node, and cache Nub's store in CI. See [GitHub Action](/docs/setup-nub).
 
+## What Nub replaces
+
+| Nub | What it does | Replaces |
+|---|---|---|
+| `nub <file>` | Runs `.js`/`.ts`/`.jsx`/`.tsx` on stock Node, transpiling TypeScript and JSX, loading `.env*` files, and polyfilling modern globals per Node-version band. A drop-in for `node <file>`. | `node`, `tsx`, `ts-node`, `dotenv-cli`, `node --env-file`, `deno run`, `bun run` (for the TS/JSX/`.env` cases) |
+| `nub install` / `i` / `ci` | Resolves and links `node_modules` from the project's existing lockfile. pnpm-compatible CLI; round-trips npm, pnpm, and bun lockfiles; reads yarn. | `npm install`, `pnpm install`, `yarn install`, `bun install`, `npm ci` |
+| `nub add` / `remove` / `update` | Mutates dependencies and the lockfile (`add`/`remove`/`update`, plus `dedupe`, `prune`, `rebuild`, `link`/`unlink`, `import`, `patch`). | `npm add`/`rm`, `pnpm add`/`remove`/`update`, `yarn add`/`remove`, `bun add`/`remove` |
+| `nub outdated` / `why` / `audit` | Inspects the dependency graph: `outdated`, `why`, `audit` (with `--fix`), `licenses`, `query`, `info`/`view`. | `npm outdated`/`why`/`audit`, `pnpm outdated`/`why`/`audit`, `yarn audit` |
+| `nub pack` / `publish` | Packages and publishes: `pack`, `publish`, `version`, `dist-tag`, `deprecate`, `owner`, `login`/`logout`. | `npm pack`/`publish`/`version`, `pnpm publish`, `yarn pack`/`npm publish` |
+| `nubx` / `nub dlx` | Runs a binary from `node_modules/.bin`, fetching it from the registry on a local miss. | `npx`, `pnpm dlx`, `pnpm exec`, `yarn dlx`, `bunx` |
+| `nub run <script>` | Runs a `package.json` script with the full lifecycle-hook and workspace surface, including recursive runs with `--filter` and topological ordering. Not a task-graph runner with cross-run caching. | `npm run`, `pnpm run`, `yarn run`, `bun run`, `pnpm -r` (recursive scripts) |
+| `nub watch` | Restarts the entry point on changes to its resolved import graph, `.env*` files, `tsconfig.json`, and manifest. Restart-mode, on Node's own `--watch`; not HMR. | `nodemon`, `node --watch`, `tsx watch`, `bun --watch` |
+| `nub node` | Provisions and pins Node versions, fetching from nodejs.org on demand (`install`, `ls`, `uninstall`, `pin`). | `nvm`, `fnm`, `n`, `volta`, `asdf` (the Node plugin) |
+| `nub pm use` | Provisions and runs the exact package-manager version a project pins in `packageManager`. | `corepack` |
+| `nub upgrade` | Self-updates the `nub` binary to the latest release. | the tool's own installer |
+
 ## Install
 
 ```bash
