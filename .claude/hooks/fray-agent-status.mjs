@@ -107,16 +107,28 @@ export function findAgentOutputAge(agentId, now = Date.now()) {
  * @param {number|null} a.ageMin        minutes since the agent's output last changed, or
  *                                       null when there is no readable output file.
  * @param {boolean} a.threadTerminal    is the owning thread's status done/dismissed?
+ * @param {boolean} [a.threadActive]    is the owning thread's status exactly `active`? Only
+ *                                       `active` threads are "being worked", so only they
+ *                                       can have an UNRECONCILED/idle agent. Deliberately-
+ *                                       PARKED phases (needs-decision/blocked/planned/
+ *                                       enqueued/todo) with done agents are EXPECTED, not a
+ *                                       drift signal — never flagged. (Defaults true for
+ *                                       backward-compat when a caller doesn't pass it.)
  * @param {number} [a.idleMin]          idle threshold (min). Default {@link DEFAULT_IDLE_MIN}.
  * @param {number} [a.frozenMin]        frozen/stale threshold (min). Default {@link DEFAULT_FROZEN_MIN}.
  * @returns {'terminal'|'unreconciled'|'idle'|'fresh'|'unknown'}
  */
-export function deriveAgentState({ ageMin, threadTerminal, idleMin = DEFAULT_IDLE_MIN, frozenMin = DEFAULT_FROZEN_MIN }) {
+export function deriveAgentState({ ageMin, threadTerminal, threadActive = true, idleMin = DEFAULT_IDLE_MIN, frozenMin = DEFAULT_FROZEN_MIN }) {
   // A reconciled thread is the orchestrator's deliberate "I folded this" signal — the
   // only mutable bit in the whole loop, and it lives on the THREAD, not the agent.
   if (threadTerminal) return 'terminal';
+  // PARKED (non-terminal but not `active`: needs-decision/blocked/planned/enqueued/todo)
+  // is also a deliberate orchestrator state — a stale/done agent on a parked thread is
+  // EXPECTED (the work finished, the thread awaits a human/dep), NOT unreconciled. Only an
+  // `active` thread is "being worked right now", so only it can have a drift-signal agent.
+  if (!threadActive) return 'terminal';
   if (ageMin == null) return 'unknown'; // no activity file → can't judge (fail-open)
-  if (ageMin > frozenMin) return 'unreconciled'; // stale output + non-terminal thread = the signal that matters
+  if (ageMin > frozenMin) return 'unreconciled'; // stale output + ACTIVE thread = the signal that matters
   if (ageMin > idleMin) return 'idle';
   return 'fresh';
 }

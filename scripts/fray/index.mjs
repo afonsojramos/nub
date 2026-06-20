@@ -164,12 +164,13 @@ const threads = readdirSync(FRAY_DIR)
     const dependsOn = parseList(fm?.depends_on);
     const next = nextStep(src);
     const threadTerminal = TERMINAL.includes(fm?.status ?? '?');
+    const threadActive = fm?.status === 'active'; // only `active` threads flag UNRECONCILED/idle agents; parked phases are expected to hold done agents
     // Agent liveness is DERIVED, never read from a stored per-agent flag: the binding
     // carries only immutable `{id, label}`; state comes from output-file age (ground
     // truth) + the thread's own status, via the SAME derivation the Stop hook uses.
     const agents = parseAgents(src).map((a) => ({
       ...a,
-      state: deriveAgentState({ ageMin: findAgentOutputAge(a.id), threadTerminal }),
+      state: deriveAgentState({ ageMin: findAgentOutputAge(a.id), threadTerminal, threadActive }),
     }));
     return {
       id,
