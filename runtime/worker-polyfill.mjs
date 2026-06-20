@@ -114,15 +114,23 @@ export function installWorkerPolyfill() {
       // the main entry), and there is no classic/importScripts mode. Passing
       // `type` through to NodeWorker is harmless — it ignores unknown options.
       // See wiki/research/worker-polyfill.md.
-      // Node rejects `--harmony-*` flags in Worker execArgv
-      // (ERR_WORKER_INVALID_EXEC_ARGV) — they are V8 internals that are not
-      // valid in the worker context. Strip them before forwarding: any
-      // harmony-implying flag that nub injects (e.g. --experimental-shadow-realm
-      // implies --harmony-shadow-realm) must not reach NodeWorker's execArgv.
+      // Node rejects flags in Worker execArgv that imply V8 `--harmony-*`
+      // staging flags (ERR_WORKER_INVALID_EXEC_ARGV). Two categories to strip:
+      //   1. `--harmony-*` flags themselves (V8 internals; may land in execArgv
+      //      on some Node versions when the parent injected an `--experimental-*`
+      //      that implies them).
+      //   2. `--experimental-shadow-realm` — implies `--harmony-shadow-realm`
+      //      (Node rejects it for workers even though the flag name is not
+      //      `--harmony-*`). This is the only nub-injected experimental flag
+      //      that has this property; other experimentals nub injects
+      //      (--experimental-vm-modules, --experimental-wasm-modules, etc.) are
+      //      fine in worker execArgv. Extend this filter if Node adds more.
       this.#worker = new NodeWorker(workerPath, {
         ...options,
         eval: false,
-        execArgv: process.execArgv.filter(f => !f.startsWith("--harmony")),
+        execArgv: process.execArgv.filter(
+          f => !f.startsWith("--harmony") && f !== "--experimental-shadow-realm"
+        ),
       });
 
       this.#worker.on("message", (data) => {
