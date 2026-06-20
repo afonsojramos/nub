@@ -166,21 +166,20 @@ if [ ! -x "$JEST_BIN" ]; then
 fi
 
 # Run from inside the pnpm package so its jest preset (registry-mock) is active.
-# Scope to the front-door suite (pnpm/test/) ONLY when no explicit jest args were
-# given — a passed file/pattern would otherwise be OR'd with --testPathPattern
-# and pull in extra suites.
-SCOPE_ARGS=(--testPathPattern 'test/')
-if [ ${#JEST_EXTRA[@]} -gt 0 ]; then
-  SCOPE_ARGS=()
+# Build one jest arg list so empty cases are safe under `set -u` (bash 3.2 errors
+# on "${empty[@]}"). Scope to the front-door suite (pnpm/test/) ONLY when no
+# explicit jest args were given — a passed file/pattern would otherwise be OR'd
+# with --testPathPattern and pull in extra suites.
+JEST_ARGS=(--json --outputFile="$RESULTS_JSON" --ci)
+if [ "${#JEST_EXTRA[@]}" -gt 0 ]; then
+  JEST_ARGS+=("${JEST_EXTRA[@]}")
+else
+  JEST_ARGS+=(--testPathPattern 'test/')
 fi
 cd "$CLONE_DIR/pnpm"
 set +e
 NODE_OPTIONS="${NODE_OPTIONS:-} --experimental-vm-modules --disable-warning=ExperimentalWarning --disable-warning=DEP0169" \
-  "$JEST_BIN" \
-    --json --outputFile="$RESULTS_JSON" \
-    "${SCOPE_ARGS[@]}" \
-    --ci \
-    "${JEST_EXTRA[@]}"
+  "$JEST_BIN" "${JEST_ARGS[@]}"
 JEST_EXIT=$?
 set -e
 
@@ -192,10 +191,13 @@ if [ ! -f "$RESULTS_JSON" ]; then
 fi
 
 # Stale-allowlist detection only on a whole-suite run (no extra jest filters).
-CLASSIFY_FULL=()
-if [ ${#JEST_EXTRA[@]} -eq 0 ]; then
-  CLASSIFY_FULL=(--full)
+# Build the arg list as a single array so an empty case is safe under `set -u`
+# (bash 3.2 errors on "${empty[@]}" without a default).
+CLASSIFY_ARGS=()
+if [ "${#JEST_EXTRA[@]}" -eq 0 ]; then
+  CLASSIFY_ARGS+=(--full)
 fi
-node "$HERE/classify.mjs" "${CLASSIFY_FULL[@]}" "$RESULTS_JSON" "$HERE/allowlist.txt"
+CLASSIFY_ARGS+=("$RESULTS_JSON" "$HERE/allowlist.txt")
+node "$HERE/classify.mjs" "${CLASSIFY_ARGS[@]}"
 CLASSIFY_EXIT=$?
 exit $CLASSIFY_EXIT

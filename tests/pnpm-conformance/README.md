@@ -85,13 +85,22 @@ The classifier flags two failure modes that fail the run:
 
 ## Proven runs (2026-06-20, local, nub v0.1.7, pnpm v10.15.1)
 
-| test file | result |
-| --- | --- |
-| `test/cli.ts` | 19 passed, 0 surprises |
-| `test/config.ts` | passed |
-| `test/root.ts` | 1 passed; `pnpm root -g` is a KNOWN divergence (global-root layout) |
+Full front-door suite (`pnpm/test/`, 50 suites / 337 tests, ~10 min on an M-series host):
 
-`pnpm root -g` was a NEW finding surfaced by this harness: nub's global root is `<pnpm-home>/global-nub`, pnpm's is `<pnpm-home>/global/<LAYOUT_VERSION>/node_modules` — a global-install layout decision, allowlisted pending a product call (not auto-changed).
+```
+PASS:          293
+KNOWN-FAILING: 25   (allowlisted divergences)
+SURPRISE:      0
+STALE-ALLOW:   0    → exit 0 (green-or-known-failing)
+```
+
+The 25 known-failing tests cluster into three real divergence families the harness surfaced (all allowlisted pending a maintainer call — none auto-changed):
+
+- **Global install / link / bin / `-g`** (~13 tests) — nub uses its own global layout (`<pnpm-home>/global-nub`) and does not replicate pnpm's global install/link/uninstall/`bin -g`/`root -g` surface.
+- **`packageManager`-field version management** (~9 tests) — nub does not replicate pnpm's `manage-package-manager-versions` / version-switch / self-update-edits-the-field behavior. One path leaks nub-identity text where pnpm emits "This project is configured to use yarn".
+- **Per-package node version, empty-dir package.json creation, dlx `.npmrc` registry** — assorted single-test divergences.
+
+These route to the `pnpm-compat-harness-bugs` thread to decide, per family, which (if any) should converge to pnpm's behavior vs stay an intended divergence.
 
 ## Keeping the pin in sync
 

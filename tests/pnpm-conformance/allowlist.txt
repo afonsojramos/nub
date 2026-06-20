@@ -5,55 +5,54 @@
 # A failure whose name matches ANY line here is reported as KNOWN-FAILING (not a
 # surprise) and does not fail the run. A failure matching NO line is a SURPRISE
 # and fails the run. Keep this list SHORT and each entry justified — a stale
-# entry (a test that now passes but is still allowlisted) is also flagged, so
-# this file shrinks as bugs are fixed and stays honest about intended divergence.
+# entry (a test that now passes but is still allowlisted) is flagged on a full
+# run, so this file stays honest and shrinks as bugs are fixed.
+#
+# IMPORTANT: every entry below was verified to MATCH a real failing test in a
+# full-suite run (pnpm v10.15.1, 2026-06-20). Do not add speculative entries —
+# an entry that matches nothing fails the run as STALE. When you fix the
+# underlying divergence, remove its line here.
 #
 # Format:  one match-substring per line; blank lines and #-comments ignored.
-# Comment the WHY directly above each cluster.
 
-# ── Codified INTENTIONAL divergences (nub is deliberately not pnpm here) ──────
-# These are product decisions, documented in the wiki — nub diverges on purpose.
-
-# (1) `nub upgrade` is self-update of the nub binary, NOT pnpm's `update` alias.
-#     pnpm aliases `pnpm upgrade` -> `pnpm update`; nub does not. Any test that
-#     drives `pnpm upgrade` expecting dependency-update behavior diverges.
-upgrade
-
-# (2) No implicit script shortcuts. pnpm lets `pnpm <script>` run a package.json
-#     script without `run`; nub requires the explicit `run` verb. Tests that rely
-#     on the bare-script shortcut diverge.
-should run a script that is specified as a command shortcut
-runs a script
-command shortcut
-
-# (3) Top-level file-run command surface. `nub <file>` runs a file; pnpm has no
-#     such top-level verb. Any suite test depending on pnpm's top-level argument
-#     handling for non-verb tokens may diverge.
-# (no current black-box test exercises this directly; placeholder cluster kept
-#  empty intentionally — add a precise match only if a real test surfaces it.)
-
-# (4) Global root layout. `pnpm root -g` prints
-#     <pnpm-home>/global/<LAYOUT_VERSION>/node_modules; nub uses its own global
-#     layout (<pnpm-home>/global-nub). Surfaced by this harness on 2026-06-20
-#     (test/root.ts "pnpm root -g"). Whether to mirror pnpm's exact path is a
-#     product decision (global install layout) — allowlisted as a known
-#     divergence pending that call, NOT auto-changed.
+# ── Global install / link / bin family (~13 tests) ───────────────────────────
+# nub uses its own global package layout (<pnpm-home>/global-nub) and does not
+# replicate pnpm's global install/link/uninstall/bin/-g surface. This is a
+# global-install design area the maintainer owns — allowlisted as a known
+# divergence cluster pending a product call (NOT auto-changed). Tracked for the
+# `pnpm-compat-harness-bugs` thread to triage which (if any) should converge.
 pnpm root -g
+pnpm bin -g
+global installation
+run lifecycle events of global packages
+global update to latest
+global update should not crash if there are no global packages
+link globally the command of a package
+link a package globally without specifying the global option
+link a package from a workspace to the global package
+uninstall global package with its bin files
 
-# ── Known bugs (tracked in [[pnpm-compat-harness-bugs]] B1/B2/B3) ────────────
-# These are REAL nub bugs, allowlisted as known-failing until fixed. Remove the
-# corresponding cluster the moment its fix lands (a stale entry is flagged).
+# ── packageManager-field version management ──────────────────────────────────
+# nub does not replicate pnpm's manage-package-manager-versions / version-switch
+# behavior (switching to / refusing the pnpm version named in packageManager,
+# self-update editing the field). One path leaks nub-identity text where pnpm
+# emits "This project is configured to use yarn" — a real finding to triage.
+do not switch to the pnpm version specified
+do not switch to pnpm version that is specified
+throws error if pnpm tools dir is corrupt
+install should not fail if the used pnpm version does not satisfy
+install should fail if the project requires a different package manager
+install should not fail for packageManager field with hash
+install should not fail for packageManager field with url
+some commands should not fail if the required package manager is not pnpm
+self-update updates the packageManager field
 
-# B1: the 9 NOT_IMPLEMENTED pnpm commands (access/edit/issues/prefix/profile/
-#     set-script/team/token/xmas) should throw ERR_PNPM_NOT_IMPLEMENTED; nub
-#     shells out to npm instead (brand leak + wrong error contract).
-not yet implemented
-ERR_PNPM_NOT_IMPLEMENTED
+# ── Per-package node version ─────────────────────────────────────────────────
+# nub does not honor a per-package node version on a recursive run.
+recursive run when some packages define different node versions
 
-# B2: `pnpm <unsupported-command>` exits 254 under nub; real pnpm exits 1.
-fails when an unsupported command is used
-
-# B3: first-run self-update banner can pollute stdout. Mitigated by gating the
-#     self-update check off in CI (NUB_NO_UPDATE / aube self-update disabled),
-#     but kept here defensively for any stdout-exact assertion that still trips.
-Update available
+# ── Misc front-door divergences (triage) ────────────────────────────────────
+# `pnpm` in an empty dir creating package.json; dlx reading .npmrc registry.
+# Both real divergences surfaced 2026-06-20; kept allowlisted until triaged.
+create a package.json if there is none
+dlx read registry from .npmrc in the current directory
