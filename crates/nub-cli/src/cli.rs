@@ -731,18 +731,6 @@ pub enum Command {
         #[arg(long)]
         no_optional: bool,
 
-        /// Skip devDependencies; install only production deps. `npm ci --omit=dev`
-        /// is the canonical production-deploy form; `-P`/`--production` are the
-        /// pnpm/npm aliases.
-        #[arg(short = 'P', long, visible_alias = "production")]
-        prod: bool,
-
-        /// Omit a dependency axis (`dev`, `optional`, `peer`). Repeatable;
-        /// matches `npm ci --omit=<dev|optional|peer>`. `--omit=dev` is the
-        /// production-deploy form (same effect as `-P`).
-        #[arg(long, value_name = "DEP", value_parser = ["dev", "optional", "peer"])]
-        omit: Vec<String>,
-
         /// Registry URL for this invocation (metadata, tarballs, audit).
         /// Overrides `registry` from `.npmrc`.
         #[arg(long, value_name = "URL")]
@@ -903,12 +891,16 @@ const SUBCOMMANDS: &[&str] = &[
     "run", "watch", "exec", "upgrade", "help", "node", "pm", "agent", "install", "i", "ci",
 ];
 
-/// `npm install <pkg>` / `pnpm install <pkg>` (and the `i` alias) are the
-/// add-to-dependencies form — THE most common PM command. Nub's argumentless
-/// `install` is a native clap command (no positionals), and the global form
-/// `install -g <pkg>` is an add too, so detect the compatibility shape before
-/// clap rejects the package positional / `-g` / npm save flags as unknown and
-/// translate it into an engine `add` invocation.
+/// `pnpm install <pkg>` (and the `i` alias) is the add-to-dependencies form —
+/// pnpm routes `install` with a package positional (or `-g`) through its `add`
+/// command. Nub's argumentless `install` is a native clap command (no
+/// positionals), and the global form `install -g <pkg>` is an add too, so detect
+/// that compatibility shape before clap rejects the package positional / `-g` /
+/// save flags as unknown and translate it into an engine `add` invocation.
+///
+/// nub's CLI frontend targets pnpm compatibility ONLY (not npm), so this routing
+/// honors exactly the spellings `pnpm install <pkg>` accepts — no npm-isms
+/// (`--omit`, `--no-save`, `-S`/`--save`, the npm `-w <name>` member selector).
 ///
 /// Routes to `add` when `install`/`i` carries a positional package OR `-g`/
 /// `--global` (before any `--` separator). Plain `nub install` (no positionals,
@@ -916,16 +908,16 @@ const SUBCOMMANDS: &[&str] = &[
 /// `-F foo`, `-P` with no package) stay on the native install path. A `--`
 /// separator stops the scan, so `nub install -- -g` keeps `-g` literal.
 ///
-/// npm's save/spec/workspace spellings are translated to the equivalent the
-/// engine `add` accepts (aube's `AddArgs` + `EngineGlobals`):
-/// - `-D`/`--save-dev`, `-E`/`--save-exact`, `-O`/`--save-optional`,
-///   `--no-save`, `-g`/`--global`, and positionals → forwarded as-is.
-/// - `-P`/`--save-prod`, `-S`/`--save` → dropped (save-to-`dependencies` is the
-///   default for `add`).
-/// - `--omit=<dev|optional|peer>` / `--omit <x>` → dropped (an install-time
-///   dep-axis filter; not an `add`-of-a-package concept — accepted, no-op).
-/// - `-w <name>` / `--workspace <name>` (npm member selector) → `--filter <name>`.
-/// - `--workspaces` → `-r` (all workspace packages).
+/// pnpm's save spellings are translated to the equivalent the engine `add`
+/// accepts (aube's `AddArgs`, whose save shorts are uppercase `-D`/`-E`/`-O`):
+/// - pnpm lowercase save shorts → aube long forms: `-d` → `--save-dev`,
+///   `-o` → `--save-optional`, `-e` → `--save-exact`.
+/// - `-p`/`-P`/`--save-prod` → dropped (save-to-`dependencies` is the `add`
+///   default; this matches `pnpm add`'s default behavior).
+/// - Everything else (`-D`/`--save-dev`, `-E`/`--save-exact`, `-O`/
+///   `--save-optional`, `--save-peer`, `-g`/`--global`, `-w` (pnpm's boolean
+///   `--workspace-root`), `-r`/`-F`/`--filter`/`-C`, positionals, …) is already
+///   an `add`-accepted pnpm spelling — forwarded verbatim.
 fn install_to_add_args(rest: &[String]) -> Option<Vec<String>> {
     let subcommand = rest.first()?.as_str();
     if !matches!(subcommand, "install" | "i") {
@@ -940,9 +932,17 @@ fn install_to_add_args(rest: &[String]) -> Option<Vec<String>> {
     let mut route_to_add = false;
     {
         // Value-taking flags whose argument must NOT be mistaken for a package
-        // positional during the route decision.
-        const VALUE_FLAGS: &[&str] =
-            &["-w", "--workspace", "--omit", "-F", "--filter", "--filter-prod", "-C", "--dir", "--registry", "--node-linker"];
+        // positional during the route decision. (pnpm `-w` is a boolean
+        // `--workspace-root`, NOT a value flag — it is deliberately absent.)
+        const VALUE_FLAGS: &[&str] = &[
+            "-F",
+            "--filter",
+            "--filter-prod",
+            "-C",
+            "--dir",
+            "--registry",
+            "--node-linker",
+        ];
         let mut i = 0;
         while i < body.len() {
             let arg = &body[i];
@@ -968,47 +968,21 @@ fn install_to_add_args(rest: &[String]) -> Option<Vec<String>> {
         return None;
     }
 
-    // Second pass: translate npm spellings into the engine `add` grammar.
+    // Second pass: translate pnpm save spellings into the engine `add` grammar.
     let scan_end = saw_separator_at.unwrap_or(body.len());
     let mut out: Vec<String> = vec!["add".to_string()];
-    let mut i = 0;
-    while i < scan_end {
-        let arg = body[i].as_str();
-        let (bare, inline_val) = match arg.split_once('=') {
-            Some((b, v)) => (b, Some(v.to_string())),
-            None => (arg, None),
-        };
-        match bare {
+    for arg in &body[..scan_end] {
+        match arg.as_str() {
             // Dropped: save-to-dependencies is the default for `add`.
-            "-P" | "--save-prod" | "-S" | "--save" => {}
-            // Dropped: an install-time dep-axis filter, no-op on an add.
-            "--omit" => {
-                if inline_val.is_none() {
-                    i += 1; // consume the separate value
-                }
-            }
-            // npm member selector → pnpm `--filter`.
-            "-w" | "--workspace" => {
-                let val = match inline_val {
-                    Some(v) => Some(v),
-                    None => {
-                        i += 1;
-                        body.get(i).cloned()
-                    }
-                };
-                if let Some(v) = val {
-                    out.push("--filter".to_string());
-                    out.push(v);
-                }
-            }
-            // npm "all workspaces" → pnpm `-r`.
-            "--workspaces" => out.push("-r".to_string()),
-            // Everything else (`-D`/`--save-dev`, `-E`, `-O`, `--no-save`,
-            // `-g`/`--global`, `-r`/`-F`/`--filter`/`-C`, positionals, …)
-            // is already an `add`-accepted spelling — forward verbatim.
-            _ => out.push(arg.to_string()),
+            "-p" | "-P" | "--save-prod" => {}
+            // pnpm lowercase save shorts → aube's long forms (aube's shorts are
+            // uppercase `-D`/`-O`/`-E`).
+            "-d" => out.push("--save-dev".to_string()),
+            "-o" => out.push("--save-optional".to_string()),
+            "-e" => out.push("--save-exact".to_string()),
+            // Everything else is already an `add`-accepted pnpm spelling.
+            other => out.push(other.to_string()),
         }
-        i += 1;
     }
     // Anything after `--` is forwarded literally (e.g. package specs that
     // start with a dash).
@@ -1040,10 +1014,25 @@ const PM_VERBS: &[&str] = &[
 /// way, or it falls through to the Node-passthrough path and Node fails on
 /// `--require install` (`Cannot find module 'install'`).
 const NORMALIZABLE_LEADING_FLAG_VERBS: &[&str] = &[
-    "run", "exec", // the original run/exec set
-    "install", "i", "ci", // native install-family verbs
-    "add", "remove", "rm", "uninstall", "un", // engine add/remove family
-    "update", "up", "dedupe", "prune", "rebuild", "fetch", "link", "unlink", "import",
+    "run",
+    "exec", // the original run/exec set
+    "install",
+    "i",
+    "ci", // native install-family verbs
+    "add",
+    "remove",
+    "rm",
+    "uninstall",
+    "un", // engine add/remove family
+    "update",
+    "up",
+    "dedupe",
+    "prune",
+    "rebuild",
+    "fetch",
+    "link",
+    "unlink",
+    "import",
 ];
 
 /// Accept pnpm's flag-before-subcommand order. pnpm takes `pnpm -r run build` AND
@@ -1957,8 +1946,6 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
         Some(Command::Ci {
             ignore_scripts,
             no_optional,
-            prod,
-            omit,
             registry,
             dir,
             filter,
@@ -1968,12 +1955,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             include_workspace_root,
         }) => crate::pm_engine::run_ci(crate::pm_engine::CiFlags {
             ignore_scripts,
-            // `--omit=dev` is the production-deploy form: same dep-axis effect as
-            // `-P`/`--production`. `--omit=optional` folds into `no_optional`;
-            // `--omit=peer` is accepted but has no separate engine knob (peers
-            // are resolved transitively), so it is a documented no-op.
-            prod: prod || omit.iter().any(|o| o == "dev"),
-            no_optional: no_optional || omit.iter().any(|o| o == "optional"),
+            no_optional,
             registry,
             dir,
             filter: crate::pm_engine::WorkspaceFilterFlags {
@@ -4638,8 +4620,9 @@ nub {v} — the all-in-one Node.js toolkit
         runtime = help_bold("Runtime options (passed through to Node):"),
         pm = help_bold("Package manager commands:"),
         toolchain = help_bold("Manage the toolchain:"),
-        footer =
-            help_bold("See `nub --help` for the expanded Node flag + environment-variable reference.")
+        footer = help_bold(
+            "See `nub --help` for the expanded Node flag + environment-variable reference."
+        )
     )
 }
 
@@ -6610,11 +6593,31 @@ mod tests {
             "nub i <pkg> routes to add"
         );
 
-        // npm save/spec flags forwarded or translated.
+        // pnpm save flags forwarded or translated to aube's `add` grammar.
         assert_eq!(
             install_to_add_args(&args(&["install", "--save-dev", "vitest"])),
             Some(args(&["add", "--save-dev", "vitest"])),
             "--save-dev forwards to add verbatim"
+        );
+        assert_eq!(
+            install_to_add_args(&args(&["install", "-D", "vitest"])),
+            Some(args(&["add", "-D", "vitest"])),
+            "-D (aube's save-dev short) forwards verbatim"
+        );
+        assert_eq!(
+            install_to_add_args(&args(&["install", "-d", "vitest"])),
+            Some(args(&["add", "--save-dev", "vitest"])),
+            "pnpm lowercase -d → aube's --save-dev long form"
+        );
+        assert_eq!(
+            install_to_add_args(&args(&["install", "-o", "fsevents"])),
+            Some(args(&["add", "--save-optional", "fsevents"])),
+            "pnpm lowercase -o → aube's --save-optional long form"
+        );
+        assert_eq!(
+            install_to_add_args(&args(&["install", "-e", "react@18.0.0"])),
+            Some(args(&["add", "--save-exact", "react@18.0.0"])),
+            "pnpm lowercase -e → aube's --save-exact long form"
         );
         assert_eq!(
             install_to_add_args(&args(&["install", "-P", "express"])),
@@ -6622,26 +6625,17 @@ mod tests {
             "-P (save-prod) is the add default, so it is dropped"
         );
         assert_eq!(
-            install_to_add_args(&args(&["install", "--omit=dev", "express"])),
+            install_to_add_args(&args(&["install", "-p", "express"])),
             Some(args(&["add", "express"])),
-            "--omit=<x> is an install-time filter, dropped on an add"
-        );
-        assert_eq!(
-            install_to_add_args(&args(&["install", "--omit", "dev", "express"])),
-            Some(args(&["add", "express"])),
-            "--omit <x> (space form) consumes its value, then is dropped"
+            "pnpm -p (save-prod) is dropped — add saves to dependencies by default"
         );
 
-        // npm workspace selectors translated to pnpm filter spellings.
+        // pnpm `-w` is the boolean `--workspace-root` — forwarded verbatim, NOT
+        // an npm-style member selector (no `--filter` translation).
         assert_eq!(
-            install_to_add_args(&args(&["install", "-w", "pkg-a", "express"])),
-            Some(args(&["add", "--filter", "pkg-a", "express"])),
-            "-w <name> (npm member selector) → --filter <name>"
-        );
-        assert_eq!(
-            install_to_add_args(&args(&["install", "--workspaces", "express"])),
-            Some(args(&["add", "-r", "express"])),
-            "--workspaces → -r (all workspace packages)"
+            install_to_add_args(&args(&["install", "-w", "express"])),
+            Some(args(&["add", "-w", "express"])),
+            "pnpm -w (--workspace-root boolean) forwards verbatim, not translated to --filter"
         );
 
         // A `--` separator stops the scan and keeps tokens literal.
@@ -7328,8 +7322,13 @@ mod tests {
         // for native verbs, the node/pm/agent groups, AND engine verbs (canonical
         // or alias) — the engine verbs (`add`, `why`, `rm`, …) previously fell
         // through to a silent exit.
-        for word in ["run", "install", "node", "pm", "agent", "add", "rm", "why", "publish"] {
-            assert!(is_help_routable(word), "`{word}` should route to a help page");
+        for word in [
+            "run", "install", "node", "pm", "agent", "add", "rm", "why", "publish",
+        ] {
+            assert!(
+                is_help_routable(word),
+                "`{word}` should route to a help page"
+            );
         }
         // Unknown words fall through to the top-level page rather than erroring.
         assert!(!is_help_routable("definitely-not-a-command"));

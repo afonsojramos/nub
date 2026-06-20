@@ -637,12 +637,30 @@ fn top_level_short_and_long_help_are_distinct() {
         .expect("failed to spawn nub -h");
     let short_stdout = String::from_utf8_lossy(&short.stdout);
     assert_eq!(short.status.code(), Some(0), "nub -h exits cleanly");
-    assert!(short_stdout.contains("Headline commands:"), "short help should lead with Nub's headline surfaces: {short_stdout}");
-    assert!(short_stdout.contains("Package manager commands:"), "short help should include the PM command section: {short_stdout}");
-    assert!(short_stdout.contains("find-hash"), "PM section should enumerate the fuller command surface: {short_stdout}");
-    assert!(short_stdout.contains("patch-commit"), "PM section should enumerate package patching verbs: {short_stdout}");
-    assert!(short_stdout.contains("nub --help"), "short help points at verbose help: {short_stdout}");
-    assert!(!short_stdout.contains("NODE_OPTIONS"), "short help omits env reference: {short_stdout}");
+    assert!(
+        short_stdout.contains("Headline commands:"),
+        "short help should lead with Nub's headline surfaces: {short_stdout}"
+    );
+    assert!(
+        short_stdout.contains("Package manager commands:"),
+        "short help should include the PM command section: {short_stdout}"
+    );
+    assert!(
+        short_stdout.contains("find-hash"),
+        "PM section should enumerate the fuller command surface: {short_stdout}"
+    );
+    assert!(
+        short_stdout.contains("patch-commit"),
+        "PM section should enumerate package patching verbs: {short_stdout}"
+    );
+    assert!(
+        short_stdout.contains("nub --help"),
+        "short help points at verbose help: {short_stdout}"
+    );
+    assert!(
+        !short_stdout.contains("NODE_OPTIONS"),
+        "short help omits env reference: {short_stdout}"
+    );
 
     let long = Command::new(nub_binary())
         .arg("--help")
@@ -650,9 +668,18 @@ fn top_level_short_and_long_help_are_distinct() {
         .expect("failed to spawn nub --help");
     let long_stdout = String::from_utf8_lossy(&long.stdout);
     assert_eq!(long.status.code(), Some(0), "nub --help exits cleanly");
-    assert!(long_stdout.contains("all-in-one Node.js toolkit"), "long help should identify nub: {long_stdout}");
-    assert!(long_stdout.contains("NODE_OPTIONS"), "long help should include env reference: {long_stdout}");
-    assert_ne!(short_stdout, long_stdout, "nub -h and nub --help intentionally differ");
+    assert!(
+        long_stdout.contains("all-in-one Node.js toolkit"),
+        "long help should identify nub: {long_stdout}"
+    );
+    assert!(
+        long_stdout.contains("NODE_OPTIONS"),
+        "long help should include env reference: {long_stdout}"
+    );
+    assert_ne!(
+        short_stdout, long_stdout,
+        "nub -h and nub --help intentionally differ"
+    );
 }
 
 #[test]
@@ -667,9 +694,19 @@ fn node_mode_help_and_version_pass_through_to_node() {
             .output()
             .expect("failed to spawn nub --node help");
         let stdout = String::from_utf8_lossy(&output.stdout);
-        assert_eq!(output.status.code(), Some(0), "nub --node {flag} exits cleanly");
-        assert!(stdout.contains("Usage: node"), "nub --node {flag} should print Node help: {stdout}");
-        assert!(!stdout.contains("all-in-one Node.js toolkit"), "nub --node {flag} must not print nub help: {stdout}");
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "nub --node {flag} exits cleanly"
+        );
+        assert!(
+            stdout.contains("Usage: node"),
+            "nub --node {flag} should print Node help: {stdout}"
+        );
+        assert!(
+            !stdout.contains("all-in-one Node.js toolkit"),
+            "nub --node {flag} must not print nub help: {stdout}"
+        );
     }
 
     let version = Command::new(nub_binary())
@@ -678,9 +715,19 @@ fn node_mode_help_and_version_pass_through_to_node() {
         .output()
         .expect("failed to spawn nub --node -v");
     let stdout = String::from_utf8_lossy(&version.stdout);
-    assert_eq!(version.status.code(), Some(0), "nub --node -v exits cleanly");
-    assert!(stdout.trim_start().starts_with('v'), "nub --node -v should print Node's version: {stdout}");
-    assert!(!stdout.contains("nub"), "nub --node -v must not print nub's version banner: {stdout}");
+    assert_eq!(
+        version.status.code(),
+        Some(0),
+        "nub --node -v exits cleanly"
+    );
+    assert!(
+        stdout.trim_start().starts_with('v'),
+        "nub --node -v should print Node's version: {stdout}"
+    );
+    assert!(
+        !stdout.contains("nub"),
+        "nub --node -v must not print nub's version banner: {stdout}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -2962,8 +3009,14 @@ fn engine_verb_help_routes_consistently() {
             .expect("failed to spawn nub engine help");
         assert_eq!(output.status.code(), Some(0), "{args:?} should exit 0");
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        assert!(stdout.contains("nub add"), "{args:?} should print add help: {stdout}");
-        assert!(stdout.contains("--global"), "{args:?} should include add flags: {stdout}");
+        assert!(
+            stdout.contains("nub add"),
+            "{args:?} should print add help: {stdout}"
+        );
+        assert!(
+            stdout.contains("--global"),
+            "{args:?} should include add flags: {stdout}"
+        );
         if args.as_slice() == ["help", "add"] {
             long_help = Some(stdout);
         } else if args.as_slice() == ["add", "--help"] {

@@ -1,32 +1,38 @@
 //! Differential CLI-grammar acceptance test for the install-family surface.
 //!
+//! SCOPE: pnpm compatibility ONLY. nub's CLI frontend targets the pnpm CLI
+//! surface, not npm's — so this table asserts exactly the flag/alias/positional
+//! forms that REAL pnpm accepts for these verbs, and nothing npm-specific
+//! (`--omit`, `--no-save`, `-S`/`--save`, the npm `-w <name>` member selector).
+//! The contract: nub accepts a form on these verbs IFF pnpm accepts it.
+//!
 //! WHY THIS EXISTS (the #29 / P0 blind spot). nub routes a verb through one of
 //! two parsers: nub's own hand-written clap structs (`install`/`i`/`ci`/
 //! `upgrade`) and the engine verbs (`add`/`remove`/`update`/… — parsed with
 //! aube's `Args` types). Every historical flag/positional compat bug has lived
 //! at the seam between those two parsers, and nothing crossed it: the native
 //! install/ci structs had ZERO parse coverage, and the engine-verb parse test
-//! only asserted what aube HAS, never what pnpm/npm document. `nub install -g
+//! only asserted what aube HAS, never what pnpm documents. `nub install -g
 //! <pkg>` (#29) and `nub install <pkg>` (its strictly-more-common twin) both
 //! shipped rejecting at clap because of exactly that gap.
 //!
-//! WHAT THIS GUARDS. A hand-curated, deliberately-WIDE table of the npm- AND
+//! WHAT THIS GUARDS. A hand-curated, deliberately-WIDE table of the
 //! pnpm-DOCUMENTED flag / alias / positional forms users actually type for each
-//! install-family verb. Every form is grounded in the incumbent's own `--help`
-//! output (NOT "the incumbent didn't error" — npm and pnpm are lenient and
-//! silently accept unknown flags, a false-negative trap), so a row asserts a
-//! form a real PM documents as supported. For each row we assert nub's parser
-//! ACCEPTS the grammar: spawn `nub <form> --help` and FAIL iff clap emitted
-//! `unexpected argument` / `unrecognized …` (its parse-reject markers). The
-//! table spans BOTH parsers in one place, so the routing seam is always crossed.
+//! install-family verb. Every form is grounded in pnpm's own `--help` output
+//! (NOT "pnpm didn't error" — pnpm is lenient and silently accepts unknown
+//! flags, a false-negative trap), so a row asserts a form pnpm documents as
+//! supported. For each row we assert nub's parser ACCEPTS the grammar: spawn
+//! `nub <form> --help` and FAIL iff clap emitted `unexpected argument` /
+//! `unrecognized …` (its parse-reject markers). The table spans BOTH parsers in
+//! one place, so the routing seam is always crossed.
 //!
 //! Appending `--help` makes each spawn a pure parse-then-print — clap intercepts
 //! `--help` once the argv parses, so no install runs and no network is touched.
 //! A runtime failure (no lockfile, bin-not-found → exit 127) is NOT a parse
 //! reject and does not fail a row; only the clap reject markers do.
 //!
-//! KNOWN-STILL-BROKEN rows (forms an incumbent documents but nub rejects today)
-//! live in `#[ignore]`d tests below, each naming its follow-up, so the gap is
+//! KNOWN-STILL-BROKEN rows (forms pnpm documents but nub rejects today) live in
+//! `#[ignore]`d tests below, each naming its follow-up, so the gap is
 //! documented-not-silently-missing.
 
 use std::path::PathBuf;
@@ -53,7 +59,10 @@ fn clap_rejected(args: &[&str]) -> (bool, String) {
     let _ = std::fs::create_dir_all(&tmp);
     // A bare manifest so the verbs that peek at package.json don't bail before
     // the parser is even exercised.
-    let _ = std::fs::write(tmp.join("package.json"), r#"{"name":"t","version":"1.0.0"}"#);
+    let _ = std::fs::write(
+        tmp.join("package.json"),
+        r#"{"name":"t","version":"1.0.0"}"#,
+    );
 
     let out = Command::new(nub_binary())
         .args(args)
@@ -84,7 +93,7 @@ fn assert_all_accepted(label: &str, rows: &[(&[&str], &str)]) {
         let (rejected, output) = clap_rejected(form);
         if rejected {
             failures.push(format!(
-                "  nub {} → REJECTED (npm/pnpm document this: {note})\n    output: {}",
+                "  nub {} → REJECTED (pnpm documents this: {note})\n    output: {}",
                 form.join(" "),
                 output.lines().next().unwrap_or("").trim()
             ));
@@ -101,7 +110,8 @@ fn assert_all_accepted(label: &str, rows: &[(&[&str], &str)]) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // install / i — native clap struct + the install→add routing seam (A/B/C/D).
-// Grounded in `npm install -h` and `pnpm install/add --help`.
+// Grounded in `pnpm install --help` and `pnpm add --help` (pnpm-only — nub's
+// frontend targets the pnpm CLI surface, not npm).
 // ─────────────────────────────────────────────────────────────────────────────
 #[test]
 fn install_family_grammar_accepts_documented_forms() {
@@ -112,42 +122,67 @@ fn install_family_grammar_accepts_documented_forms() {
             (&["install"], "pnpm install"),
             (&["i"], "pnpm i (alias)"),
             (&["install", "--frozen-lockfile"], "pnpm --frozen-lockfile"),
-            (&["install", "--no-frozen-lockfile"], "pnpm --no-frozen-lockfile"),
-            (&["install", "--prefer-frozen-lockfile"], "pnpm --prefer-frozen-lockfile"),
+            (
+                &["install", "--no-frozen-lockfile"],
+                "pnpm --no-frozen-lockfile",
+            ),
+            (
+                &["install", "--prefer-frozen-lockfile"],
+                "pnpm --prefer-frozen-lockfile",
+            ),
             (&["install", "-P"], "pnpm -P / --prod"),
             (&["install", "--prod"], "pnpm --prod"),
-            (&["install", "-D"], "pnpm -D (dev only)"),
-            (&["install", "--ignore-scripts"], "npm/pnpm --ignore-scripts"),
+            (&["install", "-D"], "pnpm -D / --dev (dev only)"),
+            (&["install", "--ignore-scripts"], "pnpm --ignore-scripts"),
             (&["install", "--no-optional"], "pnpm --no-optional"),
             (&["install", "--offline"], "pnpm --offline"),
             (&["install", "--prefer-offline"], "pnpm --prefer-offline"),
             (&["install", "--lockfile-only"], "pnpm --lockfile-only"),
-            (&["install", "-r"], "pnpm -r"),
+            (&["install", "-r"], "pnpm -r / --recursive"),
             (&["install", "-F", "foo"], "pnpm -F <pattern>"),
             (&["install", "--filter", "foo"], "pnpm --filter <pattern>"),
-            (&["install", "-C", "/tmp"], "pnpm -C <dir>"),
-            // A/B/C — install <pkg> is the add-to-deps form (the P0 + its flags).
-            (&["install", "express"], "npm/pnpm install <pkg> adds to deps (P0)"),
-            (&["i", "lodash"], "npm/pnpm i <pkg> (P0)"),
+            (&["install", "-C", "/tmp"], "pnpm -C / --dir <dir>"),
+            // A/B/C — pnpm install <pkg> routes through `add` (the P0 + save flags).
+            (
+                &["install", "express"],
+                "pnpm install <pkg> adds to deps (P0)",
+            ),
+            (&["i", "lodash"], "pnpm i <pkg> (P0)"),
             (&["install", "express", "lodash"], "multiple package specs"),
-            (&["install", "express", "-D"], "npm/pnpm -D <pkg>"),
-            (&["install", "express", "--save-dev"], "npm --save-dev"),
-            (&["install", "express", "-E"], "npm -E / --save-exact"),
-            (&["install", "express", "--save-exact"], "npm --save-exact"),
-            (&["install", "express", "-O"], "npm -O / --save-optional"),
-            (&["install", "express", "--save-optional"], "npm --save-optional"),
-            (&["install", "express", "--no-save"], "npm --no-save"),
-            (&["install", "express", "-S"], "npm -S / --save"),
-            (&["install", "express", "--save"], "npm --save"),
-            (&["install", "express", "--save-prod"], "npm --save-prod"),
-            (&["install", "express", "-P"], "npm -P on an add (save to deps, default)"),
-            (&["install", "express", "--omit=dev"], "npm --omit=<dev|optional|peer>"),
-            (&["install", "express", "--omit", "dev"], "npm --omit <x> (space form)"),
-            (&["install", "express", "-g"], "npm/pnpm install -g <pkg> (#29)"),
-            (&["install", "express", "--global"], "npm/pnpm --global"),
-            (&["install", "express", "-w", "foo"], "npm -w <member> selector"),
-            (&["install", "express", "--workspace", "foo"], "npm --workspace <member>"),
-            (&["install", "express", "--workspaces"], "npm --workspaces"),
+            // pnpm add save flags — both the lowercase pnpm shorts and the long
+            // forms (aube's uppercase shorts are translated/forwarded).
+            (
+                &["install", "express", "-D"],
+                "aube -D (save-dev short) forwards",
+            ),
+            (&["install", "express", "-d"], "pnpm -d / --save-dev"),
+            (&["install", "express", "--save-dev"], "pnpm --save-dev"),
+            (&["install", "express", "-e"], "pnpm -e / --save-exact"),
+            (&["install", "express", "--save-exact"], "pnpm --save-exact"),
+            (&["install", "express", "-o"], "pnpm -o / --save-optional"),
+            (
+                &["install", "express", "--save-optional"],
+                "pnpm --save-optional",
+            ),
+            (&["install", "express", "--save-peer"], "pnpm --save-peer"),
+            (
+                &["install", "express", "-p"],
+                "pnpm -p / --save-prod (add default)",
+            ),
+            (
+                &["install", "express", "--save-prod"],
+                "pnpm --save-prod (add default)",
+            ),
+            (
+                &["install", "express", "-P"],
+                "pnpm -P on an add (save to deps, default)",
+            ),
+            (&["install", "express", "-g"], "pnpm install -g <pkg> (#29)"),
+            (&["install", "express", "--global"], "pnpm --global"),
+            (
+                &["install", "express", "-w"],
+                "pnpm -w / --workspace-root (boolean)",
+            ),
         ],
     );
 }
@@ -161,7 +196,10 @@ fn leading_global_flags_before_install_family() {
             (&["-r", "install"], "pnpm -r install"),
             (&["-r", "i"], "pnpm -r i"),
             (&["-F", "foo", "install"], "pnpm -F <pattern> install"),
-            (&["--filter", "foo", "install"], "pnpm --filter <pattern> install"),
+            (
+                &["--filter", "foo", "install"],
+                "pnpm --filter <pattern> install",
+            ),
             (&["-r", "ci"], "pnpm -r ci"),
             (&["-r", "update"], "pnpm -r update"),
             (&["-r", "dedupe"], "pnpm -r dedupe"),
@@ -173,20 +211,17 @@ fn leading_global_flags_before_install_family() {
     );
 }
 
-// F — `nub ci` production controls (npm `ci --omit=dev`).
+// `nub ci` — pnpm `ci` (clean-install). pnpm's `ci` documents NO production
+// control (it is exactly `clean` + `install --frozen-lockfile`), so the
+// pnpm-only surface is bare `ci` plus nub's workspace/script knobs.
 #[test]
 fn ci_grammar_accepts_documented_forms() {
     assert_all_accepted(
         "ci",
         &[
-            (&["ci"], "npm ci"),
-            (&["ci", "--ignore-scripts"], "npm/pnpm --ignore-scripts"),
+            (&["ci"], "pnpm ci (clean-install)"),
+            (&["ci", "--ignore-scripts"], "pnpm --ignore-scripts"),
             (&["ci", "--no-optional"], "pnpm --no-optional"),
-            (&["ci", "-P"], "production-only (F)"),
-            (&["ci", "--production"], "--production alias (F)"),
-            (&["ci", "--omit=dev"], "npm ci --omit=dev (production deploy) (F)"),
-            (&["ci", "--omit=optional"], "npm ci --omit=optional (F)"),
-            (&["ci", "--omit=peer"], "npm ci --omit=peer (no-op, accepted) (F)"),
             (&["ci", "-r"], "pnpm -r ci"),
             (&["ci", "-F", "foo"], "pnpm -F <pattern>"),
         ],
@@ -196,7 +231,7 @@ fn ci_grammar_accepts_documented_forms() {
 // ─────────────────────────────────────────────────────────────────────────────
 // Engine verbs — the other side of the routing seam. Each parses with aube's
 // own `Args` + nub's `EngineGlobals`. Grounded in `pnpm <verb> --help` (the CLI
-// surface nub claims parity with) and `npm <verb> -h`.
+// surface nub targets).
 // ─────────────────────────────────────────────────────────────────────────────
 #[test]
 fn engine_add_grammar_accepts_documented_forms() {
@@ -229,10 +264,10 @@ fn engine_remove_update_grammar_accepts_documented_forms() {
     assert_all_accepted(
         "remove/update",
         &[
-            // remove + its aliases.
+            // remove + its aliases (pnpm: rm, uninstall, un).
             (&["remove", "foo"], "pnpm remove <pkg>"),
             (&["rm", "foo"], "pnpm rm (alias)"),
-            (&["uninstall", "foo"], "npm uninstall (alias)"),
+            (&["uninstall", "foo"], "pnpm uninstall (alias)"),
             (&["un", "foo"], "pnpm un (alias)"),
             (&["remove", "foo", "-g"], "pnpm remove -g"),
             (&["remove", "foo", "-D"], "remove from devDependencies"),
@@ -260,15 +295,15 @@ fn engine_misc_verbs_grammar_accepts_documented_forms() {
             (&["link", "foo"], "pnpm link <dir>"),
             (&["unlink", "foo"], "pnpm unlink"),
             (&["why", "foo"], "pnpm why <pkg>"),
-            (&["outdated"], "pnpm/npm outdated"),
+            (&["outdated"], "pnpm outdated"),
             (&["outdated", "-r"], "pnpm -r outdated"),
-            (&["ls"], "npm ls"),
-            (&["list"], "npm list (alias)"),
-            (&["ls", "-g"], "npm/pnpm ls -g"),
-            (&["ls", "--depth", "0"], "npm ls --depth <n>"),
-            (&["ls", "--depth=0"], "npm ls --depth=<n>"),
+            (&["ls"], "pnpm ls"),
+            (&["list"], "pnpm list (alias)"),
+            (&["ls", "-g"], "pnpm ls -g"),
+            (&["ls", "--depth", "0"], "pnpm ls --depth <n>"),
+            (&["ls", "--depth=0"], "pnpm ls --depth=<n>"),
             (&["ls", "-r"], "pnpm -r ls"),
-            (&["audit"], "npm/pnpm audit"),
+            (&["audit"], "pnpm audit"),
             (&["audit", "--fix"], "pnpm audit --fix"),
             (&["import"], "pnpm import (lockfile migration)"),
         ],
@@ -282,49 +317,43 @@ fn exec_dlx_grammar_accepts_documented_forms() {
         &[
             (&["exec", "eslint"], "pnpm exec <bin> (local)"),
             (&["dlx", "cowsay"], "pnpm dlx <pkg>"),
-            (&["dlx", "-p", "cowsay", "cowsay"], "pnpm dlx -p <pkg> (fetch source)"),
-            (&["dlx", "--package", "cowsay", "cowsay"], "pnpm dlx --package <pkg>"),
-            (&["dlx", "-y", "cowsay"], "npx-style -y (assume yes)"),
-            (&["dlx", "-q", "cowsay"], "npx-style -q (quiet)"),
+            (
+                &["dlx", "--package", "cowsay", "cowsay"],
+                "pnpm dlx --package <pkg>",
+            ),
+            (
+                &["dlx", "-p", "cowsay", "cowsay"],
+                "pnpm dlx -p (aube's --package short)",
+            ),
         ],
     );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// KNOWN-STILL-BROKEN — forms an incumbent documents that nub rejects today.
-// Kept (ignored) so the gap is visible, not silently missing. When the named
-// follow-up lands, drop the `#[ignore]` and the row joins the passing table.
+// KNOWN-STILL-BROKEN — forms pnpm documents that nub rejects today. Kept
+// (ignored) so the gap is visible, not silently missing. When the named
+// fork-side follow-up lands, drop the `#[ignore]` and the row joins the passing
+// table.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// E (fork-side, `nubjs/aube`): aube's `AddArgs` lacks `-P`/`--save-prod`,
+/// E (fork-side, `nubjs/aube`): aube's `AddArgs` lacks `-p`/`--save-prod`,
 /// `--offline`, `--prefer-offline` — all DOCUMENTED by `pnpm add --help`. The
 /// fix adds the flags to aube's `AddArgs` (default-preserving) via the nub-fork
 /// workflow, then this test un-ignores. The install→add routing already DROPS a
-/// translated `-P`/`--save-prod` (save-to-deps is the add default), so the gap
-/// is only on the bare engine `add` verb, not on `install <pkg> -P`.
+/// translated `-p`/`-P`/`--save-prod` (save-to-deps is the add default), so the
+/// gap is only on the bare engine `add` verb, not on `install <pkg> --save-prod`.
 #[test]
-#[ignore = "E: aube AddArgs missing -P/--save-prod/--offline/--prefer-offline (fork-side, nubjs/aube)"]
+#[ignore = "E: aube AddArgs missing --save-prod/--offline/--prefer-offline (fork-side, nubjs/aube)"]
 fn engine_add_pnpm_only_flags_blocked_on_fork() {
     assert_all_accepted(
         "add (fork-blocked)",
         &[
-            (&["add", "foo", "-P"], "pnpm add -P / --save-prod"),
-            (&["add", "foo", "--save-prod"], "pnpm add --save-prod"),
+            (&["add", "foo", "--save-prod"], "pnpm add -p / --save-prod"),
             (&["add", "foo", "--offline"], "pnpm add --offline"),
-            (&["add", "foo", "--prefer-offline"], "pnpm add --prefer-offline"),
+            (
+                &["add", "foo", "--prefer-offline"],
+                "pnpm add --prefer-offline",
+            ),
         ],
-    );
-}
-
-/// G (fork-side, `nubjs/aube`): aube's `OutdatedArgs` lacks `-g`/`--global`,
-/// which `npm outdated -h` documents (pnpm only documents `--global-dir`, and
-/// "accepts" `-g` via leniency, so this divergence is vs npm). The fix adds
-/// `-g` to aube's `OutdatedArgs` via the nub-fork workflow.
-#[test]
-#[ignore = "G: aube OutdatedArgs missing -g/--global (fork-side, nubjs/aube)"]
-fn engine_outdated_global_blocked_on_fork() {
-    assert_all_accepted(
-        "outdated (fork-blocked)",
-        &[(&["outdated", "-g"], "npm outdated -g / --global")],
     );
 }
