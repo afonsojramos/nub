@@ -2023,10 +2023,33 @@ fn run_nubx() -> Result<i32> {
 }
 
 fn run_as_node() -> Result<i32> {
-    // Invoked as `node` via PATH shim — augmented execution.
-    // Pass all remaining args through to Node with augmentation.
+    // Invoked as `node` via PATH shim. Default = full augmentation (Colin,
+    // 2026-06-20: go all-in on the hijack). The single opt-out is `--node`: when
+    // it appears anywhere BEFORE a `--` separator, strip it and run the
+    // resolved/pinned Node VANILLA (`compat_mode=true` — no preload, no flag
+    // injection, no `.env`, no NODE_OPTIONS/NODE_PATH/PATH-shim), exactly like
+    // `nub --node`/`nub run --node`. Version resolution/pinning stays on in BOTH
+    // cases — that's the legitimate job of the hijack. A `--node` AFTER `--` is a
+    // literal program arg and is passed through untouched.
     let args: Vec<String> = env::args().skip(1).collect();
-    run_file(&args)
+    let mut stripped: Vec<String> = Vec::with_capacity(args.len());
+    let mut compat = false;
+    let mut saw_separator = false;
+    for arg in &args {
+        if !saw_separator && arg == "--node" {
+            compat = true;
+            continue; // strip nub-owned --node before it reaches real node
+        }
+        if arg == "--" {
+            saw_separator = true;
+        }
+        stripped.push(arg.clone());
+    }
+    if compat {
+        run_file_with_compat(&stripped, true)
+    } else {
+        run_file(&args)
+    }
 }
 
 // ── Subcommand implementations ───────────────────────────────────────

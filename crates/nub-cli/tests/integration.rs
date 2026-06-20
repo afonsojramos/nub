@@ -3794,6 +3794,146 @@ fn run_points_node_env_at_an_augmenting_shim() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The `node` PATH-shim hijack honors `--node` as an augmentation opt-out.
+/// `node foo.js` (no flag) runs FULLY augmented — `.env` is eager-loaded into the
+/// child. `node --node foo.js` strips the flag and runs the pinned Node VANILLA —
+/// clean `NODE_OPTIONS`/`execArgv`, no `.env`. `--node` after a `--` separator is
+/// a literal program arg, not consumed.
+/// The shim lives in a `nub-node-shim-*` dir so `which_node` skips it (no
+/// recursion back into the shim when nub re-spawns the real Node). Unix-only
+/// (the hijack is reached via an argv0=`node` symlink).
+#[cfg(unix)]
+#[test]
+fn node_hijack_node_flag_opts_out_of_augmentation() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "nub-hijack-node-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // A `node`-named symlink to the nub binary triggers Argv0::Node (the hijack).
+    // The `nub-node-shim-` prefix makes which_node skip this dir, so the child
+    // Node nub spawns is the real one, not a recursion back through the shim.
+    let shim_dir = dir.join("nub-node-shim-test");
+    std::fs::create_dir_all(&shim_dir).unwrap();
+    let node_shim = shim_dir.join("node");
+    std::os::unix::fs::symlink(nub_binary(), &node_shim).expect("symlink nub → node");
+
+    // A project (package.json present) so the `.env` auto-load path is live, and
+    // a `.env` whose var we can probe for the augmented-vs-vanilla difference.
+    let proj = dir.join("proj");
+    std::fs::create_dir_all(&proj).unwrap();
+    std::fs::write(proj.join("package.json"), r#"{"name":"hijack"}"#).unwrap();
+    std::fs::write(proj.join(".env"), "HIJACK_ENV=from_dotenv\n").unwrap();
+    // Reports whether augmentation is active: NODE_OPTIONS carries nub's preload
+    // when augmented, and `.env` is only loaded when augmented.
+    std::fs::write(
+        proj.join("probe.js"),
+        "console.log('NODE_OPTIONS=' + (process.env.NODE_OPTIONS || ''));\n\
+         console.log('execArgv=' + process.execArgv.join(' '));\n\
+         console.log('HIJACK_ENV=' + (process.env.HIJACK_ENV || ''));\n",
+    )
+    .unwrap();
+
+    let run = |args: &[&str]| {
+        Command::new(&node_shim)
+            .args(args)
+            .current_dir(&proj)
+            .env("XDG_CACHE_HOME", unique_test_cache())
+            .output()
+            .expect("spawn node shim")
+    };
+
+    // 1. Augmented (no --node): nub eager-loads `.env` into the child env. (`.env`
+    //    loading is the robust augmentation discriminator here — flag/preload
+    //    injection is version-banded AND needs the `runtime/` asset dir adjacent
+    //    to the binary, which a bare `target/debug/nub` test build lacks, so we
+    //    don't assert on NODE_OPTIONS/execArgv for the AUGMENTED case.)
+    let aug = run(&["probe.js"]);
+    let aug_out = String::from_utf8_lossy(&aug.stdout);
+    assert_eq!(
+        aug.status.code(),
+        Some(0),
+        "augmented run failed: {}",
+        String::from_utf8_lossy(&aug.stderr)
+    );
+    assert!(
+        aug_out.contains("HIJACK_ENV=from_dotenv"),
+        "augmented `node probe.js` must eager-load `.env`: {aug_out}"
+    );
+
+    // 2. `--node` opt-out: vanilla Node — clean NODE_OPTIONS/execArgv, no `.env`.
+    let vanilla = run(&["--node", "probe.js"]);
+    let van_out = String::from_utf8_lossy(&vanilla.stdout);
+    assert_eq!(
+        vanilla.status.code(),
+        Some(0),
+        "`node --node probe.js` failed: {}",
+        String::from_utf8_lossy(&vanilla.stderr)
+    );
+    assert!(
+        !van_out.contains("preload"),
+        "`node --node` must run vanilla — no preload in NODE_OPTIONS/execArgv: {van_out}"
+    );
+    assert!(
+        van_out.contains("NODE_OPTIONS=\n") || van_out.contains("NODE_OPTIONS=$"),
+        "`node --node` must not inject NODE_OPTIONS: {van_out:?}"
+    );
+    assert!(
+        van_out.contains("execArgv=\n"),
+        "`node --node` must have empty execArgv: {van_out:?}"
+    );
+    assert!(
+        van_out.contains("HIJACK_ENV=\n") || van_out.contains("HIJACK_ENV=$"),
+        "`node --node` must NOT load `.env` (compat mode): {van_out:?}"
+    );
+
+    // 3. `node --node -v` works — the flag is stripped, `-v` reaches real Node.
+    let ver = run(&["--node", "-v"]);
+    let ver_out = String::from_utf8_lossy(&ver.stdout);
+    assert_eq!(
+        ver.status.code(),
+        Some(0),
+        "`node --node -v` must exit 0: {}",
+        String::from_utf8_lossy(&ver.stderr)
+    );
+    assert!(
+        ver_out.trim_start().starts_with('v'),
+        "`node --node -v` must print the Node version: {ver_out:?}"
+    );
+
+    // 4. `node -- --node probe.js` — `--node` AFTER `--` is a literal arg, NOT a
+    //    nub opt-out. The run stays augmented and Node sees `--node` as argv.
+    std::fs::write(
+        proj.join("argv.js"),
+        "console.log('ARGV=' + process.argv.slice(2).join(','));\n\
+         console.log('HIJACK_ENV=' + (process.env.HIJACK_ENV || ''));\n",
+    )
+    .unwrap();
+    let literal = run(&["--", "argv.js", "--node"]);
+    let lit_out = String::from_utf8_lossy(&literal.stdout);
+    assert_eq!(
+        literal.status.code(),
+        Some(0),
+        "`node -- argv.js --node` failed: {}",
+        String::from_utf8_lossy(&literal.stderr)
+    );
+    assert!(
+        lit_out.contains("ARGV=--node"),
+        "`--node` after `--` must reach the program as a literal arg: {lit_out}"
+    );
+    assert!(
+        lit_out.contains("HIJACK_ENV=from_dotenv"),
+        "a post-`--` `--node` must NOT opt out — the run stays augmented (`.env` loads): {lit_out}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The npm/pnpm aliases map to their canonical flags (`-F` is `--filter`, `-s`
 /// is `--silent`, `--workspaces` is `--recursive`). One run exercises all three
 /// at once (no per-alias test): `-F` selects a member (proving the alias plus
