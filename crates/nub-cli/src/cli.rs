@@ -891,6 +891,28 @@ const SUBCOMMANDS: &[&str] = &[
     "run", "watch", "exec", "upgrade", "help", "node", "pm", "agent", "install", "i", "ci",
 ];
 
+/// `npm install -g <pkg>` and `pnpm install -g <pkg>` are aliases for a global
+/// package add. Nub's argumentless `install` is a native clap command, while the
+/// engine's global install implementation lives behind `add -g`; detect that
+/// compatibility shape before clap rejects `-g` as an unknown install flag.
+fn global_install_alias_args(rest: &[String]) -> Option<Vec<String>> {
+    let subcommand = rest.first()?.as_str();
+    if !matches!(subcommand, "install" | "i") {
+        return None;
+    }
+    let mut saw_global = false;
+    for arg in &rest[1..] {
+        if arg == "--" {
+            break;
+        }
+        if matches!(arg.as_str(), "-g" | "--global") {
+            saw_global = true;
+            break;
+        }
+    }
+    saw_global.then(|| rest[1..].to_vec())
+}
+
 /// PM-management verbs nub recognizes only to redirect. The pure-passthrough
 /// frontend (A2) was disabled 2026-06-09 in favor of the normalized standard
 /// surface (wiki/research/package-manager-normalized-surface.md):
@@ -1448,6 +1470,17 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
     // to the engine's bootstrap entry point.
     if subcommand == "__node-gyp-bootstrap" {
         return crate::pm_engine::run_node_gyp_bootstrap(&rest[1..]);
+    }
+
+    // Compatibility alias: npm and pnpm treat `install -g <pkg>` / `i -g <pkg>`
+    // as a global package add. Route that shape through the engine's `add -g`
+    // implementation before the native argumentless-install clap variant rejects
+    // `-g` and package positionals.
+    if let Some(alias_args) = global_install_alias_args(&rest)
+        && let Some(spec) = crate::pm_engine::lookup_verb("add")
+    {
+        let pm = suggest_package_manager(&env::current_dir()?);
+        return crate::pm_engine::dispatch_verb(spec, &subcommand, &alias_args, &pm);
     }
 
     // Verbs registered to the embedded PM engine (the aube verb surface minus
@@ -6085,6 +6118,31 @@ mod tests {
             ])
             .is_err(),
             "the frozen-lockfile flags are mutually exclusive"
+        );
+    }
+
+    #[test]
+    fn global_install_alias_routes_to_add_args() {
+        let args = |parts: &[&str]| parts.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            global_install_alias_args(&args(&["install", "-g", "is-number@7.0.0"])),
+            Some(args(&["-g", "is-number@7.0.0"])),
+            "nub install -g <pkg> must route through the engine's global add path"
+        );
+        assert_eq!(
+            global_install_alias_args(&args(&["i", "--global", "is-number@7.0.0"])),
+            Some(args(&["--global", "is-number@7.0.0"])),
+            "nub i --global <pkg> must route through the same alias"
+        );
+        assert_eq!(
+            global_install_alias_args(&args(&["install", "--", "-g"])),
+            None,
+            "a separator makes -g positional, not an install-global flag"
+        );
+        assert_eq!(
+            global_install_alias_args(&args(&["install"])),
+            None,
+            "plain nub install stays on the native argumentless install path"
         );
     }
 
