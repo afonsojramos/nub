@@ -27,14 +27,14 @@ There is no new runtime to adopt and no lock-in: every augmentation rides on Nod
 
 ## What Nub replaces
 
-| Nub | What it does | Replaces |
-|---|---|---|
-| `nub <file>` | Runs `.js`/`.ts`/`.jsx`/`.tsx` on stock Node, transpiling TypeScript and JSX, loading `.env*` files, and polyfilling modern globals per Node-version band. A drop-in for `node <file>`. | `node`, `tsx`, `ts-node`, `dotenv-cli`, `node --env-file`, `deno run`, `bun run` (for the TS/JSX/`.env` cases) |
-| `nub run <script>` | Runs a `package.json` script with the full lifecycle-hook and workspace surface, including recursive runs with `--filter` and topological ordering. Not a task-graph runner with cross-run caching. | `npm run`, `pnpm run`, `yarn run`, `bun run`, `pnpm -r` (recursive scripts) |
-| `nubx` / `nub dlx` | Runs a binary from `node_modules/.bin`, fetching it from the registry on a local miss. | `npx`, `pnpm dlx`, `pnpm exec`, `yarn dlx`, `bunx` |
-| `nub install` (and the full PM surface) | The complete package-manager surface: install, add/remove/update, dedupe, audit, pack/publish, and more. pnpm-compatible CLI; round-trips npm, pnpm, and bun lockfiles; reads yarn. | `npm`, `pnpm`, `yarn`, `bun` (as a package manager) |
-| `nub watch` | Restarts the entry point on changes to its resolved import graph, `.env*` files, `tsconfig.json`, and manifest. Restart-mode, on Node's own `--watch`; not HMR. | `nodemon`, `node --watch`, `tsx watch`, `bun --watch` |
-| `nub node` | Provisions and pins Node versions, fetching from nodejs.org on demand (`install`, `ls`, `uninstall`, `pin`). Also provisions the exact package-manager version a project pins in `packageManager`. | `nvm`, `fnm`, `n`, `volta`, `asdf` (the Node plugin), `corepack` |
+| Nub | Replaces |
+|---|---|
+| `nub <file>` | `node`, `tsx`, `ts-node`, `dotenv-cli`, `node --env-file`, `deno run`, `bun run` |
+| `nub run <script>` | `npm run`, `pnpm run`, `yarn run`, `bun run`, `pnpm -r` |
+| `nubx` / `nub dlx` | `npx`, `pnpm dlx`, `pnpm exec`, `yarn dlx`, `bunx` |
+| `nub install` | `npm`, `pnpm`, `yarn`, `bun` |
+| `nub watch` | `nodemon`, `node --watch`, `tsx watch`, `bun --watch` |
+| `nub node` | `nvm`, `fnm`, `n`, `volta`, `asdf`, `corepack` |
 
 ## Install
 
