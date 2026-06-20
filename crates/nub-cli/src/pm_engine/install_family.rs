@@ -830,6 +830,8 @@ pub struct InstallFlags {
 pub struct CiFlags {
     pub ignore_scripts: bool,
     pub no_optional: bool,
+    /// `-P`/`--production`/`--omit=dev`: install only production deps.
+    pub prod: bool,
     pub registry: Option<String>,
     pub dir: Option<std::path::PathBuf>,
     /// Workspace selectors (`--filter`/`-r`/…) — same path as `install`.
@@ -1049,8 +1051,11 @@ pub fn run_ci(flags: CiFlags) -> Result<i32> {
     let dep = config.dep_selection;
     let opts = InstallOptions {
         mode: FrozenMode::Frozen,
+        // The explicit CLI flag always wins (OR'd in, never overridden) — same
+        // contract as `run_install`. `-P`/`--production`/`--omit=dev` forces the
+        // production dep-axis even when config didn't.
         dep_selection: DepSelection::from_flags(
-            dep.prod,
+            dep.prod || flags.prod,
             dep.dev,
             dep.no_optional || flags.no_optional,
         ),

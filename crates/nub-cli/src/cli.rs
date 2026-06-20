@@ -302,7 +302,7 @@ impl Argv0 {
 #[derive(Parser, Debug)]
 #[command(
     name = "nub",
-    about = "The unified JavaScript toolkit that augments Node.js instead of replacing it",
+    about = "The all-in-one Node.js toolkit",
     long_about = None,
     disable_help_subcommand = true,
     disable_version_flag = true,
@@ -731,6 +731,18 @@ pub enum Command {
         #[arg(long)]
         no_optional: bool,
 
+        /// Skip devDependencies; install only production deps. `npm ci --omit=dev`
+        /// is the canonical production-deploy form; `-P`/`--production` are the
+        /// pnpm/npm aliases.
+        #[arg(short = 'P', long, visible_alias = "production")]
+        prod: bool,
+
+        /// Omit a dependency axis (`dev`, `optional`, `peer`). Repeatable;
+        /// matches `npm ci --omit=<dev|optional|peer>`. `--omit=dev` is the
+        /// production-deploy form (same effect as `-P`).
+        #[arg(long, value_name = "DEP", value_parser = ["dev", "optional", "peer"])]
+        omit: Vec<String>,
+
         /// Registry URL for this invocation (metadata, tarballs, audit).
         /// Overrides `registry` from `.npmrc`.
         #[arg(long, value_name = "URL")]
@@ -891,26 +903,119 @@ const SUBCOMMANDS: &[&str] = &[
     "run", "watch", "exec", "upgrade", "help", "node", "pm", "agent", "install", "i", "ci",
 ];
 
-/// `npm install -g <pkg>` and `pnpm install -g <pkg>` are aliases for a global
-/// package add. Nub's argumentless `install` is a native clap command, while the
-/// engine's global install implementation lives behind `add -g`; detect that
-/// compatibility shape before clap rejects `-g` as an unknown install flag.
-fn global_install_alias_args(rest: &[String]) -> Option<Vec<String>> {
+/// `npm install <pkg>` / `pnpm install <pkg>` (and the `i` alias) are the
+/// add-to-dependencies form — THE most common PM command. Nub's argumentless
+/// `install` is a native clap command (no positionals), and the global form
+/// `install -g <pkg>` is an add too, so detect the compatibility shape before
+/// clap rejects the package positional / `-g` / npm save flags as unknown and
+/// translate it into an engine `add` invocation.
+///
+/// Routes to `add` when `install`/`i` carries a positional package OR `-g`/
+/// `--global` (before any `--` separator). Plain `nub install` (no positionals,
+/// no `-g`) and `nub install <native-flags>` (e.g. `--frozen-lockfile`, `-r`,
+/// `-F foo`, `-P` with no package) stay on the native install path. A `--`
+/// separator stops the scan, so `nub install -- -g` keeps `-g` literal.
+///
+/// npm's save/spec/workspace spellings are translated to the equivalent the
+/// engine `add` accepts (aube's `AddArgs` + `EngineGlobals`):
+/// - `-D`/`--save-dev`, `-E`/`--save-exact`, `-O`/`--save-optional`,
+///   `--no-save`, `-g`/`--global`, and positionals → forwarded as-is.
+/// - `-P`/`--save-prod`, `-S`/`--save` → dropped (save-to-`dependencies` is the
+///   default for `add`).
+/// - `--omit=<dev|optional|peer>` / `--omit <x>` → dropped (an install-time
+///   dep-axis filter; not an `add`-of-a-package concept — accepted, no-op).
+/// - `-w <name>` / `--workspace <name>` (npm member selector) → `--filter <name>`.
+/// - `--workspaces` → `-r` (all workspace packages).
+fn install_to_add_args(rest: &[String]) -> Option<Vec<String>> {
     let subcommand = rest.first()?.as_str();
     if !matches!(subcommand, "install" | "i") {
         return None;
     }
-    let mut saw_global = false;
-    for arg in &rest[1..] {
-        if arg == "--" {
-            break;
-        }
-        if matches!(arg.as_str(), "-g" | "--global") {
-            saw_global = true;
-            break;
+
+    // First pass over the pre-`--` args: decide whether this is an add (a
+    // package positional or `-g`/`--global` present). Native install flags
+    // alone keep `install` on its own path.
+    let body = &rest[1..];
+    let mut saw_separator_at: Option<usize> = None;
+    let mut route_to_add = false;
+    {
+        // Value-taking flags whose argument must NOT be mistaken for a package
+        // positional during the route decision.
+        const VALUE_FLAGS: &[&str] =
+            &["-w", "--workspace", "--omit", "-F", "--filter", "--filter-prod", "-C", "--dir", "--registry", "--node-linker"];
+        let mut i = 0;
+        while i < body.len() {
+            let arg = &body[i];
+            if arg == "--" {
+                saw_separator_at = Some(i);
+                break;
+            }
+            if matches!(arg.as_str(), "-g" | "--global") {
+                route_to_add = true;
+            }
+            let bare = arg.split('=').next().unwrap_or("");
+            if !arg.starts_with('-') {
+                // A bare token in operand position is a package spec.
+                route_to_add = true;
+            } else if VALUE_FLAGS.contains(&bare) && !arg.contains('=') {
+                // Skip the separate value so it isn't read as a positional.
+                i += 1;
+            }
+            i += 1;
         }
     }
-    saw_global.then(|| rest[1..].to_vec())
+    if !route_to_add {
+        return None;
+    }
+
+    // Second pass: translate npm spellings into the engine `add` grammar.
+    let scan_end = saw_separator_at.unwrap_or(body.len());
+    let mut out: Vec<String> = vec!["add".to_string()];
+    let mut i = 0;
+    while i < scan_end {
+        let arg = body[i].as_str();
+        let (bare, inline_val) = match arg.split_once('=') {
+            Some((b, v)) => (b, Some(v.to_string())),
+            None => (arg, None),
+        };
+        match bare {
+            // Dropped: save-to-dependencies is the default for `add`.
+            "-P" | "--save-prod" | "-S" | "--save" => {}
+            // Dropped: an install-time dep-axis filter, no-op on an add.
+            "--omit" => {
+                if inline_val.is_none() {
+                    i += 1; // consume the separate value
+                }
+            }
+            // npm member selector → pnpm `--filter`.
+            "-w" | "--workspace" => {
+                let val = match inline_val {
+                    Some(v) => Some(v),
+                    None => {
+                        i += 1;
+                        body.get(i).cloned()
+                    }
+                };
+                if let Some(v) = val {
+                    out.push("--filter".to_string());
+                    out.push(v);
+                }
+            }
+            // npm "all workspaces" → pnpm `-r`.
+            "--workspaces" => out.push("-r".to_string()),
+            // Everything else (`-D`/`--save-dev`, `-E`, `-O`, `--no-save`,
+            // `-g`/`--global`, `-r`/`-F`/`--filter`/`-C`, positionals, …)
+            // is already an `add`-accepted spelling — forward verbatim.
+            _ => out.push(arg.to_string()),
+        }
+        i += 1;
+    }
+    // Anything after `--` is forwarded literally (e.g. package specs that
+    // start with a dash).
+    if let Some(sep) = saw_separator_at {
+        out.extend(body[sep..].iter().cloned());
+    }
+    Some(out)
 }
 
 /// PM-management verbs nub recognizes only to redirect. The pure-passthrough
@@ -929,17 +1034,29 @@ const PM_VERBS: &[&str] = &[
     "migrate",
 ];
 
+/// The verbs a leading flag-run may precede. pnpm accepts `pnpm -r <verb>` for
+/// every workspace-aware verb, not just `run`/`exec` — so a leading `-r`/`-F`/…
+/// before an install-family verb (`install`/`ci`/`add`/…) must reorder the same
+/// way, or it falls through to the Node-passthrough path and Node fails on
+/// `--require install` (`Cannot find module 'install'`).
+const NORMALIZABLE_LEADING_FLAG_VERBS: &[&str] = &[
+    "run", "exec", // the original run/exec set
+    "install", "i", "ci", // native install-family verbs
+    "add", "remove", "rm", "uninstall", "un", // engine add/remove family
+    "update", "up", "dedupe", "prune", "rebuild", "fetch", "link", "unlink", "import",
+];
+
 /// Accept pnpm's flag-before-subcommand order. pnpm takes `pnpm -r run build` AND
 /// `pnpm run -r build`; nub's pre-parse otherwise only recognizes a subcommand in
 /// first position, so a leading run-flag (`-r`, `--filter`, …) falls through to
 /// the Node-passthrough path and Node fails on `--require run` (`Cannot find
 /// module 'run'`). If the args begin with a run of the `run`/`exec` flags
-/// (consuming the value of value-taking ones) immediately followed by a `run` or
-/// `exec` subcommand, reorder into canonical subcommand-first order
-/// (`run -r build`). Anything else — a Node flag, a file, `nub <file>`, eval —
-/// leaves the args untouched, so file/passthrough/eval dispatch is unaffected.
-/// Returns `None` when no normalization applies. Keep the flag lists in sync with
-/// the `Run` subcommand's `#[arg]` set.
+/// (consuming the value of value-taking ones) immediately followed by one of
+/// [`NORMALIZABLE_LEADING_FLAG_VERBS`], reorder into canonical subcommand-first
+/// order (`run -r build`, `install -r`). Anything else — a Node flag, a file,
+/// `nub <file>`, eval — leaves the args untouched, so file/passthrough/eval
+/// dispatch is unaffected. Returns `None` when no normalization applies. Keep the
+/// flag lists in sync with the `Run` subcommand's `#[arg]` set.
 fn normalize_leading_run_flags(args: &[String]) -> Option<Vec<String>> {
     const BOOL_FLAGS: &[&str] = &[
         "-r",
@@ -987,7 +1104,10 @@ fn normalize_leading_run_flags(args: &[String]) -> Option<Vec<String>> {
             break; // not a run-flag — stop scanning
         }
     }
-    if !leading.is_empty() && matches!(args.get(i).map(String::as_str), Some("run") | Some("exec"))
+    if !leading.is_empty()
+        && args
+            .get(i)
+            .is_some_and(|v| NORMALIZABLE_LEADING_FLAG_VERBS.contains(&v.as_str()))
     {
         let mut out = Vec::with_capacity(args.len());
         out.push(args[i].clone()); // subcommand first
@@ -1495,15 +1615,20 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
         return crate::pm_engine::run_node_gyp_bootstrap(&rest[1..]);
     }
 
-    // Compatibility alias: npm and pnpm treat `install -g <pkg>` / `i -g <pkg>`
-    // as a global package add. Route that shape through the engine's `add -g`
-    // implementation before the native argumentless-install clap variant rejects
-    // `-g` and package positionals.
-    if let Some(alias_args) = global_install_alias_args(&rest)
+    // Compatibility alias: npm and pnpm treat `install <pkg>` / `i <pkg>` (and
+    // the global form `install -g <pkg>`) as a package add. Route that shape
+    // through the engine's `add` implementation, translating npm save/spec/
+    // workspace spellings, before the native argumentless-install clap variant
+    // rejects the positional / `-g` / unknown save flags. Plain `nub install`
+    // and `nub install <native-flags>` stay on the native install path.
+    if let Some(add_argv) = install_to_add_args(&rest)
         && let Some(spec) = crate::pm_engine::lookup_verb("add")
     {
         let pm = suggest_package_manager(&env::current_dir()?);
-        return crate::pm_engine::dispatch_verb(spec, &subcommand, &alias_args, &pm);
+        // `add_argv[0]` is the canonical verb ("add"); the engine wants the
+        // args after the verb. Report the user's actual typed spelling so
+        // usage/errors still read `nub install …`.
+        return crate::pm_engine::dispatch_verb(spec, &subcommand, &add_argv[1..], &pm);
     }
 
     // Verbs registered to the embedded PM engine (the aube verb surface minus
@@ -1832,6 +1957,8 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
         Some(Command::Ci {
             ignore_scripts,
             no_optional,
+            prod,
+            omit,
             registry,
             dir,
             filter,
@@ -1841,7 +1968,12 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             include_workspace_root,
         }) => crate::pm_engine::run_ci(crate::pm_engine::CiFlags {
             ignore_scripts,
-            no_optional,
+            // `--omit=dev` is the production-deploy form: same dep-axis effect as
+            // `-P`/`--production`. `--omit=optional` folds into `no_optional`;
+            // `--omit=peer` is accepted but has no separate engine knob (peers
+            // are resolved transitively), so it is a documented no-op.
+            prod: prod || omit.iter().any(|o| o == "dev"),
+            no_optional: no_optional || omit.iter().any(|o| o == "optional"),
             registry,
             dir,
             filter: crate::pm_engine::WorkspaceFilterFlags {
@@ -4426,7 +4558,7 @@ fn render_curated_help() -> String {
     let v = env!("CARGO_PKG_VERSION");
     format!(
         "\
-nub {v} — the JavaScript toolkit that augments Node.js instead of replacing it
+nub {v} — the all-in-one Node.js toolkit
 
 {usage}
   nub <file> [args...]        run a file (.js/.ts/.jsx/.tsx), TypeScript just works
@@ -4519,7 +4651,7 @@ fn render_verbose_help() -> String {
     let v = env!("CARGO_PKG_VERSION");
     format!(
         "\
-nub {v} — the JavaScript toolkit that augments Node.js instead of replacing it
+nub {v} — the all-in-one Node.js toolkit
 
 {usage}
   nub [options] <file> [args...]
@@ -6451,27 +6583,94 @@ mod tests {
     }
 
     #[test]
-    fn global_install_alias_routes_to_add_args() {
+    fn install_routes_to_add_args() {
         let args = |parts: &[&str]| parts.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+        // Global add (the #29 form) — preserved.
         assert_eq!(
-            global_install_alias_args(&args(&["install", "-g", "is-number@7.0.0"])),
-            Some(args(&["-g", "is-number@7.0.0"])),
-            "nub install -g <pkg> must route through the engine's global add path"
+            install_to_add_args(&args(&["install", "-g", "is-number@7.0.0"])),
+            Some(args(&["add", "-g", "is-number@7.0.0"])),
+            "nub install -g <pkg> routes through the engine's global add path"
         );
         assert_eq!(
-            global_install_alias_args(&args(&["i", "--global", "is-number@7.0.0"])),
-            Some(args(&["--global", "is-number@7.0.0"])),
-            "nub i --global <pkg> must route through the same alias"
+            install_to_add_args(&args(&["i", "--global", "is-number@7.0.0"])),
+            Some(args(&["add", "--global", "is-number@7.0.0"])),
+            "nub i --global <pkg> routes through the same alias"
+        );
+
+        // Local add (the P0) — a bare package positional routes to add.
+        assert_eq!(
+            install_to_add_args(&args(&["install", "express"])),
+            Some(args(&["add", "express"])),
+            "nub install <pkg> is the add-to-dependencies form"
         );
         assert_eq!(
-            global_install_alias_args(&args(&["install", "--", "-g"])),
+            install_to_add_args(&args(&["i", "lodash"])),
+            Some(args(&["add", "lodash"])),
+            "nub i <pkg> routes to add"
+        );
+
+        // npm save/spec flags forwarded or translated.
+        assert_eq!(
+            install_to_add_args(&args(&["install", "--save-dev", "vitest"])),
+            Some(args(&["add", "--save-dev", "vitest"])),
+            "--save-dev forwards to add verbatim"
+        );
+        assert_eq!(
+            install_to_add_args(&args(&["install", "-P", "express"])),
+            Some(args(&["add", "express"])),
+            "-P (save-prod) is the add default, so it is dropped"
+        );
+        assert_eq!(
+            install_to_add_args(&args(&["install", "--omit=dev", "express"])),
+            Some(args(&["add", "express"])),
+            "--omit=<x> is an install-time filter, dropped on an add"
+        );
+        assert_eq!(
+            install_to_add_args(&args(&["install", "--omit", "dev", "express"])),
+            Some(args(&["add", "express"])),
+            "--omit <x> (space form) consumes its value, then is dropped"
+        );
+
+        // npm workspace selectors translated to pnpm filter spellings.
+        assert_eq!(
+            install_to_add_args(&args(&["install", "-w", "pkg-a", "express"])),
+            Some(args(&["add", "--filter", "pkg-a", "express"])),
+            "-w <name> (npm member selector) → --filter <name>"
+        );
+        assert_eq!(
+            install_to_add_args(&args(&["install", "--workspaces", "express"])),
+            Some(args(&["add", "-r", "express"])),
+            "--workspaces → -r (all workspace packages)"
+        );
+
+        // A `--` separator stops the scan and keeps tokens literal.
+        assert_eq!(
+            install_to_add_args(&args(&["install", "--", "-g"])),
             None,
-            "a separator makes -g positional, not an install-global flag"
+            "a leading separator makes -g positional, not an install-global flag"
         );
         assert_eq!(
-            global_install_alias_args(&args(&["install"])),
+            install_to_add_args(&args(&["install", "express", "--", "-some-weird-spec"])),
+            Some(args(&["add", "express", "--", "-some-weird-spec"])),
+            "tokens after -- are forwarded literally"
+        );
+
+        // Native install path is preserved (no package, no -g).
+        assert_eq!(
+            install_to_add_args(&args(&["install"])),
             None,
             "plain nub install stays on the native argumentless install path"
+        );
+        assert_eq!(
+            install_to_add_args(&args(&["install", "--frozen-lockfile"])),
+            None,
+            "nub install with only native flags stays native"
+        );
+        assert_eq!(
+            install_to_add_args(&args(&["install", "-F", "pkg-a", "-r"])),
+            None,
+            "nub install with workspace selectors but no package stays a native install"
         );
     }
 

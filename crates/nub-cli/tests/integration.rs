@@ -650,7 +650,7 @@ fn top_level_short_and_long_help_are_distinct() {
         .expect("failed to spawn nub --help");
     let long_stdout = String::from_utf8_lossy(&long.stdout);
     assert_eq!(long.status.code(), Some(0), "nub --help exits cleanly");
-    assert!(long_stdout.contains("augments Node.js"), "long help should identify nub: {long_stdout}");
+    assert!(long_stdout.contains("all-in-one Node.js toolkit"), "long help should identify nub: {long_stdout}");
     assert!(long_stdout.contains("NODE_OPTIONS"), "long help should include env reference: {long_stdout}");
     assert_ne!(short_stdout, long_stdout, "nub -h and nub --help intentionally differ");
 }
@@ -669,7 +669,7 @@ fn node_mode_help_and_version_pass_through_to_node() {
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert_eq!(output.status.code(), Some(0), "nub --node {flag} exits cleanly");
         assert!(stdout.contains("Usage: node"), "nub --node {flag} should print Node help: {stdout}");
-        assert!(!stdout.contains("augments Node.js"), "nub --node {flag} must not print nub help: {stdout}");
+        assert!(!stdout.contains("all-in-one Node.js toolkit"), "nub --node {flag} must not print nub help: {stdout}");
     }
 
     let version = Command::new(nub_binary())
