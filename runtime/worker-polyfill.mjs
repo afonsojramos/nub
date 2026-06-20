@@ -114,10 +114,15 @@ export function installWorkerPolyfill() {
       // the main entry), and there is no classic/importScripts mode. Passing
       // `type` through to NodeWorker is harmless — it ignores unknown options.
       // See wiki/research/worker-polyfill.md.
+      // Node rejects `--harmony-*` flags in Worker execArgv
+      // (ERR_WORKER_INVALID_EXEC_ARGV) — they are V8 internals that are not
+      // valid in the worker context. Strip them before forwarding: any
+      // harmony-implying flag that nub injects (e.g. --experimental-shadow-realm
+      // implies --harmony-shadow-realm) must not reach NodeWorker's execArgv.
       this.#worker = new NodeWorker(workerPath, {
         ...options,
         eval: false,
-        execArgv: process.execArgv,
+        execArgv: process.execArgv.filter(f => !f.startsWith("--harmony")),
       });
 
       this.#worker.on("message", (data) => {
