@@ -14,15 +14,18 @@
 // ORCHESTRATOR tooling — NOT run in CI. Reads .fray/merge-queue.jsonl (one JSON
 // object per line: {pr, branch?, thread?, note?, hold?}). For each entry, in
 // order:
-//   1. Skip if held — `"hold": true`, OR a note containing HELD / "do NOT
-//      merge" / "DON'T MERGE" (the live queue marks holds in prose).
+//   1. Skip if held — the AUTHORITATIVE signal is `"hold": true`; a note
+//      containing HELD / "do NOT merge" is a mutable FALLBACK only.
 //   2. Skip if the PR is already merged/closed.
 //   3. Watch the PR's CI: poll `gh pr view --json statusCheckRollup` with
-//      exponential backoff (capped) until every required check has a terminal
-//      conclusion.
-//   4. SAFETY: merge ONLY if every check concluded SUCCESS/NEUTRAL/SKIPPED and
-//      the PR is mergeable (no conflicts). Any FAILURE/cancelled/timed-out, or
-//      an un-mergeable (CONFLICTING) PR, is reported and SKIPPED — never merged.
+//      exponential backoff (capped) until the decision is terminal.
+//   4. SAFETY (positive gating — see mergeDecision): merge ONLY when every
+//      check concluded SUCCESS/NEUTRAL/SKIPPED, the required `CI gate`
+//      aggregator check is PRESENT and SUCCESS (it registers last — a partial
+//      all-green rollup is NOT done), AND mergeable === "MERGEABLE" (UNKNOWN is
+//      treated as not-ready and re-polled, never as green). Any FAILURE/
+//      cancelled, a CONFLICTING PR, blocks. State is re-read immediately before
+//      the merge to close the poll→merge staleness window.
 //   5. `gh pr merge <pr> --squash --admin`.
 //   6. `git -C <shared-tree> pull --ff-only`; if the PR touched vendor/aube,
 //      `git -C <shared-tree> submodule update --init vendor/aube`.
@@ -125,10 +128,17 @@ function readQueue(path: string): QueueEntry[] {
   return out;
 }
 
-function isHeld(e: QueueEntry): boolean {
-  if (e.hold === true) return true;
+// Hold detection. The AUTHORITATIVE signal is the structured `"hold": true`
+// field (immutable to a note edit). Prose detection in `note` (HELD / do-not-
+// merge) is a FALLBACK for entries not yet marked with the field — it is
+// mutable (a note edit can evaporate it), so it's secondary, never primary.
+function holdReason(e: QueueEntry): string | null {
+  if (e.hold === true) return 'structured "hold": true';
   const note = (e.note || "").toLowerCase();
-  return note.includes("held") || note.includes("do not merge") || note.includes("don't merge");
+  if (note.includes("held") || note.includes("do not merge") || note.includes("don't merge")) {
+    return "note prose (fallback — prefer a structured \"hold\": true field)";
+  }
+  return null;
 }
 
 // ---- CI status --------------------------------------------------------------
@@ -185,6 +195,65 @@ function classifyRollup(rollup: RollupItem[]): {
   return { pending, failed };
 }
 
+// The single required branch-protection check for this repo — the aggregator
+// gate that `needs:` every conditional job and registers LAST. Merging before
+// it is present + green can merge a PR whose heavy matrix never ran.
+const REQUIRED_GATE = "CI gate";
+
+// THE single source of truth for "may this PR be merged right now?" — used by
+// the watch loop, the dry-run preview, and the pre-merge re-read, so the gating
+// logic cannot drift between them.
+//
+// Verdicts:
+//   merge   — safe to merge NOW.
+//   wait    — not ready yet; keep polling (no checks, pending checks, mergeable
+//             still UNKNOWN, or the required gate not yet present/green).
+//   block   — terminal NOT-mergeable; do not merge (failing check or conflict).
+function mergeDecision(st: {
+  state: string;
+  mergeable: string;
+  rollup: RollupItem[];
+}): { verdict: "merge" | "wait" | "block"; reason: string } {
+  if (st.state !== "OPEN") return { verdict: "block", reason: `PR is ${st.state}, not OPEN` };
+
+  const { pending, failed } = classifyRollup(st.rollup);
+  if (failed.length > 0) return { verdict: "block", reason: `failing checks: ${failed.join(", ")}` };
+
+  if (st.rollup.length === 0) return { verdict: "wait", reason: "no checks registered yet" };
+  if (pending.length > 0) {
+    return {
+      verdict: "wait",
+      reason: `${pending.length} check(s) pending: ${pending.slice(0, 4).join(", ")}${pending.length > 4 ? " …" : ""}`,
+    };
+  }
+
+  // BLOCK 2 fix: the registered checks being all-green is NOT sufficient — the
+  // required aggregator gate must be PRESENT and SUCCESS. A partial rollup
+  // (a few fast jobs green, the matrix + `CI gate` not yet registered) has
+  // zero pending but is not actually done. Require the gate explicitly.
+  const gate = st.rollup.find((it) => (it.name || "") === REQUIRED_GATE);
+  if (!gate) {
+    return { verdict: "wait", reason: `required "${REQUIRED_GATE}" check not present yet (rollup still filling in)` };
+  }
+  const gateOk =
+    gate.status !== undefined
+      ? gate.status === "COMPLETED" && (gate.conclusion || "").toUpperCase() === "SUCCESS"
+      : (gate.state || "").toUpperCase() === "SUCCESS";
+  if (!gateOk) {
+    return { verdict: "wait", reason: `"${REQUIRED_GATE}" not green yet (${gate.status || gate.state || "?"}/${gate.conclusion || ""})` };
+  }
+
+  // BLOCK 1 fix: gate POSITIVELY on mergeability. GitHub returns UNKNOWN while
+  // it lazily computes mergeability (and the poll itself nudges the compute) —
+  // UNKNOWN is NOT green. Only MERGEABLE proceeds; CONFLICTING blocks; anything
+  // else (UNKNOWN, "") is wait-and-repoll.
+  const m = (st.mergeable || "").toUpperCase();
+  if (m === "CONFLICTING") return { verdict: "block", reason: "merge conflict (CONFLICTING)" };
+  if (m !== "MERGEABLE") return { verdict: "wait", reason: `mergeability ${m || "unknown"} (GitHub still computing)` };
+
+  return { verdict: "merge", reason: "all green + gate passed + mergeable" };
+}
+
 // Whether the PR touched the vendor/aube submodule gitlink (a pin bump).
 function touchesAube(pr: number): boolean {
   try {
@@ -205,20 +274,13 @@ async function watchUntilTerminal(
   let delay = 15_000; // start at 15s
   const maxDelay = 120_000; // cap at 2min
   for (;;) {
-    const { state, mergeable, rollup } = prState(pr);
-    if (state !== "OPEN") return { ok: false, reason: `PR is ${state}, not OPEN` };
-    if (rollup.length === 0) {
-      // No checks reported yet — keep waiting (CI may not have registered).
-    } else {
-      const { pending, failed } = classifyRollup(rollup);
-      if (failed.length > 0) return { ok: false, reason: `failing checks: ${failed.join(", ")}` };
-      if (pending.length === 0) {
-        if (mergeable === "CONFLICTING") return { ok: false, reason: "merge conflict (CONFLICTING)" };
-        return { ok: true, reason: "all checks green" };
-      }
-      console.log(`    … ${pending.length} check(s) pending: ${pending.slice(0, 4).join(", ")}${pending.length > 4 ? " …" : ""}`);
-    }
-    if (Date.now() > deadline) return { ok: false, reason: `timed out after ${maxMinutes}min` };
+    const st = prState(pr);
+    const d = mergeDecision(st);
+    if (d.verdict === "merge") return { ok: true, reason: d.reason };
+    if (d.verdict === "block") return { ok: false, reason: d.reason };
+    // wait: keep polling (the poll also nudges GitHub to compute mergeability).
+    console.log(`    … ${d.reason}`);
+    if (Date.now() > deadline) return { ok: false, reason: `timed out after ${maxMinutes}min (last: ${d.reason})` };
     await sleep(delay);
     delay = Math.min(delay * 1.5, maxDelay);
   }
@@ -233,8 +295,9 @@ async function main() {
   let skipped = 0;
   for (const e of entries) {
     const tag = `PR #${e.pr}${e.branch ? ` (${e.branch})` : ""}`;
-    if (isHeld(e)) {
-      console.log(`  ${tag}: HELD — skipping. ${e.note ? `note: ${e.note}` : ""}`);
+    const held = holdReason(e);
+    if (held) {
+      console.log(`  ${tag}: HELD (${held}) — skipping.${e.note ? ` note: ${e.note}` : ""}`);
       skipped++;
       continue;
     }
@@ -254,13 +317,9 @@ async function main() {
     }
 
     if (dryRun) {
-      const { pending, failed } = classifyRollup(st.rollup);
-      let verdict: string;
-      if (failed.length) verdict = `BLOCKED — failing: ${failed.join(", ")}`;
-      else if (st.mergeable === "CONFLICTING") verdict = "BLOCKED — merge conflict";
-      else if (pending.length) verdict = `WAIT — ${pending.length} check(s) pending`;
-      else verdict = "WOULD MERGE — all green";
-      console.log(`  ${tag}: ${verdict}`);
+      const d = mergeDecision(st);
+      const label = d.verdict === "merge" ? "WOULD MERGE" : d.verdict === "block" ? "BLOCKED" : "WAIT";
+      console.log(`  ${tag}: ${label} — ${d.reason}`);
       continue;
     }
 
@@ -269,6 +328,16 @@ async function main() {
     const res = await watchUntilTerminal(e.pr, pollMaxMinutes);
     if (!res.ok) {
       console.log(`  ${tag}: NOT merged — ${res.reason}.`);
+      skipped++;
+      continue;
+    }
+
+    // NIT fix: re-read state immediately before merging — close the staleness
+    // window between the final poll and the merge (a failure or conflict could
+    // land in between). If it's no longer a clean merge, skip.
+    const fresh = mergeDecision(prState(e.pr));
+    if (fresh.verdict !== "merge") {
+      console.log(`  ${tag}: NOT merged — state changed before merge (${fresh.reason}).`);
       skipped++;
       continue;
     }
