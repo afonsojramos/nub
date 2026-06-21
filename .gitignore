@@ -10,6 +10,7 @@
 !.gitattributes
 !.gitmodules
 !.vercelignore
+!.worktreeinclude
 !.github/
 
 # Agent tooling: tracked in git. Only nested git worktrees stay out (they're checkouts, not files git can commit).

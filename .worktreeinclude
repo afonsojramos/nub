@@ -1,0 +1,20 @@
+# .worktreeinclude — gitignored entries to bring INTO a new worktree.
+#
+# `git worktree add` checks out TRACKED files only, so a worktree is lean by
+# default (no target/, node_modules/, .repos/). This file lists the gitignored,
+# untracked things a worktree may still need; scripts/new-worktree.ts copies or
+# symlinks each one in after creating the worktree.
+#
+# Format: one entry per line. Blank lines and `#` comments are ignored.
+#   [copy|symlink] <path>      path is relative to the repo root (both sides)
+# The leading verb is optional; the default is `copy`. Use `symlink` for large,
+# read-only things you don't want duplicated on disk.
+#
+# Do NOT list target/ here — cargo's incremental fingerprints are keyed to the
+# absolute target path, so a copied/symlinked target dir is invalidated and
+# rebuilt from scratch. The fast loop is a stable, dedicated per-worktree
+# CARGO_TARGET_DIR (new-worktree.ts prints the convention), not a seeded one.
+
+# Read-only reference checkouts of other runtimes/tools (node, bun, pnpm, …).
+# Symlinked so worktree agents can Read/Grep them without a multi-GB copy.
+symlink .repos

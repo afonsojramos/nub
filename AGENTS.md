@@ -30,13 +30,13 @@ These are the load-bearing, always-true architectural premises of nub. They are 
 
 **Substantive nub-repo work lands via a PULL REQUEST opened from an isolated git WORKTREE; the SHARED working tree always stays on `main` and is NEVER branched, reset, or stashed.** (This REVERSES the long-standing "all work on `main`, no branches/worktrees" rule — but ONLY for the nub repo's own work; `vendor/aube` keeps its existing `nub-fork` workflow, below.) The PR flow buys visibility, trackability, and a shareable link to announce a feature landing. The old rule existed because branching/resetting/stashing a SHARED working tree clobbers parallel agents and orphans their WIP — the PR flow MUST NOT reintroduce that, so the isolation is structural: each landing agent works in its OWN worktree, and the shared tree is left alone.
 
-**The proven worktree workflow (copy-pasteable; validated end-to-end 2026-06-20, submodule + build + push + PR all clean):**
+**The proven worktree workflow (copy-pasteable; validated end-to-end 2026-06-20, submodule + build + push + PR all clean).** Steps 1–3 are encoded in `scripts/new-worktree.ts` — `nub scripts/new-worktree.ts <slug>` (or `node scripts/new-worktree.ts <slug>`) creates the worktree off `origin/main`, inits the `vendor/aube` submodule, applies `.worktreeinclude`, and prints the `CARGO_TARGET_DIR` to export. Prefer it over hand-rolling the recipe (full detail: the `worktree` skill, `.claude/skills/worktree/SKILL.md`). The manual equivalent:
 
 ```sh
 # 1. From the shared main tree — create a worktree on a new branch. This checks out ONLY tracked
 #    source (NOT target/ .repos/ node_modules) and shares the .git object store — no re-clone, no
 #    re-fetch. The shared main tree is UNTOUCHED and stays on main.
-git worktree add /tmp/nub-wt-<slug> -b <branch-slug>
+git worktree add /tmp/nub-wt-<slug> -b <branch-slug> origin/main
 
 # 2. The aube submodule is NOT auto-populated in a new worktree — init it explicitly (re-clones into
 #    the worktree's own vendor/aube; required for any build that touches the PM engine).
@@ -53,6 +53,9 @@ gh pr create --title "<title>" --body "<body>"   # report the returned URL to th
 
 # 5. After the orchestrator merges, clean up (orchestrator or agent):
 git worktree remove /tmp/nub-wt-<slug> --force && rm -rf /tmp/nub-wt-<slug>-target
+
+# 6. Eagerly pull the SHARED tree so it tracks origin (see the eagerly-pull rule below).
+git -C <shared-tree> pull --ff-only
 ```
 
 The rules around it:
@@ -63,6 +66,7 @@ The rules around it:
 - **`vendor/aube` changes do NOT use this PR flow** — they keep the `nub-fork` workflow (commits on `nub-fork`, push before pin bump, contribution PRs to `jdx/aube`; see the aube section below).
 - **Full `git clone --depth 1 "file://$PWD"` + own `CARGO_TARGET_DIR` is reserved for the fully-isolated trustworthy-build case** (aube fork patches whose deliverable is "passes tests + preserves upstream behavior"). Worktrees are the default for ordinary PR-landing work; a clone is the heavier tool for when an agent needs a tree no sibling can touch at all.
 - **Commit small and often within your worktree; never stash.** In an interactive foreground session, do not push/PR unless the user asks; leave verified edits committed in the worktree (or uncommitted on the shared tree for tiny exception-class edits) and report status. Committed work cannot be clobbered; if you need to preserve WIP, *commit* it.
+- **EAGERLY PULL the shared tree — after ANY merge or push to origin, `git -C <shared-tree> pull --ff-only` (the drift fix).** Every landing goes worktree → push → squash-merge, and nothing pulls the SHARED checkout back, so it silently falls behind `origin/main` (it once drifted 21 commits, and the running session kept loading stale `.claude/` hooks). After merging any PR or pushing to origin, fast-forward the shared tree. The merge-queue drain is the natural automatic home for this — it already auto-merges and flips threads done, so it should also `pull --ff-only` the shared tree after each merge. NOTE: this keeps the FILES current; loaded hooks still need a session restart (the fray plugin makes hook-drift moot — hooks load from the plugin cache, not host `.claude/`). **Corollary: do NOT commit directly in the shared tree's checkout — even control-surface/release commits go via a worktree push, so the shared tree stays clean and always fast-forwardable.** Direct shared-tree commits are what make it *diverge* (not merely fall behind), which breaks `pull --ff-only`.
 - **PUSH-THEN-EXIT for a BACKGROUND/dispatched landing agent — never wait on CI in-process.** A backgrounded sub-agent doing landing work pushes its branch the instant a commit exists (safe pre-CI — CI runs on the pushed commit), BEFORE any verification wait or rest, then reports `"pushed <sha>, awaiting CI"` and EXITS. It NEVER arms a CI watcher / poll loop / `sleep`-on-CI — those are bounded by the harness's background-command kill and strand the work; the orchestrator's heartbeat owns merge-on-green via the durable `.fray/merge-queue.jsonl` (see the fray skill). The `fray-push-before-rest` SubagentStop hook enforces this — it refuses to let a dispatched agent rest holding a committed-but-unpushed change in a PR worktree. (This is for the autonomous/background flow; it does not override the interactive-foreground "don't push unless asked" rule above.)
 
 A busy `main` with several open PRs and in-progress worktrees is expected and fine.

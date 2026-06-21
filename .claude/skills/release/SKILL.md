@@ -63,6 +63,8 @@ git tag v<ver>
 git push origin main --tags
 ```
 
+Post-merge, fast-forward the shared tree so it tracks origin: `git -C <shared-tree> pull --ff-only` (the eagerly-pull rule, AGENTS.md "Default to a PR flow" — the shared checkout otherwise drifts behind as PRs land).
+
 Pushing the `v<ver>` tag fires the release workflow. It runs, in order: `verify` (version + tag-match), `primer` (metadata primer generation), `test` + `conformance` + `glibc-floor-guard` + `pre-publish-gate` (the publish gates), `build` (8 platforms), then `publish-npm` (10 packages, idempotent), `github-release` (release + 16 assets, independently re-runnable), and `test-install` / `test-install-musl` (post-publish smoke of the published package).
 
 **Watch CI, but never block the foreground on it.** Dispatch a background watcher (a sub-agent or a detached `gh run watch` writing to a log path) and report the log path; do not poll in the foreground. The release is not "done" until `publish-npm` + `github-release` are green.
