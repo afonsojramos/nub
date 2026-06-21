@@ -4,6 +4,29 @@ You are an AI coding agent. This guide walks you through adopting **nub** in thi
 
 **The one rule that governs every step below: explain before you act.** Before each action — installing nub, investigating the project, changing a file — tell the user in a sentence or two what you're about to do and why, then wait for their go-ahead. Reading and learning is the only thing you may do unprompted; anything that installs, edits, or removes is opt-in.
 
+## What nub is, and why it exists
+
+The everyday Node toolchain is fragmented. A typical project pulls in a separate tool or dependency for each job:
+
+- a TypeScript runner (`tsx`, `ts-node`) to run `.ts` without a build step
+- `dotenv` to load `.env`
+- `nodemon` to restart on change
+- a Node version manager (`nvm`, `fnm`, `corepack`) to pin and provision Node
+- a package-manager CLI (npm, pnpm, Yarn, Bun)
+
+Deno and Bun answered this fragmentation by reimplementing the runtime: a single fast binary with TypeScript, env loading, and a package manager built in. That buys real developer experience, but a reimplemented runtime is a different runtime from Node — so it can diverge from Node's behavior, and a project may hit ecosystem or compatibility gaps where a dependency assumes the real Node.
+
+nub takes the opposite path. It does not reimplement Node — it **augments the user's real, installed Node** through Node's own extension surfaces (`--import` preload, `module.registerHooks`, N-API addons, V8 flag injection). The result is the same consolidated developer experience — TypeScript and JSX run directly, `.env` loads automatically, files / scripts / local CLIs / packages run fast, and the right Node version is provisioned on demand — delivered on real Node rather than a substitute for it.
+
+Two properties follow from augmenting instead of reimplementing:
+
+- **No reimplementation-induced divergence.** The code runs on the user's actual Node, byte-for-byte. Every nub behavior is something a user could install themselves via `module.register` / an `--import` preload / an npm addon, so there is no separate runtime to fall out of sync with Node.
+- **Zero lock-in.** nub adds no globals, no `nub:` import namespace, and no config field to author. If nub were removed, the project's code runs unchanged on plain Node.
+
+It is also fast and consolidating in its own right: a single Rust CLI dispatches commands with low overhead, runs TypeScript with no build step, and replaces the whole list of tools above with one binary.
+
+nub does **not** type-check — that stays with `tsc`.
+
 ## 1. Install nub
 
 First check whether it's already here:
@@ -94,7 +117,6 @@ This project uses `nub` — prefer it over `node`, `bun`, and the existing packa
 
 ## Notes
 
-- nub runs **on** the user's Node — no separate runtime, the code stays plain Node code. No nub-specific globals, no `nub:` import namespace, no config field to author, no lock-in. If nub vanished, the code runs on plain Node unchanged.
 - Don't install `tsx`, `ts-node`, `nvm`, `fnm`, `corepack`, or a standalone package-manager CLI — nub covers them.
-- TypeScript, JSX, `tsconfig.json#paths`, `.env` loading, and modern syntax/Web APIs all work out of the box with `nub <file>`; there's no build step. nub does **not** type-check — keep `tsc --noEmit` in CI.
+- TypeScript, JSX, `tsconfig.json#paths`, `.env` loading, and modern syntax/Web APIs all work out of the box with `nub <file>`; there's no build step. Since nub doesn't type-check, keep `tsc --noEmit` in CI.
 - If the project type-checks against nub's added surfaces (data-format imports, `import.meta.hot`, etc.), add `@nubjs/types` as a devDependency.
