@@ -40,13 +40,11 @@
  */
 import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { deriveAgentState, DEFAULT_IDLE_MIN, DEFAULT_FROZEN_MIN } from './fray-agent-status.mjs';
+import { deriveAgentState, DEFAULT_IDLE_MIN, DEFAULT_FROZEN_MIN, DEFAULT_STALE_CEILING_MIN } from './fray-agent-status.mjs';
 
 const IDLE_MIN = parseInt(process.env.FRAY_IDLE_MIN || '', 10) || DEFAULT_IDLE_MIN;
 const FROZEN_MIN = parseInt(process.env.FRAY_FROZEN_MIN || '', 10) || DEFAULT_FROZEN_MIN;
-
-// Thread-level terminal statuses (frontmatter `status:`), matching scripts/fray TERMINAL.
-const TERMINAL_THREAD = new Set(['done', 'dismissed']);
+const STALE_CEILING_MIN = parseInt(process.env.FRAY_STALE_CEILING_MIN || '', 10) || DEFAULT_STALE_CEILING_MIN;
 
 /**
  * Derive the session tasks dir from a Stop payload's transcript_path.
@@ -147,8 +145,7 @@ export function agentLivenessLines({ transcriptPath, projectDir, now = Date.now(
         continue;
       }
       const slug = f.replace(/\.md$/, '');
-      const threadStatus = src.match(/^status:\s*(\S+)/m)?.[1] ?? '';
-      const threadTerminal = TERMINAL_THREAD.has(threadStatus); // only done/dismissed suppresses flagging; every other (non-terminal) status is in scope for a stale-agent flag
+      const threadStatus = src.match(/^status:\s*(\S+)/m)?.[1] ?? ''; // drives the banded predicate in deriveAgentState (always-flag active/enqueued/blocked; needs-decision only in a recency band; never todo/planned/done/dismissed)
       const agents = parseAgents(src);
 
       for (const a of agents) {
@@ -164,7 +161,7 @@ export function agentLivenessLines({ transcriptPath, projectDir, now = Date.now(
         const who = `${a.label ? `${a.label} ` : ''}[${a.id.slice(0, 9)}] (thread ${slug})`;
 
         // DERIVE the state from ground truth only (output age + thread status).
-        const state = deriveAgentState({ ageMin, threadTerminal, idleMin: IDLE_MIN, frozenMin: FROZEN_MIN });
+        const state = deriveAgentState({ ageMin, threadStatus, idleMin: IDLE_MIN, frozenMin: FROZEN_MIN, staleCeilingMin: STALE_CEILING_MIN });
         if (state === 'unreconciled') {
           // Stale output + non-terminal thread = a likely-finished/stalled agent the
           // orchestrator never folded. THE signal that matters.
