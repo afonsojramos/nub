@@ -77,9 +77,33 @@ try {
   } catch {
     /* no .fray dir yet */
   }
+  // Merge-queue surfacing: read .fray/merge-queue.jsonl (landing agents append a line per
+  // pushed-awaiting-CI PR; the heartbeat drains it). Surface every entry BY PR so a
+  // green-but-unmerged PR can never sit silently — the exact gap that stranded a release.
+  // Cheap file read only (no `gh` network call in a per-prompt hook — the MERGEABLE/green
+  // check + the merge itself are the heartbeat's mandatory drain step, not the hook's job).
+  /** @type {string[]} */
+  const mergeQueue = [];
+  try {
+    const raw = readFileSync(join(dir, '.fray', 'merge-queue.jsonl'), 'utf8');
+    for (const line of raw.split('\n')) {
+      const t = line.trim();
+      if (!t) continue;
+      try {
+        const e = JSON.parse(t);
+        mergeQueue.push(`#${e.pr ?? '?'}${e.branch ? ` (${e.branch})` : ''}${e.thread ? ` [${e.thread}]` : ''}`);
+      } catch {
+        /* skip a malformed line */
+      }
+    }
+  } catch {
+    /* no merge-queue file → nothing awaiting merge */
+  }
+
   const status =
     `FRAY — ${pending.length} pending: ${pending.join(', ') || 'none'}. Advance or reconcile EACH this turn; if you went deep on ONE thread, don't let the others silently stall (\`node scripts/fray/index.mjs\` for detail). Returns are a strict INBOX — drain the OLDEST first, ONE at a time, never batch; an empty/progress-only return is an INCOMPLETE handoff (record needs-retry + re-dispatch, do NOT mark done). When you fold a return: DRAIN that thread's queued follow-ups (\`## Steps\` items marked QUEUED — dispatch on <agent>'s return) + MOVE any answered Open question into Decisions (a DECIDED thing lives under ## Decisions, NEVER Open questions). done/dismissed threads are TERMINAL + KEPT — never delete them. ALWAYS STEER — DON'T RE-DISPATCH (TOP-PRIORITY RULE): SendMessage works on running AND completed sub-agents. To add context / redirect / fold scope into a file an agent owns, answer a question it raised, or RESUME an agent the instant a temporary blocker (a HOLD, a transient CI failure, a now-available input) clears — MESSAGE/RESUME that agent (by name or agentId). NEVER let an agent die and cold-redispatch a fresh replacement (loses its runbook + context), never spawn a clobbering sibling, never kill-and-respawn (orphans WIP). Only fall back to marking it\`enqueued\` (naming the agent it waits on) and dispatch the instant that agent returns; never spawn a clobbering sibling or kill-and-respawn.` +
     (queued.length ? `  ⚠ UN-DRAINED QUEUED FOLLOW-UPS in ${queued.length} thread(s): ${queued.join(', ')}. THE INSTANT any of their agents returns, RE-READ that thread .md (don't reconcile from memory) and DISPATCH the actionable QUEUED items as sub-agents THIS turn (a mandated self-review/integration pass IS one — dispatch it). Surface, never silently drop, the human-gated/post-launch ones. Skipping this is the #1 failure.` : '') +
+    (mergeQueue.length ? `  ⚠ MERGE-QUEUE — ${mergeQueue.length} PR(s) pushed & awaiting CI: ${mergeQueue.join(', ')}. DRAIN .fray/merge-queue.jsonl THIS turn (MANDATORY heartbeat step): for each, \`gh pr checks <pr>\` → GREEN → \`gh pr merge <pr> --squash\` + advance the thread + REMOVE the line; RED → remove + resume the owning agent with the failures; PENDING → leave it. A green-but-unmerged PR must NEVER sit — that strands the release.` : '') +
     (errors.length ? `  ⚠ VALIDATION ERRORS (fix now): ${errors.join('; ')}` : '');
 
   const modeLine =

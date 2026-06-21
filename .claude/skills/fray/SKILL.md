@@ -178,10 +178,12 @@ The single worst recurring failure is a landing agent that creates a commit/merg
 Because landing agents push-and-exit (above), the orchestrator — not a per-agent watcher — owns getting a green PR merged. This survives orchestrator context-compaction because the work-to-do lives in a durable file, not in the orchestrator's memory:
 
 - **The queue:** `.fray/merge-queue.jsonl`, one JSON line per pushed-awaiting-CI PR: `{"pr":36,"sha":"8cc0f33","branch":"native-npm-verbs","thread":"npm-only-verbs-posture","enqueued_at":"2026-06-21T04:37:19Z"}`. The landing agent APPENDS its line at push time (right before it exits).
-- **The drain (every heartbeat):** for each entry, `gh pr checks <pr>` →
+- **The drain is a MANDATORY step EVERY heartbeat — not optional, not "when you remember".** Draining `.fray/merge-queue.jsonl` is part of the heartbeat's fixed runbook, alongside reconciling returns and advancing the board. A non-empty queue means there is unfinished merge work the orchestrator OWNS; skipping the drain is how a green PR sits unmerged and strands a release (the exact 2026-06-21 failure: a PR was green-and-mergeable for 37min while its agent sat idle and nothing merged it). The `fray-reminder` hook surfaces every queue entry BY PR each turn so it can't be forgotten — act on it.
+- **The drain (run it every heartbeat):** for each entry, `gh pr checks <pr>` →
   - **green** → squash-merge (`gh pr merge <pr> --squash`), advance the owning thread, REMOVE the entry from the queue;
   - **red/failed** → REMOVE the entry and warm-resume the owning agent (`SendMessage` its `agentId`) with the failing checks, so it fixes in-scope and re-pushes (which re-enqueues);
   - **still pending** → leave the entry; the next heartbeat re-checks.
+- **A green-but-unmerged PR is an ERROR STATE, never a resting state.** If a queue entry's PR is MERGEABLE/green, MERGE IT — do not leave it for "later". The hook flags this every turn; treat a surfaced green-unmerged entry as a must-act-now item.
 - **Why durable:** the orchestrator may compact away the in-flight knowledge of "PR #36 is awaiting CI"; the queue file is the source of truth so the next heartbeat (or a fresh orchestrator after compaction) picks it up with no memory of the dispatch. This replaces the fragile per-agent watcher with one reliable, compaction-proof loop.
 
 ## The auto-epilogue + dispatch ledger (chaining survives compaction + fan-out)

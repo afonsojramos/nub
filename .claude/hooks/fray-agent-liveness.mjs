@@ -148,8 +148,7 @@ export function agentLivenessLines({ transcriptPath, projectDir, now = Date.now(
       }
       const slug = f.replace(/\.md$/, '');
       const threadStatus = src.match(/^status:\s*(\S+)/m)?.[1] ?? '';
-      const threadTerminal = TERMINAL_THREAD.has(threadStatus);
-      const threadActive = threadStatus === 'active'; // only `active` threads can have an UNRECONCILED/idle agent; parked phases (needs-decision/blocked/planned/enqueued/todo) with done agents are EXPECTED, not drift
+      const threadTerminal = TERMINAL_THREAD.has(threadStatus); // only done/dismissed suppresses flagging; every other (non-terminal) status is in scope for a stale-agent flag
       const agents = parseAgents(src);
 
       for (const a of agents) {
@@ -165,7 +164,7 @@ export function agentLivenessLines({ transcriptPath, projectDir, now = Date.now(
         const who = `${a.label ? `${a.label} ` : ''}[${a.id.slice(0, 9)}] (thread ${slug})`;
 
         // DERIVE the state from ground truth only (output age + thread status).
-        const state = deriveAgentState({ ageMin, threadTerminal, threadActive, idleMin: IDLE_MIN, frozenMin: FROZEN_MIN });
+        const state = deriveAgentState({ ageMin, threadTerminal, idleMin: IDLE_MIN, frozenMin: FROZEN_MIN });
         if (state === 'unreconciled') {
           // Stale output + non-terminal thread = a likely-finished/stalled agent the
           // orchestrator never folded. THE signal that matters.
