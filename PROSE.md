@@ -108,6 +108,12 @@ A release note is the scannable rules applied to a changeset:
 
 ---
 
+## Naming and capitalization
+
+**Capitalize "Nub" as a proper noun in prose; use `nub` (lowercase) only inside monospace.** The test: if the word is in running prose — a sentence, a heading, a table cell description — it is "Nub". If it is inside backticks, a fenced code block, a `<code>`/`<pre>`, a URL, a file path, or a package name, it stays lowercase (`nub`, `nubx`, `@nubjs/nub`, `node_modules/.nub`). Compound modifiers follow the same rule — "Nub-identity project" in prose, `` `nub-identity` `` in code. Never "NUB" (all-caps) anywhere.
+
+---
+
 ## Universal tone rules
 
 These hold everywhere — every surface above, plus commit messages and chat.

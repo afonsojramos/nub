@@ -63,7 +63,7 @@ What still happens under `--node`: the workspace-aware `node_modules/.bin` walk-
 
 ## Download and execute
 
-When a bin isn't on the `node_modules/.bin` chain, `nubx` falls back to a registry fetch — it resolves the package, installs it into a throwaway project, and runs it, then drops the scratch dir. This is the same local-first-then-DLX model as `npx` and `pnpm dlx`; nub is a complete package manager, so it does the fetch itself rather than shelling out to a foreign PM. Following `pnpm dlx` semantics, there is no interactive confirm-prompt — it just fetches and runs.
+When a bin isn't on the `node_modules/.bin` chain, `nubx` falls back to a registry fetch — it resolves the package, installs it into a throwaway project, and runs it, then drops the scratch dir. This is the same local-first-then-DLX model as `npx` and `pnpm dlx`; Nub is a complete package manager, so it does the fetch itself rather than shelling out to a foreign PM. Following `pnpm dlx` semantics, there is no interactive confirm-prompt — it just fetches and runs.
 
 ```console
 $ nubx cowsay "Hello"
