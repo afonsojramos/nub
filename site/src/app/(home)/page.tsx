@@ -956,7 +956,7 @@ function Compatibility() {
           })}
         </div>
         <p className="mx-auto mt-6 max-w-lg text-center text-sm leading-relaxed text-fd-muted-foreground">
-          Deno&rsquo;s Node-compat corpus, scored against stock Node.<br/>
+          Deno&rsquo;s Node-compat corpus, scored against stock Node. Nub&rsquo;s misses come from auto-enabling experimental features and loading native addons.<br/>
           <a
             href="https://github.com/nubjs/nub/tree/main/tests/cross-runtime"
             target="_blank"
@@ -1111,89 +1111,6 @@ function HypermanagerBand() {
         <div className="mt-10 divide-y divide-fd-border/60">
           <Feature
             accent="pink"
-            eyebrow="Supply-chain safe by default"
-            title="Hardened against supply-chain attacks"
-            body={
-              <>
-                The defenses are on out of the box, no config required. Nub treats dependency
-                build scripts as <Mono>deny-by-default</Mono>, queries OSV for malicious-package
-                advisories on every fresh resolve, refuses a version whose publish trust evidence
-                weakened against an earlier release, and holds back releases younger than{' '}
-                <Mono>minimumReleaseAge</Mono> (24h, matching pnpm) so a freshly-compromised
-                version isn&rsquo;t pulled in.
-              </>
-            }
-            visual={
-              <Terminal
-                lines={[
-                  { cmd: 'nub add @ledgerhq/connect-kit' },
-                  {
-                    out: 'Error: refusing to add malicious package(s):',
-                    tone: 'error',
-                  },
-                  {
-                    out: '  - @ledgerhq/connect-kit (MAL-2023-8697:',
-                    tone: 'error',
-                  },
-                  {
-                    out: '      https://osv.dev/vulnerability/MAL-2023-8697)',
-                    tone: 'error',
-                  },
-                  { out: '  ❌ code=ERR_NUB_MALICIOUS_PACKAGE', tone: 'error' },
-                  { out: '' },
-                  { cmd: 'nub install', comment: 'a version that lost its provenance' },
-                  {
-                    out: 'Error: trust downgrade for nanoid@3.3.14 (trustPolicy=',
-                    tone: 'error',
-                  },
-                  {
-                    out: '  no-downgrade): earlier published version 3.3.7 had',
-                    tone: 'error',
-                  },
-                  {
-                    out: '  provenance attestation but this version has no trust evidence',
-                    tone: 'error',
-                  },
-                  { out: '  ❌ code=ERR_NUB_TRUST_DOWNGRADE', tone: 'error' },
-                ]}
-              />
-            }
-          />
-
-          <Feature
-            accent="pink"
-            reverse
-            eyebrow="Deny-by-default build scripts"
-            title={<>Build scripts don&rsquo;t run until you allow them</>}
-            body={
-              <>
-                Install-time <Mono>postinstall</Mono> scripts are where most supply-chain payloads
-                land. Nub skips them by default, names what it skipped, and waits for{' '}
-                <Mono>nub approve-builds</Mono>. A curated default-trust floor can vouch for a
-                package only after it clears provenance, advisory, and cooling gates.
-              </>
-            }
-            visual={
-              <Terminal
-                lines={[
-                  { cmd: 'nub install' },
-                  {
-                    out: 'WARN ignored build scripts for 1 package(s): esbuild@0.21.5.',
-                    tone: 'error',
-                  },
-                  {
-                    out: '     Run `nub approve-builds` to review and enable them.',
-                  },
-                  { out: '     code=WARN_NUB_IGNORED_BUILD_SCRIPTS' },
-                  { out: '' },
-                  { cmd: 'nub approve-builds', comment: 'review + allow, once' },
-                ]}
-              />
-            }
-          />
-
-          <Feature
-            accent="pink"
             eyebrow="Meta package manager"
             title="Change package managers, keep your lockfile."
             body={
@@ -1292,6 +1209,89 @@ function HypermanagerBand() {
               </>
             }
             visual={<PMMatrix />}
+          />
+
+          <Feature
+            accent="pink"
+            eyebrow="Supply-chain safe by default"
+            title="Hardened against supply-chain attacks"
+            body={
+              <>
+                The defenses are on out of the box, no config required. Nub treats dependency
+                build scripts as <Mono>deny-by-default</Mono>, queries OSV for malicious-package
+                advisories on every fresh resolve, refuses a version whose publish trust evidence
+                weakened against an earlier release, and holds back releases younger than{' '}
+                <Mono>minimumReleaseAge</Mono> (24h, matching pnpm) so a freshly-compromised
+                version isn&rsquo;t pulled in.
+              </>
+            }
+            visual={
+              <Terminal
+                lines={[
+                  { cmd: 'nub add @ledgerhq/connect-kit' },
+                  {
+                    out: 'Error: refusing to add malicious package(s):',
+                    tone: 'error',
+                  },
+                  {
+                    out: '  - @ledgerhq/connect-kit (MAL-2023-8697:',
+                    tone: 'error',
+                  },
+                  {
+                    out: '      https://osv.dev/vulnerability/MAL-2023-8697)',
+                    tone: 'error',
+                  },
+                  { out: '  ❌ code=ERR_NUB_MALICIOUS_PACKAGE', tone: 'error' },
+                  { out: '' },
+                  { cmd: 'nub install', comment: 'a version that lost its provenance' },
+                  {
+                    out: 'Error: trust downgrade for nanoid@3.3.14 (trustPolicy=',
+                    tone: 'error',
+                  },
+                  {
+                    out: '  no-downgrade): earlier published version 3.3.7 had',
+                    tone: 'error',
+                  },
+                  {
+                    out: '  provenance attestation but this version has no trust evidence',
+                    tone: 'error',
+                  },
+                  { out: '  ❌ code=ERR_NUB_TRUST_DOWNGRADE', tone: 'error' },
+                ]}
+              />
+            }
+          />
+
+          <Feature
+            accent="pink"
+            reverse
+            eyebrow="Deny-by-default build scripts"
+            title={<>Build scripts don&rsquo;t run until you allow them</>}
+            body={
+              <>
+                Install-time <Mono>postinstall</Mono> scripts are where most supply-chain payloads
+                land. Nub skips them by default, names what it skipped, and waits for{' '}
+                <Mono>nub approve-builds</Mono>. A curated default-trust floor can vouch for a
+                package only after it clears provenance, advisory, and cooling gates.
+              </>
+            }
+            visual={
+              <Terminal
+                lines={[
+                  { cmd: 'nub install' },
+                  {
+                    out: 'WARN ignored build scripts for 1 package(s): esbuild@0.21.5.',
+                    tone: 'error',
+                  },
+                  {
+                    out: '     Run `nub approve-builds` to review and enable them.',
+                  },
+                  { out: '     code=WARN_NUB_IGNORED_BUILD_SCRIPTS' },
+                  { out: '' },
+                  { cmd: 'nub approve-builds', comment: 'review + allow, once' },
+                ]}
+              />
+            }
           />
         </div>
       </Container>
