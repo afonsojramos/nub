@@ -1,9 +1,21 @@
 ---
 title: Script runner
-description: A drop-in for npm run and pnpm run — lifecycle hooks, the standard npm environment variables, arg forwarding, and pnpm-style workspace filters, 24× faster on the cold path.
+description: A drop-in for pnpm run and npm run — every flag carries over with the same spelling and semantics, 24× faster on the cold path, with the full workspace and lifecycle-hook surface preserved.
 ---
 
-The `nub run` command executes the scripts in your `package.json`. It is a drop-in replacement for `npm run` and `pnpm run` — 24× faster on the cold path, with the full workspace and lifecycle-hook surface preserved. It reads your `package.json` directly; package management stays with whatever you already use (`pnpm`, `npm`, `yarn`, `bun`). This page is a cookbook: each section is a task with the exact command to run.
+`nub run` is a drop-in for `pnpm run` — every flag carries over with the same spelling and semantics, including the recursive and workspace-filter ones a real monorepo leans on. It is equally a drop-in for `npm run`. Existing invocations work unchanged:
+
+```bash
+nub run -r --resume-from @scope/pkg build      # resume an interrupted recursive run mid-graph
+nub run -r --reporter=ndjson build             # machine-readable per-package results for CI
+nub run -r --stream --reporter-hide-prefix build
+nub run -r --workspace-concurrency 4 build
+nub run -r --if-present test                   # skip members without the script
+```
+
+It reads your `package.json` directly — 24× faster on the cold path — and package management stays with whatever you already use (`pnpm`, `npm`, `yarn`, `bun`). This page is a cookbook: each section is a task with the exact command to run.
+
+A few minor behavioral notes: `--report-summary` streams results live via `--reporter=ndjson` rather than writing a static file; `--if-present` is workspace-scoped (skips members missing the script during a recursive run); and the legacy npm knobs `--scripts-prepend-node-path`, `--unsafe-perm`, and `--npm-path` are not needed and not accepted.
 
 ## `nub run <script>`
 
@@ -249,26 +261,6 @@ nub run --node test
 ```
 
 What still happens under `--node`: script lookup, workspace walk-up, `--filter` evaluation, `npm_*` env injection, `node_modules/.bin` on `PATH`, and the `pre` / `post` lifecycle hooks. Reach for it when a script's `#!/usr/bin/env node` shebang chain expects plain Node, when bisecting a Nub bug, or when CI wants byte-exact Node runtime behavior with Nub's workspace selection.
-
-## Drop-in for `pnpm run`
-
-Existing `pnpm run` invocations carry over unchanged — Nub accepts pnpm's `run` flags with the same spellings and semantics, down to the obscure recursive ones a real monorepo leans on.
-
-```bash
-nub run -r --resume-from @scope/pkg build      # resume an interrupted recursive run mid-graph
-nub run -r --reporter=ndjson build             # machine-readable per-package results for CI
-nub run -r --stream --reporter-hide-prefix build
-nub run -r --workspace-concurrency 4 build
-nub run -r --if-present test                   # skip members without the script
-```
-
-## Flag differences
-
-Nub covers pnpm's `run` flags; a small number work a little differently:
-
-- **`--report-summary`** — pnpm writes a static `pnpm-exec-summary.json`; Nub streams the same per-package results live with `--reporter=ndjson` (shown above), so reach for that when you want machine-readable output.
-- **`--if-present`** — in Nub this is a workspace flag: it skips members missing the script during a recursive run. In a single non-workspace package, run the script directly.
-- **`--scripts-prepend-node-path`, `--unsafe-perm`, `--npm-path`** — legacy npm-compat knobs Nub doesn't need.
 
 ## Related
 
