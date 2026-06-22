@@ -28,6 +28,10 @@ interface PmRow {
   items: PmItem[];
 }
 
+const STATUS_ICON_STYLE = { color: 'var(--status-ok)' } as const;
+const WARN_ICON_STYLE = { color: 'var(--status-warn)' } as const;
+const BAD_ICON_STYLE = { color: 'var(--status-bad)' } as const;
+
 function CheckIcon() {
   return (
     <svg
@@ -38,7 +42,8 @@ function CheckIcon() {
       strokeWidth="3.5"
       strokeLinecap="round"
       strokeLinejoin="round"
-      className="size-3 shrink-0 text-emerald-600 dark:text-emerald-400"
+      className="size-3 shrink-0"
+      style={STATUS_ICON_STYLE}
     >
       <path d="M20 6 9 17l-5-5" />
     </svg>
@@ -55,7 +60,8 @@ function PartialIcon() {
       strokeWidth="3.5"
       strokeLinecap="round"
       strokeLinejoin="round"
-      className="size-3 shrink-0 text-amber-500 dark:text-amber-400"
+      className="size-3 shrink-0"
+      style={WARN_ICON_STYLE}
     >
       <path d="M20 6 9 17l-5-5" />
     </svg>
@@ -72,7 +78,8 @@ function CrossIcon() {
       strokeWidth="3.5"
       strokeLinecap="round"
       strokeLinejoin="round"
-      className="size-3 shrink-0 text-red-500 dark:text-red-400"
+      className="size-3 shrink-0"
+      style={BAD_ICON_STYLE}
     >
       <path d="M18 6 6 18" />
       <path d="m6 6 12 12" />

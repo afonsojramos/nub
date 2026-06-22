@@ -1,3 +1,4 @@
+import React from 'react';
 import type { ReactNode } from 'react';
 
 /** Plain-text the amber tooltip needs from a (possibly markdown) note. */
@@ -45,10 +46,10 @@ const SVG_PROPS = {
 
 const STATUS_META: Record<
   CompatStatus,
-  { color: string; label: string; icon: ReactNode }
+  { colorClass: string; colorStyle?: React.CSSProperties; label: string; icon: ReactNode }
 > = {
   'n/a': {
-    color: 'text-fd-muted-foreground',
+    colorClass: 'text-fd-muted-foreground',
     label: 'Not applicable',
     icon: (
       <svg {...SVG_PROPS}>
@@ -57,7 +58,8 @@ const STATUS_META: Record<
     ),
   },
   no: {
-    color: 'text-red-500 dark:text-red-400',
+    colorClass: '',
+    colorStyle: { color: 'var(--status-bad)' },
     label: 'Not supported',
     icon: (
       <svg {...SVG_PROPS}>
@@ -67,7 +69,8 @@ const STATUS_META: Record<
     ),
   },
   partial: {
-    color: 'text-amber-600 dark:text-amber-400',
+    colorClass: '',
+    colorStyle: { color: 'var(--status-warn)' },
     label: 'Partially supported',
     icon: (
       <svg {...SVG_PROPS}>
@@ -76,7 +79,8 @@ const STATUS_META: Record<
     ),
   },
   yes: {
-    color: 'text-emerald-600 dark:text-emerald-400',
+    colorClass: '',
+    colorStyle: { color: 'var(--status-ok)' },
     label: 'Supported',
     icon: (
       <svg {...SVG_PROPS}>
@@ -94,7 +98,7 @@ function StatusGlyph({
   /** Plain-text breakdown surfaced on hover/focus of the glyph. */
   tooltip?: string;
 }) {
-  const { color, label, icon } = STATUS_META[status];
+  const { colorClass, colorStyle, label, icon } = STATUS_META[status];
   // Surface the note on hover/focus whenever the row has one (not just amber):
   // a CSS-only reveal (`group` + `group-hover`/`group-focus-within`) plus
   // sr-only text, so it's reachable by pointer, keyboard, and screen readers.
@@ -103,11 +107,12 @@ function StatusGlyph({
   const hasTip = !!tooltip;
   const glyph = (
     <span
-      className={`inline-flex items-center gap-1.5 font-medium ${color} ${
+      className={`inline-flex items-center gap-1.5 font-medium ${colorClass} ${
         hasTip
           ? 'cursor-help underline decoration-dotted decoration-from-font underline-offset-4'
           : ''
       }`}
+      style={colorStyle}
     >
       {icon}
       <span className="sr-only">

@@ -57,6 +57,17 @@
   --color-sky: #1f5fb0; /* blue — 5.91:1 */
   --color-orchid: #6d28d9; /* purple — 6.64:1 */
   --color-pink: #bd3576; /* 4.99:1 */
+
+  /* Table status-glyph tokens — AA-tuned per theme so the ✓/✗/~ icons clear
+     WCAG 2.x contrast in both light and dark mode. Raw Tailwind amber/red/emerald
+     palette colors failed AA on the cream ground (amber-500 2.01:1, amber-600
+     2.64–2.98:1, red-500/emerald-600 3.52:1 — all below the 3:1 graphical floor
+     or below the 4.5:1 text threshold). Dark values keep the current bright look.
+       light: amber-800 #92400e ≈6.6:1 · red-700 #b91c1c ≈6.0:1 · emerald-700 #047857 ≈5.1:1
+       dark:  amber-400 #fbbf24 ≈9.4:1 · red-400 #f87171 ≈5.3:1 · emerald-400 #34d399 ≈8.0:1 */
+  --status-warn: #92400e;  /* amber-800 — partial support — 6.63:1 on page, 6.29:1 on header */
+  --status-bad:  #b91c1c;  /* red-700   — not supported  — 6.05:1 on page, 5.74:1 on header */
+  --status-ok:   #047857;  /* emerald-700 — supported    — 5.13:1 on page, 4.86:1 on header */
 }
 
 .dark {
@@ -87,6 +98,11 @@
   --color-sky: #7bb0ff;
   --color-orchid: #c9a3ff;
   --color-pink: #ff6fb5;
+
+  /* Status-glyph bright values for dark mode (against near-black ground). */
+  --status-warn: #fbbf24;  /* amber-400  — 9.4:1  on #100f0d */
+  --status-bad:  #f87171;  /* red-400    — 5.3:1  on #100f0d */
+  --status-ok:   #34d399;  /* emerald-400 — 8.0:1 on #100f0d */
 }
 
 :root {
