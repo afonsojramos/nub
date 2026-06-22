@@ -1,22 +1,39 @@
 <p align="center">
-  <img src="https://nubjs.com/icon.svg" width="120" alt="Nub logo" />
+  <img src="https://nubjs.com/icon-border.svg" width="200px" align="center" alt="Nub logo" />
+  <h1 align="center">Nub</h1>
+  <p align="center">
+    A fast all-in-one toolkit that augments Node.js instead of replacing it
+  </p>
 </p>
-
-<h1 align="center">Nub</h1>
+<br/>
 
 <p align="center">
-  A fast all-in-one toolkit that <em>augments</em> Node.js instead of replacing it — a Bun-like DX on top of stock <code>node</code>, written in Rust.
+<a href="https://github.com/nubjs/nub/actions?query=branch%3Amain"><img src="https://github.com/nubjs/nub/actions/workflows/ci.yml/badge.svg?event=push&branch=main" alt="Nub CI status" /></a>
+<a href="https://opensource.org/licenses/MIT" rel="nofollow"><img src="https://img.shields.io/github/license/nubjs/nub" alt="License"></a>
+<a href="https://www.npmjs.com/package/@nubjs/nub" rel="nofollow"><img src="https://img.shields.io/npm/dw/@nubjs/nub.svg" alt="npm"></a>
+<a href="https://github.com/nubjs/nub" rel="nofollow"><img src="https://img.shields.io/github/stars/nubjs/nub" alt="stars"></a>
 </p>
 
-<p align="center">
+<div align="center">
   <a href="https://nubjs.com/docs">Docs</a>
-  &nbsp;•&nbsp;
-  <a href="https://nubjs.com">Website</a>
-  &nbsp;•&nbsp;
+  <span>&nbsp;&nbsp;•&nbsp;&nbsp;</span>
   <a href="https://github.com/nubjs/nub">GitHub</a>
-</p>
+  <span>&nbsp;&nbsp;•&nbsp;&nbsp;</span>
+  <a href="https://x.com/colinhacks">𝕏</a>
+  <br />
+</div>
 
 <br/>
+<br/>
+
+### [Read the docs →](https://nubjs.com/docs)
+
+<br/>
+<br/>
+
+
+A Bun-like DX on top of stock `node`, written in Rust.
+
 
 ```sh
 nub index.ts             # TypeScript-first Node.js runtime
@@ -128,8 +145,6 @@ nub --watch src/server.ts   # same path
 - 🧷 Also watches the off-graph invalidators — `.env*`, the `tsconfig.json` extends chain, `package.json`
 - ⚙️ Runs on Node's own `--watch` engine, preserving output by default
 
-View the [full watch mode docs 👉](https://nubjs.com/docs/watch).
-
 View the [full runtime docs  👉](https://nubjs.com/docs/runtime).
 
 <br/>
@@ -235,7 +250,7 @@ Under each incumbent, Nub reads that tool's branded config and no other's; the n
 | **Bun** | `bun.lock`, `bunfig.toml` `[install]`, `trustedDependencies`, `overrides`, `patchedDependencies`, `catalog:`, `.npmrc` |
 | **Nub** | neutral only — `.npmrc`, `npm_config_*`, `overrides` / `resolutions` / `catalog` / `workspaces` |
 
-See [Package manager](https://nubjs.com/docs/install#config-it-reads) for the full docs and granular compatibility info.
+View the [full package manager docs 👉](https://nubjs.com/docs/install#config-it-reads).
 
 <br/>
 
