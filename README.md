@@ -167,7 +167,7 @@ View the [full package runner docs 👉](https://nubjs.com/docs/nubx).
 
 ## Package manager — `nub install`
 
-Nub is a package manager powered by the [Aube](https://github.com/jdx/aube) engine. The CLI is 1:1 compatible with `pnpm` foro muscle memory. 
+Nub is a package manager powered by the [Aube](https://github.com/jdx/aube) engine. The CLI is 1:1 compatible with `pnpm` for muscle memory. 
 
 ```sh
 nub install                    # alias: nub i  ·  also: nub ci, --frozen-lockfile
