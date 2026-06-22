@@ -18,7 +18,7 @@ The action installs the `nub` CLI onto the runner. From there Nub resolves and p
 
 ## How it differs from setup-node
 
-The `actions/setup-node` action installs a Node version *you* name in the workflow, and that version is what your steps run. The setup-nub action installs the nub CLI; Nub then runs the project's declared pin at runtime. A Node version in the workflow is only a warm-up hint — Nub still runs the project pin regardless.
+The `actions/setup-node` action installs a Node version *you* name in the workflow, and that version is what your steps run. The setup-nub action installs the nub CLI; Nub then runs the project's declared pin at runtime. A Node version you pass as `node-version` is a warm-up hint — Nub still runs the project pin regardless.
 
 That makes the inputs you'd reach for different:
 
@@ -33,9 +33,35 @@ Nub reads `.node-version`, `.nvmrc`, or `engines.node` on first run.
 
 The setup-node inputs (`node-version`, `cache`, `registry-url`, …) are all accepted, so a mechanical swap is safe. The ones Nub can't honor are accepted and ignored rather than erroring.
 
-## node-version
+## Inputs
 
-Pass a version to pre-provision it into Nub's cache during setup, so the first run is warm. This is a warm-up hint, not a pin — if it differs from the project's declared pin, the action emits a warning and Nub runs the project pin.
+| Input | Default | Description |
+| --- | --- | --- |
+| `nub-version` | `latest` | Version of nub to install — any semver range npm understands. |
+| `node-version` | | Pre-provision this Node version into the cache as a warm-up hint. |
+| `node-version-file` | | Read a Node version from a file and pre-provision it. |
+| `cache` | `false` | Cache Nub's store and provisioned Node toolchains across runs. |
+| `cache-dependency-path` | | Lockfile path(s) whose hash keys the cache. |
+| `registry-url` | | Registry to set up for auth; writes a project-level `.npmrc`. |
+| `scope` | | Scope for a scoped registry; falls back to the repository owner for GitHub Packages. |
+| `always-auth` | `false` | Authenticate on every registry request. |
+| `token` | `github.token` | Token for GitHub-API rate-limit relief when resolving nub's version range. |
+
+The setup-node inputs `check-latest`, `architecture`, `mirror`, and `mirror-token` are accepted and ignored — present so a swap never errors, with no effect. The `version` input is a deprecated alias for `nub-version` and emits a warning.
+
+### `nub-version`
+
+Pin the CLI version to install — any semver range npm understands. Defaults to the latest release:
+
+```yaml
+- uses: nubjs/setup-nub@v0
+  with:
+    nub-version: ^0.0
+```
+
+### `node-version`
+
+Pass a version to pre-provision it into Nub's cache during setup, so the first run is warm. This is a **warm-up hint, not a pin** — if it differs from the project's declared pin, the action emits a warning and Nub runs the project pin. The project pin always wins at runtime.
 
 ```yaml
 - uses: nubjs/setup-nub@v0
@@ -43,7 +69,11 @@ Pass a version to pre-provision it into Nub's cache during setup, so the first r
     node-version: 22.15.0
 ```
 
-Read the version from a file instead with `node-version-file`:
+Both `node-version` and `node-version-file` are redundant with Nub's own resolution — Nub provisions the pin lazily on first use without either input. Reach for them only when you want the download to happen in the setup step.
+
+### `node-version-file`
+
+Read a Node version from a file and pre-provision it. Accepts `.node-version`, `.nvmrc`, and `package.json` (reads `engines.node`):
 
 ```yaml
 - uses: nubjs/setup-nub@v0
@@ -51,9 +81,9 @@ Read the version from a file instead with `node-version-file`:
     node-version-file: .node-version
 ```
 
-Both are redundant with Nub's own resolution — Nub provisions the pin lazily on first use without either input. Reach for them only when you want the download to happen in the setup step.
+Same warm-up-hint semantics as `node-version` — the project pin wins at runtime regardless.
 
-## cache
+### `cache`
 
 Cache Nub's global store and provisioned Node toolchains across runs. Off by default; turn it on with a boolean:
 
@@ -73,7 +103,9 @@ bun.lockb
 yarn.lock
 ```
 
-Override the auto-detection with `cache-dependency-path` — a lockfile path, glob, or newline-delimited list:
+### `cache-dependency-path`
+
+Override the auto-detected lockfile for cache keying — a lockfile path, glob, or newline-delimited list:
 
 ```yaml
 - uses: nubjs/setup-nub@v0
@@ -84,11 +116,11 @@ Override the auto-detection with `cache-dependency-path` — a lockfile path, gl
       packages/*/pnpm-lock.yaml
 ```
 
-A `cache-hit` output reports whether the store was restored. A `restore-keys` ladder gives a partial warm hit even when the lockfile changes.
+A `restore-keys` ladder gives a partial warm hit even when the lockfile changes.
 
-## registry-url
+### `registry-url`
 
-Set up authenticated registry access. The action writes a temporary `.npmrc` — the neutral file Nub's package manager reads — and binds the auth token to the `NODE_AUTH_TOKEN` environment variable:
+Set up authenticated registry access. The action writes a project-level `.npmrc` — the neutral file Nub's package manager reads — and wires the auth token to `NODE_AUTH_TOKEN`:
 
 ```yaml
 - uses: nubjs/setup-nub@v0
@@ -110,32 +142,17 @@ For GitHub Packages, point at the registry and the scope defaults to the reposit
     NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 ```
 
-Set `scope` explicitly for a scoped registry, and `always-auth: true` to authenticate on every request. The `.npmrc` follows the same contract as setup-node, so existing auth setups port over unchanged.
+### `scope`
 
-## nub-version
+Scope for a scoped registry. Falls back to the repository owner for `npm.pkg.github.com`. The `.npmrc` written by `registry-url` follows the same contract as setup-node, so existing auth setups port over unchanged.
 
-Pin the CLI version to install — any semver range npm understands. Defaults to the latest release:
+### `always-auth`
 
-```yaml
-- uses: nubjs/setup-nub@v0
-  with:
-    nub-version: ^0.0
-```
+Write `always-auth=true` into the project `.npmrc` to authenticate on every registry request.
 
-## Inputs
+### `token`
 
-| Input | Default | Description |
-| --- | --- | --- |
-| `nub-version` | `latest` | Version of nub to install — any semver range npm understands. |
-| `node-version` | | Pre-provision this Node version into the cache as a warm-up hint. |
-| `node-version-file` | | Read a Node version from a file and pre-provision it. |
-| `cache` | `false` | Cache Nub's store and provisioned Node toolchains across runs. |
-| `cache-dependency-path` | | Lockfile path(s) whose hash keys the cache. |
-| `registry-url` | | Registry to set up for auth; writes a temporary `.npmrc`. |
-| `scope` | | Scope for a scoped registry; falls back to the repository owner for GitHub Packages. |
-| `always-auth` | `false` | Authenticate on every registry request. |
-
-The setup-node inputs `token`, `check-latest`, `architecture`, `mirror`, and `mirror-token` are accepted and ignored — present so a swap never errors, with no effect. A `version` input survives as a deprecated alias for `nub-version` and emits a warning.
+Token for GitHub-API rate-limit relief when resolving nub's version range (and Node downloads on GHES). Defaults to `github.token` on github.com — most workflows don't need to set this explicitly.
 
 ## Outputs
 
