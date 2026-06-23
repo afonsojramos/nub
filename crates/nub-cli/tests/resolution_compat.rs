@@ -332,3 +332,109 @@ fn data_url_unknown_format_matches_node() {
         );
     }
 }
+
+/// Regression (Next.js + Turbopack + Tailwind v4): `nub run build` must NOT crash
+/// Turbopack with `ERR_METHOD_NOT_IMPLEMENTED('resolveSync()')`.
+///
+/// Root cause: nub's fast-tier sync `module.registerHooks` resolve hook coexists with a
+/// USER async `module.register` loader — `@tailwindcss/node`'s `esm-cache.loader.mjs`,
+/// which Tailwind v4 registers when Turbopack evaluates `globals.css`. Once sync hooks
+/// exist, Node routes EVERY resolution through the synchronous chain (`loader.js`:
+/// `resolve` delegates to `resolveSync`). nub's hook's `nextResolve` then reaches Node's
+/// default step `#resolveAndMaybeBlockOnLoaderThread`, which — with an async loader
+/// present — calls the in-thread async-hooks `Hooks.resolveSync()`, a stub that
+/// unconditionally throws `ERR_METHOD_NOT_IMPLEMENTED('resolveSync()')`
+/// (node:internal/modules/esm/hooks). That throw aborted the build ("Error evaluating
+/// Node.js code" on ./app/globals.css → an esbuild deadlock). nub's resolve hook now
+/// catches that specific error (only when `userAsyncLoaderActive()`) and recovers by
+/// resolving through the parent's CJS resolver.
+///
+/// The crash needs Turbopack's internal sync-resolve path — it is not reachable from
+/// user JS alone — so the faithful regression guard is a real, minimal Next 16 +
+/// Tailwind v4 Turbopack build. That is heavy (scaffolds + `nub install` + a full
+/// `next build`), so it is `#[ignore]`d like the resolution-parity corpus and run via:
+///   cargo test -p nub-cli --test resolution_compat -- --ignored --nocapture
+/// or the CI compat job. Reproduce manually: a real app with `next ^16`, the App Router,
+/// Tailwind v4 (`@tailwindcss/postcss` + `@import "tailwindcss"` in `app/globals.css`)
+/// crashes under pre-fix `nub run build` and builds clean after.
+#[test]
+#[ignore = "heavy e2e: scaffolds a Next 16 + Tailwind v4 app, installs deps, and runs `next build` (Turbopack). Run via `cargo test -p nub-cli --test resolution_compat -- --ignored` or the CI compat job."]
+fn next_turbopack_tailwind_build_does_not_crash() {
+    use std::fs;
+
+    let nub = nub_binary();
+    let tmp = std::env::temp_dir().join(format!("nub-next-tw-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(tmp.join("app")).unwrap();
+
+    // Minimal Next 16 App Router app whose ONLY non-default ingredient is Tailwind v4 —
+    // the dependency that registers the async `module.register` loader. `app/globals.css`
+    // with `@import "tailwindcss"` is what drives Turbopack's Node evaluation.
+    fs::write(
+        tmp.join("package.json"),
+        r#"{
+  "name": "nub-next-tw-regression",
+  "private": true,
+  "scripts": { "build": "next build" },
+  "dependencies": {
+    "next": "^16.1.1",
+    "react": "^19",
+    "react-dom": "^19",
+    "tailwindcss": "^4.1.17",
+    "@tailwindcss/postcss": "^4.1.17"
+  }
+}
+"#,
+    )
+    .unwrap();
+    fs::write(
+        tmp.join("postcss.config.mjs"),
+        "export default { plugins: { '@tailwindcss/postcss': {} } };\n",
+    )
+    .unwrap();
+    fs::write(tmp.join("next.config.ts"), "export default {};\n").unwrap();
+    fs::write(tmp.join("app/globals.css"), "@import \"tailwindcss\";\n").unwrap();
+    fs::write(
+        tmp.join("app/layout.tsx"),
+        "import './globals.css';\nexport default function RootLayout({ children }: { children: React.ReactNode }) {\n  return (<html><body>{children}</body></html>);\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        tmp.join("app/page.tsx"),
+        "export default function Page() { return <main className=\"p-4\">ok</main>; }\n",
+    )
+    .unwrap();
+
+    let install = Command::new(&nub)
+        .arg("install")
+        .current_dir(&tmp)
+        .stdin(Stdio::null())
+        .output()
+        .expect("spawn nub install");
+    assert!(
+        install.status.success(),
+        "nub install failed for the Next+Tailwind regression fixture:\n{}",
+        String::from_utf8_lossy(&install.stderr)
+    );
+
+    let build = Command::new(&nub)
+        .args(["run", "build"])
+        .current_dir(&tmp)
+        .stdin(Stdio::null())
+        .output()
+        .expect("spawn nub run build");
+    let stdout = String::from_utf8_lossy(&build.stdout);
+    let stderr = String::from_utf8_lossy(&build.stderr);
+
+    let _ = fs::remove_dir_all(&tmp);
+
+    assert!(
+        !stderr.contains("ERR_METHOD_NOT_IMPLEMENTED")
+            && !stdout.contains("ERR_METHOD_NOT_IMPLEMENTED"),
+        "nub leaked the async-loader resolveSync() stub error — the Turbopack/Tailwind crash regressed.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        build.status.success(),
+        "`nub run build` failed for the Next 16 + Tailwind v4 Turbopack app.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+}

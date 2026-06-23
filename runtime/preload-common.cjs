@@ -257,6 +257,29 @@ function registerLoaderWorker(specifier, parentURL, options) {
   }
 }
 
+// Resolve a specifier through the parent module's own CommonJS resolver and return a
+// `{ url, shortCircuit }` the registerHooks resolve chain can return. Used ONLY as the
+// recovery path when Node's default resolve step throws the async-loader `resolveSync`
+// stub (see the resolve hook). CJS resolution honors `node_modules`, package `exports`,
+// relative + absolute paths, and bare/scoped specifiers — the same surface Node's
+// default ESM resolve would have produced for the cases that reach here. Returns null
+// if it cannot resolve (caller re-throws the original error so behavior is unchanged).
+function resolveViaParentRequire(specifier, parentURL) {
+  try {
+    const base = parentURL && String(parentURL).startsWith("file:")
+      ? String(parentURL)
+      : pathToFileURL(join(process.cwd(), "noop.js")).href;
+    const req = module_.createRequire(base);
+    const resolved = req.resolve(specifier);
+    const url = resolved.startsWith("node:") || resolved.startsWith("data:")
+      ? resolved
+      : pathToFileURL(resolved).href;
+    return { url, shortCircuit: true };
+  } catch {
+    return null;
+  }
+}
+
 function makeHooks(core, watchReporting) {
   installUserHookDetector();
   installUserAsyncLoaderDetector();
@@ -278,7 +301,33 @@ function makeHooks(core, watchReporting) {
         if (res) return res;
       } catch { /* fall through to Node's resolver */ }
     }
-    return nextResolve(specifier, context);
+    try {
+      return nextResolve(specifier, context);
+    } catch (err) {
+      // Node-loader interop crash (the Turbopack/Tailwind case): when nub's SYNC
+      // `module.registerHooks` resolve hook coexists with a USER async `module.register`
+      // loader (e.g. @tailwindcss/node's esm-cache.loader.mjs, pulled in by Tailwind v4
+      // under Turbopack), Node routes EVERY resolution — even an `import` — through the
+      // synchronous chain (loader.js: `resolve` delegates to `resolveSync` whenever sync
+      // hooks exist). Our `nextResolve` then reaches Node's default step
+      // `#resolveAndMaybeBlockOnLoaderThread`, which, with an async loader present, calls
+      // the async-hooks proxy `Hooks.resolveSync()` — a stub that unconditionally throws
+      // `ERR_METHOD_NOT_IMPLEMENTED('resolveSync()')` (node:internal/modules/esm/hooks).
+      // The async loader simply cannot service a sync resolve, and the throw kills the
+      // build (Turbopack reports "Error evaluating Node.js code"). This is a Node
+      // limitation in the sync-hooks × async-loader combination, but nub's sync hook is
+      // what pulls resolution onto the sync path, so nub must not let the fall-through
+      // crash: recover by resolving the specifier ourselves via the parent's CommonJS
+      // resolver (covers bare packages, node_modules `exports`, relative + absolute
+      // paths) and short-circuiting. The user's async loader still runs for everything
+      // that does NOT need a synchronous resolve; only the impossible sync-into-async
+      // hop is bypassed. Re-throw anything that is not this specific interop crash.
+      if (err && err.code === "ERR_METHOD_NOT_IMPLEMENTED" && userAsyncLoaderActive()) {
+        const fallback = resolveViaParentRequire(specifier, context.parentURL);
+        if (fallback) return fallback;
+      }
+      throw err;
+    }
   }
 
   function load(url, context, nextLoad) {
