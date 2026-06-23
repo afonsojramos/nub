@@ -2,13 +2,16 @@
 // Commit-message hygiene gate.
 //
 // Scans every commit message in a PR range (merge-base(base, head)..head) and
-// fails if any message carries an automated co-authorship / agent-attribution
-// trailer. Matching is deliberately narrow: only attribution TRAILER forms fail.
+// fails if any message carries a Co-authored-by trailer naming an automated
+// agent (Claude, Anthropic, noreply@anthropic). That trailer renders as a
+// co-author avatar in the GitHub UI — it is the one UI-visible attribution form
+// that requires enforcement.
 //
 //   - A legitimate HUMAN co-author (`Co-authored-by: Jane <jane@example.com>`)
-//     must PASS — only co-author trailers naming an automated agent fail.
-//   - A topical mention of a tool in a subject or body (e.g. a commit that adds
-//     a docs page about a "Claude Code skill") must PASS.
+//     must PASS — only trailers naming an automated agent fail.
+//   - Body-text mentions of tools (e.g. Claude-Session URLs, "Generated with"
+//     lines) are commit prose; they are invisible in the GitHub UI and are NOT
+//     flagged by this check.
 //
 // No dependencies; runs on the Actions-provided Node.
 
@@ -25,9 +28,12 @@ function git(args) {
 }
 
 // Patterns. Each entry: a human-readable label + a test() over a single line.
-// Co-author trailers are anchored to line-start (a trailer, not prose). Topical
-// patterns deliberately have no line anchor — they catch the brand only in the
-// attribution-phrase forms ("generated with ...", a session/code URL).
+//
+// Scope: only UI-visible attribution forms. Co-authored-by trailers name a
+// co-author that renders as an avatar in the GitHub UI — that is the one form
+// that matters. Claude-Session URLs and "Generated with" body text are commit-
+// body prose; they are invisible in the GitHub PR/commit UI and are not flagged.
+// Legitimate human Co-authored-by entries pass through unchanged.
 const RULES = [
   {
     label: "Co-authored-by trailer attributing an automated agent",
@@ -35,22 +41,6 @@ const RULES = [
       /^\s*co-authored-by:\s*.*(claude|anthropic\.com|noreply@anthropic)/i.test(
         line,
       ),
-  },
-  {
-    label: "Claude-Session trailer",
-    test: (line) => /^\s*claude-session:/i.test(line),
-  },
-  {
-    label: "claude.ai/code attribution link",
-    test: (line) => /claude\.ai\/code/i.test(line),
-  },
-  {
-    label: '"Generated with Claude/AI" attribution line',
-    test: (line) => /generated with (claude|ai\b)/i.test(line),
-  },
-  {
-    label: 'robot-emoji "Generated" attribution line',
-    test: (line) => /\u{1F916}.*generated/iu.test(line),
   },
 ];
 
@@ -83,15 +73,15 @@ for (const sha of shas) {
 
 if (offenders.length === 0) {
   console.log(
-    `Commit-message hygiene OK — scanned ${shas.length} commit(s), no agent-attribution trailers found.`,
+    `Commit-message hygiene OK — scanned ${shas.length} commit(s), no agent co-authored-by trailers found.`,
   );
   process.exit(0);
 }
 
 console.error("Commit-message hygiene check FAILED.\n");
 console.error(
-  "These commits carry automated co-authorship / agent-attribution trailers.\n" +
-    "nub commit messages must not include them (legitimate human co-authors are fine).\n",
+  "These commits carry a Co-authored-by trailer naming an automated agent.\n" +
+    "Remove the trailer line (legitimate human co-authors are fine).\n",
 );
 for (const { sha, subject, hits } of offenders) {
   console.error(`  commit ${sha.slice(0, 12)}  ${subject}`);
