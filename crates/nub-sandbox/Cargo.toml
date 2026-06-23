@@ -14,15 +14,15 @@ repository.workspace = true
 # Seatbelt jail (the parity baseline).
 
 [dependencies]
-glob-match = "0.2"
 tracing.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4"
 seccompiler = "0.5"
-libc.workspace = true
-
-[target.'cfg(target_os = "macos")'.dependencies]
+# libc is Linux-only here: only the Landlock/seccomp backend (linux.rs) calls
+# into it (prctl + the raw landlock_create_ruleset ABI probe). macOS is pure
+# SBPL via sandbox-exec and needs no libc; Windows uses the stub. Do not add a
+# macOS-target libc back — it was unused and dropped for supply-chain hygiene.
 libc.workspace = true
 
 [dev-dependencies]

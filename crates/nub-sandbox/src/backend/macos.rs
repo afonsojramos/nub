@@ -81,6 +81,16 @@ pub(crate) fn build_profile(policy: &SandboxPolicy) -> String {
     }
     // recursive .env* deny at any depth (matches the Seatbelt native-deny path
     // in sandbox-fs-deny-list.md). A single regex covers every directory level.
+    //
+    // FIRST-CUT LIMITATION (data/enforcement mismatch — documented, not a bug):
+    // `read_deny_glob` is consumed only as a BOOLEAN here (`!is_empty()`); the
+    // individual pattern VALUES in `secrets::read_deny_globs()` are NOT
+    // translated to SBPL — a single hardcoded `.env`/`.env.*` regex is emitted.
+    // So on macOS this axis is `.env*`-ONLY: adding a new glob (e.g. `*.pem`,
+    // `secrets/**`) to the policy would SILENTLY NOT be enforced on macOS until
+    // per-pattern glob→SBPL-regex translation lands (a tracked follow-up). The
+    // secret-DIR denies (`~/.ssh` etc.) go through the `read_deny` subpath path
+    // above and ARE fully enforced; only the glob axis is `.env`-limited.
     if !policy.fs.read_deny_glob.is_empty() {
         // `/\.env($|\.)` matches `<…>/.env` and `<…>/.env.<anything>`.
         rules.push("(deny file-read* (regex #\"/\\.env($|\\.)\"))".to_string());

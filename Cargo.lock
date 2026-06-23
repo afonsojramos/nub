@@ -3138,7 +3138,6 @@ dependencies = [
 name = "nub-sandbox"
 version = "0.1.13"
 dependencies = [
- "glob-match",
  "landlock",
  "libc",
  "seccompiler",

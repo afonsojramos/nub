@@ -80,11 +80,20 @@ pub fn read_deny_globs() -> Vec<String> {
 }
 
 /// Relative paths DENIED-WRITE even inside an otherwise-writable root —
-/// persistence/backdoor sinks (Shai-Hulud v2, nx). The build-jail's write set
-/// is already tight (package dir + caches), but when a writable root overlaps a
-/// project tree (the `.git/hooks` carve-out, future runtime profile) these must
-/// stay denied so a write can't drop persistence. Matched as suffix/glob
-/// against a candidate write path.
+/// persistence/backdoor sinks (Shai-Hulud v2, nx).
+///
+/// NOT YET ENFORCED — forward data, deliberately unconsumed in this first cut.
+/// The build-jail's write set is already TIGHT (package dir + caches), so none of
+/// these sinks (`.bashrc`, `.github/workflows/**`, `.claude/**`, `.git/config`,
+/// …) is writable today regardless — they fall outside `write_allow`, so no
+/// backend needs this list yet. It becomes load-bearing only with the RUNTIME
+/// profile, whose writable roots OVERLAP a project tree (e.g. a project-root
+/// write grant, or the `.git/hooks` carve-out): there a write into a project
+/// subtree could otherwise drop persistence, and this is the mandatory
+/// deny-set-INSIDE-writable-roots that closes it. A future reader must NOT
+/// assume these are currently denied — wire this into the runtime-profile write
+/// compiler when it lands (the macOS Seatbelt `(deny file-write* ...)` /
+/// Landlock per-path exclusion for each entry).
 pub fn write_deny_relglobs() -> Vec<String> {
     vec![
         // OS / shell persistence
