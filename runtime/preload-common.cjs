@@ -257,24 +257,60 @@ function registerLoaderWorker(specifier, parentURL, options) {
   }
 }
 
+// Is this error Node's "an async `module.register` loader cannot service a SYNCHRONOUS
+// resolve/load" stub? On Node 22.15–~24.11 the async-hooks proxy's `resolveSync`/
+// `loadSync` are stubs that unconditionally `throw new ERR_METHOD_NOT_IMPLEMENTED(...)`.
+// nub's fast-tier SYNC `module.registerHooks` hooks force EVERY resolve/load onto the
+// synchronous chain; when a USER async loader (e.g. @tailwindcss/node's
+// esm-cache.loader.mjs under Turbopack) is ALSO registered, the chain's default step
+// reaches that stub and throws — killing the build. We must detect this WITHOUT the
+// `userAsyncLoaderActive()` flag: the very FIRST throwing resolution is the loader
+// module's own specifier, resolved DURING `module.register` before the detector flag is
+// observable, so the flag is false exactly when recovery is needed. The error code +
+// message is the reliable signal. (Node 24.12+/25.2+/26 implement these methods, so the
+// stub never throws there and this never fires.)
+function isAsyncLoaderSyncStub(err) {
+  if (!err || typeof err.message !== "string") return false;
+  // Two shapes across the affected Node band: (a) the method exists but is a stub that
+  // throws ERR_METHOD_NOT_IMPLEMENTED('resolveSync()'/'loadSync()') (e.g. 24.3); (b) the
+  // method is ENTIRELY ABSENT, so Node's `this[#customizations].resolveSync/loadSync(...)`
+  // throws a TypeError "... is not a function" (e.g. 22.16/24.11). Match both.
+  if (err.code === "ERR_METHOD_NOT_IMPLEMENTED" &&
+      (err.message.includes("resolveSync") || err.message.includes("loadSync"))) {
+    return true;
+  }
+  return err instanceof TypeError &&
+    (err.message.includes("resolveSync is not a function") ||
+     err.message.includes("loadSync is not a function"));
+}
+
 // Resolve a specifier to a URL the registerHooks resolve chain can return, as the
-// recovery path when Node's default resolve step throws the async-loader `resolveSync`
-// stub (see the resolve hook). Returns `{ url, shortCircuit }`, or null if it cannot
-// resolve (caller re-throws the original error so behavior is unchanged).
+// recovery path when Node's default resolve step throws the async-loader stub (see
+// isAsyncLoaderSyncStub). Returns `{ url, shortCircuit }`, or null if it cannot resolve
+// (caller re-throws the original error so behavior is unchanged).
 //
-// Resolution uses the parent's CommonJS resolver (`createRequire().resolve`), which is
-// the only fully-synchronous, conditions-capable resolver available in this `--require`
-// CJS preload. It honors `node_modules`, package `exports`, relative + absolute paths,
-// and bare/scoped specifiers — but under the REQUIRE condition. For a DUAL package whose
-// `exports` differ by `import`/`require`, this returns the `require` build where Node's
-// default ESM resolve would return the `import` build (the recovery path only fires under
-// the async-loader stub, and the in-the-wild trigger — @tailwindcss/node resolving its
-// own internal modules — is not a dual package, so the divergence is latent; tightening
-// to import-condition resolution needs a sync import-side resolver this CJS scope lacks).
-// Builtins MUST be mapped back to `node:`: `require.resolve("fs")` returns the bare name
-// `"fs"`, which must not be turned into a bogus `file://<cwd>/fs` URL.
+// Uses the parent's CommonJS resolver (`createRequire().resolve`) — the only fully-sync,
+// conditions-capable resolver available in this `--require` CJS preload. It honors
+// `node_modules`, package `exports`, relative + absolute paths, and bare/scoped
+// specifiers, but under the REQUIRE condition; a DUAL package whose `exports` differ by
+// `import`/`require` gets its `require` build where Node's default ESM resolve would
+// return the `import` build (latent — the in-the-wild trigger resolves non-dual internal
+// modules). Builtins MUST be mapped back to `node:`: `require.resolve("fs")` returns the
+// bare name `"fs"`, which must not become a bogus `file://<cwd>/fs` URL.
 function resolveViaParentRequire(specifier, parentURL) {
   try {
+    // An ALREADY-RESOLVED specifier needs no resolution — return it verbatim. This is the
+    // common Turbopack/Tailwind trigger: Node resolves the loader module's OWN absolute
+    // `file://` URL (`@tailwindcss/node/dist/esm-cache.loader.mjs`) synchronously during
+    // `module.register`, with `parentURL` = `data:` (no useful base). `require.resolve`
+    // cannot take a `file://` URL string, so pass these through directly. Builtins and
+    // `data:` specifiers are likewise already-resolved.
+    if (specifier.startsWith("file:") || specifier.startsWith("data:")) {
+      return { url: specifier, shortCircuit: true };
+    }
+    if (specifier.startsWith("node:") || module_.isBuiltin(specifier)) {
+      return { url: specifier.startsWith("node:") ? specifier : `node:${specifier}`, shortCircuit: true };
+    }
     const base = parentURL && String(parentURL).startsWith("file:")
       ? String(parentURL)
       : pathToFileURL(join(process.cwd(), "noop.js")).href;
@@ -315,29 +351,37 @@ function makeHooks(core, watchReporting) {
     try {
       return nextResolve(specifier, context);
     } catch (err) {
-      // Node-loader interop crash (the Turbopack/Tailwind case): when nub's SYNC
-      // `module.registerHooks` resolve hook coexists with a USER async `module.register`
-      // loader (e.g. @tailwindcss/node's esm-cache.loader.mjs, pulled in by Tailwind v4
-      // under Turbopack), Node routes EVERY resolution — even an `import` — through the
-      // synchronous chain (loader.js: `resolve` delegates to `resolveSync` whenever sync
-      // hooks exist). Our `nextResolve` then reaches Node's default step
-      // `#resolveAndMaybeBlockOnLoaderThread`, which, with an async loader present, calls
-      // the async-hooks proxy `Hooks.resolveSync()` — a stub that unconditionally throws
-      // `ERR_METHOD_NOT_IMPLEMENTED('resolveSync()')` (node:internal/modules/esm/hooks).
-      // The async loader simply cannot service a sync resolve, and the throw kills the
-      // build (Turbopack reports "Error evaluating Node.js code"). This is a Node
-      // limitation in the sync-hooks × async-loader combination, but nub's sync hook is
-      // what pulls resolution onto the sync path, so nub must not let the fall-through
-      // crash: recover by resolving the specifier ourselves via the parent's CommonJS
-      // resolver (covers bare packages, node_modules `exports`, relative + absolute
-      // paths) and short-circuiting. The user's async loader still runs for everything
-      // that does NOT need a synchronous resolve; only the impossible sync-into-async
-      // hop is bypassed. Re-throw anything that is not this specific interop crash.
-      if (err && err.code === "ERR_METHOD_NOT_IMPLEMENTED" && userAsyncLoaderActive()) {
+      if (isAsyncLoaderSyncStub(err)) {
         const fallback = resolveViaParentRequire(specifier, context.parentURL);
         if (fallback) return fallback;
       }
       throw err;
+    }
+  }
+
+  // Recovery for the async-loader `loadSync` stub: load a `file:` module ourselves when
+  // Node's default load step throws ERR_METHOD_NOT_IMPLEMENTED (see isAsyncLoaderSyncStub).
+  // Reads source from disk and derives the format from extension + nearest package `type`
+  // (nub's own moduleFormatFor — the same source-of-truth as the transpile path). For a
+  // transpilable TS/JSX file outside node_modules, route through nub's transpiler; for a
+  // data-extension, through loadData; otherwise hand back raw source with the derived
+  // format. Returns null if it cannot (caller re-throws). A CJS result keeps source:null
+  // and hands off to the native CommonJS loader, matching the default-load contract.
+  function loadViaDisk(url, ext) {
+    try {
+      const path = fileURLToPath(url);
+      if (core.TRANSPILE_EXTS.has(ext) && !core.isNodeModules(url)) {
+        return core.loadTranspile(url, ext);
+      }
+      if (ext in core.DATA_EXTS) return core.loadData(url, ext);
+      const { readFileSync } = require("node:fs");
+      const source = readFileSync(path);
+      const pkgType = core.getPackageType(dirname(path));
+      const format = core.moduleFormatFor(ext, pkgType, path, source.toString("utf8"));
+      if (format === "commonjs") return { format: "commonjs", source: null, shortCircuit: true };
+      return { format, source, shortCircuit: true };
+    } catch {
+      return null;
     }
   }
 
@@ -414,7 +458,31 @@ function makeHooks(core, watchReporting) {
       return { format: undefined, source: "", shortCircuit: true };
     }
 
-    const r = nextLoad(url, context);
+    let r;
+    try {
+      r = nextLoad(url, context);
+    } catch (err) {
+      // Async-loader `loadSync` stub (the load-hook twin of the resolve recovery): with a
+      // USER async `module.register` loader present, nub's sync load hook forces the default
+      // step onto the synchronous chain, which calls the async-hooks `loadSync` stub →
+      // ERR_METHOD_NOT_IMPLEMENTED. Recover by loading the module ourselves: read source
+      // from disk and derive the format from the URL/extension (the same source-of-truth
+      // nub's own transpile path uses), so the synchronous module-job gets real source
+      // instead of crashing. node:/data:/non-file URLs and the no-format case fall through
+      // to a re-throw (we can't synthesize those here). Re-throw anything that isn't the stub.
+      if (isAsyncLoaderSyncStub(err) && typeof url === "string") {
+        // Builtins: hand back the `builtin` format with no source — Node loads them
+        // natively (a `node:`-scheme module the default load would have returned builtin for).
+        if (url.startsWith("node:") || module_.isBuiltin(url)) {
+          return { format: "builtin", source: null, shortCircuit: true };
+        }
+        if (url.startsWith("file:")) {
+          const recovered = loadViaDisk(url, ext);
+          if (recovered) return recovered;
+        }
+      }
+      throw err;
+    }
 
     // #18 — relabel a `commonjs` result as `commonjs-sync` for `file:` URLs ON THE
     // `import()`-OF-CJS PATH so the module (and its inner require()s) routes through

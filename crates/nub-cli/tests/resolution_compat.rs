@@ -333,30 +333,79 @@ fn data_url_unknown_format_matches_node() {
     }
 }
 
-/// Regression (Next.js + Turbopack + Tailwind v4): `nub run build` must NOT crash
-/// Turbopack with `ERR_METHOD_NOT_IMPLEMENTED('resolveSync()')`.
+/// Regression — async `module.register` loader coexisting with nub's sync hooks must NOT
+/// crash with the async-loader sync stub. This is the FAITHFUL, FAST, deterministic guard
+/// for the Next.js + Turbopack + Tailwind v4 crash, reduced to its essence: a user
+/// `module.register(<async loader>)` whose own loader-module specifier Node resolves (and
+/// loads) SYNCHRONOUSLY during registration — exactly what `@tailwindcss/node` does.
 ///
-/// Root cause: nub's fast-tier sync `module.registerHooks` resolve hook coexists with a
-/// USER async `module.register` loader — `@tailwindcss/node`'s `esm-cache.loader.mjs`,
-/// which Tailwind v4 registers when Turbopack evaluates `globals.css`. Once sync hooks
-/// exist, Node routes EVERY resolution through the synchronous chain (`loader.js`:
-/// `resolve` delegates to `resolveSync`). nub's hook's `nextResolve` then reaches Node's
-/// default step `#resolveAndMaybeBlockOnLoaderThread`, which — with an async loader
-/// present — calls the in-thread async-hooks `Hooks.resolveSync()`, a stub that
-/// unconditionally throws `ERR_METHOD_NOT_IMPLEMENTED('resolveSync()')`
-/// (node:internal/modules/esm/hooks). That throw aborted the build ("Error evaluating
-/// Node.js code" on ./app/globals.css → an esbuild deadlock). nub's resolve hook now
-/// catches that specific error (only when `userAsyncLoaderActive()`) and recovers by
-/// resolving through the parent's CJS resolver.
+/// Root cause: nub's fast-tier sync `module.registerHooks` hooks force EVERY resolve/load
+/// onto the synchronous chain. With a user async loader registered, Node's default
+/// resolve/load step (`#resolveAndMaybeBlockOnLoaderThread` / `#loadAndMaybeBlockOn...`)
+/// reaches the async-hooks proxy's `resolveSync`/`loadSync` — which on the affected Node
+/// band (≤ ~22.16 / ~24.11) either is a stub throwing
+/// `ERR_METHOD_NOT_IMPLEMENTED('resolveSync()'/'loadSync()')` or is ABSENT entirely
+/// (a `TypeError: … is not a function`). Either kills the build. nub's hooks now detect
+/// both shapes and recover (resolve via the parent CJS resolver / `file:`+builtin
+/// passthrough; load by reading source from disk and deriving the format). Node 24.12+ /
+/// 25.2+ / 26 implement these methods, so the stub never fires and the recovery is a
+/// no-op there.
 ///
-/// The crash needs Turbopack's internal sync-resolve path — it is not reachable from
-/// user JS alone — so the faithful regression guard is a real, minimal Next 16 +
-/// Tailwind v4 Turbopack build. That is heavy (scaffolds + `nub install` + a full
-/// `next build`), so it is `#[ignore]`d like the resolution-parity corpus and run via:
-///   cargo test -p nub-cli --test resolution_compat -- --ignored --nocapture
-/// or the CI compat job. Reproduce manually: a real app with `next ^16`, the App Router,
-/// Tailwind v4 (`@tailwindcss/postcss` + `@import "tailwindcss"` in `app/globals.css`)
-/// crashes under pre-fix `nub run build` and builds clean after.
+/// IMPORTANT: this is only a meaningful guard when run on an AFFECTED Node version
+/// (e.g. 22.16 / 24.11). On a Node-fixed version it passes trivially (no bug to catch).
+/// CI must run it on at least one broken-Node leg. Validated 2026-06-23: pre-fix EXIT 1
+/// (crash) on 22.16.0 AND 24.11.0; post-fix EXIT 0 on both; no-op green on 24.12 / 26.
+/// Single spawn, so NOT `#[ignore]`d.
+#[test]
+fn async_module_register_loader_sync_resolve_does_not_crash() {
+    use std::fs;
+
+    let nub = nub_binary();
+    let tmp = std::env::temp_dir().join(format!("nub-async-loader-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp).unwrap();
+
+    // A trivial passthrough async ESM loader — the @tailwindcss/node shape.
+    fs::write(
+        tmp.join("loader.mjs"),
+        "export async function resolve(s, c, n) { return n(s, c); }\n",
+    )
+    .unwrap();
+    // Registering it resolves+loads loader.mjs SYNCHRONOUSLY through nub's sync hooks →
+    // the async-loader stub on a broken Node. `writeSync` avoids any buffering ambiguity.
+    fs::write(
+        tmp.join("main.mjs"),
+        "import { register } from 'node:module';\nimport { writeSync } from 'node:fs';\nregister('./loader.mjs', import.meta.url);\nwriteSync(1, 'OK\\n');\n",
+    )
+    .unwrap();
+
+    let out = Command::new(&nub)
+        .arg("main.mjs")
+        .current_dir(&tmp)
+        .stdin(Stdio::null())
+        .output()
+        .expect("spawn nub for the async-loader regression");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let _ = fs::remove_dir_all(&tmp);
+
+    assert!(
+        !stderr.contains("ERR_METHOD_NOT_IMPLEMENTED")
+            && !stderr.contains("resolveSync is not a function")
+            && !stderr.contains("loadSync is not a function"),
+        "nub leaked the async-loader sync stub — the Turbopack/Tailwind crash class regressed.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        out.status.success() && stdout.contains("OK"),
+        "nub crashed registering an async module loader (sync resolve/load into the async stub).\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+}
+
+/// Heavy end-to-end twin of the fast guard above: a real, minimal Next 16 + Tailwind v4
+/// Turbopack build — the in-the-wild manifestation. `#[ignore]`d because it scaffolds an
+/// app, runs `nub install`, and runs a full `next build`; run via
+/// `cargo test … -- --ignored` or the CI compat job. Like the fast guard, this is only
+/// meaningful on an AFFECTED Node version.
 #[test]
 #[ignore = "heavy e2e: scaffolds a Next 16 + Tailwind v4 app, installs deps, and runs `next build` (Turbopack). Run via `cargo test -p nub-cli --test resolution_compat -- --ignored` or the CI compat job."]
 fn next_turbopack_tailwind_build_does_not_crash() {
