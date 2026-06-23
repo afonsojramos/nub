@@ -198,17 +198,22 @@ class HTMLRewriter {
           cleanup();
         }
       },
-      // Consumer aborted the output stream: stop reading the source body and free
-      // the engine so neither the WASM engine nor the source body lock leaks. If an
-      // async handler is in flight, safeFree() tolerates the held borrow (freed on
-      // resume), so this resolves cleanly instead of rejecting.
+      // Consumer aborted the output stream: stop reading the source body and let
+      // start()'s `finally{cleanup()}` own ALL freeing. cancel() must NOT call
+      // free() itself: if an async handler is in flight the write is suspended with
+      // the Rust borrow held, so free() throws — but wasm-bindgen's
+      // __destroy_into_raw() has ALREADY zeroed the wrapper's ptr before the
+      // throwing wasm free, orphaning a still-alive Rust object (ptr=0, object
+      // live). cleanup() then can only retry on a null pointer → the engine leaks
+      // permanently and the shared WASM memory eventually OOBs. Deferring all
+      // freeing to cleanup() — which runs only AFTER the suspended write resumes
+      // and the borrow releases — frees exactly once, cleanly.
       cancel(reason) {
         cancelled = true;
         const r = reader;
         // r.cancel(reason) releases the reader lock; capture its promise first.
         const c = r ? r.cancel(reason) : undefined;
         reader = null;
-        safeFree();
         return c;
       },
     });

@@ -148,17 +148,27 @@ fn consumer_cancel_resolves_even_mid_suspend() {
     );
 }
 
-/// The WASM engine must be freed even on the rejecting / cancelled paths — RSS
-/// must stay bounded over many such transforms. An unbounded per-engine leak (the
-/// pre-fix behavior) would balloon RSS past the threshold.
+/// The cancel-mid-suspend path must RECLAIM the engine: a pure cancel-mid-suspend
+/// loop must neither crash (the pre-fix path OOB-crashed by ~1000 cycles) nor grow
+/// RSS across a post-warmup measure window (a per-engine WASM leak would). This is
+/// the residual-leak guard — cancel() must defer all freeing to cleanup() so it
+/// frees exactly once, after the suspended write resumes and the borrow releases.
 #[test]
-fn rejecting_and_cancelled_transforms_do_not_leak_the_engine() {
+fn cancel_mid_suspend_reclaims_the_engine() {
     // --expose-gc gives a stable RSS reading; nub forwards V8 flags to Node.
     let (stdout, stderr, code) = run("leak-loop.mjs", &["--expose-gc"], &[]);
-    assert_eq!(code, 0, "fixture must exit 0\nstderr: {stderr}");
+    // exit 0 + reaching the markers means no "memory access out of bounds" crash.
+    assert_eq!(
+        code, 0,
+        "fixture must exit 0 (no OOB crash)\nstderr: {stderr}"
+    );
     assert!(
-        stdout.contains("LEAK_BOUNDED: true"),
-        "rejecting/cancelled transforms must not leak the engine (RSS unbounded):\n{stdout}"
+        stdout.contains("CANCEL_MIDSUSPEND_NO_CRASH: true"),
+        "cancel-mid-suspend loop must not crash:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("CANCEL_MIDSUSPEND_FLAT: true"),
+        "cancel-mid-suspend must reclaim the engine (RSS flat across the window):\n{stdout}"
     );
     assert!(
         stdout.contains("DONE"),
