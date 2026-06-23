@@ -58,6 +58,19 @@ function installBlobUrlSupport() {
       writable: true,
       configurable: true,
     });
+
+    // `File` is a Node bootstrap global that `extends` the NATIVE Blob, realized
+    // before this swap. Without re-pointing, `new File(...) instanceof Blob`
+    // becomes FALSE (File still extends native Blob, but `globalThis.Blob` is now
+    // the subclass) — a silent additivity violation vs vanilla Node, where File
+    // IS-A Blob. Re-parent File's prototype chain onto the new Blob so the
+    // `instanceof` contract holds. Both the .prototype link (instances) and the
+    // constructor link (static inheritance) are re-pointed.
+    const File = globalThis.File;
+    if (typeof File === "function" && Object.getPrototypeOf(File) === NativeBlob) {
+      Object.setPrototypeOf(File.prototype, Blob.prototype);
+      Object.setPrototypeOf(File, Blob);
+    }
   }
 
   const nativeCreate = URL.createObjectURL.bind(URL);

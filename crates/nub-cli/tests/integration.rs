@@ -2291,6 +2291,24 @@ fn worker_from_blob_url() {
 }
 
 #[test]
+fn blob_wrapping_preserves_file_instanceof_blob() {
+    // Regression: nub subclasses globalThis.Blob to support blob: workers. `File`
+    // is a bootstrap global extending the NATIVE Blob, so the swap must re-point
+    // File's prototype chain or `new File(...) instanceof Blob` silently turns
+    // false — an additivity violation vs vanilla Node (File IS-A Blob).
+    let (stdout, stderr, code) = run_nub("worker", "blob-file-instanceof.ts");
+    assert_eq!(code, 0, "blob/File fixture should run: {stderr}\n{stdout}");
+    assert!(
+        stdout.contains("file-instanceof-blob:true"),
+        "File must remain an instanceof Blob after the Blob wrap (matches plain Node): {stdout}"
+    );
+    assert!(
+        stdout.contains("blob-instanceof-blob:true") && stdout.contains("blob-size:5"),
+        "a Blob made through the wrapper must keep instanceof + the full Blob API: {stdout}"
+    );
+}
+
+#[test]
 fn worker_error_event_carries_source_location() {
     // WHATWG ErrorEvent must carry filename/lineno/colno from where the error was
     // raised. nub fills these from the worker error's stack (they were hardcoded
@@ -2387,6 +2405,24 @@ fn classic_worker_importscripts_loads_synchronously() {
     assert!(
         stdout.contains("classic:dep-said:imported-via-importScripts"),
         "importScripts must synchronously load + run the dependency in scope: {stdout}"
+    );
+}
+
+#[test]
+fn module_worker_importscripts_throws() {
+    // WHATWG: importScripts is classic-only and must throw in a module worker.
+    // nub's DEFAULT worker type is "module" (a documented divergence from the
+    // WHATWG "classic" default — aligns with nub's ESM-first posture), so a
+    // default-type worker calling importScripts throws. This test pins that
+    // behavior; the default-type choice is a maintainer-owned spec call.
+    let (stdout, stderr, code) = run_nub("worker", "module-importscripts-throws-main.ts");
+    assert_eq!(
+        code, 0,
+        "module-importscripts fixture should run: {stderr}\n{stdout}"
+    );
+    assert!(
+        stdout.contains("module-importscripts:threw"),
+        "importScripts must throw in a module (default-type) worker: {stdout}"
     );
 }
 

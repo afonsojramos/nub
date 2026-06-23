@@ -103,7 +103,13 @@ export function installWorkerPolyfill() {
   // `error` event delivers the thrown Error; we read its first stack frame.
   // Browser-scrubbing of cross-origin frames does not apply here (all worker
   // sources are same-origin local), so we surface the raw location.
-  const STACK_FRAME = /\(?(?:file:\/\/)?(.+?):(\d+):(\d+)\)?\s*$/;
+  //
+  // The frame is anchored at `at ` and consumes the optional `Func (` wrapper so
+  // group 1 is JUST the path (a `file://` URL, an absolute POSIX path, or a
+  // Windows `C:\…` path — the leading `C:` is NOT mistaken for the location
+  // colon because the line:col are the LAST two `:`-segments). Without the anchor
+  // + wrapper-consumption the path captured the `at Func (` prefix verbatim.
+  const STACK_FRAME = /^at\s+(?:.+?\s+\()?(.+?):(\d+):(\d+)\)?$/;
   function locationFromError(err) {
     let filename = "";
     let lineno = 0;
