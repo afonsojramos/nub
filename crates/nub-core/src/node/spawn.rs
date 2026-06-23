@@ -2191,6 +2191,142 @@ mod tests {
         verdict
     }
 
+    /// PTY worker proving issue #26's single-SIGINT guarantee STILL HOLDS once the
+    /// #27 foreground hand-off is active — the case `sigint_reaches_an_own_group_child_exactly_once`
+    /// cannot reach (that one forwards a `kill` directly, never exercising the real
+    /// TTY-Ctrl-C routing + the handoff's SIGINT-forward suppression together).
+    ///
+    /// Reproduces nub's FULL interactive topology on a real controlling terminal:
+    /// own-group child (`group_on_spawn`) running a SIGINT trap that COUNTS
+    /// deliveries; nub's signal forwarder registered (`track_child_group` — the path
+    /// that double-delivered in #26); AND `foreground_child` applied (tcsetpgrp +
+    /// SIGINT-forward suppress). Then a literal `^C` (0x03) is written to the PTY
+    /// master: the line discipline (ISIG on by default) turns it into a SIGINT for
+    /// the terminal's FOREGROUND group — which the handoff made the child's group.
+    ///
+    /// The child must see SIGINT EXACTLY ONCE: the kernel delivers it to the
+    /// foreground child directly, nub is now a background group (so the TTY does not
+    /// signal nub), and even if nub's forwarder did fire, the suppress drops the
+    /// redundant forward. A double here would mean the handoff regressed #26.
+    /// Returns: 0 = exactly-once (correct), 3 = zero deliveries (lost SIGINT),
+    /// 4 = two-or-more (the #26 double under the handoff), 2 = setup error.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn pty_sigint_count_worker() -> i32 {
+        use std::os::unix::io::RawFd;
+
+        // SAFETY: ignore SIGHUP so a terminal hangup never kills the worker mid-verdict.
+        unsafe {
+            libc::signal(libc::SIGHUP, libc::SIG_IGN);
+        }
+
+        // SAFETY: openpty(3) gives a connected master/slave fd pair.
+        let mut master: RawFd = -1;
+        let mut slave: RawFd = -1;
+        let rc = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        if rc != 0 {
+            return 2;
+        }
+
+        // New session, claim the slave as our controlling terminal, put it on stdin.
+        // SAFETY: setsid()/ioctl(TIOCSCTTY)/dup2 on the fresh session leader (us).
+        unsafe {
+            if libc::setsid() < 0 {
+                return 2;
+            }
+            libc::ioctl(slave, libc::TIOCSCTTY as libc::c_ulong, 0);
+            libc::dup2(slave, libc::STDIN_FILENO);
+            if slave > 2 {
+                libc::close(slave);
+            }
+        }
+
+        // The child counts EVERY SIGINT delivery into a marker file. Crucially the
+        // trap does NOT exit on the first one — it keeps reading — so a SECOND
+        // (doubled) delivery is still counted instead of being masked by an
+        // exit-on-first. A small grace sleep after the first hit absorbs any second
+        // delivery, then the child exits 130 (the SIGINT exit code). Own group via
+        // `group_on_spawn`, exactly like the real path.
+        let marker = std::env::temp_dir().join(format!(
+            "nub-pty-sigint-count-{}.marker",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&marker);
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(format!(
+            "trap 'echo x >>{m}' INT; read ignored; sleep 0.3; exit 130",
+            m = marker.display()
+        ));
+        cmd.stdin(std::process::Stdio::inherit())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        group_on_spawn(&mut cmd);
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(_) => return 2,
+        };
+        let child_pid = child.id();
+
+        // The full nub topology: register the forwarder (the #26 double-delivery
+        // path) AND hand the terminal foreground to the child (tcsetpgrp + suppress).
+        ctrl_c::untrack();
+        track_child_group(child_pid);
+        let _fg = foreground_child(child_pid);
+
+        // Let the trap install + the child reach its terminal read as foreground.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        // The "Ctrl-C": ETX on the master. With ISIG (default), the line discipline
+        // raises SIGINT for the terminal's foreground group = the child's group.
+        // SAFETY: write to the live master fd.
+        unsafe {
+            let etx = b"\x03";
+            libc::write(master, etx.as_ptr() as *const libc::c_void, 1);
+        }
+
+        // Wait for the child to take the SIGINT and exit (poll ~2s).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let mut status: libc::c_int = 0;
+            // SAFETY: waitpid on our child, non-blocking.
+            let r = unsafe { libc::waitpid(child_pid as libc::pid_t, &mut status, libc::WNOHANG) };
+            if r == child_pid as libc::pid_t && libc::WIFEXITED(status) {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        // Clean up before reading the verdict so we never leak the child.
+        // SAFETY: SIGKILL + reap; benign if already gone.
+        unsafe {
+            libc::kill(child_pid as libc::pid_t, libc::SIGKILL);
+            libc::close(master);
+        }
+        let _ = child.wait();
+        drop(_fg);
+
+        let deliveries = fs::read_to_string(&marker)
+            .map(|s| s.lines().count())
+            .unwrap_or(0);
+        let _ = fs::remove_file(&marker);
+
+        match deliveries {
+            1 => 0, // exactly once — #26 preserved under the handoff
+            0 => 3, // lost SIGINT
+            _ => 4, // double (or more) — the #26 regression
+        }
+    }
+
     /// Re-exec the test binary to run [`pty_scenario_worker`] as a fresh process and
     /// return its verdict exit code (0 read-OK / 1 hung / 2 error / other = crash).
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -2245,6 +2381,44 @@ mod tests {
             "with the tcsetpgrp foreground hand-off the TUI child must read the \
              terminal and exit cleanly (no #27 hang); worker verdict code {with} \
              (0=read-ok 1=hung 2=setup-err)"
+        );
+    }
+
+    /// Issue #26 single-SIGINT, proven UNDER the #27 foreground hand-off (the gap the
+    /// other #26 test can't cover — it forwards a `kill` directly rather than going
+    /// through the real TTY-Ctrl-C routing + the handoff's forward-suppression).
+    /// Same driver/worker re-exec shape as the #27 pty test: on `NUB_PTY_SIGINT_COUNT`
+    /// this becomes the worker and exits with the verdict; otherwise it drives.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn ctrl_c_under_foreground_handoff_delivers_sigint_to_child_exactly_once() {
+        // Worker mode: run the scenario and exit with its verdict as the process code.
+        if std::env::var("NUB_PTY_SIGINT_COUNT").is_ok() {
+            std::process::exit(pty_sigint_count_worker());
+        }
+
+        // Driver mode: re-exec ourselves as a fresh (non-forked) worker process.
+        let _serial = CTRL_C_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let exe = std::env::current_exe().expect("current_exe");
+        let code = Command::new(exe)
+            .args([
+                "--exact",
+                "node::spawn::tests::ctrl_c_under_foreground_handoff_delivers_sigint_to_child_exactly_once",
+            ])
+            .env("NUB_PTY_SIGINT_COUNT", "1")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("re-exec test binary for PTY sigint-count scenario")
+            .code()
+            .unwrap_or(-1);
+
+        assert_eq!(
+            code, 0,
+            "under the #27 foreground hand-off a terminal Ctrl-C must deliver SIGINT to \
+             the child EXACTLY ONCE (issue #26); worker verdict {code} \
+             (0=exactly-once 3=lost-sigint 4=double 2=setup-err)"
         );
     }
 
