@@ -1,0 +1,26 @@
+name: commit-hygiene
+
+# Enforces commit-message hygiene on every pull request: no automated
+# co-authorship / agent-attribution trailers may enter the history. Legitimate
+# human co-authors and topical mentions of tools in a subject/body are allowed —
+# only attribution TRAILERS fail.
+
+on:
+  pull_request:
+
+jobs:
+  no-agent-trailers:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          # Fetch the full range so the merge base with the target branch resolves.
+          fetch-depth: 0
+
+      - name: Scan PR commit messages for agent-attribution trailers
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: node .github/scripts/check-commit-hygiene.mjs "$BASE_SHA" "$HEAD_SHA"
