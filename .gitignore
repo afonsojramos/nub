@@ -22,6 +22,7 @@
 # Agent tooling: tracked in git. Only nested git worktrees stay out (they're checkouts, not files git can commit).
 !.claude/
 !.agents/
+!.githooks/
 !.opencode/
 !.opencode/opencode.json
 !.opencode/agent/
