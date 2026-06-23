@@ -23,9 +23,6 @@ doctest = false
 [dependencies]
 napi.workspace = true
 napi-derive.workspace = true
-# lol-html 3.0.0 — the streaming HTML rewriter behind the CF-parity HTMLRewriter
-# binding (src/html_rewriter.rs). Called in-process on the JS thread.
-lol_html = "3"
 # `preserve_order` makes serde_json::Map keep INSERTION order (IndexMap-backed)
 # rather than sorting keys. This is load-bearing for `tsconfig_hash` byte-parity:
 # the old JS computed the cache-key component as `JSON.stringify(compilerOptions)`

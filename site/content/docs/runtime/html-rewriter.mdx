@@ -7,7 +7,7 @@ description: A streaming HTML rewriter with the Cloudflare Workers API, as a glo
 The `HTMLRewriter` global is typed by Nub's own types package — it is not part of `@types/node`.
 </TypesSetup>
 
-Cloudflare Workers exposes an `HTMLRewriter` for streaming HTML transformation; Bun ships the same API. Nub provides it as a global on every supported Node (18.19+), backed by a first-party binding to [lol-html](https://github.com/cloudflare/lol-html) — Cloudflare's own streaming rewriter, the same engine behind the Workers API. Code written against Workers' `HTMLRewriter` runs here unchanged.
+Cloudflare Workers exposes an `HTMLRewriter` for streaming HTML transformation; Bun ships the same API. Nub provides it as a global on every supported Node (18.19+), backed by a WebAssembly build of [lol-html](https://github.com/cloudflare/lol-html) — Cloudflare's own streaming rewriter, the same engine behind the Workers API. Code written against Workers' `HTMLRewriter` runs here unchanged.
 
 ```ts
 const res = new HTMLRewriter()
@@ -70,13 +70,26 @@ The selector grammar is lol-html's CSS subset:
 
 Sibling combinators (`+`, `~`), `:last-child` / `:only-child` / `:root` / `:scope` / `:is()` / `:where()`, pseudo-elements, and namespaced selectors are not supported and throw at registration. An invalid selector throws synchronously when you call `on`.
 
+## Async handlers
+
+Handlers may be synchronous or `async`. A handler that returns a Promise is awaited mid-transform — fetch data, read a file, or do any async work from inside a handler, exactly as on Workers and Bun:
+
+```ts
+new HTMLRewriter()
+  .on("a[href]", {
+    async element(el) {
+      const ok = await isAllowed(el.getAttribute("href"));
+      if (!ok) el.remove();
+    },
+  })
+  .transform(response);
+```
+
+The transform pauses while the Promise resolves and resumes where it left off, so the streaming output stays correctly ordered.
+
 ## Mechanism
 
-Nub preloads the `HTMLRewriter` global (`runtime/html-rewriter.mjs`), feature-detected with `typeof` so it installs only when no native global is already present. The lol-html engine ships in Nub's native addon and is loaded lazily on the first `transform`, so programs that never touch `HTMLRewriter` pay nothing at startup.
-
-## Synchronous handlers
-
-Handlers run synchronously, inline as the document streams. A handler that returns a Promise throws — lol-html drives handlers without yield points, so awaiting inside one is not yet supported. Fetch and await any data you need before calling `transform`, then use it from a synchronous handler. Async handler support is planned.
+Nub preloads the `HTMLRewriter` global (`runtime/html-rewriter.mjs`), feature-detected with `typeof` so it installs only when no native global is already present. The engine is lol-html compiled to WebAssembly with Binaryen's Asyncify pass — one portable `.wasm` for every platform, and the unwind/rewind machinery that lets a handler Promise be awaited mid-transform. The engine and its `.wasm` are loaded lazily on the first `transform`, so programs that never touch `HTMLRewriter` pay nothing at startup.
 
 ## TypeScript
 

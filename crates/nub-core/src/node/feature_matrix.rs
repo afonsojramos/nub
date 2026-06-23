@@ -436,13 +436,15 @@ pub static FEATURES: &[Feature] = &[
     },
     // ── HTMLRewriter (Cloudflare-Workers-shape global) ──────────────────────
     // Not shipped by ANY Node version. nub installs a Cloudflare-Workers-parity
-    // `HTMLRewriter` global backed by a first-party lol-html binding in the
-    // nub-native N-API addon (the same .node already cross-built for all 8
-    // platforms). The JS wrapper (runtime/html-rewriter.mjs) feature-detects and
-    // bows out when the global is already present (forward-compat), so no Rust
+    // `HTMLRewriter` global backed by a WASM build of lol-html with Binaryen's
+    // Asyncify pass (vendored runtime/html-rewriter-engine/) — one portable .wasm
+    // for every platform, no per-platform native build, and full async-handler
+    // support (Asyncify unwinds/rewinds the WASM stack to await a handler Promise
+    // mid-transform). The JS wrapper (runtime/html-rewriter.mjs) feature-detects
+    // and bows out when the global is already present (forward-compat), so no Rust
     // version gate is needed; it is absent under --node/NODE_COMPAT because compat
-    // mode skips all preload injection (spawn.rs). The native engine is resolved
-    // lazily on first transform, keeping the addon off the common startup path.
+    // mode skips all preload injection (spawn.rs). The engine + .wasm are loaded
+    // lazily on first transform, keeping them off the common startup path.
     Feature {
         name: "HTMLRewriter",
         mitigations: &[(
@@ -452,7 +454,7 @@ pub static FEATURES: &[Feature] = &[
                 global: "globalThis.HTMLRewriter",
             },
         )],
-        evidence: "CF/edge API; not in any Node through 26; first-party lol-html binding in nub-native",
+        evidence: "CF/edge API; not in any Node through 26; WASM+Asyncify lol-html (vendored html-rewriter-wasm)",
     },
     // ── navigator.locks (Web Locks API) ─────────────────────────────────────
     // Native on Node 24.5+ (worker: add web locks api, #58666 — NOT 24.0: the

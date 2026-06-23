@@ -1,6 +1,7 @@
 // Exercises the HTMLRewriter global end-to-end under nub. Prints `LINE: <value>`
 // lines the integration test asserts against. Each line pins one contract.
-// Cloudflare-exact: transform takes a Response and returns a Response.
+// Cloudflare-exact: transform takes a Response and returns a Response. The engine
+// is WASM lol-html with Asyncify, so handlers may be synchronous OR async.
 import assert from "node:assert";
 
 // Rewrite an HTML string by wrapping it in a Response and reading the result.
@@ -58,11 +59,34 @@ const out4 = await rewrite(
 );
 console.log("TEXT:", out4);
 
+// --- ASYNC handler awaited mid-transform (Asyncify) ---
+// The element + end handlers await a microtask and a timer before mutating; the
+// engine must suspend the WASM stack across the await and resume correctly.
+const outAsync = await rewrite(
+  new HTMLRewriter()
+    .on("a", {
+      async element(el) {
+        await Promise.resolve();
+        await new Promise((r) => setTimeout(r, 5));
+        el.setAttribute("data-async", "1");
+      },
+    })
+    .onDocument({
+      async end(end) {
+        await new Promise((r) => setTimeout(r, 5));
+        end.append("<!--async-end-->", { html: true });
+      },
+    }),
+  `<a href="/">x</a>`,
+);
+console.log("ASYNC:", outAsync);
+
 // --- streaming over a Response (headers preserved, content-length dropped) ---
 const res = new HTMLRewriter()
   .on("title", { element(el) { el.setInnerContent("Streamed"); } })
   .transform(new Response("<title>old</title>", { headers: { "content-type": "text/html" } }));
 assert.ok(res instanceof Response, "transform(Response) must return a Response");
+assert.strictEqual(res.headers.get("content-type"), "text/html", "headers must carry over");
 console.log("STREAM:", await res.text());
 
 // --- non-Response input throws a TypeError ---
@@ -82,17 +106,5 @@ try {
   badSel = true;
 }
 console.log("BADSEL:", badSel);
-
-// --- async handler is rejected (first-cut: sync only) ---
-let asyncThrew = false;
-try {
-  await rewrite(
-    new HTMLRewriter().on("a", { element() { return Promise.resolve(); } }),
-    "<a>x</a>",
-  );
-} catch (e) {
-  asyncThrew = e instanceof TypeError;
-}
-console.log("ASYNC:", asyncThrew);
 
 console.log("DONE");

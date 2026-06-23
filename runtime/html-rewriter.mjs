@@ -1,22 +1,20 @@
-// Cloudflare-Workers-shape `HTMLRewriter` global for Node.js, backed by the
-// first-party lol-html binding in the nub-native N-API addon. Code written
-// against Cloudflare Workers' (or Bun's) HTMLRewriter ports here unchanged:
+// Cloudflare-Workers-shape `HTMLRewriter` global for Node.js, backed by a WASM
+// build of lol-html (Cloudflare's streaming HTML rewriter). Code written against
+// Cloudflare Workers' (or Bun's) HTMLRewriter ports here unchanged:
 //
 //   new HTMLRewriter()
 //     .on("a[href]", { element(el) { el.setAttribute("rel", "noopener"); } })
 //     .transform(response)
 //
-// WHY a thin JS wrapper over a native engine: lol-html drives the element/text/
-// comment/doctype handlers SYNCHRONOUSLY as it parses each written chunk, so the
-// fluent `.on()/.onDocument()/.transform()` surface, the streaming bridge onto a
-// WHATWG Response body, and the `{html}`→ContentType mapping all live in JS; the
-// native `HtmlRewriterEngine` owns parsing + the rewritable-unit methods.
-//
-// FIRST CUT — SYNC HANDLERS ONLY. lol-html's write() is fully synchronous and has
-// no yield points; true async-handler support needs the Asyncify trampoline CF/Bun
-// run above their WASM build, which a native N-API addon cannot reproduce. So a
-// handler returning a Promise throws a TypeError (rather than silently dropping the
-// awaited mutations). Async handlers are a documented follow-up.
+// ENGINE: the vendored html-rewriter-wasm build (runtime/html-rewriter-engine/),
+// lol-html compiled to WebAssembly with Binaryen's Asyncify pass. One portable
+// .wasm for every platform — no per-platform native prebuilds. Asyncify is what
+// gives FULL ASYNC-HANDLER support: when a handler returns a Promise, the engine
+// unwinds the WASM stack, awaits the Promise, then rewinds and continues the
+// transform — so `engine.write()`/`engine.end()` are async and a handler may be
+// `async`/return a Promise (Cloudflare/Bun parity). The engine owns parsing + the
+// rewritable-unit methods; this file is the thin fluent wrapper + the WHATWG
+// Response streaming bridge.
 
 // node: builtins via process.getBuiltinModule (NOT static import) — the same loader-
 // chain-leak avoidance the Worker polyfill documents: a static `import` would route
@@ -31,9 +29,11 @@ function __getBuiltin(id) {
   return _bootstrapCreateRequire(import.meta.url)(id);
 }
 
-// Resolve the native engine lazily + memoized. The addon ships in nub's
-// distribution next to this file (runtime/addons/nub-native.node); it is loaded by
-// ABSOLUTE path so it never touches the ESM loader chain.
+// Resolve the WASM engine constructor lazily + memoized. The engine is a CommonJS
+// module in nub's distribution (runtime/html-rewriter-engine/html_rewriter.js); it
+// instantiates the .wasm synchronously off its own __dirname, so it never touches
+// the ESM loader chain. Loaded only on the first transform — non-HTMLRewriter runs
+// never pay the ~900KB .wasm instantiation.
 let _engineCtor;
 function getEngineCtor() {
   if (_engineCtor !== undefined) return _engineCtor;
@@ -41,11 +41,14 @@ function getEngineCtor() {
   const { fileURLToPath } = __getBuiltin("node:url");
   const require = createRequire(import.meta.url);
   _engineCtor = null;
-  for (const rel of ["./addons/nub-native.node", "../runtime/addons/nub-native.node"]) {
+  for (const rel of [
+    "./html-rewriter-engine/html_rewriter.js",
+    "../runtime/html-rewriter-engine/html_rewriter.js",
+  ]) {
     try {
-      const addon = require(fileURLToPath(new URL(rel, import.meta.url)));
-      if (addon && addon.HtmlRewriterEngine) {
-        _engineCtor = addon.HtmlRewriterEngine;
+      const mod = require(fileURLToPath(new URL(rel, import.meta.url)));
+      if (mod && mod.HTMLRewriter) {
+        _engineCtor = mod.HTMLRewriter;
         break;
       }
     } catch {
@@ -58,41 +61,27 @@ function getEngineCtor() {
 // Output sink for the throwaway engine used only to validate selectors at .on().
 const NOOP_SINK = () => {};
 
-// A handler that returns a thenable can't be awaited inside lol-html's synchronous
-// write loop (see the file header). Surfacing it as a clear error beats silently
-// emitting the un-awaited output.
-function guardSync(result) {
-  if (result != null && typeof result.then === "function") {
-    throw new TypeError(
-      "HTMLRewriter: async handlers are not supported. Use synchronous handlers, " +
-        "or await/buffer the content before transforming.",
+function requireEngine() {
+  const Engine = getEngineCtor();
+  if (!Engine) {
+    throw new Error(
+      "HTMLRewriter: the WASM engine is unavailable (html-rewriter-engine not found).",
     );
   }
+  return Engine;
 }
 
-// Wrap each user handler so (a) a returned Promise is rejected eagerly and (b) the
-// native unit object is passed straight through. The native object is valid ONLY
-// for the duration of this call (the engine invalidates it on return), matching
-// Cloudflare's "the element is only usable inside the handler" contract.
-function wrapHandlers(handlers) {
+function assertHandlers(handlers) {
   if (handlers == null || typeof handlers !== "object") {
     throw new TypeError("HTMLRewriter: handlers must be an object");
   }
-  const out = {};
-  for (const key of ["element", "comments", "text", "doctype", "end"]) {
-    const fn = handlers[key];
-    if (typeof fn === "function") {
-      out[key] = (unit) => {
-        guardSync(fn(unit));
-      };
-    }
-  }
-  return out;
+  return handlers;
 }
 
 class HTMLRewriter {
-  // Registrations are buffered until transform(): the engine is built per-transform
-  // so one HTMLRewriter instance can transform multiple inputs (CF parity).
+  // Registrations are buffered until transform(): a fresh engine is built per
+  // transform (the WASM engine is single-use — one end() per instance), so one
+  // HTMLRewriter can transform multiple inputs (Cloudflare parity).
   #elementHandlers = [];
   #documentHandlers = [];
 
@@ -100,33 +89,33 @@ class HTMLRewriter {
     if (typeof selector !== "string") {
       throw new TypeError("HTMLRewriter.on: selector must be a string");
     }
-    const wrapped = wrapHandlers(handlers);
+    assertHandlers(handlers);
     // Validate the selector eagerly so an invalid selector throws HERE, matching
     // Cloudflare's "throws at .on() registration" contract. The real engine is
-    // built lazily at transform() (lol-html consumes its Settings by value, so it
-    // can't be reused across transforms), but a throwaway engine parses the
-    // selector immediately and surfaces the SelectorError now rather than later.
+    // built per-transform, but a throwaway engine parses the selector immediately
+    // and surfaces the error now. free() it so the WASM instance isn't leaked.
     const Engine = getEngineCtor();
-    if (Engine) new Engine(NOOP_SINK).on(selector, {});
-    this.#elementHandlers.push([selector, wrapped]);
+    if (Engine) {
+      const probe = new Engine(NOOP_SINK);
+      try {
+        probe.on(selector, {});
+      } finally {
+        probe.free();
+      }
+    }
+    this.#elementHandlers.push([selector, handlers]);
     return this;
   }
 
   onDocument(handlers) {
-    this.#documentHandlers.push(wrapHandlers(handlers));
+    assertHandlers(handlers);
+    this.#documentHandlers.push(handlers);
     return this;
   }
 
   #buildEngine(sink) {
-    const Engine = getEngineCtor();
-    if (!Engine) {
-      throw new Error(
-        "HTMLRewriter: the native engine is unavailable (nub-native addon not found).",
-      );
-    }
+    const Engine = requireEngine();
     const engine = new Engine(sink);
-    // Selector parse errors throw synchronously here, matching CF's "throws at
-    // .on() registration" contract closely enough (we register at transform()).
     for (const [selector, h] of this.#elementHandlers) engine.on(selector, h);
     for (const h of this.#documentHandlers) engine.onDocument(h);
     return engine;
@@ -148,40 +137,54 @@ class HTMLRewriter {
     let engine = null;
     let reader = null;
 
+    // Free the WASM engine + release the source reader exactly once.
+    const cleanup = () => {
+      if (reader) {
+        reader.releaseLock();
+        reader = null;
+      }
+      if (engine) {
+        engine.free();
+        engine = null;
+      }
+    };
+
     const stream = new ReadableStream({
       async start(controller) {
-        engine = self.#buildEngine((buf) => {
-          if (buf && buf.length) controller.enqueue(new Uint8Array(buf));
+        engine = self.#buildEngine((chunk) => {
+          // The engine hands back a Uint8Array view into WASM memory; copy it,
+          // since the buffer is reused across chunks.
+          if (chunk && chunk.length) controller.enqueue(new Uint8Array(chunk));
         });
         reader = sourceBody.getReader();
         try {
           for (;;) {
             const { done, value } = await reader.read();
             if (done) break;
-            engine.write(Buffer.from(value));
+            // Async: the engine awaits any Promise a handler returns (Asyncify).
+            await engine.write(value);
           }
-          engine.end();
+          await engine.end();
           controller.close();
         } catch (err) {
           controller.error(err);
         } finally {
-          // `cancel` may have already released + nulled the reader.
-          if (reader) reader.releaseLock();
-          reader = null;
-          engine = null;
+          cleanup();
         }
       },
-      // Consumer aborted the output stream: stop reading the source body and drop
-      // the engine so neither the lol-html engine nor the source body lock leaks.
+      // Consumer aborted the output stream: stop reading the source body and free
+      // the engine so neither the WASM engine nor the source body lock leaks.
       cancel(reason) {
-        engine = null;
-        if (reader) {
-          const r = reader;
-          reader = null;
-          const c = r.cancel(reason);
-          r.releaseLock();
-          return c;
+        const r = reader;
+        // cleanup() releases+frees; capture the source-cancel promise first.
+        const c = r ? r.cancel(reason) : undefined;
+        // r.cancel already released? releaseLock after cancel is safe/no-throw.
+        reader = null;
+        if (engine) {
+          engine.free();
+          engine = null;
         }
+        return c;
       },
     });
 
@@ -213,7 +216,7 @@ export function installHTMLRewriter() {
 
 // Fast tier (getBuiltinModule present): install eagerly at module eval, preserving
 // the side-effect-on-require contract the lazy preload getter relies on. The engine
-// itself is still resolved lazily (first transform), so this costs ~nothing for the
-// common "never touch HTMLRewriter" run. On the floor the compat preload calls
-// setBootstrapCreateRequire(...) + installHTMLRewriter() explicitly.
+// (and its .wasm) is still resolved lazily on the first transform, so this costs
+// ~nothing for the common "never touch HTMLRewriter" run. On the floor the compat
+// preload calls setBootstrapCreateRequire(...) + installHTMLRewriter() explicitly.
 if (typeof process.getBuiltinModule === "function") installHTMLRewriter();

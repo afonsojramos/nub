@@ -786,11 +786,11 @@ declare namespace Temporal {
 // separate `declare var Temporal` is needed — and adding one collides (TS2300).
 
 // ── HTMLRewriter (Cloudflare-Workers-shape global; runtime/html-rewriter.mjs) ──
-// Backed by nub's first-party lol-html binding in the nub-native addon. Not in any
-// Node version and not in @types/node, so declared here. Surface mirrors the
-// Cloudflare Workers / Bun API so Workers code ports unchanged. FIRST CUT: handlers
-// must be SYNCHRONOUS — a handler returning a Promise throws at runtime (async
-// support is a documented follow-up), so the handler return type is `void` here.
+// Backed by nub's WASM build of lol-html (Asyncify). Not in any Node version and
+// not in @types/node, so declared here. Surface mirrors the Cloudflare Workers /
+// Bun API so Workers code ports unchanged. Handlers may be SYNCHRONOUS OR ASYNC —
+// a handler returning a Promise is awaited mid-transform (Asyncify unwinds/rewinds
+// the WASM stack), so every handler returns `void | Promise<void>`.
 //
 // The rewritable-unit objects (`HTMLRewriterElement`, etc.) are valid only inside
 // their handler callback; using one after the handler returns throws.
@@ -825,7 +825,7 @@ interface HTMLRewriterElement {
   removeAndKeepContent(): HTMLRewriterElement;
   setInnerContent(content: string, options?: ContentOptions): HTMLRewriterElement;
   /** Register a handler for this element's end tag (no-op on void elements). */
-  onEndTag(handler: (endTag: HTMLRewriterEndTag) => void): void;
+  onEndTag(handler: (endTag: HTMLRewriterEndTag) => void | Promise<void>): void;
 }
 
 interface HTMLRewriterEndTag {
@@ -869,16 +869,16 @@ interface HTMLRewriterDocumentEnd {
 }
 
 interface ElementContentHandlers {
-  element?: (element: HTMLRewriterElement) => void;
-  comments?: (comment: HTMLRewriterComment) => void;
-  text?: (text: HTMLRewriterText) => void;
+  element?: (element: HTMLRewriterElement) => void | Promise<void>;
+  comments?: (comment: HTMLRewriterComment) => void | Promise<void>;
+  text?: (text: HTMLRewriterText) => void | Promise<void>;
 }
 
 interface DocumentContentHandlers {
-  doctype?: (doctype: HTMLRewriterDoctype) => void;
-  comments?: (comment: HTMLRewriterComment) => void;
-  text?: (text: HTMLRewriterText) => void;
-  end?: (end: HTMLRewriterDocumentEnd) => void;
+  doctype?: (doctype: HTMLRewriterDoctype) => void | Promise<void>;
+  comments?: (comment: HTMLRewriterComment) => void | Promise<void>;
+  text?: (text: HTMLRewriterText) => void | Promise<void>;
+  end?: (end: HTMLRewriterDocumentEnd) => void | Promise<void>;
 }
 
 declare class HTMLRewriter {
