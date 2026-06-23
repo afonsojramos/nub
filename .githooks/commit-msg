@@ -1,0 +1,33 @@
+#!/bin/sh
+# commit-msg hook: strip UI-visible agent co-authorship trailers.
+#
+# Removes Co-authored-by trailers naming automated agents (Claude, Anthropic,
+# noreply@anthropic). These render as co-author avatars in the GitHub UI and
+# are the only agent-attribution form that matters to maintainers.
+#
+# NOT stripped: Claude-Session URLs, "Generated with" lines, or any other body
+# text — those are invisible in the GitHub PR/commit UI and are left as-is.
+#
+# Legitimate human co-authors (e.g. "Co-authored-by: Jane <jane@x.com>") are
+# preserved unchanged.
+#
+# core.hooksPath is set to .githooks in .git/config so this hook is active for
+# all worktrees sharing this repo without any per-clone setup step.
+
+MSG_FILE="$1"
+
+TMP_FILE="${MSG_FILE}.hook_tmp.$$"
+
+grep -viE \
+  '^\s*co-authored-by:.*\b(claude|anthropic\.com|noreply@anthropic)\b' \
+  "$MSG_FILE" \
+> "$TMP_FILE"
+
+# Collapse multiple trailing blank lines, discard a lone trailing blank line.
+awk '
+  /^[[:space:]]*$/ { blanks++; next }
+  { for (i = 0; i < (blanks > 1 ? 1 : blanks); i++) print ""; blanks = 0; print }
+  END { /* discard any trailing blank lines */ }
+' "$TMP_FILE" > "${TMP_FILE}.2" && mv "${TMP_FILE}.2" "$TMP_FILE"
+
+mv "$TMP_FILE" "$MSG_FILE"

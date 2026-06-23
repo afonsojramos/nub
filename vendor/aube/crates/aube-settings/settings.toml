@@ -2447,6 +2447,22 @@ sources.npmrc = ["save-prefix", "savePrefix"]
 sources.workspaceYaml = ["savePrefix"]
 examples = []
 
+[saveExact]
+description = "Save dependencies with an exact version instead of a range prefix."
+type = "bool"
+default = "false"
+docs = """
+The npm/pnpm-compatible `save-exact` knob: when set, `add` pins the saved
+specifier to the exact resolved version (empty save-prefix). Equivalent to the
+`--save-exact` flag, and overrides `save-prefix` when both are set. Read from
+`.npmrc` so an existing `save-exact=true` is honored on `add`.
+"""
+sources.cli = []
+sources.env = ["npm_config_save_exact", "NPM_CONFIG_SAVE_EXACT", "AUBE_SAVE_EXACT"]
+sources.npmrc = ["save-exact", "saveExact"]
+sources.workspaceYaml = []
+examples = []
+
 [linkWorkspacePackages]
 description = "Resolve `aube add <name>` against local workspace siblings before falling back to the registry."
 type = '"false" | "true" | "deep"'
