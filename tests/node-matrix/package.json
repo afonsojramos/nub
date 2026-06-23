@@ -1,0 +1,5 @@
+{
+  "name": "nub-node-matrix-fixtures",
+  "private": true,
+  "//": "No engines/.node-version pin: the matrix selects the Node version via PATH (actions/setup-node), and nub must augment THAT version. A pin here would make nub provision over the matrix's choice and mask compat-tier coverage."
+}
