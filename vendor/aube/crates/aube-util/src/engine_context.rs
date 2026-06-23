@@ -200,6 +200,28 @@ pub struct EngineContext {
     ///
     /// [`Embedder::user_agent`]: crate::identity::Embedder::user_agent
     pub lifecycle_user_agent_product: Option<String>,
+
+    /// Whether a bare *exact* version on `add` (`add pkg@1.2.3`, or a bare
+    /// `add pkg` that resolves to a concrete version) is saved to
+    /// `package.json` with the configured `save-prefix` applied (e.g.
+    /// `"^1.2.3"`) rather than the literal version (`"1.2.3"`). `false`
+    /// (default) preserves upstream aube/pnpm behavior: pnpm and bun write the
+    /// user-typed bare version verbatim, so standalone aube (a pnpm drop-in)
+    /// does too. An embedder mirroring an **npm** incumbent sets this `true`,
+    /// because real `npm install pkg@1.2.3` applies its `save-prefix` default
+    /// (`^`) and writes `"^1.2.3"`.
+    ///
+    /// This gates ONLY the bare-exact-version path. An explicit *range*
+    /// (`add pkg@^1`, `add pkg@~1.2`, `add pkg@>=1`) is always preserved
+    /// verbatim on every PM, and `--save-exact` (or `save-exact=true`) always
+    /// pins the bare version regardless of this posture. The prefix applied is
+    /// the resolved `save-prefix` (honoring `.npmrc` `save-prefix` /
+    /// `save-exact`), so a custom `save-prefix=~` yields `"~1.2.3"`.
+    ///
+    /// Embedder-fixed per invocation: the host derives it from the project's
+    /// incumbent PM, exactly like [`read_branded_pnpm_config`](Self::read_branded_pnpm_config)
+    /// and the other incumbent-keyed read postures. aube assigns no policy.
+    pub npm_save_prefix_on_bare_exact: bool,
 }
 
 impl Default for EngineContext {
@@ -221,6 +243,7 @@ impl Default for EngineContext {
             path_prepends: Vec::new(),
             env_overlay: Vec::new(),
             lifecycle_user_agent_product: None,
+            npm_save_prefix_on_bare_exact: false,
         }
     }
 }
@@ -284,5 +307,6 @@ mod tests {
         assert!(ctx.path_prepends.is_empty());
         assert!(ctx.env_overlay.is_empty());
         assert_eq!(ctx.lifecycle_user_agent_product, None);
+        assert!(!ctx.npm_save_prefix_on_bare_exact);
     }
 }

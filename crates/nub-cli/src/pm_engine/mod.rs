@@ -1316,6 +1316,11 @@ pub(crate) fn engine_brand_preflight() {
     // incumbent; under any other surface those Bun-named env vars are another
     // tool's state and must not be read (name-based policy, like `read_yarn_config`).
     let read_bun_config = read_bun_config_for_surface(&surface);
+    // npm save-prefix convention: only under an npm incumbent does a bare-exact
+    // `add pkg@1.2.3` get npm's `^` save-prefix (`"^1.2.3"`). pnpm/bun/nub-identity
+    // preserve the literal bare version — matching each PM's real behavior.
+    let npm_save_prefix_on_bare_exact =
+        matches!(surface, ConfigSurface::NonPnpmCompat { role: "npm", .. });
     aube_util::update_engine_context(|c| {
         c.read_branded_pnpm_config = read_branded_pnpm_config;
         // GLOBAL config is read PM-AGNOSTICALLY and UNGATED by cwd incumbency:
@@ -1337,6 +1342,7 @@ pub(crate) fn engine_brand_preflight() {
         c.pnpmfile_default_enabled = pnpmfile_default_enabled;
         c.synthetic_user_npmrc_entries = bunfig.user;
         c.synthetic_project_npmrc_entries = bunfig.project;
+        c.npm_save_prefix_on_bare_exact = npm_save_prefix_on_bare_exact;
     });
     match surface {
         ConfigSurface::NubIdentity(dir) => {

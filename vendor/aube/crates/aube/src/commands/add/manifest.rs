@@ -133,7 +133,11 @@ pub(super) async fn update_manifest_for_add(
     let (default_tag, default_prefix, catalog_mode) =
         crate::commands::with_settings_ctx(cwd, |ctx| {
             let tag = aube_settings::resolved::tag(ctx);
-            let prefix = if opts.save_exact {
+            // `--save-exact` (CLI) OR a resolved `.npmrc`/env `save-exact=true`
+            // both pin to the exact version (empty prefix). npm and pnpm both
+            // honor the `save-exact` config knob, so reading it here is the
+            // npm/pnpm-compatible behavior, not nub-specific.
+            let prefix = if opts.save_exact || aube_settings::resolved::save_exact(ctx) {
                 String::new()
             } else {
                 let raw = aube_settings::resolved::save_prefix(ctx);
@@ -421,9 +425,23 @@ pub(super) async fn update_manifest_for_add(
         let is_jsr = spec.jsr_name.is_some();
         let needs_npm_prefix = !is_jsr && (spec.alias.is_some() || orig.starts_with("npm:"));
         let prefix = &default_prefix;
+        // npm-incumbent save-prefix convention: `npm install pkg@1.2.3` applies
+        // its `save-prefix` default and writes `"^1.2.3"`, whereas pnpm/bun
+        // preserve the bare version. The embedder turns this on
+        // (`npm_save_prefix_on_bare_exact`) only under an npm incumbent; under
+        // pnpm/bun/nub-identity it stays off and the literal is preserved.
+        // Scope is exactly a BARE EXACT version the user supplied — an explicit
+        // range (`^1`, `~1.2`, `>=1`) never parses as a strict `Version`, so it
+        // is preserved verbatim. Dist-tags and `--save-exact` are handled by the
+        // other `pin_to_resolved` clauses; this one only catches the
+        // bare-exact-version add.
+        let bare_exact_npm_save_prefix = aube_util::engine_context().npm_save_prefix_on_bare_exact
+            && spec.has_explicit_range
+            && node_semver::Version::parse(&spec.range).is_ok();
         let pin_to_resolved = spec.range == default_tag
             || packument.dist_tags.contains_key(&spec.range)
-            || opts.save_exact;
+            || opts.save_exact
+            || bare_exact_npm_save_prefix;
         // Dist-tags and `--save-exact` both resolve to a concrete version
         // with the configured prefix (empty when `--save-exact`). Non-dist-tag
         // explicit ranges (e.g. `lodash@^4`) are preserved as-is.
