@@ -1,8 +1,8 @@
 //! Windows / other-OS scaffold backend.
 //!
-//! TODO(build-jail Windows Tier 1, `.fray/build-jail-design.md` §1 "Windows"):
-//! the unprivileged OS write-jail is `CreateRestrictedToken(WRITE_RESTRICTED,
-//! restrictingSids=[per-jail synthetic write-SID])` + `SetNamedSecurityInfo`
+//! TODO(script-sandbox Windows Tier 1, `.fray/script-sandbox-design.md` §1 "Windows"):
+//! the unprivileged OS write-confinement is `CreateRestrictedToken(WRITE_RESTRICTED,
+//! restrictingSids=[per-sandbox synthetic write-SID])` + `SetNamedSecurityInfo`
 //! ACL grants on the writable roots, spawned `CREATE_SUSPENDED` → assign-to-job
 //! → apply-token → `ResumeThread`. Plus the per-`.env*` deny-read ACEs and the
 //! cap-SID inheritable allow-rw from `.fray/sandbox-fs-deny-list.md` (Windows
@@ -32,7 +32,7 @@ pub fn apply(_cmd: &mut Command, policy: &SandboxPolicy) -> std::io::Result<Degr
     Ok(Degradation {
         lost,
         reason: Some(
-            "OS write/net jail not yet implemented on this platform (env-scrub only)".into(),
+            "OS write/net sandbox not yet implemented on this platform (env-scrub only)".into(),
         ),
     })
 }

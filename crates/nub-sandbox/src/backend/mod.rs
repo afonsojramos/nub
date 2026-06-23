@@ -8,13 +8,13 @@
 //!   backend returns a [`Degradation`] describing exactly which axes were lost
 //!   so the caller can surface a one-line WARNING (never silent). The install
 //!   still runs — a PM install cannot hard-fail on a missing hardening layer
-//!   (`.fray/build-jail-design.md` §7), but the loss is always reported.
+//!   (`.fray/script-sandbox-design.md` §7), but the loss is always reported.
 //! - A backend NEVER silently drops an axis it claimed to enforce.
 //!
 //! Today the macOS (Seatbelt) backend is the fully-implemented reference (the
 //! primary dev OS). Linux (Landlock + seccomp) is implemented; Windows is
 //! scaffolded with an explicit TODO (Tier 0 Job-Object + env-scrub only until
-//! the restricted-token write-jail lands).
+//! the restricted-token write-confinement lands).
 
 use crate::policy::SandboxPolicy;
 
@@ -92,7 +92,7 @@ pub fn apply(
 }
 
 /// Windows entry — Tier 0 (env-scrub + Job-Object limits) is the caller's job
-/// via the existing reaping path; the OS write-jail (restricted token) is a
+/// via the existing reaping path; the OS write-confinement (restricted token) is a
 /// scaffolded TODO. Returns a degradation describing the gap honestly.
 #[cfg(not(unix))]
 pub fn apply(

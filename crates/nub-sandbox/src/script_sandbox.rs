@@ -1,10 +1,17 @@
-//! The build-jail PROFILE — the first consumer of the sandbox engine.
+//! The install/build-script PROFILE of nub's script sandbox — the first
+//! consumer of the engine.
 //!
-//! Assembles a [`SandboxPolicy`] from the default-ON build-jail defaults
-//! (`.fray/build-jail-design.md` §3/§4/§5/§8.5), parameterized by the spawn's
+//! The "script sandbox" is the umbrella feature (confining the scripts nub runs
+//! on the user's behalf); this module is its **install/lifecycle-script
+//! profile** — the one shipping now, applied to dependency lifecycle scripts.
+//! The sibling `nub run` runtime profile reuses the SAME [`SandboxPolicy`] model
+//! and backends with a more permissive default scope.
+//!
+//! Assembles a [`SandboxPolicy`] from the default-ON install-profile defaults
+//! (`.fray/script-sandbox-design.md` §3/§4/§5/§8.5), parameterized by the spawn's
 //! package dir, project root, resolved HOME/cache dirs, and the configured
 //! registry hosts. This is the drop-in replacement for today's aube install
-//! jail, at parity (env-scrub + Landlock/Seatbelt fs + coarse net) and BEYOND
+//! sandbox, at parity (env-scrub + Landlock/Seatbelt fs + coarse net) and BEYOND
 //! it on the secret-deny set and the per-host egress allowlist.
 
 use crate::net_defaults;
@@ -12,16 +19,16 @@ use crate::policy::{EnvPolicy, FsPolicy, NetPolicy, PidPolicy, SandboxPolicy};
 use crate::secrets;
 use std::path::{Path, PathBuf};
 
-/// Inputs needed to build the per-spawn build-jail policy. Supplied by the
+/// Inputs needed to build the per-spawn script-sandbox policy. Supplied by the
 /// embedder (nub) at the install-lifecycle seam.
 #[derive(Debug, Clone)]
-pub struct BuildJailParams {
+pub struct ScriptSandboxParams {
     /// The dependency package dir whose lifecycle script is running (read+write).
     pub package_dir: PathBuf,
     /// The project root (read; never write — project SOURCE is read-only).
     pub project_root: PathBuf,
-    /// The per-package throwaway jail-home (read+write; HOME/TMP repoint target).
-    pub jail_home: PathBuf,
+    /// The per-package throwaway sandbox-home (read+write; HOME/TMP repoint target).
+    pub sandbox_home: PathBuf,
     /// The real user home — used to resolve the secret deny-set absolute paths.
     pub user_home: PathBuf,
     /// Extra writable roots the build legitimately needs: `~/.cache/node-gyp`,
@@ -30,7 +37,7 @@ pub struct BuildJailParams {
     /// Configured registry host(s) from `.npmrc` (`registry=` + scoped). Added
     /// to the egress allowlist so a corporate Artifactory works.
     pub registry_hosts: Vec<String>,
-    /// Additional egress hosts from `jail-allow-hosts` (per-project / per-package
+    /// Additional egress hosts from `sandbox-allow-hosts` (per-project / per-package
     /// override — node-pre-gyp custom S3 buckets, mirrors).
     pub extra_hosts: Vec<String>,
     /// Whether to bundle the opt-in browser/driver CDN hosts (puppeteer, cypress,
@@ -78,9 +85,9 @@ fn default_env_deny_tokens() -> Vec<String> {
 }
 
 /// The known-safe env allowlist — the minimal set a build needs (§8.5). Mirrors
-/// aube's `safe_jail_env_key` exact list; the `npm_config_` prefix is admitted
+/// aube's safe-env-key allowlist exact list; the `npm_config_` prefix is admitted
 /// (minus any key the deny-substrings reject, e.g. `npm_config_..._authToken`).
-fn build_jail_env() -> EnvPolicy {
+fn script_sandbox_env() -> EnvPolicy {
     EnvPolicy {
         allow_exact: [
             // process basics a build cannot run without
@@ -161,13 +168,13 @@ fn build_jail_env() -> EnvPolicy {
 }
 
 /// FS policy: generous-read + deny-the-secret-set (defense-in-depth, net gate
-/// primary), write confined to package dir + jail-home + caches (§4/§5).
-fn build_jail_fs(p: &BuildJailParams) -> FsPolicy {
-    let mut write_allow = vec![p.package_dir.clone(), p.jail_home.clone()];
+/// primary), write confined to package dir + sandbox-home + caches (§4/§5).
+fn script_sandbox_fs(p: &ScriptSandboxParams) -> FsPolicy {
+    let mut write_allow = vec![p.package_dir.clone(), p.sandbox_home.clone()];
     write_allow.extend(p.extra_write.iter().cloned());
 
     let mut read_deny = secrets::read_deny_paths(&p.user_home);
-    // The jail-home is the only HOME the child sees, but if the build resolves
+    // The sandbox-home is the only HOME the child sees, but if the build resolves
     // an absolute path into the real home's secret dirs, deny it (above). Also
     // deny the user's real .env under the project (covered by globs too).
     read_deny.dedup();
@@ -186,9 +193,9 @@ fn build_jail_fs(p: &BuildJailParams) -> FsPolicy {
 }
 
 /// Net policy: the tight default egress allowlist (§3, §8.5 refinement #4 — no
-/// `github.com` apex). Always `enforce` — the build-jail confines egress to the
+/// `github.com` apex). Always `enforce` — the script-sandbox confines egress to the
 /// proxy + the allowed hosts.
-fn build_jail_net(p: &BuildJailParams) -> NetPolicy {
+fn script_sandbox_net(p: &ScriptSandboxParams) -> NetPolicy {
     let mut allow_hosts = net_defaults::default_allow_hosts();
     allow_hosts.extend(p.registry_hosts.iter().cloned());
     allow_hosts.extend(p.extra_hosts.iter().cloned());
@@ -204,12 +211,12 @@ fn build_jail_net(p: &BuildJailParams) -> NetPolicy {
     }
 }
 
-/// Build the complete build-jail [`SandboxPolicy`] for one lifecycle spawn.
-pub fn policy(p: &BuildJailParams) -> SandboxPolicy {
+/// Build the complete script-sandbox [`SandboxPolicy`] for one lifecycle spawn.
+pub fn policy(p: &ScriptSandboxParams) -> SandboxPolicy {
     SandboxPolicy {
-        env: build_jail_env(),
-        fs: build_jail_fs(p),
-        net: build_jail_net(p),
+        env: script_sandbox_env(),
+        fs: script_sandbox_fs(p),
+        net: script_sandbox_net(p),
         pid: PidPolicy {
             // generous active-process cap: native builds fan out cl.exe/cc/make.
             max_processes: Some(512),
@@ -239,11 +246,11 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    fn params() -> BuildJailParams {
-        BuildJailParams {
+    fn params() -> ScriptSandboxParams {
+        ScriptSandboxParams {
             package_dir: PathBuf::from("/proj/node_modules/dep"),
             project_root: PathBuf::from("/proj"),
-            jail_home: PathBuf::from("/tmp/nub-jail/123/dep-abc"),
+            sandbox_home: PathBuf::from("/tmp/nub-sandbox/123/dep-abc"),
             user_home: PathBuf::from("/home/user"),
             extra_write: vec![PathBuf::from("/home/user/.cache/node-gyp")],
             registry_hosts: vec!["registry.npmjs.org".into()],
@@ -253,8 +260,8 @@ mod tests {
     }
 
     #[test]
-    fn build_jail_env_admits_safe_denies_secrets() {
-        let env = build_jail_env();
+    fn script_sandbox_env_admits_safe_denies_secrets() {
+        let env = script_sandbox_env();
         assert!(env.admits("PATH"));
         assert!(env.admits("npm_config_registry"));
         assert!(env.admits("HTTPS_PROXY"));
@@ -270,8 +277,8 @@ mod tests {
     }
 
     #[test]
-    fn build_jail_net_is_tight_no_github_apex() {
-        let net = build_jail_net(&params());
+    fn script_sandbox_net_is_tight_no_github_apex() {
+        let net = script_sandbox_net(&params());
         assert!(net.permits_host("registry.npmjs.org"));
         assert!(net.permits_host("nodejs.org"));
         assert!(net.permits_host("objects.githubusercontent.com"));
@@ -281,8 +288,8 @@ mod tests {
     }
 
     #[test]
-    fn build_jail_fs_write_is_confined_read_denies_secrets() {
-        let fs = build_jail_fs(&params());
+    fn script_sandbox_fs_write_is_confined_read_denies_secrets() {
+        let fs = script_sandbox_fs(&params());
         assert!(fs.write_enforce);
         assert!(
             fs.write_allow
@@ -300,8 +307,8 @@ mod tests {
     #[test]
     fn browser_cdns_bundled_only_when_requested() {
         let mut p = params();
-        assert!(!build_jail_net(&p).permits_host("storage.googleapis.com"));
+        assert!(!script_sandbox_net(&p).permits_host("storage.googleapis.com"));
         p.bundle_browser_cdns = true;
-        assert!(build_jail_net(&p).permits_host("storage.googleapis.com"));
+        assert!(script_sandbox_net(&p).permits_host("storage.googleapis.com"));
     }
 }

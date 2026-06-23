@@ -1,5 +1,5 @@
 //! The zero-breakage default deny-sets, grounded in the §8.5 attack→capability
-//! mapping (`.fray/build-jail-design.md`) and SRT's `macGetMandatoryDenyPatterns`.
+//! mapping (`.fray/script-sandbox-design.md`) and SRT's `macGetMandatoryDenyPatterns`.
 //!
 //! These are the paths/patterns NO legitimate build reads or writes (verified by
 //! the §4 `strace` footprint of a 6-package native-build corpus). Denying them is
@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 /// the macOS Keychain. The HOME-repoint already neutralizes `~/.npmrc` /
 /// `~/.gitconfig`, so those need no explicit entry.
 ///
-/// Note: in the build-jail the child's HOME is repointed at a throwaway
-/// jail-home, so `~`-relative secrets resolve to an empty dir anyway. These
+/// Note: in the script-sandbox the child's HOME is repointed at a throwaway
+/// sandbox-home, so `~`-relative secrets resolve to an empty dir anyway. These
 /// rules deny the REAL home too (defense-in-depth) — a script that hardcodes an
 /// absolute `/Users/<me>/.ssh` still can't read it.
 pub fn read_deny_paths(home: &Path) -> Vec<PathBuf> {
@@ -83,7 +83,7 @@ pub fn read_deny_globs() -> Vec<String> {
 /// persistence/backdoor sinks (Shai-Hulud v2, nx).
 ///
 /// NOT YET ENFORCED — forward data, deliberately unconsumed in this first cut.
-/// The build-jail's write set is already TIGHT (package dir + caches), so none of
+/// The script-sandbox's write set is already TIGHT (package dir + caches), so none of
 /// these sinks (`.bashrc`, `.github/workflows/**`, `.claude/**`, `.git/config`,
 /// …) is writable today regardless — they fall outside `write_allow`, so no
 /// backend needs this list yet. It becomes load-bearing only with the RUNTIME

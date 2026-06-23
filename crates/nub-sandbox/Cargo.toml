@@ -6,12 +6,12 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
-# OS-enforced sandbox engine for nub. The build-jail PROFILE is the first
-# consumer: it replaces aube's bundled install-script jail at parity, then
-# grows the runtime profile + per-axis config. See .fray/build-jail-design.md
+# OS-enforced sandbox engine for nub. The script-sandbox PROFILE is the first
+# consumer: it replaces aube's bundled install-script sandbox at parity, then
+# grows the runtime profile + per-axis config. See .fray/script-sandbox-design.md
 # and .fray/sandbox.md (engine architecture). Backends are ported in spirit
 # from Codex's Apache-2.0 sandbox crates (NOTICE) and aube's own Landlock/
-# Seatbelt jail (the parity baseline).
+# Seatbelt sandbox (the parity baseline).
 
 [dependencies]
 tracing.workspace = true

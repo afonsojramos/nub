@@ -1,41 +1,48 @@
-//! `nub-sandbox` — nub's OS-enforced sandbox engine.
+//! `nub-sandbox` — nub's OS-enforced **script sandbox** engine.
 //!
-//! The build-jail PROFILE is the first consumer: a default-ON jail for
-//! dependency lifecycle scripts (install/postinstall/…) that blocks the
+//! "Script sandbox" is the umbrella: it confines the SCRIPTS nub runs on the
+//! user's behalf. It spans two profiles of one engine — (a) **dependency
+//! lifecycle / install scripts** (install/postinstall/…), the profile shipping
+//! NOW, and (b) **`nub run` script execution**, the planned runtime profile.
+//! Same `{env, fs, net, pid}` policy model, same per-OS backends; the profiles
+//! differ only in default scope.
+//!
+//! The profile shipping first is the **install/build-script profile** ([`script_sandbox`]):
+//! a default-ON sandbox over dependency lifecycle scripts that blocks the
 //! supply-chain attack canon (secret exfil, C2/beacon egress, out-of-package
 //! writes, persistence) while letting legitimate native builds (node-gyp /
-//! prebuild-install) through. See `.fray/build-jail-design.md` (the design) and
-//! `.fray/sandbox.md` (the engine architecture: this crate is step 1 — the
-//! build-jail profile at parity with today's aube jail, before the runtime
-//! profile).
+//! prebuild-install) through. See `.fray/script-sandbox-design.md` (the design)
+//! and `.fray/sandbox.md` (the engine architecture: this crate is step 1 — the
+//! install-script profile at parity with today's aube sandbox, before the
+//! `nub run` runtime profile).
 //!
 //! ## Shape
 //! - [`SandboxPolicy`] — the unified `{env, fs, net, pid}` model (one schema,
-//!   two future profiles).
-//! - [`build_jail`] — the build-jail preset that assembles a policy from the
-//!   §3/§4/§5/§8.5 defaults.
+//!   both profiles).
+//! - [`script_sandbox`] — the install/build-script profile preset that assembles
+//!   a policy from the §3/§4/§5/§8.5 defaults.
 //! - [`apply_to_command`] — apply a policy to a `std::process::Command`: the
 //!   env-axis scrub (a spawn-boundary filter) + the per-OS fs/net/pid backend.
 //!
 //! ## Enforcement posture (security-critical)
-//! - **Deny-by-default on env / fs-write / net** once the build-jail policy is
-//!   active (it always is, default-ON). The env allowlist clears the child env
-//!   and re-admits ONLY known-safe keys; fs-write is confined; net egress is
-//!   confined to the allowlist.
+//! - **Deny-by-default on env / fs-write / net** once a script-sandbox policy is
+//!   active (the install profile always is, default-ON). The env allowlist clears
+//!   the child env and re-admits ONLY known-safe keys; fs-write is confined; net
+//!   egress is confined to the allowlist.
 //! - **Fail-SAFE, not fail-open.** A missing OS primitive degrades the affected
 //!   axis and surfaces a one-line WARNING (never silent, never a hard install
 //!   failure) — but a backend NEVER silently claims enforcement it didn't
 //!   deliver. The env-scrub (not an OS primitive) always applies on every OS.
 
 pub mod backend;
-pub mod build_jail;
 pub mod net_defaults;
 pub mod policy;
+pub mod script_sandbox;
 pub mod secrets;
 
 pub use backend::Degradation;
-pub use build_jail::{BuildJailParams, default_extra_write};
 pub use policy::{EnvPolicy, FsPolicy, NetPolicy, PidPolicy, SandboxPolicy};
+pub use script_sandbox::{ScriptSandboxParams, default_extra_write};
 
 use std::process::Command;
 
@@ -49,7 +56,7 @@ use std::process::Command;
 /// This is the spawn-boundary filter, not an OS primitive — it runs on every OS
 /// identically, so the env guarantee holds even where the fs/net backend
 /// degrades. When `policy.env.enforce` is false, this is a no-op (the child
-/// inherits the full env, today's unjailed behavior).
+/// inherits the full env, today's unsandboxed behavior).
 pub fn apply_env_scrub<I, K, V>(cmd: &mut Command, policy: &EnvPolicy, inherited: I)
 where
     I: IntoIterator<Item = (K, V)>,
@@ -78,7 +85,7 @@ where
 /// seccomp hook. On Windows it is currently a reporting no-op (TODO: restricted
 /// token — see [`backend::stub`]).
 pub fn apply_to_command(cmd: &mut Command, policy: &SandboxPolicy) -> std::io::Result<Degradation> {
-    // Write roots MUST exist before the OS jail is applied: Landlock can only
+    // Write roots MUST exist before the OS sandbox is applied: Landlock can only
     // grant an extant path, and macOS `canonicalize()` (for the /var->/private
     // form) fails on a missing path — so a cache dir the build will create
     // (e.g. ~/.cache/node-gyp on a cold cache) would get NO write grant and the

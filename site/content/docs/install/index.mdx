@@ -396,9 +396,9 @@ The OSV check queries `api.osv.dev` on a fresh resolve. A confirmed `MAL-*` hit 
 
 Frozen reinstalls — `nub ci`, `--frozen-lockfile`, a teammate's clone — inherit the advisory vetting recorded when the lockfile was written and skip the per-install round-trip, but still enforce the cooling and provenance gates on every install.
 
-### Build jail
+### Script sandbox
 
-The OS-level build jail — a network-blocked, filesystem-scoped sandbox around every build script — is compiled in but **off by default**. Opt in with the neutral `paranoid` / `npm_config_paranoid` setting, which also flips the advisory gate to fail-closed. The jail covers macOS and Linux; Windows is a passthrough.
+The OS-level script sandbox — a network-blocked, filesystem-scoped sandbox around every install/lifecycle script — is compiled in but **off by default**. Opt in with the neutral `paranoid` / `npm_config_paranoid` setting, which also flips the advisory gate to fail-closed. The sandbox covers macOS and Linux; Windows is a passthrough.
 
 ## Store and disk layout
 

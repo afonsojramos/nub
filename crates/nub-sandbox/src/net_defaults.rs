@@ -1,5 +1,5 @@
 //! The default egress allowlist — DATA, overridable as data (never a boolean
-//! per host). From `.fray/build-jail-design.md` §3 + §8.5 refinement #4.
+//! per host). From `.fray/script-sandbox-design.md` §3 + §8.5 refinement #4.
 //!
 //! The list is deliberately TIGHT: every allowed host is an exfil channel.
 //! Crucially it does NOT include the `github.com` apex or `*.github.io`
@@ -30,7 +30,7 @@ pub fn default_allow_hosts() -> Vec<String> {
         // (`mapbox-node-binary.s3.us-east-1.amazonaws.com`) needs its own
         // entry — a `*.s3.*.amazonaws.com` double-wildcard matches NOTHING in
         // this matcher (fail-closed). Region buckets that don't fit either
-        // global form go through the `jail-allow-hosts` per-project override.
+        // global form go through the `sandbox-allow-hosts` per-project override.
         "*.s3.amazonaws.com",
     ]
     .iter()
@@ -40,7 +40,7 @@ pub fn default_allow_hosts() -> Vec<String> {
 
 /// Opt-in browser/driver/engine CDN hosts (§3 "plus the per-package-opt-in"
 /// block). Bundled into the default list only when
-/// [`BuildJailParams::bundle_browser_cdns`](crate::BuildJailParams) is set
+/// [`ScriptSandboxParams::bundle_browser_cdns`](crate::ScriptSandboxParams) is set
 /// (§9(d) maintainer-owned). Widens the exfil surface by ~7 hosts, so off by
 /// default in the engine; the embedder flips it per the maintainer's call.
 pub fn browser_cdn_hosts() -> Vec<String> {

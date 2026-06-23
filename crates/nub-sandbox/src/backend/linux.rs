@@ -1,11 +1,11 @@
 //! Linux backend — Landlock (ABI v2) + seccomp, NO bubblewrap, NO namespaces.
 //!
-//! Decided 2026-06-23 (`.fray/build-jail-design.md` §1, [[landlock-vs-bwrap-research]]):
+//! Decided 2026-06-23 (`.fray/script-sandbox-design.md` §1, [[landlock-vs-bwrap-research]]):
 //! the Linux fs/sandbox backend is LANDLOCK-ONLY. No external-binary dep, no
 //! bundled `bwrap`, no user-namespace dependency (which fails on stock Ubuntu
 //! 24.04+/RHEL/restricted CI).
 //!
-//! Evolves aube's `linux_jail.rs`:
+//! Evolves aube's Linux sandbox backend:
 //!   - **Read** — aube granted `/` read wholesale (secrets readable). We keep a
 //!     broad read (generous-read posture, §4) but DENY the secret set by NOT
 //!     granting their parent dirs read and, where they sit under a granted root,
@@ -15,14 +15,14 @@
 //!     curated set of secret PARENT dirs that we simply never add; full
 //!     recursive `.env*` per-child walk is the documented follow-on — see
 //!     DESIGN-NOTES.)
-//!   - **Write** — subtree write on package dir + jail-home + extra-write
+//!   - **Write** — subtree write on package dir + sandbox-home + extra-write
 //!     (NOT `/tmp` — symlink-race avoidance, matching aube), plus `/dev`.
 //!   - **Net** — seccomp `AF_INET`/`AF_INET6`-deny (+ other dangerous families),
 //!     keeping `AF_UNIX` for node IPC. Loopback-to-proxy carve-out is the
 //!     follow-on when the proxy lands (seccomp can't allow-list by host).
 //!
 //! Capability-probe + graceful-degrade: if Landlock is unavailable (kernel
-//! <5.19 / disabled), the fs jail is lost — we return a [`Degradation`] and
+//! <5.19 / disabled), the fs sandbox is lost — we return a [`Degradation`] and
 //! still apply the seccomp net-deny + env-scrub. Never hard-fail; never reach
 //! for bwrap.
 //!
@@ -54,10 +54,10 @@ fn add_rule(
     access: BitFlags<AccessFs>,
 ) -> Result<RulesetCreated, String> {
     let fd = PathFd::new(path)
-        .map_err(|e| format!("failed to open jail path {}: {e}", path.display()))?;
+        .map_err(|e| format!("failed to open sandbox path {}: {e}", path.display()))?;
     ruleset
         .add_rule(PathBeneath::new(fd, access))
-        .map_err(|e| format!("failed to add jail path {}: {e}", path.display()))
+        .map_err(|e| format!("failed to add sandbox path {}: {e}", path.display()))
 }
 
 /// Add a path rule, ignoring ENOENT (a deny-target dir that doesn't exist needs
@@ -116,7 +116,7 @@ fn apply_landlock(policy: &SandboxPolicy) -> Result<(), String> {
         ruleset = add_rule(ruleset, Path::new("/"), read_access)?;
     }
 
-    // WRITE: package dir + jail-home + extra-write + /dev. NOT /tmp.
+    // WRITE: package dir + sandbox-home + extra-write + /dev. NOT /tmp.
     if policy.fs.write_enforce {
         ruleset = add_rule_opt(ruleset, Path::new("/dev"), full_access)?;
         for p in &policy.fs.write_allow {
@@ -221,7 +221,7 @@ pub fn apply(cmd: &mut Command, policy: &SandboxPolicy) -> std::io::Result<Degra
         deg.reason = Some("Landlock unavailable on this kernel".into());
     } else if !policy.fs.read_enforce && !policy.fs.read_deny.is_empty() {
         // HONESTY (caught in review): Landlock is allow-only, so the generous-
-        // read build-jail posture grants `/` read and CANNOT deny the secret
+        // read script-sandbox posture grants `/` read and CANNOT deny the secret
         // subpaths the way macOS Seatbelt does. The recursive read-carve walk
         // (sandbox-fs-deny-list.md) is the follow-on; until then report the gap
         // so the reduced-mode WARNING fires — never claim a read-deny we don't
@@ -267,17 +267,17 @@ pub fn apply(cmd: &mut Command, policy: &SandboxPolicy) -> std::io::Result<Degra
 
 #[cfg(test)]
 mod tests {
-    use crate::build_jail::{self, BuildJailParams};
+    use crate::script_sandbox::{self, ScriptSandboxParams};
     use std::path::PathBuf;
 
     #[test]
-    fn jail_policy_constructs() {
-        // Smoke: the build-jail policy is well-formed for the Linux backend
+    fn sandbox_policy_constructs() {
+        // Smoke: the script-sandbox policy is well-formed for the Linux backend
         // (the actual enforcement is exercised by the e2e test under Docker/CI).
-        let p = build_jail::policy(&BuildJailParams {
+        let p = script_sandbox::policy(&ScriptSandboxParams {
             package_dir: PathBuf::from("/proj/node_modules/dep"),
             project_root: PathBuf::from("/proj"),
-            jail_home: PathBuf::from("/tmp/nub-jail/1/dep"),
+            sandbox_home: PathBuf::from("/tmp/nub-sandbox/1/dep"),
             user_home: PathBuf::from("/home/me"),
             extra_write: vec![],
             registry_hosts: vec![],

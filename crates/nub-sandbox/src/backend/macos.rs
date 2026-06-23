@@ -7,9 +7,9 @@
 //!      a recursive `.env*` regex deny. aube's `(allow default)` left reads
 //!      wide open; this closes the credential-read channel (defense-in-depth).
 //!   2. **Tight write** — `(deny file-write*)` then re-allow ONLY the package
-//!      dir + jail-home + extra-write roots. aube also re-allowed `/tmp` and
+//!      dir + sandbox-home + extra-write roots. aube also re-allowed `/tmp` and
 //!      `/private/tmp`; we DROP those (match Linux: world-writable tmp invites
-//!      symlink races — only the private jail-home is scratch).
+//!      symlink races — only the private sandbox-home is scratch).
 //!   3. **Net** — `(deny network*)` with a loopback-only carve-out to the
 //!      egress proxy port when one is set; otherwise full network-deny. Per-host
 //!      filtering lives in the proxy (§3), not the kernel.
@@ -21,7 +21,7 @@
 //! the read-deny / write-confine / net-deny layers, which deliver the §8.5
 //! load-bearing kills (FRD + FWC + NET) today, at-or-above aube parity.
 //!
-//! DESIGN-NOTES (follow-on phases, tracked in `.fray/build-jail-design.md` §8):
+//! DESIGN-NOTES (follow-on phases, tracked in `.fray/script-sandbox-design.md` §8):
 //!   - Port SRT's verbatim essential-permissions block + flip base to
 //!     `(deny default)` for full read-confine parity with the read-allow set.
 //!   - Wire the localhost egress proxy + 302-redirect re-check (§3); until then
@@ -195,14 +195,14 @@ pub fn apply(cmd: &mut Command, policy: &SandboxPolicy) -> std::io::Result<Degra
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::build_jail::{self, BuildJailParams};
+    use crate::script_sandbox::{self, ScriptSandboxParams};
     use std::path::PathBuf;
 
-    fn jail_policy() -> SandboxPolicy {
-        build_jail::policy(&BuildJailParams {
+    fn sandbox_policy() -> SandboxPolicy {
+        script_sandbox::policy(&ScriptSandboxParams {
             package_dir: PathBuf::from("/proj/node_modules/dep"),
             project_root: PathBuf::from("/proj"),
-            jail_home: PathBuf::from("/tmp/nub-jail/1/dep"),
+            sandbox_home: PathBuf::from("/tmp/nub-sandbox/1/dep"),
             user_home: PathBuf::from("/Users/me"),
             extra_write: vec![PathBuf::from("/Users/me/.cache/node-gyp")],
             registry_hosts: vec!["registry.npmjs.org".into()],
@@ -213,7 +213,7 @@ mod tests {
 
     #[test]
     fn profile_denies_secrets_and_confines_write() {
-        let prof = build_profile(&jail_policy());
+        let prof = build_profile(&sandbox_policy());
         assert!(prof.contains("(version 1)"));
         // secret read-deny present
         assert!(prof.contains("(deny file-read* (subpath \"/Users/me/.ssh\"))"));
@@ -229,7 +229,7 @@ mod tests {
 
     #[test]
     fn profile_does_not_grant_write_to_project_source() {
-        let prof = build_profile(&jail_policy());
+        let prof = build_profile(&sandbox_policy());
         // /proj is readable but must NOT be writable (source is read-only)
         assert!(!prof.contains("(allow file-write* (subpath \"/proj\"))"));
     }

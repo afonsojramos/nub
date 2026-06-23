@@ -1,21 +1,21 @@
 //! The unified sandbox policy model — `SandboxPolicy { env, fs, net, pid }`.
 //!
-//! This is the single schema that drives BOTH the build-jail profile (wired to
+//! This is the single schema that drives BOTH the script-sandbox profile (wired to
 //! dependency lifecycle scripts, default-ON) and — later — the runtime profile
-//! (`nub run` / `nub <file>` / `nubx`). The build-jail is the FIRST consumer;
-//! it is the [`build_jail`](crate::build_jail) preset applied to a lifecycle
-//! spawn. No build-jail value lives outside this schema (see `.fray/sandbox.md`
+//! (`nub run` / `nub <file>` / `nubx`). The script-sandbox is the FIRST consumer;
+//! it is the [`script_sandbox`](crate::script_sandbox) preset applied to a lifecycle
+//! spawn. No script-sandbox value lives outside this schema (see `.fray/sandbox.md`
 //! "engine architecture" + `.fray/sandbox.findings/api.md`).
 //!
 //! The value forms mirror the config surface: a missing axis means "inherit /
 //! no enforcement"; an explicit policy is deny-by-default for env/fs-write/net
-//! once present. The build-jail preset always supplies an explicit policy on
+//! once present. The script-sandbox preset always supplies an explicit policy on
 //! every axis (it is default-ON, not opt-in-by-presence).
 
 use std::path::PathBuf;
 
 /// Top-level sandbox policy. One per spawned process; every axis composes
-/// independently. Built by a profile preset (today: [`crate::build_jail`]).
+/// independently. Built by a profile preset (today: [`crate::script_sandbox`]).
 #[derive(Debug, Clone, Default)]
 pub struct SandboxPolicy {
     pub env: EnvPolicy,
@@ -57,7 +57,7 @@ pub struct EnvPolicy {
 
 impl EnvPolicy {
     /// Decide whether an inherited env key survives the scrub. Mirrors aube's
-    /// `safe_jail_env_key` but driven by data so the build-jail and runtime
+    /// the safe-env-key allowlist but driven by data so the script-sandbox and runtime
     /// profiles share one decision function. A deny (substring OR token) is
     /// checked FIRST and wins over any allow — so a secret riding an allow
     /// prefix (`npm_config_<scope>:_authToken`) is still rejected.
@@ -130,7 +130,7 @@ pub struct FsPolicy {
     pub write_allow: Vec<PathBuf>,
     /// `true` once the read-allow set is the authoritative allowlist (Landlock
     /// curated read-set / Seatbelt re-allow). `false` = generous read (only the
-    /// deny set + globs apply). The build-jail uses generous-read + deny-set.
+    /// deny set + globs apply). The script-sandbox uses generous-read + deny-set.
     pub read_enforce: bool,
     /// `true` once write is confined to `write_allow`.
     pub write_enforce: bool,
