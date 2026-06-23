@@ -1,0 +1,32 @@
+[package]
+name = "nub-sandbox"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# OS-enforced sandbox engine for nub. The build-jail PROFILE is the first
+# consumer: it replaces aube's bundled install-script jail at parity, then
+# grows the runtime profile + per-axis config. See .fray/build-jail-design.md
+# and .fray/sandbox.md (engine architecture). Backends are ported in spirit
+# from Codex's Apache-2.0 sandbox crates (NOTICE) and aube's own Landlock/
+# Seatbelt jail (the parity baseline).
+
+[dependencies]
+glob-match = "0.2"
+tracing.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4"
+seccompiler = "0.5"
+libc.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true
