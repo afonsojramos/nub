@@ -218,6 +218,17 @@ function installLazyEsmPolyfills() {
     return;
   }
 
+  // Main thread: install blob: worker support EAGERLY. It only wraps
+  // URL.createObjectURL + subclasses Blob (touches no node:worker_threads, so it's
+  // cold-start-cheap) and MUST be live before user code calls createObjectURL —
+  // which happens before the first `new Worker`, so it cannot wait for the lazy
+  // Worker load below. See runtime/worker-blob-url.cjs.
+  try {
+    __require("./worker-blob-url.cjs").installBlobUrlSupport();
+  } catch {
+    // blob: worker support is best-effort; never block startup on it.
+  }
+
   // Main thread: lazy Worker global. Defined NON-ENUMERABLE so it stays invisible
   // to `Object.keys(globalThis)` / for-in — the additive contract — matching how
   // worker-polyfill.mjs defines the real one.

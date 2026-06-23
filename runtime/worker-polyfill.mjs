@@ -87,76 +87,180 @@ function getErrorEventCtor() {
 export function installWorkerPolyfill() {
   const { Worker: NodeWorker, parentPort, isMainThread } = __getBuiltin("node:worker_threads");
   const { fileURLToPath } = __getBuiltin("node:url");
+  // blob: worker source registry, shared with the eager main-thread preload that
+  // wraps URL.createObjectURL (worker-blob-url.cjs). Loaded via createRequire so
+  // both this lazily-loaded ESM module and the eager CJS preload reference the SAME
+  // module instance (Node dedupes by resolved path) — i.e. the SAME blobUrlSources.
+  const { blobUrlSources, installBlobUrlSupport } = (
+    typeof process.getBuiltinModule === "function"
+      ? __getBuiltin("node:module").createRequire(import.meta.url)
+      : _bootstrapCreateRequire(import.meta.url)
+  )("./worker-blob-url.cjs");
+
+  // Resolve a worker-error stack frame to {filename,lineno,colno} so the
+  // ErrorEvent carries real source location, per WHATWG §10.2.6 (the spec
+  // requires these fields populated from where the error was raised). Node's
+  // `error` event delivers the thrown Error; we read its first stack frame.
+  // Browser-scrubbing of cross-origin frames does not apply here (all worker
+  // sources are same-origin local), so we surface the raw location.
+  const STACK_FRAME = /\(?(?:file:\/\/)?(.+?):(\d+):(\d+)\)?\s*$/;
+  function locationFromError(err) {
+    let filename = "";
+    let lineno = 0;
+    let colno = 0;
+    const stack = err && typeof err.stack === "string" ? err.stack : "";
+    for (const line of stack.split("\n")) {
+      const t = line.trim();
+      if (!t.startsWith("at ")) continue;
+      const m = STACK_FRAME.exec(t);
+      if (m) {
+        filename = m[1].startsWith("file://") ? fileURLToPath(m[1]) : m[1];
+        lineno = Number(m[2]) || 0;
+        colno = Number(m[3]) || 0;
+        break;
+      }
+    }
+    return { filename, lineno, colno };
+  }
 
   if (typeof globalThis.Worker === "undefined") {
   class Worker extends EventTarget {
     #worker;
+    #name;
 
     constructor(url, options = {}) {
       super();
 
-      let workerPath;
-      if (url instanceof URL) {
-        workerPath = fileURLToPath(url);
-      } else if (typeof url === "string") {
-        if (url.startsWith("file://")) {
-          workerPath = fileURLToPath(url);
-        } else {
-          workerPath = url;
-        }
-      } else {
+      // The WHATWG Worker constructor accepts a script URL. Per §10.2.6.3 the
+      // standard inline mechanisms are `blob:` and `data:` URLs (there is no
+      // inline-source-string form in the spec). We map each to a Node spawn:
+      //   - file path / file: URL  → spawn the file (transpiled by nub's preload)
+      //   - data: URL              → Node runs it directly (worker_threads v14.9)
+      //   - blob: URL              → resolve the Blob via node:buffer, spawn its
+      //                              source with eval:true (Node can't open blob:)
+      let spawnTarget;
+      let evalMode = false;
+
+      const asUrlString =
+        url instanceof URL ? url.href : typeof url === "string" ? url : null;
+      if (asUrlString === null) {
         throw new TypeError("Worker constructor: url must be a string or URL");
       }
 
-      // `type: "module" | "classic"` is accepted for web compatibility but not
-      // enforced: Node decides module-vs-CJS for the worker entry by file
-      // extension + nearest package.json "type" (the same rule nub applies to
-      // the main entry), and there is no classic/importScripts mode. Passing
-      // `type` through to NodeWorker is harmless — it ignores unknown options.
-      // See wiki/research/worker-polyfill.md.
-      // Node rejects flags in Worker execArgv that imply V8 `--harmony-*`
-      // staging flags (ERR_WORKER_INVALID_EXEC_ARGV). Two categories to strip:
-      //   1. `--harmony-*` flags themselves (V8 internals; may land in execArgv
-      //      on some Node versions when the parent injected an `--experimental-*`
-      //      that implies them).
-      //   2. `--experimental-shadow-realm` — implies `--harmony-shadow-realm`
-      //      (Node rejects it for workers even though the flag name is not
-      //      `--harmony-*`). This is the only nub-injected experimental flag
-      //      that has this property; other experimentals nub injects
-      //      (--experimental-vm-modules, --experimental-wasm-modules, etc.) are
-      //      fine in worker execArgv. Extend this filter if Node adds more.
-      this.#worker = new NodeWorker(workerPath, {
-        ...options,
-        eval: false,
-        execArgv: process.execArgv.filter(
+      if (asUrlString.startsWith("blob:")) {
+        // A `blob:` worker (WHATWG inline mechanism). Node cannot open a blob:
+        // URL as a worker entry, and the Blob's bytes are only readable
+        // ASYNCHRONOUSLY (Blob.text/arrayBuffer) while this constructor is sync.
+        // We close that gap by snapshotting the source SYNCHRONOUSLY at
+        // `URL.createObjectURL(blob)` time (see installBlobUrlSupport below) into
+        // a module-scope registry keyed by URL, then spawn it with eval:true.
+        const source = blobUrlSources.get(asUrlString);
+        if (source === undefined) {
+          throw new TypeError(
+            `Worker constructor: blob URL '${asUrlString}' is not a known object URL`
+          );
+        }
+        spawnTarget = source;
+        evalMode = true;
+      } else if (asUrlString.startsWith("data:")) {
+        spawnTarget = new URL(asUrlString);
+      } else if (asUrlString.startsWith("file://")) {
+        spawnTarget = fileURLToPath(asUrlString);
+      } else {
+        spawnTarget = asUrlString;
+      }
+
+      this.#name = typeof options.name === "string" ? options.name : "";
+
+      // `type: "module" | "classic"` selects the worker's module system per the
+      // spec. The worker-side scope exposes `importScripts` only for classic
+      // workers (WHATWG WorkerGlobalScope — classic-only) and throws for module
+      // workers. nub signals the choice to the worker via the internal
+      // NUB_WORKER_TYPE env (internal plumbing var — exempt from the brand
+      // boundary). Node still decides the entry's actual module/CJS PARSING by
+      // file extension + package.json "type"; this env governs only which
+      // importScripts surface the polyfill installs.
+      const workerType =
+        options.type === "classic" ? "classic" : "module";
+
+      // Node rejects flags in Worker execArgv that imply V8 `--harmony-*` staging
+      // flags (ERR_WORKER_INVALID_EXEC_ARGV): `--harmony-*` themselves, and
+      // `--experimental-shadow-realm` (implies `--harmony-shadow-realm`). Strip
+      // those from whatever execArgv we forward.
+      const stripHarmony = (argv) =>
+        argv.filter(
           f => !f.startsWith("--harmony") && f !== "--experimental-shadow-realm"
-        ),
-      });
+        );
+      // execArgv: forward nub's preload-carrying parent execArgv by DEFAULT (so a
+      // worker inherits nub's transpile augmentation), but if the user supplied
+      // their own execArgv, MERGE rather than clobber — parent flags first, user
+      // flags appended so the user's win on conflict.
+      const execArgv = stripHarmony(
+        Array.isArray(options.execArgv)
+          ? [...process.execArgv, ...options.execArgv]
+          : process.execArgv
+      );
+
+      const nodeOptions = {
+        ...options,
+        eval: evalMode,
+        execArgv,
+      };
+      // Signal the worker type via the internal NUB_WORKER_TYPE env without
+      // disturbing the user's env semantics. `worker_threads.SHARE_ENV` is a
+      // Symbol (live-shared parent env) — spreading it would destroy the share —
+      // so in that case we leave env untouched and let the worker default
+      // importScripts to the classic form (the only edge where the module-worker
+      // throwing-importScripts nicety is skipped).
+      const userEnv = options.env;
+      if (typeof userEnv === "symbol") {
+        // SHARE_ENV: leave nodeOptions.env as the user gave it; can't inject.
+      } else {
+        nodeOptions.env = { ...(userEnv ?? process.env), NUB_WORKER_TYPE: workerType };
+      }
+      if (this.#name) nodeOptions.name = this.#name;
+
+      this.#worker = new NodeWorker(spawnTarget, nodeOptions);
 
       this.#worker.on("message", (data) => {
         this.dispatchEvent(new MessageEvent("message", { data }));
       });
 
-      this.#worker.on("messageerror", (err) => {
-        this.dispatchEvent(new MessageEvent("messageerror", { data: err }));
+      // WHATWG: messageerror fires when an inbound message fails deserialization;
+      // it is a plain MessageEvent with `data: null` (NOT carrying the error).
+      this.#worker.on("messageerror", () => {
+        this.dispatchEvent(new MessageEvent("messageerror", { data: null }));
       });
 
       this.#worker.on("error", (err) => {
         const ErrorEventCtor = getErrorEventCtor();
-        this.dispatchEvent(new ErrorEventCtor("error", { error: err, message: err.message }));
+        const { filename, lineno, colno } = locationFromError(err);
+        this.dispatchEvent(
+          new ErrorEventCtor("error", {
+            error: err,
+            message: err.message,
+            filename,
+            lineno,
+            colno,
+          })
+        );
       });
+      // No `exit` event: WHATWG Workers have no exit event (it is a
+      // node:worker_threads concept, not part of the web Worker surface).
+    }
 
-      this.#worker.on("exit", (code) => {
-        this.dispatchEvent(new Event("exit"));
-      });
+    get name() {
+      return this.#name;
     }
 
     postMessage(data, transfer) {
       this.#worker.postMessage(data, transfer);
     }
 
+    // WHATWG terminate() returns void. Node's returns a Promise; we discard it so
+    // the surface matches the spec (the underlying termination still proceeds).
     terminate() {
-      return this.#worker.terminate();
+      this.#worker.terminate();
     }
 
     #onmessageHandler = null;
@@ -194,6 +298,11 @@ export function installWorkerPolyfill() {
     writable: true,
     configurable: true,
   });
+
+  // Enable blob: workers: wrap URL.createObjectURL so the source is captured
+  // synchronously for the constructor's blob: branch. Transparent for all other
+  // uses; installs once. Only on the main thread (where blob: URLs are minted).
+  if (isMainThread) installBlobUrlSupport();
 }
 
 // Worker-side bootstrap: emulate the DedicatedWorkerGlobalScope on top of
@@ -220,6 +329,63 @@ if (!isMainThread && parentPort) {
       configurable: true,
     });
   defineGlobal("self", scope);
+
+  // `self.name` — the worker's name from the constructor's {name} option (WHATWG
+  // DedicatedWorkerGlobalScope.name). Node backs the {name} ctor option with a
+  // per-thread `worker_threads.threadName` (v18.16, safe at nub's 18.19 floor),
+  // readable inside the worker — so we surface that directly, no extra plumbing.
+  {
+    const wt = __getBuiltin("node:worker_threads");
+    const name = wt && typeof wt.threadName === "string" ? wt.threadName : "";
+    Object.defineProperty(scope, "name", {
+      value: name,
+      enumerable: false,
+      writable: true,
+      configurable: true,
+    });
+  }
+
+  // `importScripts(...urls)` — WHATWG WorkerGlobalScope, CLASSIC workers only.
+  // Synchronously fetches + evaluates each script in the global scope, in order.
+  // A module worker MUST throw on importScripts (use `import` instead). nub learns
+  // the worker's type from NUB_WORKER_TYPE (set by the main-side constructor).
+  // Remote URLs are not supported (no sync network in Node); local file:/relative
+  // paths and data: URLs are read synchronously.
+  // Default to the classic (working) importScripts when the type is unset — this
+  // is the SHARE_ENV edge where the constructor couldn't inject NUB_WORKER_TYPE.
+  if (process.env.NUB_WORKER_TYPE !== "module") {
+    const fs = __getBuiltin("node:fs");
+    const { fileURLToPath: f2p, pathToFileURL } = __getBuiltin("node:url");
+    defineGlobal("importScripts", (...urls) => {
+      for (const u of urls) {
+        const s = String(u);
+        let code;
+        if (s.startsWith("data:")) {
+          const comma = s.indexOf(",");
+          const meta = s.slice(5, comma);
+          const body = s.slice(comma + 1);
+          code = meta.includes("base64")
+            ? Buffer.from(body, "base64").toString("utf8")
+            : decodeURIComponent(body);
+        } else if (/^https?:/.test(s)) {
+          throw new TypeError(
+            "importScripts: remote URLs are not supported (no synchronous network)"
+          );
+        } else {
+          const path = s.startsWith("file://") ? f2p(s) : s;
+          code = fs.readFileSync(path, "utf8");
+        }
+        // Indirect eval → runs in global scope, matching importScripts semantics.
+        (0, eval)(code);
+      }
+    });
+  } else {
+    // Module workers: importScripts must throw (spec). Provide the throwing form
+    // so the surface exists and the error is the spec-correct one.
+    defineGlobal("importScripts", () => {
+      throw new TypeError("importScripts is not available in module workers");
+    });
+  }
 
   // `message`/`messageerror` are DELEGATED straight onto the native `parentPort`
   // (a real Node MessagePort) so Node's own C++ event-loop ref-counting governs

@@ -34,10 +34,12 @@ Inside the worker, Nub installs the dedicated-worker scope on top of `node:worke
 
 ```text
 self
+name
 postMessage
 close
 addEventListener, removeEventListener
 onmessage, onmessageerror
+importScripts (classic workers)
 ```
 
 Node's worker global is not an `EventTarget` and exposes none of these, so the polyfill provides the whole surface.
@@ -46,14 +48,32 @@ Node's worker global is not an `EventTarget` and exposes none of these, so the p
 
 The main-thread `Worker` carries the browser subset:
 
-- **`new Worker(scriptURL, options?)`** — `scriptURL` is a string or `URL`; `options` accepts `type` (`"module"` | `"classic"`), `name`, and `credentials`.
-- **`postMessage(message, transfer?)`** — `transfer` is a list of `ArrayBuffer` / `MessagePort` to transfer.
-- **`terminate()`** — stops the worker.
+- **`new Worker(scriptURL, options?)`** — `scriptURL` is a string, a `URL`, a `data:` URL, or a `blob:` URL (from `URL.createObjectURL`); `options` accepts `type` (`"module"` | `"classic"`), `name`, and `credentials`.
+- **`worker.name`** — the name passed as `options.name`.
+- **`postMessage(message, transfer?)`** — `transfer` is a list of `ArrayBuffer` / `MessagePort` to transfer; transferred objects are detached on the sending side.
+- **`terminate()`** — stops the worker; returns `undefined`.
 - **`onmessage` / `onmessageerror` / `onerror`** — event-handler properties, plus the inherited `addEventListener` / `removeEventListener` / `dispatchEvent`.
 
-Inbound `"message"` events arrive as real `MessageEvent`s (`ev.data`); a thrown error in the worker surfaces on the main thread as an `ErrorEvent` (`ev.message`, `ev.error`).
+Inbound `"message"` events arrive as real `MessageEvent`s (`ev.data`). A failed deserialization fires `"messageerror"` as a `MessageEvent` with `data` of `null`. A thrown error in the worker surfaces on the main thread as an `ErrorEvent` carrying `message`, `error`, and the source location (`filename`, `lineno`, `colno`).
 
-The `type` option is accepted for web compatibility but not enforced: Node decides module-vs-CommonJS for the worker entry by file extension and the nearest `package.json` `"type"` — the same rule Nub applies to the main entry — and there is no `classic` / `importScripts` mode.
+## Inline workers
+
+A worker source can be inlined with a `data:` or `blob:` URL — the same mechanisms the browser uses, neither of which `node:worker_threads` exposes through a browser-shape constructor:
+
+```ts
+const url = URL.createObjectURL(
+  new Blob(["self.onmessage = (e) => self.postMessage(e.data * 2);"], {
+    type: "text/javascript",
+  }),
+);
+const worker = new Worker(url);
+worker.postMessage(21);
+worker.onmessage = (e) => console.log(e.data); // → 42
+```
+
+## Module and classic workers
+
+`type: "module"` (the default) runs the worker as an ES module — `import` and `import.meta.url` work, and `importScripts` throws. `type: "classic"` runs it as a classic worker, where `importScripts(...urls)` synchronously loads and evaluates scripts in the worker's global scope. Node still decides the entry's module-vs-CommonJS parsing by file extension and the nearest `package.json` `"type"`.
 
 ## Divergences
 

@@ -99,6 +99,7 @@ interface WorkerOptions {
   credentials?: "omit" | "same-origin" | "include";
 }
 interface __NubWorker extends EventTarget {
+  readonly name: string;
   postMessage(message: any, transfer?: readonly (ArrayBuffer | MessagePort)[]): void;
   terminate(): void;
   onmessage: ((this: Worker, ev: MessageEvent) => any) | null;
