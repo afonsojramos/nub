@@ -42,7 +42,7 @@ const LABEL_GAP = 8; // "Star" -> count pill
 const PILL_PAD = 7; // horizontal padding inside the pill
 const PILL_H = 17;
 const PILL_PAD_R = 12; // right padding after the pill
-const DIGIT_H = 16; // tape advance per glyph
+const DIGIT_H = 20; // tape advance per glyph (> PILL_H so only one digit shows at rest)
 
 const FONT = '600 12px -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif';
 const COUNT_FONT = '600 12px ui-monospace,"SF Mono",Menlo,monospace';
@@ -62,36 +62,69 @@ async function getStarCount(): Promise<number> {
 }
 
 /**
- * Count pill: a rounded-full rect with the comma-formatted number. Each digit is a
- * tabular-width cell holding a 0..final glyph tape that rolls up and freezes; the comma is
- * static. Fixed cell widths keep the pill width stable through the count-up (no jitter).
+ * Count pill: a rounded-full rect with the comma-formatted number, rendered as an ODOMETER
+ * that counts 0 -> count over one shared ~6.5s ease-in-out timeline, then freezes.
+ *
+ * Each digit position is a vertical "tape" of glyphs inside its own nested `<svg>` viewport.
+ * As the global value sweeps 0..count, a position holding place value `pv` (1, 10, 100, ...)
+ * advances at the values `0, pv, 2*pv, ...`, displaying `s % 10` at its s-th advance — so its
+ * tape lists those digits and slides up by `steps * DIGIT_H`. All tapes share ONE eased SMIL
+ * timeline (same dur + spline), so the ones column spins fast while higher columns crawl — a
+ * synchronized odometer that decelerates into the final value.
+ *
+ * Clipping: a nested `<svg>` (default overflow:hidden) is the window, and the slide is a SMIL
+ * `<animateTransform>` (in the SVG render tree, so it IS clipped to the window). This is the
+ * combination that actually holds in GitHub's `<img>` SVG renderer — a CSS-`transform`
+ * animation composites into a layer that ESCAPES SVG clipping (clip-path/mask alike), leaking
+ * adjacent glyphs out of the pill; SMIL inside a nested-svg viewport does not. `fill="freeze"`
+ * holds the final number; `calcMode="spline"` gives the ease-in-out. JS never runs in a
+ * README-embedded `<img>`, so the animation must be declarative (SMIL/CSS) — SMIL here.
+ *
+ * "Skip intermediate values": with ease-in-out over ~6.5s the sweep blurs through the middle
+ * and slows at both ends; the tape positions are exact, so it lands precisely on the count.
+ * Fixed mono cell widths keep the pill from reflowing as digits roll (jitter-free).
  */
-function countPill(str: string, pillX: number): { svg: string; width: number } {
+function countPill(str: string, pillX: number, count: number): { svg: string; width: number } {
   const cellW = 7.4; // fixed mono cell @12px
   const commaW = 3.8;
   let inner = 0;
   for (const ch of str) inner += ch === ',' ? commaW : cellW;
   const pillW = inner + PILL_PAD * 2;
   const pillY = (H - PILL_H) / 2;
-  const baseY = pillY + PILL_H / 2 + 12 * 0.34; // optical center of the 12px cap block
+  const baseY = pillY + PILL_H / 2 + 12 * 0.34; // optical center of the 12px cap block (for the comma)
+  const baseLocal = PILL_H / 2 + 12 * 0.34; // same, but in nested-svg-local coords
+
+  // Place value per digit column, left to right. e.g. "1,744" -> [1000, _, 100, 10, 1].
+  const digitChars = str.replace(/,/g, '');
+  const placeOf: number[] = [];
+  for (let i = 0; i < digitChars.length; i++) {
+    placeOf.push(Math.pow(10, digitChars.length - 1 - i));
+  }
+
+  // Shared SMIL ease-in-out: accelerate in, decelerate as it settles. ~6.5s, plays once, freezes.
+  const anim =
+    '<animateTransform attributeName="transform" type="translate" from="0 0" to="0 -TRAVEL" dur="6.5s" calcMode="spline" keyTimes="0;1" keySplines="0.7 0 0.3 1" repeatCount="1" fill="freeze"/>';
 
   let cx = pillX + PILL_PAD;
-  let col = 0;
+  let digitIdx = 0;
   const cells: string[] = [];
   for (const ch of str) {
     if (ch >= '0' && ch <= '9') {
-      const center = cx + cellW / 2;
+      const pv = placeOf[digitIdx];
+      const steps = Math.floor(count / pv); // how many glyph-advances this column makes
       const glyphs: string[] = [];
-      for (let d = 0; d <= Number(ch); d++) {
-        glyphs.push(`<text x="${center}" y="${baseY + d * DIGIT_H}" text-anchor="middle" class="cnt">${d}</text>`);
+      for (let s = 0; s <= steps; s++) {
+        // At the s-th advance of this column the global value is s*pv, so it shows s % 10.
+        glyphs.push(
+          `<text x="${cellW / 2}" y="${baseLocal + s * DIGIT_H}" text-anchor="middle" class="cnt">${s % 10}</text>`,
+        );
       }
-      const travel = Number(ch) * DIGIT_H;
+      const travel = steps * DIGIT_H;
       cells.push(
-        `<clipPath id="p${col}"><rect x="${cx}" y="${pillY}" width="${cellW}" height="${PILL_H}"/></clipPath>` +
-          `<g clip-path="url(#p${col})"><g class="tape" style="--t:-${travel}px;animation-delay:${col * 0.06}s">${glyphs.join('')}</g></g>`,
+        `<svg x="${cx}" y="${pillY}" width="${cellW}" height="${PILL_H}"><g>${glyphs.join('')}${anim.replace('TRAVEL', String(travel))}</g></svg>`,
       );
       cx += cellW;
-      col++;
+      digitIdx++;
     } else {
       cells.push(`<text x="${cx + commaW / 2}" y="${baseY}" text-anchor="middle" class="cnt">${ch}</text>`);
       cx += commaW;
@@ -114,17 +147,15 @@ function renderSvg(count: number): string {
   x += LABEL_W + LABEL_GAP;
 
   const pillX = x;
-  const { svg: pillSvg, width: pillW } = countPill(countStr, pillX);
+  const { svg: pillSvg, width: pillW } = countPill(countStr, pillX, count);
   x += pillW + PILL_PAD_R;
 
   const width = Math.round(x);
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${H}" viewBox="0 0 ${width} ${H}" role="img" aria-label="${count} GitHub stars">
   <style>
-    @keyframes roll {0%{transform:translateY(0);}100%{transform:translateY(var(--t));}}
     .lbl{font:${FONT};fill:${C.text};}
     .cnt{font:${COUNT_FONT};fill:${C.text};font-variant-numeric:tabular-nums;}
-    .tape{animation:roll 1.4s cubic-bezier(.16,1,.3,1) forwards;animation-iteration-count:1;}
   </style>
   <rect x="0.5" y="0.5" width="${width - 1}" height="${H - 1}" rx="6" fill="${C.btnBg}" stroke="${C.btnBorder}"/>
   ${star}
