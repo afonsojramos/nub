@@ -30,11 +30,14 @@ fails=0
 pass() { echo "  PASS  $1"; }
 fail() { echo "  FAIL  $1"; fails=$((fails + 1)); }
 
-# SANITY: nub discovers its Node from PATH, but a pin (engines / .node-version) ABOVE the
-# PATH version makes it PROVISION a different Node — silently masking the leg's coverage.
-# Assert nub actually ran the matrix-selected version before trusting any result. The
-# matrix fixtures ship a pin-free package.json so this should always hold; this guard
-# catches a future regression (a stray pin, a floor bump) that would make the matrix lie.
+# ENGINES-REDIRECT GUARD (defeats the false-green class this matrix exists to prevent).
+# nub discovers its Node from PATH, but an `engines.node` / `.node-version` / `packageManager`
+# constraint that the PATH-selected Node does NOT satisfy makes nub REJECT it and fall through
+# to the highest installed Node — so a leg labeled "Node 22.16" would silently run on 26 and
+# mask version-specific bugs. The fixtures ship a PERMISSIVE engines (>=18) so no lower-tier
+# leg is redirected; this assertion is the backstop — it fails the leg if the running Node is
+# not the matrix-selected one (a stray pin, a transitive constraint, a floor bump). Probe from
+# the pin-free fixtures dir so the probe itself isn't redirected.
 ACTUAL_VER="$(cd "$FIX/async-loader-collision" && "$NUB" --eval 'process.stdout.write(process.version)' 2>/dev/null || true)"
 if [[ -n "$ACTUAL_VER" && -n "$NODE_VER" && "$NODE_VER" != "unknown" && "$ACTUAL_VER" != "$NODE_VER" ]]; then
   fail "version mismatch — matrix selected $NODE_VER but nub ran on $ACTUAL_VER (a pin is masking this leg's coverage)"

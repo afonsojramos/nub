@@ -31,6 +31,24 @@ echo "== real-apps on Node $NODE_VER ==  nub: $NUB  work: $WORK"
 fails=0
 crash_re='resolveSync|loadSync|ERR_METHOD_NOT_IMPLEMENTED|Error evaluating Node.js code'
 
+# ENGINES-REDIRECT GUARD (defeats false-green from running the WRONG Node). nub discovers
+# its Node from PATH, but an `engines.node` / `.node-version` / `packageManager` constraint
+# that the PATH-selected Node does NOT satisfy makes nub REJECT it and fall through to the
+# highest installed Node — so a leg labeled "Node 22.16" would silently build on 26 and mask
+# version-specific bugs (the exact false-positive class this matrix exists to prevent). The
+# scaffolded apps below ship a PERMISSIVE `engines.node` (`>=18`) precisely so no lower-tier
+# leg is redirected; this assertion is the backstop that fails the leg if a redirect happens
+# anyway (a transitive dep, a future edit, a floor bump). Assert nub runs the matrix-selected
+# version BEFORE building anything.
+# Run the probe from $WORK (a bare mktemp dir under TMPDIR, no package.json in its parents)
+# so the probe ITSELF isn't redirected by the repo root's own engines pin.
+ACTUAL_VER="$(cd "$WORK" && "$NUB" --eval 'process.stdout.write(process.version)' 2>/dev/null || true)"
+if [[ -n "$ACTUAL_VER" && -n "$NODE_VER" && "$NODE_VER" != "unknown" && "$ACTUAL_VER" != "$NODE_VER" ]]; then
+  echo "  FAIL  version redirect — matrix selected $NODE_VER but nub ran on $ACTUAL_VER (engines/pin masking this leg)"
+  echo "== real-apps on Node $NODE_VER: 1 failure(s) =="
+  exit 1
+fi
+
 judge() { # judge <label> <exit> <logfile>
   local label="$1" rc="$2" log="$3"
   if [[ $rc -eq 0 ]]; then echo "  PASS  $label"; return; fi
@@ -50,6 +68,7 @@ judge() { # judge <label> <exit> <logfile>
 A1="$WORK/next-tw"; mkdir -p "$A1/app"
 cat > "$A1/package.json" <<'EOF'
 { "name": "nub-next-tw", "private": true, "scripts": { "build": "next build" },
+  "engines": { "node": ">=18" },
   "dependencies": { "next": "16.1.1", "react": "19.2.0", "react-dom": "19.2.0",
     "tailwindcss": "4.1.17", "@tailwindcss/postcss": "4.1.17" } }
 EOF
@@ -72,6 +91,7 @@ fi
 A2="$WORK/vite-ssr"; mkdir -p "$A2/src"
 cat > "$A2/package.json" <<'EOF'
 { "name": "nub-vite-ssr", "private": true, "type": "module",
+  "engines": { "node": ">=18" },
   "scripts": { "build": "vite build --ssr src/entry-server.js --outDir dist-server" },
   "devDependencies": { "vite": "6.0.7" } }
 EOF

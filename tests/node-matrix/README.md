@@ -49,13 +49,23 @@ The collision guard is meaningful **only on a Node-broken version** — on a Nod
 it is vacuously green. The matrix therefore runs it across the broken bands (and asserts it
 must pass on the fixed ones).
 
-## Important: nub must run the matrix-selected Node
+## Important: the engines-redirect guard (nub must run the matrix-selected Node)
 
-nub discovers its Node from `PATH`, but an `engines.node` / `.node-version` pin **above** the
-PATH version makes nub *provision* a different Node, silently masking a leg's coverage. The
-fixtures ship a **pin-free `package.json`** so nub always augments the matrix-selected version,
-and `run.sh` has a sanity guard that fails the leg if nub ran a different version than selected.
-The repo root pins `engines.node >= 22.15`, which is why the fixtures need their own.
+nub discovers its Node from `PATH`, but an `engines.node` / `.node-version` / `packageManager`
+constraint the PATH-selected Node does NOT satisfy makes nub **reject** it and fall through to the
+highest installed Node — so a leg labeled "Node 22.16" would silently run on 26 and **mask the
+version-specific bug**. That is the exact false-positive class this matrix exists to prevent, so
+the matrix is hardened against it two ways:
+
+1. **Permissive fixtures.** Every fixture (the smoke `package.json`, the scaffolded Next + Vite
+   apps) ships `engines.node: ">=18"` — low enough that no matrix leg is ever redirected, and it
+   shadows the repo root's `engines.node >= 22.15` (which would otherwise be inherited by upward
+   walk and redirect the lower-tier legs).
+2. **A version-assertion guard in BOTH runners.** `run.sh` and `real-apps.sh` each probe nub's
+   actual `process.version` (from a pin-free dir, so the probe isn't itself redirected) and FAIL
+   the leg if it doesn't equal the matrix-selected version. So even a stray pin, a transitive
+   `engines` constraint, or a future floor bump can't produce a silent false-green — the leg goes
+   RED with a "version redirect" message instead.
 
 ## The collision is a hard must-pass on every version
 
