@@ -1,0 +1,96 @@
+{
+  "_doc": "Per-file WPT expectations for nub's Worker conformance gate. An entry is one of: {} (every subtest must pass), {skip:<reason>} (file not run — needs a DOM substrate nub has no business providing), or {fail:{expected:[<subtest names>], note:<why>}} (those subtests are documented, accepted divergences; every OTHER subtest in the file must still pass). expected-fail entries are DOCUMENTED divergences, not silent gaps — most are inherited from node:worker_threads and shared with native Node. The Blob-instanceof divergence (D2) is a real nub finding pending a maintainer document-vs-fix decision; see the note. An unexpected pass on an expected-fail subtest is reported (so the list can be tightened) but does not fail the run; an unexpected FAIL (regression) does.",
+  "tests": {
+    "webmessaging/MessageEvent.any.js": {},
+
+    "webmessaging/MessageEvent-trusted.any.js": {
+      "skip": "Both subtests assert MessageEvent.isTrusted===true. Node's worker_threads MessageEvent is isTrusted=false (verified: native Node is also false), so this is a Node-inherited divergence, not nub-specific. The BroadcastChannel subtest also needs an on-disk worker support file we do not vendor."
+    },
+
+    "webmessaging/MessagePort_initial_disabled.any.js": {
+      "fail": {
+        "expected": ["Untitled"],
+        "note": "PORT AUTO-START (Node-inherited). The spec requires that addEventListener('message') WITHOUT start() must not deliver; nub follows node:worker_threads, which starts a port on any listener (workerd shares this). Documented in the worker FAQ. The file itself notes it duplicates message-channels/no-start.any.js."
+      }
+    },
+
+    "webmessaging/MessagePort_onmessage_start.any.js": {},
+    "webmessaging/Channel_postMessage_event_properties.any.js": {},
+    "webmessaging/Channel_postMessage_target_source.any.js": {},
+    "webmessaging/Channel_postMessage_clone_port.any.js": {},
+    "webmessaging/Channel_postMessage_clone_port_error.any.js": {},
+    "webmessaging/Channel_postMessage_DataCloneErr.any.js": {},
+    "webmessaging/Channel_postMessage_ports_readonly_array.any.js": {},
+    "webmessaging/Channel_postMessage_with_transfer_outgoing_messages.any.js": {},
+    "webmessaging/Channel_postMessage_with_transfer_incoming_messages.any.js": {},
+    "webmessaging/Channel_postMessage_with_transfer_entangled.any.js": {},
+
+    "webmessaging/Channel_postMessage_Blob.any.js": {
+      "fail": {
+        "expected": ["Test Description: Messages can contain Blobs."],
+        "note": "DOM gap: the test reads the cloned Blob with `FileReader`, which is not a Node global (no DOM substrate). The Blob itself clones correctly (instanceof + bytes are fixed); only the FileReader-based readback is unavailable. Out of scope, like the other DOM-only rows."
+      }
+    },
+
+    "webmessaging/message-channels/basics.any.js": {},
+    "webmessaging/message-channels/close.any.js": {},
+
+    "webmessaging/message-channels/no-start.any.js": {
+      "fail": {
+        "expected": ["Untitled"],
+        "note": "PORT AUTO-START (Node-inherited). addEventListener('message') without start() should not deliver per spec; node:worker_threads (and workerd) start the port on any listener. Documented in the worker FAQ. Same divergence as MessagePort_initial_disabled.any.js."
+      }
+    },
+
+    "webmessaging/message-channels/implied-start.any.js": {},
+    "webmessaging/message-channels/dictionary-transferrable.any.js": {},
+
+    "webmessaging/message-channels/worker-post-after-close.any.js": {
+      "skip": "CLOSE() SEMANTICS divergence. These probe the browser's GRACEFUL self.close() — queued tasks (and a postMessage issued right after close()) still run/flush. nub's worker-scope close() is process.exit(0) (hard), so a postMessage after close() is lost and the test's async_test never completes (0 subtests). A documentable divergence; skipped because it cannot yield a meaningful pass/fail under a hard close."
+    },
+
+    "webmessaging/message-channels/worker.any.js": {
+      "skip": "CLOSE() SEMANTICS divergence (same as worker-post-after-close): the blob: worker calls self.close() then postMessage(true); nub's hard process.exit(0) close drops the post, so the async_test never completes."
+    },
+
+    "html/infrastructure/safe-passing-of-structured-data/messagechannel.any.js": {
+      "fail": {
+        "expected": [
+          "FileList empty",
+          "Array FileList object, FileList empty",
+          "Object FileList object, FileList empty",
+          "ImageData 1x1 transparent black",
+          "ImageData 1x1 non-transparent non-black",
+          "Array ImageData object, ImageData 1x1 transparent black",
+          "Array ImageData object, ImageData 1x1 non-transparent non-black",
+          "Object ImageData object, ImageData 1x1 transparent black",
+          "Object ImageData object, ImageData 1x1 non-transparent non-black",
+          "ImageBitmap 1x1 transparent black",
+          "ImageBitmap 1x1 non-transparent non-black",
+          "Array ImageBitmap object, ImageBitmap 1x1 transparent black",
+          "Array ImageBitmap object, ImageBitmap 1x1 transparent non-black",
+          "Object ImageBitmap object, ImageBitmap 1x1 transparent black",
+          "Object ImageBitmap object, ImageBitmap 1x1 transparent non-black",
+          "Growable SharedArrayBuffer",
+          "ImageBitmap",
+          "OffscreenCanvas"
+        ],
+        "versioned": [
+          {
+            "minMajor": 22,
+            "maxMajor": 22,
+            "expected": [
+              "File basic",
+              "A subclass instance will deserialize as its closest serializable superclass"
+            ],
+            "note": "NODE 22 structured-clone bug: on the Node 22 line, structuredClone/postMessage of a File deserializes to a plain Blob — File-ness is lost (verified on vanilla Node 22.15.1 + 22.16.0, no nub: `structuredClone(new File([…])) instanceof File === false`). Node 24+ fixed it (round-trips as File). nub's polyfill is faithful — this is the underlying node:worker_threads/v8 serializer on v22, not a nub divergence — so it is an expected-fail ONLY on the Node 22 tier (which is the fast-tier FLOOR). The 'subclass deserializes as closest serializable superclass' subtest fails for the same reason (the File subclass collapses to Blob)."
+          }
+        ],
+        "note": "Structured-clone battery (152 subtests). The version-independent expected fails are all NON-Blob: (1) DOM-only types with NO Node substrate — FileList/ImageData/ImageBitmap need `document`/canvas (throw 'document is not defined' / 'OffscreenCanvas is not defined'); legitimately out of scope (no DOM on Node), kept expected-fail rather than skip so a future DOM polyfill surfaces as an unexpected-pass. (2) 'Growable SharedArrayBuffer instanceof ArrayBuffer' — a growable SAB is not an ArrayBuffer instance under Node. Plus two Node-22-ONLY File-clone fails (see `versioned`). The 19 Blob clone rows now PASS — `cloned instanceof Blob` AND the Blob's bytes-via-Response are fixed (runtime/worker-blob-url.cjs makes globalThis.Blob a Proxy over the native Blob, keeping `globalThis.Blob.prototype === node:buffer.Blob.prototype` so a deserialized native Blob passes both `instanceof` and undici's webidl brand check). Every Map/Set/Date/typed-array/SAB-identity/transfer/circular case also passes."
+      }
+    },
+
+    "workers/Worker-custom-event.any.js": {},
+    "workers/Worker-replace-event-handler.any.js": {}
+  }
+}
