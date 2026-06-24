@@ -1,38 +1,56 @@
-// `/stars.svg` — a dynamically-generated animated star-count badge for the README.
+// `/stars.svg` — a dynamically-generated GitHub-style "Star" button for the README.
 //
-// Returns `image/svg+xml` with the live nubjs/nub star count baked in plus a CSS
-// `@keyframes` count-up that plays once on render. The animation MUST be declarative
-// CSS (or SMIL): GitHub embeds README images as `<img>`, which is script-disabled, so
-// no JS runs — but internal `<style>` `@keyframes` animate (the readme-typing-svg
-// precedent). Each digit column is a vertical "tape" of glyphs that slides up so the
-// final digit lands in the viewport, easing + freezing (`forwards`, iteration-count 1).
+// Returns `image/svg+xml` replicating GitHub's dark-theme Star button: the outline star
+// octicon + "Star" label + a rounded count pill, with the live nubjs/nub star count
+// counting up once on render. The count-up MUST be declarative CSS (`@keyframes`): GitHub
+// embeds README images as `<img>`, which is script-disabled, so no JS runs — but internal
+// `<style>` animations play (the readme-typing-svg precedent). Each digit is a fixed-width
+// (tabular) cell holding a vertical tape of glyphs 0..final that slides up so the final
+// digit lands in the pill window, easing + freezing (`forwards`, iteration-count 1). Fixed
+// cell widths keep the pill from reflowing as the digits roll.
 //
 // Freshness is camo-bound: GitHub proxies + caches README images (~31 days default), so
 // "fresh on every load" is structurally impossible. We send a 1-hour s-maxage with a long
 // stale-while-revalidate so the count is approximately current while never approaching the
 // 60/hr unauthenticated GitHub API limit. The animation replays whenever a viewer's
-// browser actually (re)fetches + renders the SVG — a cache-miss render, not literally
-// every visit.
+// browser actually (re)fetches + renders the SVG — a cache-miss render, not every visit.
 
 export const revalidate = 3600; // ISR: re-fetch the count at most hourly on the origin.
 
 const GITHUB_API = 'https://api.github.com/repos/nubjs/nub';
 const FALLBACK = 1700; // sensible floor if the API call fails — never error the image.
 
-// Brand (from site/src/app/global.css). Warm cream + ember on a card surface.
-const COLOR = {
-  bg: '#fffdf8',
-  border: '#e4dccb',
-  fg: '#1a1714',
-  ember: '#ff5d3b',
-  muted: '#6b6358',
+// GitHub dark-theme button palette.
+const C = {
+  btnBg: '#21262d',
+  btnBorder: '#30363d',
+  text: '#e6edf3',
+  countBg: '#30363d',
 };
+
+// octicons star-16 (outline).
+const STAR_PATH =
+  'M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.751.751 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25Zm0 2.445L6.615 5.5a.75.75 0 0 1-.564.41l-3.097.45 2.24 2.184a.75.75 0 0 1 .216.664l-.528 3.084 2.769-1.456a.75.75 0 0 1 .698 0l2.77 1.456-.53-3.084a.75.75 0 0 1 .216-.664l2.24-2.183-3.096-.45a.75.75 0 0 1-.564-.41L8 2.694Z';
+
+// Geometry — calibrated against GitHub's real button via chrome-devtools measurement.
+const H = 30; // button height (matches GitHub's default)
+const ICON = 16;
+const PAD_L = 13; // left padding to star
+const ICON_GAP = 6; // star -> "Star"
+const LABEL_W = 25.5; // "Star" @ 12px/600 system
+const LABEL_GAP = 8; // "Star" -> count pill
+const PILL_PAD = 7; // horizontal padding inside the pill
+const PILL_H = 17;
+const PILL_PAD_R = 12; // right padding after the pill
+const DIGIT_H = 16; // tape advance per glyph
+
+const FONT = '600 12px -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif';
+const COUNT_FONT = '600 12px ui-monospace,"SF Mono",Menlo,monospace';
 
 async function getStarCount(): Promise<number> {
   try {
     const res = await fetch(GITHUB_API, {
       headers: { Accept: 'application/vnd.github+json' },
-      // Next ISR cache — bounded by `revalidate` above; keeps us off the rate limit.
       next: { revalidate: 3600 },
     });
     if (!res.ok) return FALLBACK;
@@ -43,71 +61,75 @@ async function getStarCount(): Promise<number> {
   }
 }
 
-const DIGIT_H = 30; // px advance per glyph in a tape — matches the text line-height below.
-
 /**
- * A single rolling digit column. Renders glyphs 0..final stacked top-to-bottom, then
- * slides the stack up by `final * DIGIT_H` so the final glyph sits at baseline. A short
- * per-column delay (left digits settle first) gives the cascading odometer feel.
+ * Count pill: a rounded-full rect with the comma-formatted number. Each digit is a
+ * tabular-width cell holding a 0..final glyph tape that rolls up and freezes; the comma is
+ * static. Fixed cell widths keep the pill width stable through the count-up (no jitter).
  */
-function digitTape(finalDigit: number, x: number, colIndex: number): string {
-  const glyphs: string[] = [];
-  for (let d = 0; d <= finalDigit; d++) {
-    glyphs.push(`<text x="${x}" y="${21 + d * DIGIT_H}">${d}</text>`);
+function countPill(str: string, pillX: number): { svg: string; width: number } {
+  const cellW = 7.4; // fixed mono cell @12px
+  const commaW = 3.8;
+  let inner = 0;
+  for (const ch of str) inner += ch === ',' ? commaW : cellW;
+  const pillW = inner + PILL_PAD * 2;
+  const pillY = (H - PILL_H) / 2;
+  const baseY = pillY + PILL_H / 2 + 12 * 0.34; // optical center of the 12px cap block
+
+  let cx = pillX + PILL_PAD;
+  let col = 0;
+  const cells: string[] = [];
+  for (const ch of str) {
+    if (ch >= '0' && ch <= '9') {
+      const center = cx + cellW / 2;
+      const glyphs: string[] = [];
+      for (let d = 0; d <= Number(ch); d++) {
+        glyphs.push(`<text x="${center}" y="${baseY + d * DIGIT_H}" text-anchor="middle" class="cnt">${d}</text>`);
+      }
+      const travel = Number(ch) * DIGIT_H;
+      cells.push(
+        `<clipPath id="p${col}"><rect x="${cx}" y="${pillY}" width="${cellW}" height="${PILL_H}"/></clipPath>` +
+          `<g clip-path="url(#p${col})"><g class="tape" style="--t:-${travel}px;animation-delay:${col * 0.06}s">${glyphs.join('')}</g></g>`,
+      );
+      cx += cellW;
+      col++;
+    } else {
+      cells.push(`<text x="${cx + commaW / 2}" y="${baseY}" text-anchor="middle" class="cnt">${ch}</text>`);
+      cx += commaW;
+    }
   }
-  const travel = finalDigit * DIGIT_H;
-  const delay = colIndex * 0.08;
-  return `<g class="tape" style="--travel:-${travel}px;animation-delay:${delay}s">${glyphs.join('')}</g>`;
+  const pill = `<rect x="${pillX}" y="${pillY}" width="${pillW}" height="${PILL_H}" rx="${PILL_H / 2}" fill="${C.countBg}"/>`;
+  return { svg: pill + '\n  ' + cells.join('\n  '), width: pillW };
 }
 
 function renderSvg(count: number): string {
-  const text = count.toLocaleString('en-US'); // e.g. "1,742"
-  // Lay out each character left-to-right. Digits get a rolling tape clipped to their own
-  // column; the comma is static. Each digit carries its absolute x so its clipPath aligns.
-  const charW = 14;
-  const startX = 44; // after the star glyph
-  let x = startX;
-  let colIndex = 0;
-  const cols: string[] = [];
-  const statics: string[] = [];
-  for (const ch of text) {
-    if (ch >= '0' && ch <= '9') {
-      cols.push(
-        `<clipPath id="clip${colIndex}"><rect x="${x - 2}" y="3" width="${charW}" height="28"/></clipPath>` +
-          `<g clip-path="url(#clip${colIndex})">${digitTape(Number(ch), x, colIndex)}</g>`,
-      );
-      colIndex++;
-      x += charW;
-    } else {
-      // comma / separator — static, slightly narrower
-      statics.push(`<text x="${x}" y="21" class="sep">${ch}</text>`);
-      x += charW * 0.45;
-    }
-  }
-  const labelX = x + 8;
-  const width = labelX + 56;
+  const countStr = count.toLocaleString('en-US');
+  const iconY = (H - ICON) / 2;
+  const textBaseY = H / 2 + 12 * 0.34;
 
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="40" viewBox="0 0 ${width} 40" role="img" aria-label="${text} GitHub stars">
+  let x = PAD_L;
+  const star = `<path d="${STAR_PATH}" fill="${C.text}" transform="translate(${x} ${iconY})"/>`;
+  x += ICON + ICON_GAP;
+
+  const labelX = x;
+  x += LABEL_W + LABEL_GAP;
+
+  const pillX = x;
+  const { svg: pillSvg, width: pillW } = countPill(countStr, pillX);
+  x += pillW + PILL_PAD_R;
+
+  const width = Math.round(x);
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${H}" viewBox="0 0 ${width} ${H}" role="img" aria-label="${count} GitHub stars">
   <style>
-    @keyframes roll {
-      0%   { transform: translateY(0); }
-      100% { transform: translateY(var(--travel)); }
-    }
-    .frame { fill: ${COLOR.bg}; stroke: ${COLOR.border}; }
-    text { font: 600 22px ui-monospace, "SF Mono", "IBM Plex Mono", Menlo, monospace; fill: ${COLOR.fg}; }
-    .star { fill: ${COLOR.ember}; }
-    .sep { fill: ${COLOR.fg}; }
-    .label { font: 600 13px ui-sans-serif, system-ui, sans-serif; fill: ${COLOR.muted}; letter-spacing: .04em; }
-    .tape {
-      animation: roll 1.4s cubic-bezier(.16,1,.3,1) forwards;
-      animation-iteration-count: 1;
-    }
+    @keyframes roll {0%{transform:translateY(0);}100%{transform:translateY(var(--t));}}
+    .lbl{font:${FONT};fill:${C.text};}
+    .cnt{font:${COUNT_FONT};fill:${C.text};font-variant-numeric:tabular-nums;}
+    .tape{animation:roll 1.4s cubic-bezier(.16,1,.3,1) forwards;animation-iteration-count:1;}
   </style>
-  <rect class="frame" x="0.5" y="0.5" width="${width - 1}" height="39" rx="9"/>
-  <path class="star" transform="translate(16 9) scale(0.9)" d="M11 0l3.09 6.26L21 7.27l-5 4.87 1.18 6.88L11 15.77 4.82 19.02 6 12.14 1 7.27l6.91-1.01z"/>
-  ${cols.join('\n  ')}
-  ${statics.join('\n  ')}
-  <text x="${labelX}" y="20" class="label">STARS</text>
+  <rect x="0.5" y="0.5" width="${width - 1}" height="${H - 1}" rx="6" fill="${C.btnBg}" stroke="${C.btnBorder}"/>
+  ${star}
+  <text x="${labelX}" y="${textBaseY}" class="lbl">Star</text>
+  ${pillSvg}
 </svg>`;
 }
 
