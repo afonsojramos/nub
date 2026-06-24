@@ -43,15 +43,17 @@ MAX_LOAD=999   # pass --max-load 2 for a quiet-box publication run
 FIXTURE_FILTER="true"
 TOOLS="core"
 SAVE_RESULTS=0
+QUIET=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --warmup)   WARMUP="$2";          shift 2 ;;
-    --runs)     RUNS="$2";            shift 2 ;;
-    --prewarm)  PREWARM="$2";         shift 2 ;;
-    --max-load) MAX_LOAD="$2";        shift 2 ;;
-    --fixture)  FIXTURE_FILTER="$2";  shift 2 ;;
-    --tools)    TOOLS="$2";           shift 2 ;;
-    --save)     SAVE_RESULTS=1;       shift ;;
+    --warmup)        WARMUP="$2";          shift 2 ;;
+    --runs)          RUNS="$2";            shift 2 ;;
+    --prewarm)       PREWARM="$2";         shift 2 ;;
+    --max-load)      MAX_LOAD="$2";        shift 2 ;;
+    --fixture)       FIXTURE_FILTER="$2";  shift 2 ;;
+    --tools)         TOOLS="$2";           shift 2 ;;
+    --save)          SAVE_RESULTS=1;       shift ;;
+    --quiet|--clean) QUIET=1;             shift ;;
     *) echo "Unknown arg: $1" >&2; exit 1 ;;
   esac
 done
@@ -117,22 +119,24 @@ trap 'rm -rf "$FIX_TRUE" "$FIX_NODE"' EXIT
 verify() {  # $1=label $2=dir $3...=command
   local label="$1" dir="$2"; shift 2
   if ( cd "$dir" && "$@" >/dev/null 2>&1 ); then
-    echo "  [verify] $label → exit 0 ✓"
+    if [[ "$QUIET" -eq 0 ]]; then echo "  [verify] $label → exit 0 ✓"; fi
   else
     echo "ERROR: '$label' did not exit 0 in $dir (got $?). Aborting — refuse to time an error path." >&2
     exit 1
   fi
 }
 
-echo "================================================================"
-echo "  nub run  vs  node --run  — script DISPATCH benchmark"
-echo "  nub:  $("$NUB" --version 2>&1 | head -1)"
-echo "  node: $(node --version)   npm: $(npm --version)   pnpm: $(pnpm --version)"
-echo "  tools: $TOOLS  prewarm: $PREWARM  hyperfine warmup: $WARMUP  runs: $RUNS  save: $([[ $SAVE_RESULTS -eq 1 ]] && echo yes || echo no)"
-echo "  date: $(date)"
-echo "  load@run (1-min): $LOAD_AT_RUN   full uptime: $(uptime)"
-echo "================================================================"
-echo "  Exit-0 verification (each command must dispatch the script):"
+if [[ "$QUIET" -eq 0 ]]; then
+  echo "================================================================"
+  echo "  nub run  vs  node --run  — script DISPATCH benchmark"
+  echo "  nub:  $("$NUB" --version 2>&1 | head -1)"
+  echo "  node: $(node --version)   npm: $(npm --version)   pnpm: $(pnpm --version)"
+  echo "  tools: $TOOLS  prewarm: $PREWARM  hyperfine warmup: $WARMUP  runs: $RUNS  save: $([[ $SAVE_RESULTS -eq 1 ]] && echo yes || echo no)"
+  echo "  date: $(date)"
+  echo "  load@run (1-min): $LOAD_AT_RUN   full uptime: $(uptime)"
+  echo "================================================================"
+  echo "  Exit-0 verification (each command must dispatch the script):"
+fi
 verify_fixture() {
   local fix="$1"
   verify "nub run"    "$fix" "$NUB" run noop
@@ -150,17 +154,19 @@ case "$FIXTURE_FILTER" in
     verify_fixture "$FIX_NODE"
     ;;
 esac
-echo "================================================================"
+if [[ "$QUIET" -eq 0 ]]; then echo "================================================================"; fi
 
 mkdir -p "$RESULTS_DIR"
 
 run_fixture() {  # $1=tag $2=dir
   local tag="$1" dir="$2"
   local out="$RESULTS_DIR/script-runner-vs-node-${tag}-${TIMESTAMP}.json"
-  echo ""
-  echo "---- fixture: $tag  (script body: $(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["scripts"]["noop"])' "$dir/package.json")) ----"
+  if [[ "$QUIET" -eq 0 ]]; then
+    echo ""
+    echo "---- fixture: $tag  (script body: $(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["scripts"]["noop"])' "$dir/package.json")) ----"
+  fi
   if [[ "$PREWARM" -gt 0 ]]; then
-    echo "  [prewarm] running each command $PREWARM times before hyperfine..."
+    if [[ "$QUIET" -eq 0 ]]; then echo "  [prewarm] running each command $PREWARM times before hyperfine..."; fi
     for _ in $(seq 1 "$PREWARM"); do
       ( cd "$dir" && "$NUB" run noop >/dev/null 2>&1 )
       ( cd "$dir" && node --run noop >/dev/null 2>&1 )
@@ -182,7 +188,11 @@ run_fixture() {  # $1=tag $2=dir
     )
   fi
   hyperfine "${hyperfine_args[@]}"
-  echo "  [results saved → $out]"
+  if [[ "$QUIET" -eq 0 ]]; then
+    echo "  [results saved → $out]"
+  elif [[ "$SAVE_RESULTS" -eq 1 ]]; then
+    echo "  [saved → $(basename "$out")]"
+  fi
 }
 
 case "$FIXTURE_FILTER" in
@@ -194,8 +204,10 @@ case "$FIXTURE_FILTER" in
     ;;
 esac
 
-echo ""
-echo "================================================================"
-echo "  Results in $RESULTS_DIR/script-runner-vs-node-*-${TIMESTAMP}.json"
-echo "  load@run was: $LOAD_AT_RUN"
-echo "================================================================"
+if [[ "$QUIET" -eq 0 ]]; then
+  echo ""
+  echo "================================================================"
+  echo "  Results in $RESULTS_DIR/script-runner-vs-node-*-${TIMESTAMP}.json"
+  echo "  load@run was: $LOAD_AT_RUN"
+  echo "================================================================"
+fi

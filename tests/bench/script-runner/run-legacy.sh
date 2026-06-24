@@ -22,11 +22,13 @@ TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 WARMUP=5
 RUNS=20
 SAVE_RESULTS=0
+QUIET=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --warmup) WARMUP="$2"; shift 2 ;;
-    --runs)   RUNS="$2";   shift 2 ;;
-    --save)   SAVE_RESULTS=1; shift ;;
+    --warmup)        WARMUP="$2"; shift 2 ;;
+    --runs)          RUNS="$2";   shift 2 ;;
+    --save)          SAVE_RESULTS=1; shift ;;
+    --quiet|--clean) QUIET=1;    shift ;;
     *) echo "Unknown arg: $1" >&2; exit 1 ;;
   esac
 done
@@ -89,20 +91,22 @@ pnpm install --lockfile-only --dir "$FIXTURE" --silent 2>/dev/null \
 ( cd "$FIXTURE" && corepack pnpm run noop >/dev/null 2>&1 )
 
 # ── Run benchmark ──────────────────────────────────────────────────────────
-echo "================================================================"
-echo "  Script-runner dispatch benchmark"
-echo "  Script: 'node -e \"\"'  (trivial noop — runner overhead dominates)"
-echo "  nub:      $NUB_VER  ($NUB)"
-echo "  pnpm:     $PNPM_VER"
-echo "  corepack: $COREPACK_VER"
-echo "  node:     $NODE_VER"
-echo "  warmup: $WARMUP  runs: $RUNS"
-echo "  date: $(date)"
-echo "================================================================"
-echo ""
-echo "  NOTE: Check 'uptime' before trusting these numbers."
-echo "  High load averages contaminate wall-clock timings."
-echo ""
+if [[ "$QUIET" -eq 0 ]]; then
+  echo "================================================================"
+  echo "  Script-runner dispatch benchmark"
+  echo "  Script: 'node -e \"\"'  (trivial noop — runner overhead dominates)"
+  echo "  nub:      $NUB_VER  ($NUB)"
+  echo "  pnpm:     $PNPM_VER"
+  echo "  corepack: $COREPACK_VER"
+  echo "  node:     $NODE_VER"
+  echo "  warmup: $WARMUP  runs: $RUNS"
+  echo "  date: $(date)"
+  echo "================================================================"
+  echo ""
+  echo "  NOTE: Check 'uptime' before trusting these numbers."
+  echo "  High load averages contaminate wall-clock timings."
+  echo ""
+fi
 
 OUTFILE="$RESULTS_DIR/script-runner-${TIMESTAMP}.json"
 mkdir -p "$RESULTS_DIR"
@@ -115,8 +119,13 @@ hyperfine \
   "cd '$FIXTURE' && pnpm run noop" \
   "cd '$FIXTURE' && corepack pnpm run noop"
 
-echo ""
-echo "  [results saved → $OUTFILE]"
+if [[ "$QUIET" -eq 0 ]]; then
+  echo ""
+  echo "  [results saved → $OUTFILE]"
+  echo ""
+elif [[ "$SAVE_RESULTS" -eq 1 ]]; then
+  echo "  [saved → $(basename "$OUTFILE")]"
+fi
 echo ""
 
 # ── Summary ────────────────────────────────────────────────────────────────

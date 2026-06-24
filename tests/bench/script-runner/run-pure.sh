@@ -23,11 +23,13 @@ TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 WARMUP=5
 RUNS=30
 SAVE_RESULTS=0
+QUIET=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --warmup) WARMUP="$2"; shift 2 ;;
-    --runs)   RUNS="$2";   shift 2 ;;
-    --save)   SAVE_RESULTS=1; shift ;;
+    --warmup)        WARMUP="$2"; shift 2 ;;
+    --runs)          RUNS="$2";   shift 2 ;;
+    --save)          SAVE_RESULTS=1; shift ;;
+    --quiet|--clean) QUIET=1;    shift ;;
     *) echo "Unknown arg: $1" >&2; exit 1 ;;
   esac
 done
@@ -62,15 +64,17 @@ EOF
 ( cd "$FIXTURE" && pnpm run noop >/dev/null 2>&1 ) || { echo "pnpm run failed" >&2; exit 1; }
 ( cd "$FIXTURE" && npm run noop >/dev/null 2>&1 )  || { echo "npm run failed" >&2; exit 1; }
 
-echo "================================================================"
-echo "  Script-runner DISPATCH benchmark — PURE-SHELL script ('true')"
-echo "  (no node invocation — isolates runner overhead)"
-echo "  nub:  $("$NUB" --version 2>&1 | head -1)"
-echo "  pnpm: $(pnpm --version)   npm: $(npm --version)"
-echo "  bun:  $([[ $HAS_BUN -eq 1 ]] && bun --version || echo '(absent)')"
-echo "  warmup: $WARMUP  runs: $RUNS"
-echo "  date: $(date)   load: $(uptime | sed 's/.*load averages*: //')"
-echo "================================================================"
+if [[ "$QUIET" -eq 0 ]]; then
+  echo "================================================================"
+  echo "  Script-runner DISPATCH benchmark — PURE-SHELL script ('true')"
+  echo "  (no node invocation — isolates runner overhead)"
+  echo "  nub:  $("$NUB" --version 2>&1 | head -1)"
+  echo "  pnpm: $(pnpm --version)   npm: $(npm --version)"
+  echo "  bun:  $([[ $HAS_BUN -eq 1 ]] && bun --version || echo '(absent)')"
+  echo "  warmup: $WARMUP  runs: $RUNS"
+  echo "  date: $(date)   load: $(uptime | sed 's/.*load averages*: //')"
+  echo "================================================================"
+fi
 
 OUTFILE="$RESULTS_DIR/script-runner-pure-${TIMESTAMP}.json"
 mkdir -p "$RESULTS_DIR"
@@ -87,6 +91,10 @@ if [[ $HAS_BUN -eq 1 ]]; then
 fi
 
 hyperfine "${HF_ARGS[@]}"
-echo ""
-echo "  [results saved → $OUTFILE]"
-echo "================================================================"
+if [[ "$QUIET" -eq 0 ]]; then
+  echo ""
+  echo "  [results saved → $OUTFILE]"
+  echo "================================================================"
+elif [[ "$SAVE_RESULTS" -eq 1 ]]; then
+  echo "  [saved → $(basename "$OUTFILE")]"
+fi

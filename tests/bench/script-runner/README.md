@@ -59,6 +59,15 @@ For a quieter publication-grade run:
 bash tests/bench/script-runner/run-vs-node.sh --fixture true --runs 100 --prewarm 30 --warmup 30 --max-load 2 --save
 ```
 
+For a clean screenshot (preamble suppressed, hyperfine output only):
+
+```bash
+bash tests/bench/script-runner/run-vs-node.sh --quiet
+# or: --clean (alias)
+```
+
+`--quiet`/`--clean` suppresses the banner, version info, and exit-0 verification output. The verification still runs — a failure still errors loudly. All three harnesses (`run-vs-node.sh`, `run-pure.sh`, `run-legacy.sh`) accept the flag.
+
 ## Results
 
 By default, scripts write JSON to a temp directory. Pass `--save` to update checked-in JSON under `tests/bench/script-runner/results/`.
