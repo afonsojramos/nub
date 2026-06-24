@@ -57,7 +57,10 @@ cmd_up() {
 }
 
 cmd_exec() {
-  local name="${1:-$NAME_DEFAULT}"; shift || true
+  # Optional leading [name]; if the first arg is the `--` separator (or absent),
+  # the name was omitted -> use the default.
+  local name="$NAME_DEFAULT"
+  if [ "${1:-}" != "--" ] && [ "$#" -gt 0 ]; then name="$1"; shift; fi
   [ "${1:-}" = "--" ] && shift
   [ "$#" -gt 0 ] || die "exec needs a command after --"
   need tart
@@ -65,7 +68,11 @@ cmd_exec() {
 }
 
 cmd_run() {
-  local name="${1:-$NAME_DEFAULT}" file="${2:?run needs a local script path}"
+  # Optional leading [name]; if the first arg is an existing file, the name was
+  # omitted -> use the default and treat that arg as the script.
+  local name="$NAME_DEFAULT" file
+  if [ -f "${1:-}" ]; then file="$1"; else name="${1:-$NAME_DEFAULT}"; file="${2:-}"; fi
+  [ -n "$file" ] || die "run needs a local script path"
   [ -f "$file" ] || die "no such file: $file"
   need tart
   local ip; ip=$(tart ip "$name" 2>/dev/null) || die "$name has no IP — is it up?"
