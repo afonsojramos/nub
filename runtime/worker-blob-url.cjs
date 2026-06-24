@@ -64,9 +64,15 @@ function installBlobUrlSupport() {
     // have NativeBlob.prototype in their chain.
     const BlobProxy = new Proxy(NativeBlob, {
       construct(target, args, newTarget) {
-        // Force the NATIVE prototype (target, not newTarget/the Proxy) so instances
-        // are byte-identical to `new NativeBlob(...)` — same brand, same chain.
-        const inst = Reflect.construct(target, args, target);
+        // FORWARD newTarget so a user subclass (`class X extends Blob {}`) gets ITS
+        // prototype — passing `target` here would force NativeBlob.prototype and
+        // silently break `new X() instanceof X` + the subclass's methods (an
+        // additivity violation vs vanilla Node). When `new Blob(...)` is called
+        // directly, newTarget IS this Proxy; Reflect.construct(NativeBlob, args, Proxy)
+        // resolves the new instance's proto from `Proxy.prototype`, which the Proxy
+        // forwards to NativeBlob.prototype — so a direct Blob is byte-identical to a
+        // native one (same brand, passes instanceof + undici's webidl check).
+        const inst = Reflect.construct(target, args, newTarget);
         if (args[0] != null) blobParts.set(inst, args[0]);
         return inst;
       },
