@@ -75,7 +75,18 @@
           "ImageBitmap",
           "OffscreenCanvas"
         ],
-        "note": "Structured-clone battery (152 subtests). The remaining 18 expected fails are all NON-Blob: (1) DOM-only types with NO Node substrate — FileList/ImageData/ImageBitmap need `document`/canvas (throw 'document is not defined' / 'OffscreenCanvas is not defined'); legitimately out of scope (no DOM on Node), kept expected-fail rather than skip so a future DOM polyfill surfaces as an unexpected-pass. (2) 'Growable SharedArrayBuffer instanceof ArrayBuffer' — a growable SAB is not an ArrayBuffer instance under Node. The 19 Blob clone rows now PASS — `cloned instanceof Blob` AND the Blob's bytes-via-Response are fixed (runtime/worker-blob-url.cjs makes globalThis.Blob a Proxy over the native Blob, keeping `globalThis.Blob.prototype === node:buffer.Blob.prototype` so a deserialized native Blob passes both `instanceof` and undici's webidl brand check). Every Map/Set/Date/typed-array/SAB-identity/transfer/circular case also passes."
+        "versioned": [
+          {
+            "minMajor": 22,
+            "maxMajor": 22,
+            "expected": [
+              "File basic",
+              "A subclass instance will deserialize as its closest serializable superclass"
+            ],
+            "note": "NODE 22 structured-clone bug: on the Node 22 line, structuredClone/postMessage of a File deserializes to a plain Blob — File-ness is lost (verified on vanilla Node 22.15.1 + 22.16.0, no nub: `structuredClone(new File([…])) instanceof File === false`). Node 24+ fixed it (round-trips as File). nub's polyfill is faithful — this is the underlying node:worker_threads/v8 serializer on v22, not a nub divergence — so it is an expected-fail ONLY on the Node 22 tier (which is the fast-tier FLOOR). The 'subclass deserializes as closest serializable superclass' subtest fails for the same reason (the File subclass collapses to Blob)."
+          }
+        ],
+        "note": "Structured-clone battery (152 subtests). The version-independent expected fails are all NON-Blob: (1) DOM-only types with NO Node substrate — FileList/ImageData/ImageBitmap need `document`/canvas (throw 'document is not defined' / 'OffscreenCanvas is not defined'); legitimately out of scope (no DOM on Node), kept expected-fail rather than skip so a future DOM polyfill surfaces as an unexpected-pass. (2) 'Growable SharedArrayBuffer instanceof ArrayBuffer' — a growable SAB is not an ArrayBuffer instance under Node. Plus two Node-22-ONLY File-clone fails (see `versioned`). The 19 Blob clone rows now PASS — `cloned instanceof Blob` AND the Blob's bytes-via-Response are fixed (runtime/worker-blob-url.cjs makes globalThis.Blob a Proxy over the native Blob, keeping `globalThis.Blob.prototype === node:buffer.Blob.prototype` so a deserialized native Blob passes both `instanceof` and undici's webidl brand check). Every Map/Set/Date/typed-array/SAB-identity/transfer/circular case also passes."
       }
     },
 

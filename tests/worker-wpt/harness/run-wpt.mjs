@@ -53,6 +53,29 @@ function findNub() {
 const NUB = findNub();
 const status = JSON.parse(readFileSync(STATUS_PATH, "utf8"));
 
+// The Node version under test. In CI each matrix leg runs `node run-wpt.mjs` with
+// that leg's Node on PATH (setup-node), and WPT_NUB resolves the same Node — so the
+// orchestrator's own process.version IS the version every subprocess runs under.
+// Used to gate VERSION-SPECIFIC expected-fails (a divergence inherited from a
+// specific Node line, e.g. structuredClone(File) losing its File-ness on Node 22,
+// fixed in Node 24+) so the gate stays green on the floor without masking the
+// behavior on versions where it's actually correct.
+const NODE_MAJOR = Number(process.versions.node.split(".")[0]) || 0;
+
+// Resolve a fail-entry to the set of subtest names expected to fail ON THIS Node.
+// Plain `fail.expected` applies to ALL versions; `fail.versioned` is a list of
+// { maxMajor?, minMajor?, expected:[…], note } whose `expected` names apply only
+// when NODE_MAJOR falls in [minMajor, maxMajor] (either bound optional/inclusive).
+function expectedFailsFor(entry) {
+  const names = new Set((entry.fail && entry.fail.expected) || []);
+  for (const v of (entry.fail && entry.fail.versioned) || []) {
+    const okMin = v.minMajor == null || NODE_MAJOR >= v.minMajor;
+    const okMax = v.maxMajor == null || NODE_MAJOR <= v.maxMajor;
+    if (okMin && okMax) for (const n of v.expected) names.add(n);
+  }
+  return names;
+}
+
 const args = process.argv.slice(2);
 const filterIdx = args.indexOf("--filter");
 const filter = filterIdx >= 0 ? args[filterIdx + 1] : null;
@@ -147,11 +170,14 @@ const PASS = 0;
       report.push(`  skip  ${rel}  (${entry.skip})`);
       continue;
     }
-    const expectedFails = new Set((entry.fail && entry.fail.expected) || []);
+    const expectedFails = expectedFailsFor(entry);
     // Track which expected-fail names actually matched a subtest, so a stale/typo'd
     // entry (a name that matches nothing — e.g. an upstream rename) is surfaced
     // rather than silently rotting and quietly holding a divergent subtest to
-    // must-pass. Reconciled per file after all its scopes run.
+    // must-pass. Reconciled per file after all its scopes run. NOTE: a versioned
+    // expected-fail only contributes names on the versions it targets, so the
+    // stale-name check below is naturally scoped to THIS Node — a name that applies
+    // only to Node 22 is not flagged stale on Node 24 because it isn't in the set.
     const matchedExpected = new Set();
 
     for (const scope of scopesFor(rel, entry)) {

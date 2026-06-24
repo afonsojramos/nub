@@ -49,6 +49,13 @@ is not run, an `expected-fail` subtest must fail, every other subtest must pass.
 file can be tightened, but does not fail the run; an *unexpected fail* (a regression)
 fails it.
 
+A `fail` entry may carry a `versioned` list of `{ minMajor?, maxMajor?, expected, note }`
+for divergences that exist only on a specific Node line — those `expected` names are
+treated as expected-fail only when the running Node's major is in `[minMajor, maxMajor]`
+(either bound optional/inclusive), and pass-as-normal on every other version. This is for
+behavior inherited from a particular Node release, e.g. `structuredClone(File)` losing its
+File-ness on Node 22 (fixed in Node 24) — see the battery entry in `status.json`.
+
 ## How a file runs
 
 `run-file.mjs` parses the `// META:` block, sets `self` + `GLOBAL.isWindow()`, loads the

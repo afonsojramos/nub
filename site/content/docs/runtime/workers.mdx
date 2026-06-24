@@ -93,7 +93,7 @@ These are the behaviors where nub's wrapper differs from a browser `Worker`. The
 
 **`event.target` for non-message events.** Events other than `"message"` / `"messageerror"` dispatched on `self` inside a worker land on a private `EventTarget`, so `event.target` is that target rather than the global scope. Dispatch itself works — `self.addEventListener("custom", …)` plus `self.dispatchEvent(new Event("custom"))` fires the listener — only the `target` identity differs. The private target is a deliberate seam so worker lifetime (auto-exit when no message listeners remain) matches Node.
 
-**Cloned `Blob` identity.** A `Blob` survives `postMessage` / `structuredClone` with its bytes and a `Blob` constructor name intact, but `cloned instanceof Blob` is `false`: nub replaces the global `Blob` with a transparent subclass to support `blob:` workers, while the structured-clone deserializer produces a native `node:buffer` Blob. The data round-trips correctly; only the identity check against the global differs.
+**`File` round-trip on Node 22.** On the Node 22 line, posting or `structuredClone`-ing a `File` deserializes it to a plain `Blob` — the bytes survive but the `File` wrapper (and `instanceof File`) is lost. This is a Node 22 structured-clone limitation, fixed in Node 24; it reproduces on plain Node 22 with no nub involved. `Blob` itself round-trips correctly on every version.
 
 **No `SharedWorker`.** It depends on a browser document/origin model with no server-side equivalent — Bun and Cloudflare omit it too. Use one worker plus message passing.
 
