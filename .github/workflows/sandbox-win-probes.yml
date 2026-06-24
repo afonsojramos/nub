@@ -1,0 +1,58 @@
+# Throwaway VALIDATION harness for the Windows sandbox ground-truth (thread:
+# sandbox-windows-research). Empirically validates the unprivileged Windows sandbox
+# primitives on a real windows-latest runner BEFORE any nub-sandbox Windows backend
+# is greenlit. These are STANDALONE probe programs — they do NOT touch crates/nub-sandbox.
+#
+# Each probe runs as a NON-elevated standard user (the default GH Actions shell token)
+# and self-asserts it is not admin. Each has a NEGATIVE CONTROL so a pass can't be vacuous.
+name: sandbox-win-probes
+on:
+  workflow_dispatch:
+  push:
+    branches: [sandbox-windows-probes]
+    paths:
+      - 'tests/sandbox-win-probes/**'
+      - '.github/workflows/sandbox-win-probes.yml'
+jobs:
+  probes:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Environment / elevation baseline
+        shell: powershell
+        run: |
+          $id=[System.Security.Principal.WindowsIdentity]::GetCurrent()
+          $admin=(New-Object System.Security.Principal.WindowsPrincipal($id)).IsInRole([System.Security.Principal.WindowsBuiltinRole]::Administrator)
+          Write-Host "User: $($id.Name)"
+          Write-Host "IsElevated(admin): $admin"
+          Write-Host "OS: $([System.Environment]::OSVersion.VersionString)"
+          whoami /priv
+      - name: 'Probe 1 — unprivileged FS read-deny (KEY claim)'
+        id: p1
+        continue-on-error: true
+        shell: powershell
+        run: ./tests/sandbox-win-probes/probe1-read-deny.ps1
+      - name: 'Probe 2 — unprivileged FS write-confine'
+        id: p2
+        continue-on-error: true
+        shell: powershell
+        run: ./tests/sandbox-win-probes/probe2-write-confine.ps1
+      - name: 'Probe 3 — AppContainer egress + Job containment + env-scrub'
+        id: p3
+        continue-on-error: true
+        shell: powershell
+        run: ./tests/sandbox-win-probes/probe3-egress-job-env.ps1
+      - name: Summary
+        shell: powershell
+        run: |
+          Write-Host "Probe1 (read-deny):      $('${{ steps.p1.outcome }}')"
+          Write-Host "Probe2 (write-confine):  $('${{ steps.p2.outcome }}')"
+          Write-Host "Probe3 (egress/job/env): $('${{ steps.p3.outcome }}')"
+          # Surface the KEY claim loudly in the job summary
+          $key = '${{ steps.p1.outcome }}'
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "## Windows sandbox probe results"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "| Probe | Outcome |"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "|---|---|"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "| 1 — FS read-deny (KEY) | ${{ steps.p1.outcome }} |"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "| 2 — FS write-confine | ${{ steps.p2.outcome }} |"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "| 3 — egress/job/env | ${{ steps.p3.outcome }} |"
