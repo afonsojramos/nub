@@ -153,11 +153,17 @@ function makeRealmDriver({ harnessCode, harnessFile, includes, bodyCode, bodyFil
         collected.push({ name: t.name, status: t.status, message: t.message ?? null });
       });
       // The completion callback receives (tests, harness_status, asserts). A harness
-      // `status.status` of 0 is OK; 1=ERROR, 2=TIMEOUT — both are whole-file failures
-      // that no subtest reflects. Forward the harness status so the parent can fail.
+      // `status.status` of 0 is OK; 1=ERROR, 2=TIMEOUT, 3=PRECONDITION_FAILED — every
+      // non-zero is a whole-file failure that no subtest reflects, so forward it for
+      // the parent to fail on.
+      const HARNESS_STATUS = { 1: "ERROR", 2: "TIMEOUT", 3: "PRECONDITION_FAILED" };
       globalThis.add_completion_callback((_tests, harness) => {
         const s = harness && typeof harness.status === "number" ? harness.status : 0;
-        done(s === 0 ? null : { status: s === 2 ? "TIMEOUT" : "ERROR", message: (harness && harness.message) || `harness status ${s}` });
+        done(
+          s === 0
+            ? null
+            : { status: HARNESS_STATUS[s] || "ERROR", message: (harness && harness.message) || `harness status ${s}` }
+        );
       });
 
       // Load META script includes first (e.g. the structured-clone battery), then
