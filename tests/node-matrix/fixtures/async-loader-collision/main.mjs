@@ -11,12 +11,13 @@
 // the bare `module.register()` call is sufficient, verified through the real nub binary.)
 //
 // PASS contract: this program prints "COLLISION_OK" and exits 0 ONLY when nub recovers
-// from (or never hits) the resolveSync stub. On a Node-broken version with an un-fixed
-// nub it crashes BEFORE printing — exit != 0, `ERR_METHOD_NOT_IMPLEMENTED` on stderr.
-//
-// IMPORTANT: this guard is only meaningful on a Node-BROKEN version (v22.15-22.16,
-// v23.6-23.11, v24.1-24.11.x, v25.0-25.1). On Node-fixed versions (v24.12+, v25.2+, v26)
-// it is vacuously green. The matrix MUST run it on at least one broken-tier leg.
+// from (or never hits) the resolveSync/loadSync stub. nub's fast-tier hooks DO recover the
+// stub throw (the Next.js/Turbopack/Tailwind fix), so this must pass on EVERY version —
+// including the previously-broken bands (v22.15-22.16, v23.6-23.11, v24.1-24.11, v25.0-25.1),
+// which is exactly where the regression guard has teeth. A crash here (exit != 0,
+// `ERR_METHOD_NOT_IMPLEMENTED` on stderr) means nub regressed the recovery or a new broken
+// Node band appeared. Node-fixed (v24.12+, v25.2+, v26) and compat-tier (no registerHooks)
+// versions pass trivially.
 import nodeModule, { register } from "node:module";
 import { writeSync } from "node:fs";
 

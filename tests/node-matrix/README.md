@@ -57,22 +57,26 @@ fixtures ship a **pin-free `package.json`** so nub always augments the matrix-se
 and `run.sh` has a sanity guard that fails the leg if nub ran a different version than selected.
 The repo root pins `engines.node >= 22.15`, which is why the fixtures need their own.
 
-## XFAIL policy (read before flipping to hard-fail)
+## The collision is a hard must-pass on every version
 
-As of this matrix's introduction, **PR #98's fix does not actually recover the crash on the
-Node-broken bands** (validated against the real binary — see
-`.fray/node-version-matrix-smoke.findings/validation.md`):
+nub recovers the sync-into-async `resolveSync()`/`loadSync()` hop on the Node-broken bands
+(the Next.js/Turbopack/Tailwind fix — nub's fast-tier resolve+load hooks catch the
+`ERR_METHOD_NOT_IMPLEMENTED` stub throw and fall back to the parent CommonJS resolver). So the
+collision guard runs with `--collision-must-pass` on **every** leg: the previously-broken fast-tier
+versions (22.15-22.16, 23.6-23.11, 24.1-24.11, 25.0-25.1) now go GREEN, and so do the
+Node-fixed (24.12+, 25.2+, 26) and compat-tier (no `registerHooks`) versions. A **RED** collision
+on any leg is a real finding — either nub regressed the recovery, or a new broken Node band
+appeared that the recovery doesn't cover. Do not re-XFAIL it; surface it.
 
-1. #98's resolve-hook recovery is gated on `userAsyncLoaderActive()`, which is **false** at the
-   throwing resolution (the loader module's own spec, resolved during `module.register`), so the
-   recovery never fires.
-2. Even bypassing that gate, the **load** hook hits the identical `loadSync` stub with no recovery.
+The fixture also self-guards against silent augmentation-absence: on any Node with
+`registerHooks`, it asserts nub wrapped it (`__nubWrapped`) before judging, so a leg can't pass
+the collision merely because nub's preload failed to load (it would hard-fail instead).
 
-So the collision guard currently **XFAILs** on Node-broken legs (it documents the known gap and
-keeps the matrix green) and **must-pass** on Node-fixed / compat-tier legs. Once nub actually
-recovers the sync-into-async hop on the broken bands, flip the broken legs to
-`--collision-must-pass` (in `.github/workflows/node-matrix.yml`) so the matrix guards against a
-regression of the fix.
+History: an earlier revision of the fix only patched the resolve hook and gated recovery on a
+flag that was false at the loader's own resolution, so it did NOT recover the broken bands — the
+matrix was authored XFAIL-on-broken to stay honest about that gap. The reworked fix recovers both
+the resolve and load hooks across the whole band, validated on real broken-Node binaries, which is
+why every leg is now must-pass.
 
 ## Reproduce locally
 

@@ -142,14 +142,13 @@ jobs:
         shell: bash
         run: |
           chmod +x nub-bundle/nub tests/node-matrix/run.sh
-          # On Node-fixed versions the collision MUST pass; on Node-broken versions it is
-          # XFAIL (the bug class is unfixed — see tests/node-matrix/README.md). Flip the
-          # broken legs to --collision-must-pass once nub recovers the sync-into-async hop.
-          case "${{ matrix.node }}" in
-            24.12|25.2|26) tests/node-matrix/run.sh "$PWD/nub-bundle/nub" --collision-must-pass ;;
-            18.19|20.19|22.12) tests/node-matrix/run.sh "$PWD/nub-bundle/nub" --collision-must-pass ;;
-            *) tests/node-matrix/run.sh "$PWD/nub-bundle/nub" ;;
-          esac
+          # The collision MUST pass on EVERY version — that is the durable regression guard.
+          # nub recovers the sync-into-async resolveSync/loadSync hop on the Node-broken bands
+          # (the #98 / Next.js-Turbopack-Tailwind fix), so the broken fast-tier legs now go
+          # GREEN; the Node-fixed and compat-tier legs were always green. A RED collision on
+          # any leg means nub regressed (or a new broken band exists) — see
+          # tests/node-matrix/README.md.
+          tests/node-matrix/run.sh "$PWD/nub-bundle/nub" --collision-must-pass
 
   # Heavy real-app builds (Next 16 + Tailwind v4 + Turbopack; Vite SSR). Push/nightly, or a
   # PR that touches the augmentation surface. The faithful in-the-wild guard for the crash.
@@ -179,13 +178,12 @@ jobs:
         shell: bash
         run: |
           chmod +x nub-bundle/nub tests/node-matrix/real-apps.sh
-          # Node-fixed legs MUST pass the Next/Tailwind build; Node-broken legs XFAIL the
-          # resolveSync crash but still FAIL any other build error (and the Vite SSR build,
-          # which has no async loader, must pass on every version).
-          case "${{ matrix.node }}" in
-            24.12|26) tests/node-matrix/real-apps.sh "$PWD/nub-bundle/nub" --require-pass ;;
-            *) tests/node-matrix/real-apps.sh "$PWD/nub-bundle/nub" ;;
-          esac
+          # Both real apps MUST build on EVERY version. With the #98 fix in, the Next 16 +
+          # Tailwind v4 + Turbopack build no longer crashes the resolveSync/loadSync stub on
+          # the Node-broken bands, so the broken legs are now a hard must-pass — the faithful
+          # in-the-wild regression guard. (The Vite SSR build has no async loader and was
+          # always version-agnostic.)
+          tests/node-matrix/real-apps.sh "$PWD/nub-bundle/nub" --require-pass
 
   # Always-green aggregator so branch protection has one stable required check regardless of
   # which optional legs were skipped on a given event.
