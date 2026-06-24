@@ -1,0 +1,51 @@
+#!/bin/sh
+# pre-commit hook: block direct commits to the SHARED main checkout.
+#
+# WHY: the shared `main` working tree must stay ALWAYS fast-forwardable to
+# origin/main. A commit made directly in the shared tree creates a local commit
+# that is NOT on origin; on a stale base this DIVERGES the shared tree from
+# origin/main, so `git pull --ff-only` then fails and the tree silently rots
+# (AGENTS.md "Default to a PR flow" + its no-direct-shared-commit corollary).
+# Worktrees can't cause this — they branch off origin/main fresh and land via
+# push, so the shared tree only ever fast-forwards. This guard makes the rule
+# STRUCTURAL: tracked-file commits must go through a worktree.
+#
+# Detection: in the shared clone `git-dir` == `git-common-dir` (both the main
+# .git); in a linked worktree git-dir is .git/worktrees/<name> and DIFFERS from
+# the common-dir. Only the shared-clone + on-`main` combination is the footgun;
+# anything else (a worktree, a deliberate non-main branch, detached HEAD) is
+# allowed. Escape hatch NUB_ALLOW_SHARED_COMMIT=1 for a sanctioned emergency.
+#
+# core.hooksPath is .githooks (shared across all worktrees), so this is active
+# everywhere without per-clone setup.
+
+if [ "${NUB_ALLOW_SHARED_COMMIT:-}" = "1" ]; then
+  echo "pre-commit: NUB_ALLOW_SHARED_COMMIT=1 set — shared-tree guard bypassed." >&2
+  exit 0
+fi
+
+GIT_DIR=$(git rev-parse --git-dir 2>/dev/null) || exit 0
+COMMON_DIR=$(git rev-parse --git-common-dir 2>/dev/null) || exit 0
+
+# A linked worktree (git-dir != common-dir) is the sanctioned landing path.
+[ "$GIT_DIR" = "$COMMON_DIR" ] || exit 0
+
+# Shared clone: allow unless on `main`. A detached HEAD or any non-main branch
+# is a deliberate state, not the footgun this guard prevents.
+BRANCH=$(git symbolic-ref --quiet --short HEAD 2>/dev/null) || exit 0
+[ "$BRANCH" = "main" ] || exit 0
+
+cat >&2 <<'EOF'
+pre-commit: blocked a direct commit to the SHARED main tree.
+
+Commits to tracked files must land via a WORKTREE (which branches off
+origin/main fresh and pushes), so the shared tree only ever fast-forwards —
+a direct commit here would diverge it from origin/main and break `git pull`.
+
+  nub scripts/new-worktree.ts <slug>     # create a worktree, work + push there
+  # then open a PR; the orchestrator merges.
+
+Genuine emergency (sanctioned direct commit):
+  NUB_ALLOW_SHARED_COMMIT=1 git commit ...
+EOF
+exit 1
