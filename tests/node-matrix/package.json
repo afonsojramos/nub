@@ -1,0 +1,6 @@
+{
+  "name": "nub-node-matrix-fixtures",
+  "private": true,
+  "engines": { "node": ">=18" },
+  "//": "PERMISSIVE engines (>=18) on purpose: the matrix selects the Node version via PATH (actions/setup-node), and nub must augment THAT version. A RESTRICTIVE pin (or inheriting the repo root's engines.node>=22.15 by upward walk) would make nub REJECT a lower-tier PATH Node and fall through to the highest installed Node, silently masking compat-tier coverage. This package.json both shadows the repo root and states a floor low enough that no matrix leg is ever redirected. run.sh additionally asserts the running version matches the selected one."
+}

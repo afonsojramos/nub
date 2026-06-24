@@ -1,0 +1,205 @@
+name: Node matrix
+
+# Augmentation smoke across a BIG Node-version matrix. nub augments the user's installed
+# Node via version-banded mechanisms (sync `module.registerHooks` fast tier >=22.15, async
+# `module.register` loader-worker compat tier 18.19-22.14, V8/experimental-flag injection)
+# that break DIFFERENTLY per Node version. The repo's main CI matrix tests only a handful
+# of versions and never exercised the async-loader x sync-hooks collision that shipped the
+# Turbopack/Tailwind `resolveSync()` crash (the nextjs-build-compat thread / PR #98) — this
+# workflow closes that gap.
+#
+# COST MODEL: CI is free (public repo); the real constraints are runner-SLOT contention and
+# dev-feedback latency. So:
+#   - nub is built ONCE (one job) and reused across every Node leg — the Node version is a
+#     PATH/runtime choice (actions/setup-node), NOT a rebuild.
+#   - per-PR: a LEAN tier-boundary subset of the lightweight smoke, gated by PATH FILTERS
+#     (the heavy real-app matrix and the broad version sweep run only when runtime/preload/
+#     spawn/flags code changes — the surfaces that can break version-banded augmentation).
+#   - push:main + nightly: the FULL version matrix + both real-app builds.
+#   - concurrency group with cancel-in-progress so superseded runs free their slots.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Nightly full matrix at 05:00 UTC (offset from the other nightlies: CI 06:00,
+    # lockfile-roundtrip 07:00, pnpm-conformance 08:00).
+    - cron: "0 5 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Decide what to run for this event. PRs that don't touch the augmentation surface skip
+  # the heavy legs entirely (the lightweight smoke still runs on a tier-boundary subset).
+  plan:
+    name: Plan
+    runs-on: ubuntu-latest
+    outputs:
+      smoke_versions: ${{ steps.plan.outputs.smoke_versions }}
+      run_full: ${{ steps.plan.outputs.run_full }}
+      run_realapps: ${{ steps.plan.outputs.run_realapps }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590  # v3
+        id: filter
+        with:
+          # The surfaces whose changes can break version-banded augmentation. A change here
+          # is the trigger for the full version sweep + real-app builds on a PR.
+          filters: |
+            aug:
+              - 'runtime/**'
+              - 'crates/nub-core/src/node/**'
+              - 'crates/nub-cli/src/**'
+              - 'tests/node-matrix/**'
+              - '.github/workflows/node-matrix.yml'
+      - id: plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_full=false; run_realapps=false
+          # Lean per-PR smoke subset: the tier boundaries that actually shift behavior —
+          # 22.12 (pre-registerHooks), 22.15 (first registerHooks = first Node-broken),
+          # 22.16 (latest v22 LTS, still broken), 24.11 (latest pre-fix on v24), 26 (fixed).
+          smoke='["22.12","22.15","22.16","24.11","26"]'
+          if [[ "${{ github.event_name }}" != "pull_request" ]]; then
+            run_full=true; run_realapps=true
+          elif [[ "${{ steps.filter.outputs.aug }}" == "true" ]]; then
+            # A PR touching the augmentation surface gets the full version sweep + real apps.
+            run_full=true; run_realapps=true
+          fi
+          if [[ "$run_full" == "true" ]]; then
+            # FULL sweep: tier boundaries + Node-fix points across every live line.
+            smoke='["18.19","20.19","22.12","22.15","22.16","23.6","23.11","24.1","24.11","24.12","25.0","25.2","26"]'
+          fi
+          {
+            echo "smoke_versions=$smoke"
+            echo "run_full=$run_full"
+            echo "run_realapps=$run_realapps"
+          } >> "$GITHUB_OUTPUT"
+          echo "event=${{ github.event_name }} aug=${{ steps.filter.outputs.aug }} run_full=$run_full smoke=$smoke"
+
+  # Build nub + the native addon ONCE; publish as an artifact the matrix legs reuse.
+  build:
+    name: Build nub (once)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: "24"
+      - name: Build nub + native addon
+        shell: bash
+        run: |
+          cargo build -p nub-cli -p nub-native
+          mkdir -p runtime/addons
+          cp target/debug/libnub_native.so runtime/addons/nub-native.node
+      - name: Stage the reusable nub bundle
+        shell: bash
+        run: |
+          # Ship the binary together with runtime/ — nub walks up from the binary to find
+          # runtime/preload.* + runtime/addons, so they must travel as siblings.
+          mkdir -p nub-bundle
+          cp target/debug/nub nub-bundle/nub
+          cp -r runtime nub-bundle/runtime
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: nub-bundle
+          path: nub-bundle
+          retention-days: 1
+
+  # Lightweight per-version smoke: hello JS/TS, ESM<->CJS, Worker, import.meta.resolve, and
+  # the async-loader collision tripwire. One prebuilt binary, N cheap runtime legs.
+  smoke:
+    name: Smoke (node ${{ matrix.node }})
+    needs: [plan, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ${{ fromJSON(needs.plan.outputs.smoke_versions) }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: ${{ matrix.node }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: nub-bundle
+          path: nub-bundle
+      - name: Run the smoke matrix
+        shell: bash
+        run: |
+          chmod +x nub-bundle/nub tests/node-matrix/run.sh
+          # The collision MUST pass on EVERY version — that is the durable regression guard.
+          # nub recovers the sync-into-async resolveSync/loadSync hop on the Node-broken bands
+          # (the #98 / Next.js-Turbopack-Tailwind fix), so the broken fast-tier legs now go
+          # GREEN; the Node-fixed and compat-tier legs were always green. A RED collision on
+          # any leg means nub regressed (or a new broken band exists) — see
+          # tests/node-matrix/README.md.
+          tests/node-matrix/run.sh "$PWD/nub-bundle/nub" --collision-must-pass
+
+  # Heavy real-app builds (Next 16 + Tailwind v4 + Turbopack; Vite SSR). Push/nightly, or a
+  # PR that touches the augmentation surface. The faithful in-the-wild guard for the crash.
+  real-apps:
+    name: Real apps (node ${{ matrix.node }})
+    needs: [plan, build]
+    if: ${{ needs.plan.outputs.run_realapps == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        # A representative spread: one Node-broken fast-tier version (the faithful RED on a
+        # broken nub) + the Node-fix points + latest. Real-app builds are heavy, so this is
+        # a curated subset rather than the full version list.
+        node: ["22.16", "24.11", "24.12", "26"]
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: ${{ matrix.node }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: nub-bundle
+          path: nub-bundle
+      - name: Build the real apps under nub
+        shell: bash
+        run: |
+          chmod +x nub-bundle/nub tests/node-matrix/real-apps.sh
+          # Both real apps MUST build on EVERY version. With the #98 fix in, the Next 16 +
+          # Tailwind v4 + Turbopack build no longer crashes the resolveSync/loadSync stub on
+          # the Node-broken bands, so the broken legs are now a hard must-pass — the faithful
+          # in-the-wild regression guard. (The Vite SSR build has no async loader and was
+          # always version-agnostic.)
+          tests/node-matrix/real-apps.sh "$PWD/nub-bundle/nub" --require-pass
+
+  # Always-green aggregator so branch protection has one stable required check regardless of
+  # which optional legs were skipped on a given event.
+  node-matrix-gate:
+    name: Node matrix gate
+    needs: [smoke, real-apps]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - shell: bash
+        run: |
+          set -euo pipefail
+          smoke='${{ needs.smoke.result }}'
+          apps='${{ needs.real-apps.result }}'
+          echo "smoke=$smoke real-apps=$apps"
+          # A skipped leg (PR that didn't trigger it) is fine; a failure is not.
+          [[ "$smoke" == "success" || "$smoke" == "skipped" ]] || { echo "smoke failed"; exit 1; }
+          [[ "$apps"  == "success" || "$apps"  == "skipped" ]] || { echo "real-apps failed"; exit 1; }
+          echo "node matrix gate: OK"
