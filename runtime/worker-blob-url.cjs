@@ -34,15 +34,21 @@ function decode(parts) {
   return src;
 }
 
-// Wrap URL.createObjectURL/revokeObjectURL and subclass Blob to remember parts.
+// Wrap URL.createObjectURL/revokeObjectURL and Proxy Blob to remember parts.
 // Idempotent + transparent for every non-worker use. No-op when URL has no
 // createObjectURL (older floors) — blob: workers are then simply unavailable.
+//
+// The install-marker is a Symbol, not a string property: it sits on the native
+// Blob constructor (a shared global), so a string key would show up in
+// `Reflect.ownKeys(Blob)` / `"x" in Blob` — a (cosmetic) divergence from vanilla
+// Node. A Symbol keeps the marker invisible to those reflective surfaces.
+const INSTALLED = Symbol.for("nub.blobUrlSupport.installed");
 function installBlobUrlSupport() {
   if (typeof URL === "undefined" || typeof URL.createObjectURL !== "function") return;
-  if (URL.createObjectURL.__nubWrapped) return;
+  if (URL.createObjectURL[INSTALLED]) return;
 
   const NativeBlob = globalThis.Blob;
-  if (typeof NativeBlob === "function" && !NativeBlob.__nubWrapped) {
+  if (typeof NativeBlob === "function" && !NativeBlob[INSTALLED]) {
     // Record construction parts WITHOUT changing Blob's identity. The earlier
     // approach — a `class extends NativeBlob` swapped onto globalThis.Blob — broke
     // brand identity in two ways that a structured-clone exposes:
@@ -77,7 +83,7 @@ function installBlobUrlSupport() {
         return inst;
       },
     });
-    Object.defineProperty(NativeBlob, "__nubWrapped", { value: true });
+    Object.defineProperty(NativeBlob, INSTALLED, { value: true });
     Object.defineProperty(globalThis, "Blob", {
       value: BlobProxy,
       enumerable: false,
@@ -97,7 +103,7 @@ function installBlobUrlSupport() {
     if (parts) blobUrlSources.set(url, decode(parts));
     return url;
   };
-  Object.defineProperty(wrappedCreate, "__nubWrapped", { value: true });
+  Object.defineProperty(wrappedCreate, INSTALLED, { value: true });
   URL.createObjectURL = wrappedCreate;
   if (nativeRevoke) {
     URL.revokeObjectURL = function revokeObjectURL(url) {
