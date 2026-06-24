@@ -352,18 +352,28 @@ if (!isMainThread && parentPort) {
   // `self.name` — the worker's name from the constructor's {name} option (WHATWG
   // DedicatedWorkerGlobalScope.name). Node only exposes a worker-side reader for
   // the {name} option as `worker_threads.threadName` from v24.6.0 / v22.20.0 — it
-  // is ABSENT across nub's whole compat tier (18.19–22.14) and on 22.15–22.19, so
-  // it cannot be the floor mechanism. We therefore THREAD the name in ourselves
-  // via the internal NUB_WORKER_NAME env (internal plumbing var — exempt from the
-  // brand boundary), set by the main-side constructor, and prefer the native
-  // threadName where it exists (newer Node). The env survives across the floor and
-  // is the only portable carrier; the SHARE_ENV edge (where the ctor can't inject
-  // env) falls back to native threadName / "".
+  // is ABSENT across nub's whole compat tier (18.19–22.19), so it cannot be the
+  // floor mechanism. We THREAD the name in ourselves via the internal
+  // NUB_WORKER_NAME env (internal plumbing var — exempt from the brand boundary),
+  // set by the main-side constructor.
+  //
+  // RESOLUTION ORDER — env FIRST (not native threadName): NUB_WORKER_NAME carries
+  // the user's EXACT intent including the empty string, whereas native
+  // `threadName` defaults to the literal sentinel "WorkerThread" for an UNNAMED
+  // worker (it's the thread DISPLAY name, not the WHATWG worker name) — surfacing
+  // that as self.name would be a spec divergence (an unnamed worker's name must be
+  // ""). So: the injected env wins when present; native threadName is the fallback
+  // ONLY on the SHARE_ENV path (where the ctor couldn't inject env), with the
+  // "WorkerThread" sentinel filtered to "".
   {
     const wt = __getBuiltin("node:worker_threads");
-    const name =
-      (wt && typeof wt.threadName === "string" && wt.threadName) ||
-      (typeof process.env.NUB_WORKER_NAME === "string" ? process.env.NUB_WORKER_NAME : "");
+    let name;
+    if (typeof process.env.NUB_WORKER_NAME === "string") {
+      name = process.env.NUB_WORKER_NAME;
+    } else {
+      const tn = wt && typeof wt.threadName === "string" ? wt.threadName : "";
+      name = tn === "WorkerThread" ? "" : tn;
+    }
     Object.defineProperty(scope, "name", {
       value: name,
       enumerable: false,

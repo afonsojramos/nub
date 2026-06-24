@@ -2264,6 +2264,21 @@ fn worker_name_option_reaches_both_sides() {
 }
 
 #[test]
+fn worker_unnamed_self_name_is_empty() {
+    // WHATWG: an UNNAMED worker's self.name must be "". On Node >=24.6/22.20,
+    // native worker_threads.threadName returns the literal "WorkerThread" sentinel
+    // (the thread DISPLAY name) for an unnamed worker — nub must NOT surface that
+    // as self.name. The polyfill prefers the injected NUB_WORKER_NAME env (which
+    // carries the exact intent, "") and filters the "WorkerThread" sentinel.
+    let (stdout, stderr, code) = run_nub("worker", "unnamed-main.ts");
+    assert_eq!(code, 0, "unnamed fixture should run: {stderr}\n{stdout}");
+    assert!(
+        stdout.contains("unnamed-self.name:[]"),
+        "an unnamed worker's self.name must be the empty string, not a sentinel: {stdout}"
+    );
+}
+
+#[test]
 fn worker_from_data_url() {
     // WHATWG inline-worker mechanism: a `data:` URL worker. Node runs it directly
     // (worker_threads v14.9) and nub's worker-side scope (self/postMessage) is
