@@ -1,9 +1,10 @@
 name: commit-hygiene
 
-# Enforces commit-message hygiene on every pull request: no automated
-# co-authorship / agent-attribution trailers may enter the history. Legitimate
-# human co-authors and topical mentions of tools in a subject/body are allowed —
-# only attribution TRAILERS fail.
+# Enforces commit-message hygiene on every pull request: Co-authored-by trailers
+# naming automated agents (Claude, Anthropic) are blocked because they render as
+# UI-visible co-author avatars in GitHub. Legitimate human co-authors pass.
+# Claude-Session URLs and "Generated with" body lines are NOT flagged — they are
+# invisible commit prose, not UI-visible attribution.
 
 on:
   pull_request:
