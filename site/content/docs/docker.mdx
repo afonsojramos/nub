@@ -8,7 +8,7 @@ Nub augments the Node already in your image — it is not a separate runtime. Th
 ## Official images
 
 ```dockerfile
-FROM nubjs/nub
+FROM ghcr.io/nubjs/nub
 COPY --chown=node:node . .
 RUN nub install
 CMD ["nub", "run", "start"]
@@ -26,7 +26,7 @@ Two variants, both on the current Node release line, digest-pinned and published
 Run a TypeScript file directly — the entrypoint passes any non-command argument to `nub`:
 
 ```bash
-docker run --rm -v "$PWD:/app" nubjs/nub script.ts
+docker run --rm -v "$PWD:/app" ghcr.io/nubjs/nub script.ts
 ```
 
 Signals reach the runtime: `docker stop` delivers `SIGTERM` to `nub`, which forwards it to the Node process for a clean shutdown. The container runs as the non-root `node` user (uid 1000); when you bind-mount a directory that `nub install` must write into, run with `--user "$(id -u)"` so the writes land with your host ownership.

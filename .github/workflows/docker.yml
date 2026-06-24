@@ -103,7 +103,8 @@ jobs:
         run: docker run --rm nub-local:${{ matrix.variant }} /usr/local/bin/smoke.sh
 
       - name: Report image size
-        run: docker image inspect nub-local:${{ matrix.variant }} --format '${{ matrix.variant }} size: {{.Size}} bytes'
+        run: |
+          docker image inspect nub-local:${{ matrix.variant }} --format '${{ matrix.variant }} size: {{.Size}} bytes'
 
       # ── PUBLISH (release tags only, and only once a registry is configured) ───
       # MAINTAINER TODO: set the DOCKER_IMAGE repo variable to enable this. With it
