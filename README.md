@@ -316,4 +316,6 @@ View the [full `nub node` docs 👉](https://nubjs.com/docs/node).
 
 MIT
 
-> If you read this far, consider leaving a star! ⭐️
+<p align="center">
+  <em>⭐️ If you read this far, consider leaving a star! ⭐️</em>
+</p>
