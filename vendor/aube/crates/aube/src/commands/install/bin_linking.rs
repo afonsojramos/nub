@@ -537,7 +537,11 @@ fn link_dir_bins(
     ) else {
         return Ok(());
     };
-    if !canon_bins.starts_with(&canon_root) {
+    // Reject both an escape (`../x`, absolute, symlink-elsewhere) AND
+    // the package root itself: pnpm's `isSubdir(pkgPath, binDir)` is
+    // false when the two are equal, so `directories.bin: "."` links
+    // NOTHING rather than shimming every file in the package.
+    if canon_bins == canon_root || !canon_bins.starts_with(&canon_root) {
         return Ok(());
     }
 
@@ -1191,6 +1195,54 @@ mod tests {
         assert!(
             !bin.join("pwned").exists(),
             "a directories.bin that escapes the package root must link nothing"
+        );
+    }
+
+    /// `directories.bin: "."` (the package root itself) links NOTHING,
+    /// matching pnpm's `isSubdir`, which is false for equal paths. The
+    /// reflexive `starts_with` would otherwise shim every file in the
+    /// package (package.json, sources, …) into `.bin/`.
+    #[test]
+    fn directories_bin_pointing_at_package_root_links_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_dir = dir.path();
+        let aube_dir = project_dir.join("node_modules/.aube");
+        let dep_path = "rootdep@1.0.0";
+        let pkg_dir = materialized_pkg_dir(&aube_dir, dep_path, "rootdep", 120, None);
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(
+            pkg_dir.join("package.json"),
+            r#"{"name":"rootdep","version":"1.0.0","directories":{"bin":"."}}"#,
+        )
+        .unwrap();
+        std::fs::write(pkg_dir.join("index.js"), "module.exports = {}\n").unwrap();
+
+        let mut importers = BTreeMap::new();
+        importers.insert(
+            ".".to_string(),
+            vec![DirectDep {
+                name: "rootdep".to_string(),
+                dep_path: dep_path.to_string(),
+                dep_type: DepType::Production,
+                specifier: Some("1.0.0".to_string()),
+            }],
+        );
+        let mut packages = BTreeMap::new();
+        packages.insert(
+            dep_path.to_string(),
+            locked("rootdep", "1.0.0", BTreeMap::new()),
+        );
+        let graph = LockfileGraph {
+            importers,
+            packages,
+            ..Default::default()
+        };
+        run_link_bins(project_dir, &graph, &aube_dir);
+
+        let bin = project_dir.join("node_modules/.bin");
+        assert!(
+            !bin.join("index.js").exists() && !bin.join("package.json").exists(),
+            "directories.bin pointing at the package root must link nothing"
         );
     }
 
