@@ -21,9 +21,13 @@ use napi_derive::napi;
 
 use oxc::{
     allocator::Allocator,
-    ast::ast::{ImportDeclarationSpecifier, RegExpFlags, Statement, VariableDeclaration},
+    ast::ast::{
+        Argument, Expression, ImportDeclarationSpecifier, NewExpression, RegExpFlags, Statement,
+        VariableDeclaration,
+    },
     ast_visit::Visit,
     parser::Parser,
+    semantic::SemanticBuilder,
 };
 use oxc_napi::get_source_type;
 
@@ -69,6 +73,18 @@ pub struct ModuleInfo {
     /// the target-version-gated SYNTAX triggers (using ∪ v-flag-regexp); the JS gate
     /// ORs it with `has_decorators`.
     pub transformable_syntax: bool,
+
+    /// True when the source contains a `new Worker(<string-literal>)` whose callee
+    /// is the FREE/global `Worker` (the browser-global the polyfill installs) — the
+    /// exact shape the Worker-specifier rewrite (`worker_rewrite`) acts on. It is
+    /// an ADDITIONAL trigger for transpiling project-source plain JS: such a file
+    /// must be routed through the transform so the caller-relative rewrite fires,
+    /// uniformly with `.ts`/`.jsx` callers. PRECISE (semantic-scoped, not a name
+    /// match), so a bound `Worker` — `import { Worker } from "node:worker_threads"`,
+    /// a shadowed local — does NOT trigger, preserving the byte-identical no-op path
+    /// for those files. Computed only when a cheap candidate is present (see below),
+    /// so the semantic build stays off the common no-Worker hot path.
+    pub has_global_worker_string_call: bool,
 }
 
 /// Detect a file's module-format and decorator shape. `lang` is `'ts'`, `'tsx'`,
@@ -100,6 +116,7 @@ pub fn detect_module_info(
             has_value_esm_syntax: false,
             has_decorators: false,
             transformable_syntax: false,
+            has_global_worker_string_call: false,
         };
     }
 
@@ -109,19 +126,43 @@ pub fn detect_module_info(
         !ret.module_record.import_metas.is_empty(),
     );
 
-    // ONE AST walk computes both the decorator guard and the skip-gate verdict —
-    // the visitor already traverses the whole tree, so folding the using/v-flag
-    // checks into the same pass is near-free (no extra parse, no second walk).
+    // ONE AST walk computes the decorator guard, the skip-gate verdict, AND a CHEAP
+    // boolean: does any `new Worker(<string-literal>)` with a bare `Worker` callee
+    // exist? (No scope info — the parser doesn't resolve references.) The visitor
+    // already traverses the whole tree, so folding these in is near-free.
     let mut finder = SyntaxFinder {
         decorators: false,
         transformable: false,
+        has_worker_candidate: false,
     };
     finder.visit_program(&ret.program);
+
+    // The Worker trigger is PRECISE: only a FREE/global `Worker` counts. Build
+    // semantic ONLY when a candidate exists (the common no-Worker file pays nothing),
+    // then re-walk with the resolved scoping to confirm at least one candidate's
+    // callee reference is unresolved (free/global) — `reference_id`s are populated by
+    // SemanticBuilder, so this scope check must run AFTER the build, not in the
+    // pre-semantic pass above.
+    let has_global_worker_string_call = if !finder.has_worker_candidate {
+        false
+    } else {
+        let scoping = SemanticBuilder::new()
+            .build(&ret.program)
+            .semantic
+            .into_scoping();
+        let mut checker = WorkerScopeChecker {
+            scoping: &scoping,
+            found_global: false,
+        };
+        checker.visit_program(&ret.program);
+        checker.found_global
+    };
 
     ModuleInfo {
         has_value_esm_syntax,
         has_decorators: finder.decorators,
         transformable_syntax: finder.transformable,
+        has_global_worker_string_call,
     }
 }
 
@@ -212,16 +253,28 @@ fn specifier_is_type(spec: &ImportDeclarationSpecifier<'_>) -> bool {
     }
 }
 
-/// Walks the AST once, latching two independent verdicts:
+/// Walks the AST once, latching the verdicts:
 ///   * `decorators` — a `@decorator` appears anywhere (drives the Stage-3 guard).
 ///   * `transformable` — the source contains target-version-gated SYNTAX oxc lowers
 ///     at `target:"es2022"`: a `using`/`await using` declaration, or a `v`-flag
 ///     RegExp literal. See `ModuleInfo::transformable_syntax` for the pinned
-///     provenance of this set (oxc =0.132.0). Both fields keep going once latched
-///     (the visit completes) — correctness only needs "did we ever see one".
+///     provenance of this set (oxc =0.132.0). Latches once seen.
+///   * `has_worker_candidate` — does any `new Worker(<string-literal>)` with a bare
+///     `Worker` callee exist? A cheap, pre-semantic OVER-approximation (no scope
+///     info). The caller confirms FREE/global via a second, semantic-aware pass —
+///     run only when this latches, so the common no-Worker file pays nothing.
 struct SyntaxFinder {
     decorators: bool,
     transformable: bool,
+    has_worker_candidate: bool,
+}
+
+/// Does a `new Worker(<string-literal>)` call have a bare-identifier `Worker`
+/// callee AND a string-literal first arg? (The eligibility SHAPE the rewrite acts
+/// on, minus the scope guard.)
+fn is_worker_string_call(it: &NewExpression<'_>) -> bool {
+    matches!(&it.callee, Expression::Identifier(ident) if ident.name.as_str() == "Worker")
+        && matches!(it.arguments.first(), Some(Argument::StringLiteral(_)))
 }
 
 impl<'a> Visit<'a> for SyntaxFinder {
@@ -244,5 +297,38 @@ impl<'a> Visit<'a> for SyntaxFinder {
         if it.regex.flags.contains(RegExpFlags::V) {
             self.transformable = true;
         }
+    }
+
+    fn visit_new_expression(&mut self, it: &NewExpression<'a>) {
+        if is_worker_string_call(it) {
+            self.has_worker_candidate = true;
+        }
+        oxc::ast_visit::walk::walk_new_expression(self, it);
+    }
+}
+
+/// Second pass, run with the resolved `Scoping` only when a candidate exists:
+/// latches `found_global` iff some `new Worker(<string-literal>)` callee is a
+/// FREE/global reference (`symbol_id().is_none()`) — exactly the rewrite's guard,
+/// so the transpile trigger matches what the rewrite will actually act on.
+struct WorkerScopeChecker<'a> {
+    scoping: &'a oxc::semantic::Scoping,
+    found_global: bool,
+}
+
+impl<'a> Visit<'a> for WorkerScopeChecker<'_> {
+    fn visit_new_expression(&mut self, it: &NewExpression<'a>) {
+        if is_worker_string_call(it) {
+            if let Expression::Identifier(ident) = &it.callee {
+                let free = match ident.reference_id.get() {
+                    Some(id) => self.scoping.get_reference(id).symbol_id().is_none(),
+                    None => false,
+                };
+                if free {
+                    self.found_global = true;
+                }
+            }
+        }
+        oxc::ast_visit::walk::walk_new_expression(self, it);
     }
 }

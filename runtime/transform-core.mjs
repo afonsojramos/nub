@@ -670,7 +670,23 @@ export function maybeTranspilePlainJs(url, ext) {
   }
   // lang "ts" parses all JS (a TS superset) but NOT JSX — JSX-in-.js is out of scope.
   const info = detectModuleInfo(filePath, source, "ts");
-  if (!info.transformableSyntax && !info.hasDecorators) {
+  // The Worker rewrite emits `import.meta.url`, valid ONLY in an ES module — so the
+  // worker trigger fires ONLY for an ESM file. Without this gate a CJS plain-JS file
+  // (.cjs, or a .js/.mjs that detects as commonjs) carrying a worker string would be
+  // routed through oxc, which reformats it (quotes/whitespace) while the ESM-gated
+  // rewrite does nothing — breaking the byte-parity no-op invariant for CJS. Compute
+  // the format the same way loadTranspile will (nearest package.json `type`, else
+  // source detection); only an ESM verdict admits the worker trigger.
+  const pkgType = ext === ".mts" || ext === ".cts" ? undefined : getPackageType(dirname(filePath));
+  const isEsm = moduleFormatFor(ext, pkgType, filePath, source) === "module";
+  const workerTrigger = info.hasGlobalWorkerStringCall && isEsm;
+  // Trigger transpilation when the file needs lowering (using/v-flag/decorators) OR
+  // carries an ESM `new <free/global Worker>(<string-literal>)` the rewrite must act
+  // on — so a raw `new Worker("./w.js")` resolves caller-relative from a .js/.mjs/.cjs
+  // ES module, UNIFORMLY with .ts callers. The worker flag is semantic-scoped (a
+  // bound/shadowed Worker does NOT set it) and ESM-gated, so a no-eligible-worker /
+  // CJS / no-lowerable file stays byte-identical.
+  if (!info.transformableSyntax && !info.hasDecorators && !workerTrigger) {
     return null; // no-op: Node's native loader handles it, byte-identical.
   }
   // Transformable: run the SAME pipeline as TS/JSX (target es2022 lowering, tsconfig,

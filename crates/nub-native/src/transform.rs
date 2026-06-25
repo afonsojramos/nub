@@ -40,6 +40,8 @@ use oxc::{
 use oxc_napi::{OxcError, get_source_type};
 use oxc_sourcemap::napi::SourceMap;
 
+use crate::worker_rewrite;
+
 /// The result of a transform. Mirror of oxc's `TransformResult`, minus the
 /// isolated-declarations fields nub never requests.
 #[derive(Default)]
@@ -441,6 +443,12 @@ struct Compiler {
     transform_options: oxc::transformer::TransformOptions,
     sourcemap: bool,
 
+    /// The compiling module's absolute path. Threaded in from `transform()` so the
+    /// worker-specifier rewrite pass (`worker_rewrite`) can resolve a string
+    /// `new Worker("…")` against the CALLING module, like a top-level import — not
+    /// node:worker_threads' cwd. Empty for a sourceless / unknown-path transform.
+    file_path: String,
+
     printed: String,
     printed_sourcemap: Option<SourceMap>,
 
@@ -504,6 +512,7 @@ impl Compiler {
         Ok(Self {
             transform_options,
             sourcemap,
+            file_path: String::default(),
             printed: String::default(),
             printed_sourcemap: None,
             define,
@@ -538,6 +547,43 @@ impl CompilerInterface for Compiler {
     fn after_codegen(&mut self, ret: CodegenReturn) {
         self.printed = ret.code;
         self.printed_sourcemap = ret.map.map(SourceMap::from);
+    }
+
+    /// Override the transform seam (NOT `after_transform`) because this is the one
+    /// hook that holds BOTH the `Allocator` (to build replacement AST) AND the
+    /// post-transform `Scoping` (the free-vs-bound `Worker` guard). Run oxc's stock
+    /// transform first — preserving byte-parity — then the additive worker-specifier
+    /// rewrite over the same allocator + scoping before returning.
+    fn transform<'a>(
+        &self,
+        options: &oxc::transformer::TransformOptions,
+        allocator: &'a oxc::allocator::Allocator,
+        program: &mut oxc::ast::ast::Program<'a>,
+        source_path: &Path,
+        scoping: oxc::semantic::Scoping,
+    ) -> oxc::transformer::TransformerReturn {
+        let ret = oxc::transformer::Transformer::new(allocator, source_path, options)
+            .build_with_scoping(scoping, program);
+
+        // ESM-only: `import.meta` is invalid in CJS output. A CJS-format source is
+        // parsed with ModuleKind::CommonJS, so this gate also covers a CJS-syntax
+        // `.ts` (nub passes sourceType per detected format).
+        if program.source_type.is_module() && !self.file_path.is_empty() {
+            let dir = Path::new(&self.file_path)
+                .parent()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let ast = oxc::ast::AstBuilder::new(allocator);
+            worker_rewrite::rewrite_worker_specifiers(
+                ast,
+                program,
+                &ret.scoping,
+                &self.file_path,
+                &dir,
+            );
+        }
+
+        ret
     }
 
     #[expect(deprecated)]
@@ -586,6 +632,8 @@ pub fn transform(
             };
         }
     };
+    // The resolver referrer for the worker-specifier rewrite (see Compiler.file_path).
+    compiler.file_path = filename.clone();
 
     compiler.compile(&source_text, source_type, source_path);
 

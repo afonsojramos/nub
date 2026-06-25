@@ -24,7 +24,7 @@ self.onmessage = (ev) => {
 };
 ```
 
-The worker entry is TypeScript here for free — Nub transpiles it like any other entry. The constructor takes a string or `URL`; pass `new URL("./worker.ts", import.meta.url)` for a path resolved relative to the current module, exactly as in the browser.
+The worker entry is TypeScript here for free — Nub transpiles it like any other entry. The constructor takes a string or `URL`; `new URL("./worker.ts", import.meta.url)` is the canonical form, and a plain relative string resolves against the current module too — see [Constructor inputs](#constructor-inputs).
 
 ## Mechanism
 
@@ -47,9 +47,14 @@ Node's worker global is not an `EventTarget` and exposes none of these, so the p
 
 `new Worker(scriptURL, options?)` accepts the WHATWG inputs:
 
-- **A file path or `URL`** (including `file://`) — spawned and transpiled like any nub entry.
+- **A `URL`** — pass `new URL("./worker.ts", import.meta.url)` to resolve a path relative to the current module, exactly as in the browser. This is the canonical form: it is explicit, portable without a build step, and the shape every bundler (Vite, esbuild, webpack, Rollup) traces to chunk the worker.
+- **A relative string** — `new Worker("./worker.ts")` resolves with Nub's full module resolution against the calling module, the same way a top-level `import "./worker.ts"` would: relative paths, extension probing (`./worker` → `./worker.ts`), and tsconfig `paths` aliases all work. Nub resolves it at compile time and rewrites it to the `new URL(..., import.meta.url)` form for you, so it resolves against the module — never `process.cwd()`, the `node:worker_threads` quirk. This is uniform across module languages — a `.ts`, `.tsx`, `.js`, `.mjs`, or `.cjs` ES module behaves the same. (A worker constructed in a CommonJS module is left as-is, since `import.meta` is ES-module-only; use the `URL` form with `pathToFileURL(__filename)` there.)
 - **A `data:` URL** — run directly.
 - **A `blob:` URL** from `URL.createObjectURL(blob)` — the WHATWG inline-worker mechanism. Nub snapshots the Blob's source synchronously at `createObjectURL` time and spawns it.
+
+An absolute path, a `file://` / `data:` / `blob:` URL string, a `URL` instance, and any non-literal (computed) specifier pass through unchanged — only a relative or bare string literal is resolved. For a computed path, wrap it yourself: `new Worker(new URL(path, import.meta.url))`.
+
+A **bare package** string — `new Worker("some-pkg/worker")` — resolves through Node's own resolver via `import.meta.resolve`, honoring the package's `exports` under the default (`node`) conditions; there is no special `"worker"` condition, so it resolves like a top-level `import` of the same name. Unlike the relative `new URL(...)` form, a bare-package worker is **not statically analyzable by bundlers** (the same way a dynamic `import.meta.resolve` isn't) — prefer the `new URL` form on a build pipeline.
 
 `options` accepts `type` (`"module"` | `"classic"`), `name`, `execArgv`, and `env`. There is no inline source-string form (the spec has none either — use a `blob:` or `data:` URL).
 

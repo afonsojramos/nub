@@ -28,22 +28,30 @@ const TS_PARENT_EXTS: [&str; 4] = [".ts", ".tsx", ".mts", ".cts"];
 /// absolute filesystem path (empty for the entry).
 #[napi]
 pub fn resolve_ts(specifier: String, parent_path: String) -> Option<String> {
-    let parent_ext = extname(&parent_path);
+    resolve_ts_core(&specifier, &parent_path)
+}
+
+/// In-process core of [`resolve_ts`], called both from the napi entry above and
+/// from the worker-specifier rewrite pass (`worker_rewrite`). Same `Some`/`None`
+/// boundary: `Some` is an additive case nub owns (relative/extensionless/tsconfig
+/// `paths`), `None` is everything Node owns (node_modules / `exports` / bare).
+pub fn resolve_ts_core(specifier: &str, parent_path: &str) -> Option<String> {
+    let parent_ext = extname(parent_path);
     let parent_dir = if parent_path.is_empty() {
         std::env::current_dir().ok()?.to_string_lossy().into_owned()
     } else {
-        dirname(&parent_path)
+        dirname(parent_path)
     };
 
     let is_relative = specifier.starts_with("./") || specifier.starts_with("../");
-    let is_absolute = specifier.starts_with('/') || Path::new(&specifier).is_absolute();
+    let is_absolute = specifier.starts_with('/') || Path::new(specifier).is_absolute();
     let is_file_url = specifier.starts_with("file:");
 
     // tsconfig `paths` branch — non-relative, non-absolute specifiers from a file
     // outside node_modules. (Not gated on a TS parent: a plain .js with a paths
     // alias resolves too.)
-    if !is_relative && !is_absolute && !is_file_url && !is_node_modules(&parent_path) {
-        let candidates = tsconfig::match_paths(&parent_dir, &specifier);
+    if !is_relative && !is_absolute && !is_file_url && !is_node_modules(parent_path) {
+        let candidates = tsconfig::match_paths(&parent_dir, specifier);
         for candidate in candidates {
             if let Some(resolved) = try_resolve_file(&candidate, &parent_ext, true) {
                 return Some(resolved);
@@ -57,12 +65,45 @@ pub fn resolve_ts(specifier: String, parent_path: String) -> Option<String> {
     // Extensionless / emit-swap branch — only when the importer is itself a TS
     // file and the specifier is relative.
     if is_ts_parent(&parent_ext) && is_relative {
-        let target = path_join_resolve(&parent_dir, &specifier);
+        let target = path_join_resolve(&parent_dir, specifier);
         if let Some(resolved) = try_resolve_file(&target, &parent_ext, true) {
             return Some(resolved);
         }
     }
 
+    None
+}
+
+/// Resolve a `new Worker("…")` STRING specifier like a top-level import, for ANY
+/// caller extension (`.ts`/`.tsx`/… AND raw `.js`/`.mjs`/`.cjs`). This is the
+/// SINGLE worker-resolution shared by both the AST-rewrite path and (when a JS
+/// caller is routed through the transform via `maybeTranspilePlainJs`) that same
+/// pass — so a `.js` caller resolves IDENTICALLY to a `.ts` caller.
+///
+/// It reuses [`resolve_ts_core`] (covers tsconfig `paths` for every parent, and the
+/// TS-parent relative/extensionless/emit-swap probing) and, when that returns `None`
+/// for a RELATIVE specifier (the case `resolve_ts_core` gates to TS parents), adds a
+/// parent-ext-agnostic relative probe so a raw-JS caller's `./worker.js` / `./worker`
+/// resolves too. `None` still means Node-owned (node_modules / bare) — the
+/// bare-package seam is unchanged.
+pub fn resolve_worker_target(specifier: &str, parent_path: &str) -> Option<String> {
+    if let Some(hit) = resolve_ts_core(specifier, parent_path) {
+        return Some(hit);
+    }
+    let is_relative = specifier.starts_with("./") || specifier.starts_with("../");
+    if is_relative {
+        let parent_dir = if parent_path.is_empty() {
+            std::env::current_dir().ok()?.to_string_lossy().into_owned()
+        } else {
+            dirname(parent_path)
+        };
+        let target = path_join_resolve(&parent_dir, specifier);
+        // Empty parent_ext → default probe order (.ts/.tsx/.js/.jsx/.json); the
+        // `.js`→`.ts` emit-swap still applies for an explicit `.js`.
+        if let Some(resolved) = try_resolve_file(&target, "", true) {
+            return Some(resolved);
+        }
+    }
     None
 }
 

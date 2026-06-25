@@ -60,6 +60,29 @@ fn run_nub_with_env(fixture: &str, file: &str, env: &[(&str, &str)]) -> (String,
     (stdout, stderr, code)
 }
 
+/// Like `run_nub` but with the process CWD set to a FOREIGN directory (the system
+/// temp dir), not the fixture dir. This is the load-bearing setup for the
+/// worker-string-resolution tests: a cwd-relative resolver would fail to find a
+/// fixture-relative path from here, so a passing run proves caller-relative
+/// resolution.
+fn run_nub_foreign_cwd(fixture: &str, file: &str, env: &[(&str, &str)]) -> (String, String, i32) {
+    let fixture_path = fixtures_dir().join(fixture);
+    let mut cmd = Command::new(nub_binary());
+    cmd.arg(fixture_path.join(file).to_str().unwrap())
+        .current_dir(std::env::temp_dir());
+    if !env.iter().any(|(k, _)| *k == "XDG_CACHE_HOME") {
+        cmd.env("XDG_CACHE_HOME", unique_test_cache());
+    }
+    for &(k, v) in env {
+        cmd.env(k, v);
+    }
+    let output = cmd.output().expect("failed to spawn nub");
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let code = output.status.code().unwrap_or(-1);
+    (stdout, stderr, code)
+}
+
 /// Flagship provisioning, end-to-end through the binary: a project pinned (via
 /// `.node-version`) to an EXACT version that is on neither PATH nor in nub's store
 /// nor nvm → `nub <file>` downloads + installs it from nodejs.org (uv-style
@@ -5477,4 +5500,224 @@ fn run_script_reports_role_aware_user_agent() {
     }
 
     let _ = std::fs::remove_dir_all(&base);
+}
+
+// ── Worker string-specifier resolution (caller-relative, transpile-time) ──────
+// A raw STRING in `new Worker("…")` resolves with nub's full module resolution
+// against the CALLING module (like a top-level import) — fixing worker_threads'
+// cwd-relative footgun. The transpiler rewrites the literal to the canonical
+// `new Worker(new URL("<rel>", import.meta.url))` (nub-owned cases) or
+// `new Worker(import.meta.resolve("<bare>"))` (node_modules). Each run uses a
+// FOREIGN cwd so a cwd-relative resolver would fail — a pass proves caller-relative.
+
+#[test]
+fn worker_bare_relative_string_resolves_caller_relative() {
+    // The core fix: `new Worker("./worker.ts")`, run from a cwd that is NOT the
+    // fixture dir, reaches the sibling worker.ts. Under worker_threads' cwd
+    // behavior this would be a ModuleNotFound.
+    let (stdout, stderr, code) = run_nub_foreign_cwd("worker-string", "main.ts", &[]);
+    assert_eq!(
+        code, 0,
+        "bare relative worker string must resolve + run: {stderr}\n{stdout}"
+    );
+    assert!(
+        stdout.contains("main-got:worker-string:ready"),
+        "worker resolved caller-relative and ran (enum lowered): {stdout}"
+    );
+}
+
+#[test]
+fn worker_extensionless_string_gains_extension() {
+    // `new Worker("./worker")` (no extension) probes to ./worker.ts, like an import.
+    let (stdout, stderr, code) = run_nub_foreign_cwd("worker-string", "extensionless-main.ts", &[]);
+    assert_eq!(
+        code, 0,
+        "extensionless worker string must resolve: {stderr}\n{stdout}"
+    );
+    assert!(
+        stdout.contains("main-got:worker-string:ready"),
+        "extensionless specifier resolved to the .ts sibling: {stdout}"
+    );
+}
+
+#[test]
+fn worker_tsconfig_paths_alias_resolves() {
+    // A tsconfig `paths` alias (`@workers/w`) resolves like a top-level import and
+    // is erased to a portable relative URL in the emit (no tsconfig at runtime).
+    let (stdout, stderr, code) = run_nub_foreign_cwd("worker-string-paths", "src/main.ts", &[]);
+    assert_eq!(
+        code, 0,
+        "tsconfig paths worker alias must resolve: {stderr}\n{stdout}"
+    );
+    assert!(
+        stdout.contains("main-got:paths-worker:ready"),
+        "paths alias resolved + relativized: {stdout}"
+    );
+}
+
+#[test]
+fn worker_non_ascii_path_round_trips() {
+    // A non-ASCII worker filename (`café.ts`) must percent-encode its UTF-8 bytes
+    // in the emitted URL (`caf%C3%A9.ts`, NOT the latin-1 mojibake `cafÃ©.ts`) and
+    // round-trip back through `new URL` → `fileURLToPath` to the real file. Run
+    // from a foreign cwd so resolution is genuinely caller-relative.
+    let (stdout, stderr, code) = run_nub_foreign_cwd("worker-string", "unicode-main.ts", &[]);
+    assert_eq!(
+        code, 0,
+        "non-ASCII worker path must resolve + run: {stderr}\n{stdout}"
+    );
+    assert!(
+        stdout.contains("main-got:unicode-worker:ready"),
+        "percent-encoded UTF-8 path resolved to the real file: {stdout}"
+    );
+}
+
+#[test]
+fn worker_threads_import_is_not_rewritten() {
+    // The additivity guard: `import { Worker } from "node:worker_threads"` binds
+    // `Worker`, so the rewrite must SKIP it (its ctor is genuinely cwd/path-relative
+    // — rewriting would be a regression). The fixture passes an absolute path, so a
+    // pass proves the worker_threads Worker still works AND nub left it untouched.
+    let (stdout, stderr, code) = run_nub("worker-string", "wt-main.ts");
+    assert_eq!(
+        code, 0,
+        "worker_threads Worker must still work, unrewritten: {stderr}\n{stdout}"
+    );
+    assert!(
+        stdout.contains("main-got:wt-ran"),
+        "the bound worker_threads Worker ran (not rewritten): {stdout}"
+    );
+}
+
+#[test]
+fn worker_string_no_rewrite_in_compat_mode() {
+    // `--node` and NODE_COMPAT=1 disable augmentation entirely: no transpile
+    // rewrite AND no Worker global. The bare-string worker then behaves like plain
+    // Node (`Worker is not defined`), never caller-relative. One assertion per
+    // opt-out surface (the `--node` flag, the env var).
+    //
+    // Uses a PLAIN-JS (.mjs) fixture, NOT a .ts one: `--node` also disables nub's
+    // transpiler, and Node below 22.18 (the fast-tier floor and every compat tier)
+    // can't strip TS types — a .ts entry would throw a SyntaxError on the type
+    // annotation BEFORE reaching `new Worker`, masking the signal. Plain JS parses
+    // on every tier, so the ONLY failure is the missing Worker global.
+    let entry = fixtures_dir().join("worker-string").join("compat-main.mjs");
+
+    let node_flag = Command::new(nub_binary())
+        .arg("--node")
+        .arg(&entry)
+        .current_dir(std::env::temp_dir())
+        .env("XDG_CACHE_HOME", unique_test_cache())
+        .output()
+        .expect("spawn nub --node");
+    let flag_err = String::from_utf8_lossy(&node_flag.stderr);
+    assert_ne!(
+        node_flag.status.code(),
+        Some(0),
+        "--node must not augment: {flag_err}"
+    );
+    assert!(
+        flag_err.contains("Worker is not defined"),
+        "--node leaves the bare string unaugmented (plain-Node Worker): {flag_err}"
+    );
+
+    let (_o, env_err, env_code) =
+        run_nub_foreign_cwd("worker-string", "compat-main.mjs", &[("NODE_COMPAT", "1")]);
+    assert_ne!(env_code, 0, "NODE_COMPAT=1 must not augment: {env_err}");
+    assert!(
+        env_err.contains("Worker is not defined"),
+        "NODE_COMPAT=1 leaves the bare string unaugmented: {env_err}"
+    );
+}
+
+// ── Worker string resolution from RAW JS callers (.js/.mjs/.cjs) ──────────────
+// Uniformity with .ts callers: a raw `new Worker("./w.js")` resolves caller-relative
+// from a plain `.js`/`.mjs` module too. nub does not transpile plain JS by default
+// (the #152 byte-parity invariant), so a bare-worker file is routed through the
+// transform by an ADDED trigger in `maybeTranspilePlainJs` (the
+// `has_global_worker_string_call` detection), where the existing rewrite fires.
+
+#[test]
+fn worker_string_resolves_from_plain_mjs_caller() {
+    // A plain `.mjs` caller with ONLY a worker (no other lowerable syntax) must be
+    // transpiled + rewritten so its `./js-worker.js` resolves caller-relative. Run
+    // from a foreign cwd, so a cwd-relative resolver would fail.
+    let (stdout, stderr, code) = run_nub_foreign_cwd("worker-string", "mjs-main.mjs", &[]);
+    assert_eq!(
+        code, 0,
+        "raw .mjs caller must resolve its worker string caller-relative: {stderr}\n{stdout}"
+    );
+    assert!(
+        stdout.contains("main-got:mjs-worker:ready"),
+        "the .mjs caller's worker resolved the sibling: {stdout}"
+    );
+}
+
+#[test]
+fn worker_string_resolves_from_dotjs_esm_caller() {
+    // A `.js` file in a `type: module` package is ESM but not transpiled by default —
+    // the worker trigger routes it through the transform, so behavior is uniform
+    // across module languages.
+    let (stdout, stderr, code) = run_nub_foreign_cwd("worker-string-js-esm", "main.js", &[]);
+    assert_eq!(
+        code, 0,
+        "raw .js-as-ESM caller must resolve caller-relative: {stderr}\n{stdout}"
+    );
+    assert!(
+        stdout.contains("main-got:dotjs-esm:ready"),
+        "the .js caller's worker resolved the sibling: {stdout}"
+    );
+}
+
+#[test]
+fn worker_string_plain_js_no_worker_is_byte_identical() {
+    // The #152 no-op invariant must hold: a plain `.mjs` with NO worker and no other
+    // lowerable syntax is NOT transpiled — Node loads it raw, byte-identical. We run
+    // it (it must succeed) AND assert the loaded source kept its distinctive
+    // formatting (single quotes, trailing commas) that oxc codegen would have
+    // normalized — proving nub did not route it through the transform.
+    let (stdout, stderr, code) = run_nub("worker-string-byte-parity", "plain.mjs");
+    assert_eq!(code, 0, "no-worker plain .mjs must run: {stderr}\n{stdout}");
+    assert!(
+        stdout.contains("byte-parity:12hi"),
+        "the no-worker file ran unchanged: {stdout}"
+    );
+}
+
+#[test]
+fn worker_string_in_node_modules_is_not_rewritten() {
+    // The byte-parity boundary is node_modules, NOT the file extension: a dep's
+    // internal `new Worker("./inner.js")` must be left RAW (cwd-relative), never
+    // transpiled/rewritten. Run from a foreign cwd: left raw, the dep's worker
+    // resolves against cwd and errors — exactly what proves nub did not touch
+    // node_modules source. (A rewrite would have made it resolve + run.)
+    let (stdout, stderr, code) = run_nub_foreign_cwd("worker-string-nm", "main.mjs", &[]);
+    assert_eq!(code, 0, "fixture should complete: {stderr}\n{stdout}");
+    assert!(
+        stdout.contains("dep-worker-cwd-relative-as-expected"),
+        "a node_modules dep's worker string must stay cwd-relative (unrewritten): {stdout}"
+    );
+    assert!(
+        !stdout.contains("UNEXPECTED-dep-resolved"),
+        "nub must NOT rewrite node_modules worker strings: {stdout}"
+    );
+}
+
+#[test]
+fn worker_string_in_cjs_is_not_rewritten() {
+    // The rewrite emits `import.meta.url` (ESM-only), so a CommonJS caller is left
+    // as-is: NOT transpiled (byte-identical, Node's native CJS path) and NOT
+    // rewritten. The worker keeps worker_threads' cwd-relative behavior, so run from
+    // the fixture dir where the sibling resolves. This guards the byte-parity no-op
+    // invariant for a CJS file that carries a global Worker string — without the ESM
+    // gate it would be needlessly codegen'd (and reformatted).
+    let (stdout, stderr, code) = run_nub("worker-string", "cjs-main.cjs");
+    assert_eq!(
+        code, 0,
+        "CJS worker file must run on the native path: {stderr}\n{stdout}"
+    );
+    assert!(
+        stdout.contains("cjs-got:cjs-native:ok:1"),
+        "the CJS worker ran cwd-relative (unrewritten, untranspiled): {stdout}"
+    );
 }

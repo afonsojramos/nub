@@ -1,0 +1,34 @@
+# The worker-specifier path classification + re-relativization helpers, factored
+# out of `nub-native` so they are unit testable. `nub-native` is a `cdylib` N-API
+# addon: its `napi_*` symbols are resolved by the Node host at dlopen, so a
+# `cargo test` harness for that crate cannot link (it has `test = false` — see its
+# Cargo.toml). These helpers are pure path arithmetic (classify a Worker string
+# specifier, re-relativize an absolute resolved target to a POSIX-`/` URL, encode
+# it) with no napi dependency, and they carry the LOAD-BEARING portability moat
+# (never bake an absolute build path; cross-root → no rewrite) plus
+# Windows-separator behavior that the Linux-only e2e suite cannot exercise — so
+# they live here where they CAN be tested on every platform, and `nub-native`
+# calls into them. Keep this crate napi-free.
+#
+# SELF-CONTAINED MANIFEST (no `*.workspace = true`): same rationale as
+# `nub-cache-key` — this crate is a member of the ROOT workspace AND a
+# cross-workspace path dependency of `crates/nub-native`, whose release `cross`
+# build mounts only the nub-native workspace, where the root manifest is absent.
+# Inlining the package fields (identical to the root `[workspace.package]`) lets
+# this manifest parse standalone in the cross container. Keep these literals in
+# lockstep with the root `Cargo.toml`'s `[workspace.package]` /
+# `[workspace.lints.clippy]`.
+[package]
+name = "nub-worker-resolve"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+repository = "https://github.com/nubjs/nub"
+
+[dependencies]
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"

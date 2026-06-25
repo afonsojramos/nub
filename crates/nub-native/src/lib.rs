@@ -16,6 +16,7 @@ mod detect;
 mod resolve;
 mod transform;
 mod tsconfig;
+mod worker_rewrite;
 
 use napi_derive::napi;
 
