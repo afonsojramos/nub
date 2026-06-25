@@ -686,6 +686,47 @@ fn urlpattern_available() {
 }
 
 #[test]
+fn web_locks_spec_behavior() {
+    // Web Locks works to the spec under nub on every supported Node: the hand-rolled
+    // polyfill below 24.5, native at/above. The fixture asserts steal, option/name
+    // validation, reader/writer fairness, AbortSignal, and core mutual exclusion —
+    // every assertion holds on BOTH paths, so this is a true differential test (a
+    // regression on either turns it red). On the 18.19–20.x compat legs it also proves
+    // the navigator backfill hosts navigator.locks. Verified against the WPT web-locks
+    // suite (68/68 of the runnable subtests, matching native Node) across 18.19/20.19/
+    // 22.15/24.4 at implementation time.
+    let (stdout, stderr, code) = run_nub("web-locks", "main.mjs");
+    assert_eq!(
+        code, 0,
+        "web-locks spec checks must pass: {stderr}\n{stdout}"
+    );
+    assert!(
+        stdout.contains("weblocks:ALL-OK"),
+        "all web-locks scenarios pass: {stdout}"
+    );
+}
+
+#[test]
+fn navigator_surface_present() {
+    // `navigator` is present and well-shaped under nub on every supported Node —
+    // native on 21+, backfilled by navigator-shim.mjs on 18.19–20.x — with a
+    // `Node.js/<major>` userAgent (never `Nub/…`: brand boundary).
+    let (stdout, stderr, code) = run_nub("navigator-shim", "main.mjs");
+    assert_eq!(
+        code, 0,
+        "navigator surface must be well-shaped: {stderr}\n{stdout}"
+    );
+    assert!(
+        stdout.contains("navshim:ALL-OK"),
+        "navigator surface checks pass: {stdout}"
+    );
+    assert!(
+        !stdout.to_lowercase().contains("navshim:ua:nub"),
+        "navigator.userAgent must not be nub-branded: {stdout}"
+    );
+}
+
+#[test]
 fn jsonc_import_works() {
     let (stdout, stderr, code) = run_nub("jsonc-import", "main.ts");
     assert_eq!(code, 0, "stderr: {stderr}");
