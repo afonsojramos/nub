@@ -208,6 +208,64 @@ async function main() {
   const isWindow = SCOPE === "window";
 
   if (isWindow) {
+    // ── Harness shims for window-scope tests ──────────────────────────────────
+    // These globals aren't in nub's base runtime but many WPT tests expect them.
+    //
+    // location — used by web-locks helpers.js for unique resource names via
+    //   `self.location.pathname`. The fake pathname uniquely identifies the file.
+    //
+    // isSecureContext — spec tests check this; nub's CLI has no browser HTTPS
+    //   context, so it's false. Tests asserting `true` are expected-fail.
+    //
+    // fetch shim — relay relative-URL fetches to local files next to the test.
+    //   URLPattern tests load their JSON test data via `fetch('resources/…json')`.
+    //   Absolute URLs fall through to nub's native fetch (undici).
+    if (typeof globalThis.location === "undefined") {
+      const _pathname = "/" + TEST_REL.replace(/\\/g, "/").replace(/^\/+/, "");
+      globalThis.location = {
+        pathname: _pathname,
+        href: "https://wpt.example" + _pathname,
+        origin: "https://wpt.example",
+        protocol: "https:",
+        host: "wpt.example",
+        hostname: "wpt.example",
+        port: "",
+        search: "",
+        hash: "",
+        toString() { return this.href; },
+      };
+    }
+    if (typeof globalThis.isSecureContext === "undefined") {
+      globalThis.isSecureContext = false;
+    }
+    if (!globalThis.__wptFetchShimInstalled) {
+      globalThis.__wptFetchShimInstalled = true;
+      const _nativeFetch = typeof globalThis.fetch === "function" ? globalThis.fetch : null;
+      globalThis.fetch = async (_input) => {
+        const _urlStr = typeof _input === "string" ? _input : (_input && (_input.url || String(_input)));
+        if (!/^[a-z][a-z0-9+\-.]*:\/\//i.test(_urlStr)) {
+          // Relative URL — resolve from the test file's directory.
+          const _p = resolve(testDir, _urlStr);
+          const _buf = readFileSync(_p);
+          const _text = _buf.toString("utf8");
+          return {
+            ok: true,
+            status: 200,
+            headers: { get: (_k) => null },
+            json: async () => JSON.parse(_text),
+            text: async () => _text,
+            arrayBuffer: async () => {
+              const ab = new ArrayBuffer(_buf.length);
+              new Uint8Array(ab).set(_buf);
+              return ab;
+            },
+          };
+        }
+        if (_nativeFetch) return _nativeFetch(_input);
+        throw new TypeError("fetch: no handler for absolute URL: " + _urlStr);
+      };
+    }
+
     // Main-realm path: drive directly here, under nub.
     const drive = makeRealmDriver({
       harnessCode,
