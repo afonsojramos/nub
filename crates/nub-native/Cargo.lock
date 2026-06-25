@@ -624,7 +624,6 @@ dependencies = [
  "napi-build",
  "napi-derive",
  "nub-cache-key",
- "nub-worker-resolve",
  "oxc",
  "oxc_napi",
  "oxc_sourcemap",
@@ -634,10 +633,6 @@ dependencies = [
  "toml",
  "yaml-rust2",
 ]
-
-[[package]]
-name = "nub-worker-resolve"
-version = "0.2.0"
 
 [[package]]
 name = "num-bigint"

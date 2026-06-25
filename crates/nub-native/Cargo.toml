@@ -155,9 +155,6 @@ blake3.workspace = true
 # invalidation contract can be unit-tested off the un-testable cdylib. A path dep
 # that crosses into the MAIN workspace (where nub-cache-key is a member).
 nub-cache-key = { path = "../nub-cache-key" }
-# Worker-specifier path classification + re-relativization (the portability moat).
-# Same cross-workspace path-dep + napi-free-testable shape as nub-cache-key above.
-nub-worker-resolve = { path = "../nub-worker-resolve" }
 
 [build-dependencies]
 napi-build = "2"
