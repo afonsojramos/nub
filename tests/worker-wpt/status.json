@@ -77,16 +77,40 @@
         ],
         "versioned": [
           {
-            "minMajor": 22,
-            "maxMajor": 22,
+            "maxMajor": 23,
             "expected": [
               "File basic",
               "A subclass instance will deserialize as its closest serializable superclass"
             ],
-            "note": "NODE 22 structured-clone bug: on the Node 22 line, structuredClone/postMessage of a File deserializes to a plain Blob — File-ness is lost (verified on vanilla Node 22.15.1 + 22.16.0, no nub: `structuredClone(new File([…])) instanceof File === false`). Node 24+ fixed it (round-trips as File). nub's polyfill is faithful — this is the underlying node:worker_threads/v8 serializer on v22, not a nub divergence — so it is an expected-fail ONLY on the Node 22 tier (which is the fast-tier FLOOR). The 'subclass deserializes as closest serializable superclass' subtest fails for the same reason (the File subclass collapses to Blob)."
+            "note": "NODE structured-clone limitation on every line BELOW 24: structuredClone/postMessage of a File deserializes to a plain Blob — File-ness is lost. Verified on vanilla Node (no nub) on 18.19, 20, and 22 (22.15.1/22.16.0): `structuredClone(new File([…])) instanceof File === false`. Node 24+ fixed it (round-trips as File). nub is faithful here — the loss is in the underlying node:worker_threads/v8 serializer, which nub does not intermediate for a native MessageChannel; nub backfills the `File` global on the 18.x floor (runtime/polyfills.cjs) so the test can construct the File, but cannot make the native serializer preserve its subclass identity. The 'subclass deserializes as closest serializable superclass' subtest fails for the same reason (the File subclass collapses to Blob)."
+          },
+          {
+            "maxMajor": 21,
+            "expected": [
+              "A detached ArrayBuffer cannot be transferred",
+              "Transferring a non-transferable platform object fails",
+              "Serializing a non-serializable platform object fails"
+            ],
+            "note": "NODE native-serializer error behavior on lines BELOW 22: Node's native MessageChannel postMessage does NOT reject these transfer/serialize error cases on Node 18/20 — re-transferring an already-detached ArrayBuffer, transferring a non-transferable Blob, and serializing a non-serializable Response all silently succeed instead of throwing DataCloneError. Verified on vanilla Node (no nub) on 18.19 and 20 (no throw) vs Node 22.15+/24 (throws DataCloneError). nub does not intermediate a native MessageChannel's serializer, so this is the underlying Node behavior, not a nub divergence — expected-fail on the 18/20 legs only. The throw boundary is verified at the matrix legs (no-throw on 18.19/20, throws on 22.15+); if a sub-22.15 leg (22.0-22.14) is ever added, re-verify the exact minor where the native rejection landed."
+          },
+          {
+            "maxMajor": 19,
+            "expected": [
+              "Resizable ArrayBuffer",
+              "Length-tracking TypedArray",
+              "Length-tracking DataView",
+              "Serializing OOB TypedArray throws",
+              "Serializing OOB DataView throws",
+              "Resizable ArrayBuffer is transferable",
+              "Length-tracking TypedArray is transferable",
+              "Length-tracking DataView is transferable",
+              "Transferring OOB TypedArray throws",
+              "Transferring OOB DataView throws"
+            ],
+            "note": "NODE 18 V8 limitation: resizable/growable ArrayBuffer (the `maxByteLength` option + `ArrayBuffer.prototype.resize`) is a V8 feature that landed in Node 20 — it is absent on the 18.x compat floor (`new ArrayBuffer(n, {maxByteLength}).resize` is not a function). nub cannot add a V8 engine feature, so these resizable-buffer serialize/transfer subtests are expected-fail on the Node 18 leg only; Node 20+ has the feature and passes them."
           }
         ],
-        "note": "Structured-clone battery (152 subtests). The version-independent expected fails are all NON-Blob: (1) DOM-only types with NO Node substrate — FileList/ImageData/ImageBitmap need `document`/canvas (throw 'document is not defined' / 'OffscreenCanvas is not defined'); legitimately out of scope (no DOM on Node), kept expected-fail rather than skip so a future DOM polyfill surfaces as an unexpected-pass. (2) 'Growable SharedArrayBuffer instanceof ArrayBuffer' — a growable SAB is not an ArrayBuffer instance under Node. Plus two Node-22-ONLY File-clone fails (see `versioned`). The 19 Blob clone rows now PASS — `cloned instanceof Blob` AND the Blob's bytes-via-Response are fixed (runtime/worker-blob-url.cjs makes globalThis.Blob a Proxy over the native Blob, keeping `globalThis.Blob.prototype === node:buffer.Blob.prototype` so a deserialized native Blob passes both `instanceof` and undici's webidl brand check). Every Map/Set/Date/typed-array/SAB-identity/transfer/circular case also passes."
+        "note": "Structured-clone battery (152 subtests). The version-independent expected fails are all NON-Blob: (1) DOM-only types with NO Node substrate — FileList/ImageData/ImageBitmap need `document`/canvas (throw 'document is not defined' / 'OffscreenCanvas is not defined'); legitimately out of scope (no DOM on Node), kept expected-fail rather than skip so a future DOM polyfill surfaces as an unexpected-pass. (2) 'Growable SharedArrayBuffer instanceof ArrayBuffer' — a growable SAB is not an ArrayBuffer instance under Node. Plus three VERSION-GATED bands (see `versioned`), all genuine below-floor Node limitations nub cannot fix and does not mask on the versions where the behavior is correct: File→Blob clone loss on Node <24, native-serializer non-rejection on Node <22, and resizable-ArrayBuffer absence on Node 18. The 19 Blob clone rows now PASS — `cloned instanceof Blob` AND the Blob's bytes-via-Response are fixed (runtime/worker-blob-url.cjs makes globalThis.Blob a Proxy over the native Blob, keeping `globalThis.Blob.prototype === node:buffer.Blob.prototype` so a deserialized native Blob passes both `instanceof` and undici's webidl brand check). Every Map/Set/Date/typed-array/SAB-identity/transfer/circular case also passes."
       }
     },
 

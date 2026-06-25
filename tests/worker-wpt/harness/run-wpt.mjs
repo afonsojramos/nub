@@ -54,12 +54,18 @@ const NUB = findNub();
 const status = JSON.parse(readFileSync(STATUS_PATH, "utf8"));
 
 // The Node version under test. In CI each matrix leg runs `node run-wpt.mjs` with
-// that leg's Node on PATH (setup-node), and WPT_NUB resolves the same Node — so the
-// orchestrator's own process.version IS the version every subprocess runs under.
-// Used to gate VERSION-SPECIFIC expected-fails (a divergence inherited from a
-// specific Node line, e.g. structuredClone(File) losing its File-ness on Node 22,
-// fixed in Node 24+) so the gate stays green on the floor without masking the
-// behavior on versions where it's actually correct.
+// that leg's Node on PATH (setup-node), so this orchestrator's own process.version
+// IS the version every subprocess must run under. We ENFORCE that below by pinning
+// NODE_EXECUTABLE=process.execPath on the spawned nub children — without it, nub
+// would read the repo-root package.json `engines.node` (>=22.15.0) and silently
+// PROVISION a satisfying Node on the floor legs, so the "Node 18.19/20 leg" would
+// actually run a >=22.15 Node and the floor coverage would be vacuous.
+//
+// NODE_MAJOR is used to gate VERSION-SPECIFIC expected-fails (a divergence inherited
+// from a specific Node line, e.g. structuredClone(File) losing its File-ness on Node
+// 22, fixed in Node 24+) so the gate stays green on the floor without masking the
+// behavior on versions where it's actually correct. The NODE_EXECUTABLE pin keeps
+// the children's Node provably equal to this NODE_MAJOR.
 const NODE_MAJOR = Number(process.versions.node.split(".")[0]) || 0;
 
 // Resolve a fail-entry to the set of subtest names expected to fail ON THIS Node.
@@ -116,7 +122,11 @@ function runOne(rel, scope) {
   return new Promise((res) => {
     const child = spawn(NUB, [DRIVER, WPT_ROOT, rel, scope], {
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env },
+      // Pin nub's Node to THIS harness's Node (the matrix leg's setup-node Node).
+      // NODE_EXECUTABLE bypasses pin-file/engines resolution, so nub can't upgrade
+      // past the floor via the repo-root engines.node >=22.15.0 — the floor legs
+      // run the real floor Node. (See the NODE_MAJOR comment above.)
+      env: { ...process.env, NODE_EXECUTABLE: process.execPath },
     });
     let out = "";
     let err = "";
