@@ -33,16 +33,18 @@ $Exe = "$BinDir\nub.exe"
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 
-# Download the per-platform archive (binary + runtime) and extract it into the
-# install dir. The archive ships bin\nub.exe alongside runtime\ (preload.mjs +
-# vendored node_modules); without runtime\, nub cannot transpile at all (A30).
+# Download the per-platform archive and extract it into the install dir. The
+# archive ships ONLY bin\ — nub is a single self-contained binary that embeds its
+# runtime (preload + vendored node_modules + native addon) and JIT-extracts it to
+# the user cache on first run, so there is no sidecar runtime\ to ship.
 $Url = "https://github.com/nubjs/nub/releases/download/v$Version/nub-$Target.zip"
 Write-Host "Downloading from $Url..."
 
 $TmpZip = Join-Path $env:TEMP "nub-$Target-$PID.zip"
 try {
     Invoke-WebRequest -Uri $Url -OutFile $TmpZip -UseBasicParsing
-    # Replace any prior bin\ + runtime\ for a clean upgrade, then extract.
+    # Replace any prior bin\ for a clean upgrade. A stale runtime\ from a
+    # pre-single-binary install is also removed for hygiene, then extract bin\.
     if (Test-Path $BinDir) { Remove-Item -Recurse -Force $BinDir }
     if (Test-Path "$InstallDir\runtime") { Remove-Item -Recurse -Force "$InstallDir\runtime" }
     Expand-Archive -Path $TmpZip -DestinationPath $InstallDir -Force
