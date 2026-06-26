@@ -31,6 +31,30 @@ pub struct ProvisionedPm {
     pub version: String,
 }
 
+/// Join a registry-resolved version onto the PM store dir, asserting the result
+/// stays UNDER the store. The STRUCTURAL half of the F0c containment, paired with
+/// [`registry::validate_version`]'s char-blocklist: an ABSOLUTE or DRIVE-prefixed
+/// version (`C:foo` on Windows) makes `Path::join` DISCARD the base and escape the
+/// store, so the bin nub then writes + EXECUTES would land outside `<store>/pm/<pm>/`.
+/// This is the exact escape class a char-blocklist is most apt to miss a
+/// metacharacter for (the Windows `:` slipped through once). `validate_version`
+/// already rejects those at resolution, so in practice this never fires — it is
+/// belt-and-suspenders. The two layers are complementary: this catches the
+/// base-discarding join (absolute/drive), while the separator/`..` class stays with
+/// `validate_version` (`PathBuf::starts_with` is a lexical component-prefix and does
+/// NOT normalize `..`, so it is not a traversal guard on its own — but it is
+/// component-wise, so a sibling-prefix dir like `…/pm-evil` does not spuriously pass).
+fn store_version_dir(pm_store: &Path, version: &str) -> Result<PathBuf> {
+    let dir = pm_store.join(version);
+    if !dir.starts_with(pm_store) {
+        bail!(
+            "refusing to use {version:?} as a store path component — it escapes {}",
+            pm_store.display()
+        );
+    }
+    Ok(dir)
+}
+
 /// Download + verify + extract the pinned package manager into nub's store,
 /// returning its runnable bin. Flow mirrors [`provision_node`]:
 ///   1. split any Corepack `+<algo>.<hex>` pin hash off the pinned version (the
@@ -143,7 +167,7 @@ pub fn provision_pm_announced(
         cb(&dist.version);
     }
 
-    let final_dir = pm_store.join(&dist.version);
+    let final_dir = store_version_dir(&pm_store, &dist.version)?;
     let bin = final_dir.join("package").join(&dist.bin_subpath);
     if bin.is_file() {
         return Ok(ProvisionedPm {
@@ -206,7 +230,7 @@ pub fn provision_pm_from_tarball(
     store_root: &Path,
 ) -> Result<ProvisionedPm> {
     let pm_store = store_root.join("pm").join(pm.to_string());
-    let final_dir = pm_store.join(&dist.version);
+    let final_dir = store_version_dir(&pm_store, &dist.version)?;
     let bin = final_dir.join("package").join(&dist.bin_subpath);
 
     // Cache hit on the exact resolved version → done, zero work (the warm re-pin
@@ -509,6 +533,23 @@ impl Drop for WorkGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// F0c structural backstop: a legit version stays under the store; an absolute
+    /// component (the cross-platform stand-in for the Windows `C:foo` drive-relative
+    /// escape, where `Path::join` discards the base) is refused. `validate_version`
+    /// blocks both before they reach here — this proves the second line of defense.
+    #[test]
+    fn store_version_dir_contains_legit_and_rejects_a_base_discarding_join() {
+        let store = Path::new("/var/cache/nub/pm/pnpm");
+        assert_eq!(
+            store_version_dir(store, "11.9.0").unwrap(),
+            store.join("11.9.0")
+        );
+        assert!(
+            store_version_dir(store, "/etc/evil").is_err(),
+            "an absolute version makes join discard the base — must be refused"
+        );
+    }
     use crate::pm::Pm;
 
     #[test]
