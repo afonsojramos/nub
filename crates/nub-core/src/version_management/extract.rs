@@ -123,6 +123,16 @@ fn extract_tar_xz_capped(
     // recreates a symlink entry the same way `Archive::unpack` did, while the
     // manual walk lets us bound the entry COUNT (the `tar` crate has no
     // entry-count guard) on top of the decompression cap.
+    //
+    // `Archive::unpack` is itself a per-entry `unpack_in` loop; this hand-rolled
+    // version intentionally drops only two of its behaviors, both immaterial for a
+    // Node `.tar.xz`: (1) the deferred final directory pass (a no-op here — it
+    // exists to reapply restrictive dir *permissions*, gated on
+    // `preserve_permissions`, which a default `Archive` leaves off, so only dir
+    // mtimes differ, which nothing reads); (2) Windows `\\?\` long-path
+    // canonicalization (unreachable — Windows Node ships as `.zip`, handled by
+    // `extract_zip`). File data, exec bits, symlink targets, and the `..`/absolute
+    // traversal guard are all preserved by `unpack_in`.
     let decoder = CappedReader::new(liblzma::read::XzDecoder::new(file), decompressed_cap);
     let mut tar = tar::Archive::new(decoder);
     std::fs::create_dir_all(dest_parent)
