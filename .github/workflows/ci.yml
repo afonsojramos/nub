@@ -255,6 +255,35 @@ jobs:
       # find_preload extraction path, so this exercises the same code a release build does.
       - name: Build release nub.exe (--features embed-runtime)
         run: cargo build -p nub-cli --release --features embed-runtime
+      # The WHOLE point of a Windows runner is the on-access AV heuristic (process
+      # writes a DLL then dlopen's it). GitHub-hosted runners ship with real-time
+      # protection OFF, so try to turn it ON before the round-trip so the scan is
+      # actually firing. This needs admin (runners are admin-capable) but tamper-
+      # protection or the image policy may refuse — that's an informative outcome,
+      # not a failure, so this step never fails the job; it just records whether RTP
+      # actually came on. The round-trip step below re-reads + prints the live status.
+      - name: Try to enable Defender real-time protection
+        shell: pwsh
+        run: |
+          Write-Host "=== Defender status BEFORE enable attempt ==="
+          Get-MpComputerStatus |
+            Select-Object RealTimeProtectionEnabled, IsTamperProtected, AMRunningMode |
+            Format-List | Out-String | Write-Host
+          try {
+            Set-MpPreference -DisableRealtimeMonitoring $false -ErrorAction Stop
+            Write-Host "Set-MpPreference -DisableRealtimeMonitoring \$false succeeded"
+          } catch {
+            Write-Host "Set-MpPreference failed (expected if tamper-protected / policy-locked): $_"
+          }
+          Write-Host "=== Defender status AFTER enable attempt ==="
+          $st = Get-MpComputerStatus
+          $st | Select-Object RealTimeProtectionEnabled, IsTamperProtected, AMRunningMode |
+            Format-List | Out-String | Write-Host
+          if ($st.RealTimeProtectionEnabled) {
+            Write-Host "RTP_OUTCOME: real-time protection is ON — round-trip will run under active scanning"
+          } else {
+            Write-Host "RTP_OUTCOME: real-time protection is OFF (tamper-protected:$($st.IsTamperProtected)) — CI cannot exercise active-RTP; residual risk needs a post-publish stock-Defender machine"
+          }
       - name: Round-trip — extract, dlopen, execute, warm cache, Defender
         shell: pwsh
         run: |
