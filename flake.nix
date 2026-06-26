@@ -105,18 +105,21 @@
       apps = forAllSystems (
         system:
         let
-          nub = nubFor system;
+          nubPkg = nubFor system;
         in
-        rec {
+        {
           nub = {
             type = "app";
-            program = "${nub}/bin/nub";
+            program = "${nubPkg}/bin/nub";
           };
           nubx = {
             type = "app";
-            program = "${nub}/bin/nubx";
+            program = "${nubPkg}/bin/nubx";
           };
-          default = nub;
+          default = {
+            type = "app";
+            program = "${nubPkg}/bin/nub";
+          };
         }
       );
     };

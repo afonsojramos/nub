@@ -39,9 +39,6 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@v16
 
-      - name: Cache Nix store
-        uses: DeterminateSystems/magic-nix-cache-action@v8
-
       # Evaluate every system's outputs (the locked flake must evaluate for all
       # four targets, including the Darwin ones that cannot build on this runner).
       - name: nix flake check
