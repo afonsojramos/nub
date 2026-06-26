@@ -1,7 +1,7 @@
 import { DocsLayout } from 'fumadocs-ui/layouts/docs';
 import type { ReactNode } from 'react';
 import type { Node as TreeNode, Root as TreeRoot } from 'fumadocs-core/page-tree';
-import { baseOptions } from '@/lib/layout.shared';
+import { baseOptions, githubPillLink } from '@/lib/layout.shared';
 import { source } from '@/lib/source';
 
 /* Pages that map to a concrete command get a subtle, right-aligned mono chip
@@ -75,7 +75,7 @@ function styleNode(node: TreeNode): TreeNode {
 }
 
 export default function Layout({ children }: { children: ReactNode }) {
-  // Keep the nav title + GitHub link, but drop the "Docs"/"Blog" nav links
+  // Keep the nav title + GitHub star pill, but drop the "Docs"/"Blog" nav links
   // from the docs sidebar — they only belong in the top home nav.
   const { links, ...base } = baseOptions();
 
@@ -85,7 +85,7 @@ export default function Layout({ children }: { children: ReactNode }) {
   };
 
   return (
-    <DocsLayout tree={tree} {...base} links={[]}>
+    <DocsLayout tree={tree} {...base} links={[githubPillLink()]}>
       {children}
     </DocsLayout>
   );

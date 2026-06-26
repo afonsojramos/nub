@@ -6,6 +6,7 @@ import { InstallTabs } from '@/components/install-tabs';
 import { MigrationPrompt, ViewRepoLink } from '@/components/migration-prompt';
 import { Terminal, Source, BenchBars } from '@/components/code';
 import { ToolkitTabs } from '@/components/toolkit-tabs';
+import { StarNudge } from '@/components/star-nudge';
 import { getLatestNode } from '@/lib/node-version';
 
 /* The "Copy agent prompt" button copies start.md VERBATIM — start.md is the
@@ -221,6 +222,11 @@ async function Hero() {
             'radial-gradient(55% 50% at 50% -5%, rgba(255,93,59,0.16), transparent 70%)',
         }}
       />
+      {/* Handwritten "Leave a star" annotation in the hero's top-right; its arrow
+          swoops up to the star pill in the bar above. Mounted here but PORTALS to
+          <body> so it renders over the nav (escaping the hero's stacking context);
+          only the home route mounts it. Optional — see StarNudge. */}
+      <StarNudge />
       {/* Wider than the rest of the page (smaller gutters) so the H1 has room
           and never breaks past 3 lines. Stacks to one column below xl. */}
       <div className="relative mx-auto flex min-h-[calc(100svh-3.5rem)] w-full max-w-[88rem] items-center px-6 py-16 sm:px-8">

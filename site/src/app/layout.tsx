@@ -1,6 +1,6 @@
 import './global.css';
 import { RootProvider } from 'fumadocs-ui/provider/next';
-import { Fraunces, Newsreader, IBM_Plex_Mono } from 'next/font/google';
+import { Fraunces, Newsreader, IBM_Plex_Mono, Caveat } from 'next/font/google';
 import type { ReactNode } from 'react';
 import type { Metadata, Viewport } from 'next';
 
@@ -28,6 +28,17 @@ const plexMono = IBM_Plex_Mono({
   variable: '--font-plex-mono',
   display: 'swap',
   weight: ['400', '500', '600'],
+});
+
+// Handwriting face — used ONLY by the optional "Leave a Star" nudge near the
+// header pill. Gated behind that component's SHOW_STAR_NUDGE flag, so it costs
+// nothing visually when the nudge is off (the font still preloads; if the nudge
+// is permanently removed, drop this too).
+const caveat = Caveat({
+  subsets: ['latin'],
+  variable: '--font-caveat',
+  display: 'swap',
+  weight: ['600'],
 });
 
 const TITLE = 'Nub — an all-in-one toolkit for Node.js';
@@ -120,7 +131,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html
       lang="en"
-      className={`${fraunces.variable} ${newsreader.variable} ${plexMono.variable}`}
+      className={`${fraunces.variable} ${newsreader.variable} ${plexMono.variable} ${caveat.variable}`}
       suppressHydrationWarning
     >
       <body className="flex min-h-screen flex-col antialiased">
