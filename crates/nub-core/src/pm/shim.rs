@@ -229,21 +229,28 @@ pub enum ShimDecision {
 ///   - pinned + name mismatch + [`Nesting::Nested`] → fall through, NOT refuse:
 ///     a running PM spawned this (a lifecycle script invoking a different PM),
 ///     so refusing would break an install the user never directly typed. Only a
-///     TOP-LEVEL mismatch — one the user can actually fix — stays strict.
+///     TOP-LEVEL mismatch — one the user can actually fix — stays strict;
+///   - pinned + name mismatch + `global` → fall through, NOT refuse (2026-06-26):
+///     a GLOBAL op (`npm install -g`, `yarn global add`, `npm ls -g`) targets the
+///     user's global prefix and never the project's lockfile/node_modules, so the
+///     refusal's whole rationale ("a competing lockfile and node_modules here")
+///     does not apply. The project pin is project-scoped; a global op is not.
+///     `global` is computed from the argv by [`is_global_invocation`].
 pub fn decide(
     invoked: ShimName,
     pin: &PinState,
     first_arg: Option<&str>,
     nesting: Nesting,
+    global: bool,
 ) -> ShimDecision {
     // A nub-pinned project: nub is the manager. Foreign-PM shims refuse and
-    // redirect to nub, with the same transparent/nested escapes a sibling-PM
-    // mismatch gets (a `npm create vite` or a nested lifecycle call still flows
-    // to the system PM rather than breaking).
+    // redirect to nub, with the same transparent/nested/global escapes a
+    // sibling-PM mismatch gets (a `npm create vite`, a nested lifecycle call, or
+    // a global install still flows to the system PM rather than breaking).
     if let PinState::NubPinned { provenance } = pin {
         let transparent = invoked.always_transparent()
             || first_arg.is_some_and(|verb| TRANSPARENT_VERBS.contains(&verb));
-        return if transparent || nesting == Nesting::Nested {
+        return if transparent || nesting == Nesting::Nested || global {
             ShimDecision::FallThrough { invoked }
         } else {
             ShimDecision::RefuseNubPinned {
@@ -267,17 +274,48 @@ pub fn decide(
     // A name mismatch: transparent verbs always escape; a NESTED invocation
     // (spawned by a running PM, e.g. a pnpm postinstall calling `npm`) escapes
     // too — refusing there breaks an install the user issued at one layer up,
-    // never typed `npm` for, and can't fix from the failing command. Only a
-    // top-level, non-transparent mismatch the user can correct stays strict.
+    // never typed `npm` for, and can't fix from the failing command; a GLOBAL op
+    // escapes too — it writes the global prefix, not this project. Only a
+    // top-level, non-transparent, project-scoped mismatch stays strict.
     let transparent = invoked.always_transparent()
         || first_arg.is_some_and(|verb| TRANSPARENT_VERBS.contains(&verb));
-    if transparent || nesting == Nesting::Nested {
+    if transparent || nesting == Nesting::Nested || global {
         ShimDecision::FallThrough { invoked }
     } else {
         ShimDecision::Refuse {
             pinned_pm: *pinned,
             provenance: *provenance,
         }
+    }
+}
+
+/// Whether this shim invocation targets the user's GLOBAL prefix rather than the
+/// current project — `npm install -g`, `pnpm add --global`, `yarn global add`,
+/// `npm ls -g`, … A global op writes the global prefix and NEVER the project's
+/// lockfile or node_modules, so the cross-PM project-pin refusal — whose entire
+/// rationale is "a different package manager here would write a competing
+/// lockfile and node_modules" — does not apply to it; [`decide`] lets a global
+/// mismatch fall through to the system PM instead of refusing. Pure over the
+/// argv (no env / FS), matching the rest of the decision core.
+pub fn is_global_invocation(invoked: ShimName, args: &[String]) -> bool {
+    match invoked {
+        // npm / pnpm (and their npx/pnpx runners) spell global as the `-g` /
+        // `--global` boolean flag, placeable anywhere in the command (`npm -g
+        // ls`, `npm install -g <pkg>`). A `--` separator ends option parsing —
+        // everything after is a literal operand (`npm install -- -g` installs a
+        // package literally named `-g`), so the flag is only honored before it.
+        // Match the BARE flag only — never a `--global=<val>` form: nopt accepts
+        // `--global=false` as an explicit LOCAL install, and treating that as
+        // global would wrongly bypass the refusal (a dangerous false positive).
+        // `--global=true` becoming a harmless false-negative is the safe trade.
+        ShimName::Npm | ShimName::Npx | ShimName::Pnpm | ShimName::Pnpx => args
+            .iter()
+            .take_while(|a| a.as_str() != "--")
+            .any(|a| matches!(a.as_str(), "-g" | "--global")),
+        // yarn classic spells global as a `global` SUBCOMMAND (`yarn global
+        // add`); it has no `-g` flag, and Berry dropped global entirely. Only
+        // the FIRST token counts — a later `global` is an operand.
+        ShimName::Yarn | ShimName::Yarnpkg => args.first().is_some_and(|a| a == "global"),
     }
 }
 
@@ -1479,7 +1517,7 @@ mod tests {
         // `nested_mismatch_falls_through_top_level_still_refuses`.
         for (invoked, pin, arg, want, why) in cases {
             assert_eq!(
-                decide(*invoked, pin, *arg, Nesting::TopLevel),
+                decide(*invoked, pin, *arg, Nesting::TopLevel, false),
                 *want,
                 "{why} (invoked {invoked:?}, first arg {arg:?})"
             );
@@ -1498,7 +1536,7 @@ mod tests {
         // The bug: a pnpm postinstall shells out to `npm install` (a name
         // mismatch). TOP-LEVEL that refuses — the user typed it and can fix it.
         assert_eq!(
-            decide(Npm, &pnpm, Some("install"), Nesting::TopLevel),
+            decide(Npm, &pnpm, Some("install"), Nesting::TopLevel, false),
             Refuse {
                 pinned_pm: Pm::Pnpm,
                 provenance: PinProvenance::PackageManagerField,
@@ -1508,14 +1546,14 @@ mod tests {
         // NESTED (a running PM set npm_config_user_agent) it must fall through,
         // not refuse — otherwise the pnpm-driven install breaks on its own hook.
         assert_eq!(
-            decide(Npm, &pnpm, Some("install"), Nesting::Nested),
+            decide(Npm, &pnpm, Some("install"), Nesting::Nested, false),
             FallThrough { invoked: Npm },
             "a nested mismatch falls through to the system PM instead of refusing"
         );
         // A nested SAME-PM call is unchanged: it still runs the pin. Nesting only
         // relaxes the mismatch refusal, never the run-the-pin path.
         assert_eq!(
-            decide(Pnpm, &pnpm, Some("install"), Nesting::Nested),
+            decide(Pnpm, &pnpm, Some("install"), Nesting::Nested, false),
             RunPinned {
                 pm: Pm::Pnpm,
                 bin_entry: "pnpm",
@@ -1539,6 +1577,110 @@ mod tests {
             "an empty marker is not a running PM"
         );
         assert_eq!(Nesting::from_env(|_| None), Nesting::TopLevel);
+    }
+
+    #[test]
+    fn global_mismatch_falls_through_local_still_refuses() {
+        use ShimDecision::*;
+        use ShimName::*;
+        let pnpm = PinState::Pinned {
+            pm: Pm::Pnpm,
+            provenance: PinProvenance::PackageManagerField,
+        };
+        let nub = PinState::NubPinned {
+            provenance: PinProvenance::PackageManagerField,
+        };
+
+        // A GLOBAL mismatch in a pnpm-pinned project falls through to the system
+        // npm — it writes the global prefix, not the project. The LOCAL form of
+        // the SAME command still refuses (unchanged): only `global` is toggled.
+        assert_eq!(
+            decide(Npm, &pnpm, Some("install"), Nesting::TopLevel, true),
+            FallThrough { invoked: Npm },
+            "a top-level global mismatch falls through, not refuse"
+        );
+        assert_eq!(
+            decide(Npm, &pnpm, Some("install"), Nesting::TopLevel, false),
+            Refuse {
+                pinned_pm: Pm::Pnpm,
+                provenance: PinProvenance::PackageManagerField,
+            },
+            "the LOCAL form still refuses — the bypass is global-only"
+        );
+        // A nub-pinned project gets the same global escape (nub never owns the
+        // user's global prefix either).
+        assert_eq!(
+            decide(Npm, &nub, Some("install"), Nesting::TopLevel, true),
+            FallThrough { invoked: Npm },
+            "a global mismatch in a nub-pinned project also falls through"
+        );
+        assert_eq!(
+            decide(Npm, &nub, Some("install"), Nesting::TopLevel, false),
+            RefuseNubPinned {
+                provenance: PinProvenance::PackageManagerField,
+            },
+            "the LOCAL form in a nub-pinned project still refuses"
+        );
+    }
+
+    #[test]
+    fn is_global_invocation_detects_the_global_forms_only() {
+        use ShimName::*;
+        let v = |args: &[&str]| args.iter().map(|s| s.to_string()).collect::<Vec<String>>();
+
+        // npm / pnpm: the `-g` / `--global` flag anywhere in the command.
+        assert!(is_global_invocation(Npm, &v(&["install", "-g", "tldr"])));
+        assert!(is_global_invocation(Npm, &v(&["-g", "ls"])));
+        assert!(is_global_invocation(Pnpm, &v(&["add", "--global", "tldr"])));
+        assert!(is_global_invocation(Npm, &v(&["ls", "-g"])));
+        // Other global-ish read ops carry the same flag and bypass alike.
+        assert!(is_global_invocation(Npm, &v(&["root", "-g"])));
+
+        // yarn classic: the `global` SUBCOMMAND (no `-g` flag exists).
+        assert!(is_global_invocation(Yarn, &v(&["global", "add", "tldr"])));
+        assert!(is_global_invocation(Yarnpkg, &v(&["global", "list"])));
+
+        // NOT global: a plain local install, or `global` appearing as a later
+        // operand rather than the yarn subcommand.
+        assert!(!is_global_invocation(Npm, &v(&["install", "react"])));
+        assert!(!is_global_invocation(Yarn, &v(&["add", "global"])));
+        // A `--` separator makes a trailing `-g` a literal operand, not the flag.
+        assert!(!is_global_invocation(Npm, &v(&["install", "--", "-g"])));
+        // `-g` is not a yarn flag, so a bare yarn `-g` is not treated as global.
+        assert!(!is_global_invocation(Yarn, &v(&["-g"])));
+        // `--global=false` is an explicit LOCAL install (nopt boolean form);
+        // misreading it as global would WRONGLY bypass the refusal, so only the
+        // BARE `--global` flag counts — never a `--global=<val>` form.
+        assert!(!is_global_invocation(
+            Npm,
+            &v(&["install", "--global=false", "react"])
+        ));
+        // npm's local-layout `--global-style` is a near-miss that must NOT match.
+        assert!(!is_global_invocation(
+            Npm,
+            &v(&["install", "--global-style", "react"])
+        ));
+    }
+
+    #[test]
+    fn matched_global_runs_the_pin_not_fallthrough() {
+        use ShimDecision::*;
+        use ShimName::*;
+        let pnpm = PinState::Pinned {
+            pm: Pm::Pnpm,
+            provenance: PinProvenance::PackageManagerField,
+        };
+        // The ordering guarantee: a MATCHED-PM global (`pnpm add -g` in a pnpm
+        // pin) still RUNS THE PIN — global relaxes only the mismatch refusal,
+        // never the run-the-pin path (same_pm_name short-circuits first).
+        assert_eq!(
+            decide(Pnpm, &pnpm, Some("add"), Nesting::TopLevel, true),
+            RunPinned {
+                pm: Pm::Pnpm,
+                bin_entry: "pnpm",
+            },
+            "a matched-PM global runs the pinned PM, not the system fall-through"
+        );
     }
 
     #[test]

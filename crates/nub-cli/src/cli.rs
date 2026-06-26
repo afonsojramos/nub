@@ -6569,11 +6569,17 @@ fn shim_plan(
     // top-level invocation (no marker) keeps full strict behavior.
     let nesting = Nesting::from_env(|k| env::var(k).ok());
 
+    // A GLOBAL op (`npm install -g`, `yarn global add`, `npm ls -g`) writes the
+    // user's global prefix, never this project's lockfile/node_modules, so the
+    // cross-PM project-pin refusal does not apply — `decide` lets it fall through.
+    let global = shim::is_global_invocation(invoked, args);
+
     match shim::decide(
         invoked,
         &pin_state,
         args.first().map(String::as_str),
         nesting,
+        global,
     ) {
         ShimDecision::Refuse {
             pinned_pm,

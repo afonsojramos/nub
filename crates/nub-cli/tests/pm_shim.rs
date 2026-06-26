@@ -240,6 +240,57 @@ fn mismatched_pm_in_a_pinned_project_refuses_with_the_redirect() {
 }
 
 #[test]
+fn global_install_falls_through_but_local_install_still_refuses() {
+    // A GLOBAL install (`npm install -g`) targets the user's global prefix and
+    // never the project's lockfile/node_modules, so the cross-PM project-pin
+    // refusal's rationale does not apply — it must fall through to the system
+    // npm. The LOCAL form of the SAME command in the SAME project still refuses.
+    let work = tmp("global");
+    let proj = work.join("proj");
+    std::fs::create_dir_all(&proj).unwrap();
+    std::fs::write(
+        proj.join("package.json"),
+        r#"{"packageManager":"pnpm@9.0.0"}"#,
+    )
+    .unwrap();
+    let sys = work.join("sys");
+    std::fs::create_dir_all(&sys).unwrap();
+    let fake = fake_pm(&sys, "npm");
+    let link = shim_link(&work, "npm");
+    let env = [
+        ("PATH", sys.to_str().unwrap()),
+        ("HOME", work.to_str().unwrap()),
+    ];
+
+    // Global: passes through to the system npm with argv verbatim.
+    let (stdout, stderr, code) = run(&link, &["install", "-g", "tldr"], &proj, &env);
+    assert_eq!(
+        code, 0,
+        "a global install must NOT refuse — it falls through; stderr:\n{stderr}"
+    );
+    assert_eq!(
+        stdout,
+        format!("FAKE:{}:install -g tldr\n", fake.display()),
+        "the global install runs the system npm with argv passed verbatim"
+    );
+
+    // Local control: the same project, a LOCAL install, still refuses.
+    let (stdout, stderr, code) = run(&link, &["install", "react"], &proj, &env);
+    assert_eq!(
+        code, 1,
+        "the local install still refuses (the bypass is global-only); stderr:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("FAKE"),
+        "the system npm must NOT run on the local refusal, got:\n{stdout}"
+    );
+    assert!(
+        stderr.contains("refusing to run npm"),
+        "the local refusal still fires; stderr:\n{stderr}"
+    );
+}
+
+#[test]
 fn transparent_verb_falls_through_to_the_system_pm_not_the_pin() {
     let work = tmp("transparent");
     let proj = work.join("proj");
