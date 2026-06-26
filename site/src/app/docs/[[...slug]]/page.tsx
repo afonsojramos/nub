@@ -25,23 +25,64 @@ function GitHubIcon({ className }: { className?: string }) {
   );
 }
 
-/* Footer node injected into the docs TOC panel — the "Edit on GitHub" link,
-   styled to read as the last entry in the table of contents (matching the TOC
-   items' `text-sm text-fd-muted-foreground` and their `ps-3` left inset) rather
-   than as a foreign button. Replaces the former repo link that lived here. */
-function TocEditLink({ href }: { href: string }) {
+/* Footer node injected into the docs TOC panel: a GitHub repo link with a
+   handwritten "Leave a star" annotation scribbled above it, its little arrow
+   swooping down to the link — the docs-panel echo of the hero's star nudge.
+   The TOC column is a fixed-width sticky element, so (unlike the hero, where the
+   pill moves with viewport width) this arrow can be a static hand-drawn SVG.
+   The link itself stays an unobtrusive last-entry-of-the-TOC affordance. */
+function TocStarNudge({ href }: { href: string }) {
   return (
     <>
-      <hr className="mt-2 mb-1 border-fd-foreground/10" />
-      <a
-        href={href}
-        target="_blank"
-        rel="noopener noreferrer"
-        className="flex items-center gap-1.5 py-1.5 ps-3 text-sm text-fd-muted-foreground transition-colors hover:text-fd-accent-foreground"
-      >
-        <GitHubIcon className="size-3.5 shrink-0" />
-        <span>Edit on GitHub</span>
-      </a>
+      <hr className="mb-4 mt-2 border-fd-foreground/10" />
+      <div className="relative ps-3 pb-[72px]">
+        <a
+          href={href}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="flex items-center gap-1.5 py-1.5 text-sm text-fd-muted-foreground transition-colors hover:text-fd-accent-foreground"
+        >
+          <GitHubIcon className="size-3.5 shrink-0" />
+          <span>nubjs/nub</span>
+        </a>
+        {/* Handwritten nudge BELOW the link. The arrow sits ENTIRELY below the
+            link box — its tip is ~6px under the link's bottom edge and points UP
+            at it (never into the icon), an elongated swoosh descending toward the
+            label below. The link box is ~32px tall, so in this overlay's coords
+            (origin = the link's top-left) the link bottom is at y≈32 and the tip
+            at y≈38. The arrow stays in the icon's column (x<24), clear of the
+            link text; a thin stroke + slim head keep it from reading stubby. */}
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute left-3 top-0 select-none text-ember/85"
+        >
+          <svg
+            viewBox="0 0 120 100"
+            fill="none"
+            className="absolute left-0 top-0 h-[100px] w-[120px]"
+          >
+            {/* shaft: a long, gently-curved swoosh from above the label up to the
+                tip just below the link's bottom edge */}
+            <path
+              d="M23 74 C 10 64, 13 47, 7 39"
+              stroke="currentColor"
+              strokeWidth="1.7"
+              strokeLinecap="round"
+            />
+            {/* arrowhead, tip at (~7,38) — ~6px below the link bottom — pointing UP */}
+            <path
+              d="M2 47 L 7 38 L 13 45"
+              stroke="currentColor"
+              strokeWidth="1.7"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+          <span className="absolute left-0 top-[80px] block w-fit -rotate-3 whitespace-nowrap font-[family-name:var(--font-caveat)] text-lg leading-none">
+            Leave a star!
+          </span>
+        </div>
+      </div>
     </>
   );
 }
@@ -65,17 +106,11 @@ export default async function Page(props: {
 
   const MDXContent = page.data.body;
 
-  /* Construct the GitHub edit URL from the virtual file path fumadocs exposes on
-     the page object. The path is relative to the docs content root (e.g.
-     "runtime/index.mdx"), so we prepend the repo-relative prefix to build the
-     full edit URL. */
-  const editHref = `https://github.com/nubjs/nub/edit/main/site/content/docs/${(page as { path?: string }).path ?? ''}`;
-
   return (
     <DocsPage
       toc={page.data.toc}
       full={page.data.full}
-      tableOfContent={{ footer: <TocEditLink href={editHref} /> }}
+      tableOfContent={{ footer: <TocStarNudge href="https://github.com/nubjs/nub" /> }}
       footer={{ children: <PageStarFooter /> }}
     >
       <DocsTitle>{page.data.title}</DocsTitle>

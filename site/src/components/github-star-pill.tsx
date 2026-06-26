@@ -42,11 +42,12 @@ function StarIcon({ className }: { className?: string }) {
   );
 }
 
-/* Plain integer, NO thousands grouping (e.g. "1087", not "1,234") — matches the
-   bare presentation people expect on a star count. The pill is roomy enough for
-   the exact count, so — unlike the README badge — we don't abbreviate to "1.2k". */
+/* Abbreviated, GitHub-style: counts ≥1k collapse to one decimal with a trailing
+   ".0" stripped ("2161" → "2.2k", "2000" → "2k"); under 1k stays exact. Keeps the
+   pill compact and reads the way people expect a star count to. */
 function formatStars(count: number): string {
-  return String(count);
+  if (count < 1000) return String(count);
+  return `${(count / 1000).toFixed(1).replace(/\.0$/, '')}k`;
 }
 
 /* Fetch the repo's stargazer count, ISR-cached hourly (mirrors `/stars.svg`).
@@ -73,6 +74,7 @@ export async function GitHubStarPill({ repo }: { repo: string }) {
 
   return (
     <a
+      data-github-star-pill=""
       href={`https://github.com/${repo}`}
       target="_blank"
       rel="noopener noreferrer"
@@ -93,7 +95,7 @@ export async function GitHubStarPill({ repo }: { repo: string }) {
       <span className="flex items-center gap-1 font-[system-ui,-apple-system,'Segoe_UI',sans-serif]">
         <StarIcon className="size-3.5 shrink-0 text-fd-muted-foreground transition-colors group-hover:text-ember" />
         {stars !== null && (
-          <span className="tabular-nums leading-none">{formatStars(stars)}</span>
+          <span className="leading-none">{formatStars(stars)}</span>
         )}
       </span>
     </a>

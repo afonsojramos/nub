@@ -432,3 +432,18 @@ a[href] {
     transform: scaleX(1);
   }
 }
+
+/* Keep the nav's primary controls — search, theme switch, GitHub star pill —
+   visible down to the md breakpoint. Fumadocs' header hides that cluster below
+   lg (`max-lg:hidden`) and swaps in a compact mobile cluster (`lg:hidden`); we
+   shift both breakpoints from lg (1024px) to md (768px) for the md–lg band.
+   Keyed on the generated utility classes of the two direct <div> children of the
+   header <nav>, so it tracks fumadocs' header markup. */
+@media (min-width: 768px) and (max-width: 1023.98px) {
+  nav > div.max-lg\:hidden {
+    display: flex !important;
+  }
+  nav > div.lg\:hidden {
+    display: none !important;
+  }
+}
