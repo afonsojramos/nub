@@ -201,6 +201,152 @@ jobs:
       - run: cargo test -p nub-core --features embed-runtime
       - run: cargo build -p nub-cli --features embed-runtime
 
+  # TEMPORARY (PR #175 data point) — remove after Windows embed behavior is confirmed.
+  #
+  # The single-binary first-run mechanism is novel ON WINDOWS specifically: the binary
+  # extracts the embedded nub-native.node (a DLL) to a cache dir and dlopen's it on the
+  # first run — the "process writes a DLL then loads it" shape Windows Defender real-time
+  # scanning can flag. No other CI leg exercises extract-then-load: the `embed-runtime`
+  # job above only BUILDS the feature-on binary, and the release.yml test-install runs
+  # post-publish. This job builds the REAL release single binary (--features embed-runtime,
+  # with the actual release nub-native addon staged into the embedded blob), runs a TS
+  # fixture end-to-end on a runner with Defender enabled, and asserts the full first-run
+  # round-trip — extract -> dlopen -> transpile -> execute — plus warm-cache reuse, and
+  # surfaces any Defender detection so a silent quarantine can't pass as green. A clean
+  # exit 0 with correct output is the proof Defender did not block the write/load.
+  #
+  # Scope: this proves the Defender real-time-scan + extract/dlopen mechanism. It does
+  # NOT reproduce SmartScreen Mark-of-the-Web reputation (that needs a browser-downloaded,
+  # internet-zoned nub.exe — a separate download-UX concern). Standalone (NOT wired into
+  # ci-gate): it is a non-blocking data point, not a new required check.
+  windows-embed-roundtrip:
+    name: Windows embed round-trip (TEMPORARY, PR #175)
+    if: github.event_name == 'pull_request'
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      # Throwaway job: read-only cache (save-if: false) so it never churns the budget.
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          shared-key: ci-win-embed-roundtrip
+          save-if: false
+          workspaces: |
+            .
+            crates/nub-native
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: "24"
+      # Stage the REAL release addon into runtime/ so the embedded blob carries a
+      # loadable DLL — without it the extracted runtime can't transpile. nub-native is
+      # its own workspace (cdylib, panic=unwind); its .cargo/config routes output into
+      # the shared root target/. Windows cdylib output is nub_native.dll.
+      - name: Build + stage release nub-native addon
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd crates/nub-native && cargo build --release)
+          mkdir -p runtime/addons
+          cp target/release/nub_native.dll runtime/addons/nub-native.node
+      # Build the real single binary: --features embed-runtime makes build.rs tar+zstd-19
+      # the staged runtime/ into the binary; the binary extracts it on first run. The
+      # feature (not the profile) is what triggers the include_bytes! blob arm + the
+      # find_preload extraction path, so this exercises the same code a release build does.
+      - name: Build release nub.exe (--features embed-runtime)
+        run: cargo build -p nub-cli --release --features embed-runtime
+      - name: Round-trip — extract, dlopen, execute, warm cache, Defender
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          # Cold, isolated cache so the FIRST run is forced to extract (proves the
+          # DLL write + dlopen). cache_dir() honors XDG_CACHE_HOME on every platform,
+          # so the extracted dir is <XDG_CACHE_HOME>\nub\runtime-<key>.
+          $cache = Join-Path $env:RUNNER_TEMP "nub-embed-cache"
+          if (Test-Path $cache) { Remove-Item -Recurse -Force $cache }
+          $env:XDG_CACHE_HOME = $cache
+          $nubRoot = Join-Path $cache "nub"
+
+          $nub = Join-Path (Get-Location) "target\release\nub.exe"
+          if (-not (Test-Path $nub)) { throw "nub.exe not found at $nub" }
+
+          # Isolated work dir (no package.json/.nvmrc) so nub uses the PATH Node and
+          # no project pin interferes. A typed fixture forces real transpilation
+          # (annotations stripped) -> addon dlopen -> execute.
+          $work = Join-Path $env:RUNNER_TEMP "fixture"
+          if (Test-Path $work) { Remove-Item -Recurse -Force $work }
+          New-Item -ItemType Directory -Force -Path $work | Out-Null
+          $fixture = Join-Path $work "embed.ts"
+          @'
+          const greeting: string = "embed-roundtrip-ok";
+          const n: number = 21 * 2;
+          console.log(`${greeting}-${n}`);
+          '@ | Set-Content -Encoding utf8 $fixture
+
+          # --- First run: must extract runtime + dlopen addon + transpile + execute ---
+          Push-Location $work
+          $out1 = & $nub $fixture 2>&1 | Out-String
+          $code1 = $LASTEXITCODE
+          Pop-Location
+          Write-Host "first-run exit=$code1"
+          Write-Host "first-run output: $out1"
+          if ($code1 -ne 0) { throw "first run exited $code1 — extract/dlopen/execute failed" }
+          if ($out1 -notmatch "embed-roundtrip-ok-42") { throw "first run wrong output: $out1" }
+
+          # --- Cache assertions: exactly one runtime-* dir, addon + preload present ---
+          $rt = @(Get-ChildItem -Path $nubRoot -Directory -Filter "runtime-*")
+          if ($rt.Count -ne 1) { throw "expected exactly one runtime-* dir, got $($rt.Count)" }
+          $dir = $rt[0].FullName
+          Write-Host "extracted cache dir: $dir"
+          if (-not (Test-Path (Join-Path $dir "preload.mjs"))) { throw "preload.mjs missing in $dir" }
+          if (-not (Test-Path (Join-Path $dir "addons\nub-native.node"))) { throw "addon missing in $dir" }
+          $tmpLeft = @(Get-ChildItem -Path $nubRoot -Directory -Filter ".runtime-*")
+          if ($tmpLeft.Count -ne 0) { throw "leftover .tmp extract dir(s): $($tmpLeft.FullName -join ', ')" }
+          $mtime1 = (Get-Item $dir).LastWriteTimeUtc
+
+          # --- Second run: warm cache must be reused, no re-extract ---
+          Push-Location $work
+          $out2 = & $nub $fixture 2>&1 | Out-String
+          $code2 = $LASTEXITCODE
+          Pop-Location
+          Write-Host "second-run exit=$code2"
+          Write-Host "second-run output: $out2"
+          if ($code2 -ne 0) { throw "second run exited $code2" }
+          if ($out2 -notmatch "embed-roundtrip-ok-42") { throw "second run wrong output: $out2" }
+          $rt2 = @(Get-ChildItem -Path $nubRoot -Directory -Filter "runtime-*")
+          if ($rt2.Count -ne 1) { throw "warm run changed runtime-* dir count to $($rt2.Count)" }
+          $mtime2 = (Get-Item $dir).LastWriteTimeUtc
+          if ($mtime1 -ne $mtime2) { throw "warm run re-extracted (dir mtime $mtime1 -> $mtime2)" }
+          Write-Host "warm-cache reuse confirmed (dir mtime unchanged: $mtime1)"
+
+          # --- Defender: surface any detection so a silent quarantine can't pass green ---
+          Write-Host "=== Get-MpComputerStatus ==="
+          try {
+            Get-MpComputerStatus |
+              Select-Object AMRunningMode, RealTimeProtectionEnabled, AntivirusEnabled |
+              Format-List | Out-String | Write-Host
+          } catch { Write-Host "Get-MpComputerStatus unavailable: $_" }
+
+          Write-Host "=== Get-MpThreatDetection ==="
+          $threats = @(Get-MpThreatDetection -ErrorAction SilentlyContinue)
+          Write-Host "Defender threat-detection record count: $($threats.Count)"
+          if ($threats.Count -gt 0) {
+            $threats | Format-List | Out-String | Write-Host
+            # Fail only on a detection referencing a nub artifact / our cache path — the
+            # runner may carry pre-existing unrelated records.
+            $related = $threats | Where-Object {
+              $res = ($_.Resources -join ';')
+              ($res -match 'nub') -or ($res -match [regex]::Escape($cache))
+            }
+            if ($related) { throw "Defender flagged a nub artifact:`n$($related | Format-List | Out-String)" }
+            Write-Host "detections present but none reference a nub artifact — not a block"
+          } else {
+            Write-Host "no Defender threat detections"
+          }
+
+          Write-Host "ROUND-TRIP OK: extract -> dlopen -> transpile -> execute -> warm-cache reuse; Defender did not block"
+
   test:
     name: Test (${{ matrix.os }}, node ${{ matrix.node }})
     needs: matrix-plan
