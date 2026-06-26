@@ -18,8 +18,15 @@ pub(super) fn resolve_global_virtual_store_override(
             && !ci_mode
             && !virtual_store_only_setting
         {
-            tracing::warn!(
-                code = aube_codes::warnings::WARN_AUBE_GVS_INCOMPATIBLE,
+            // The notice is unactionable by the end user (the only fix is an
+            // upstream change in `{name}`), so an embedder that owns its own UX
+            // (`gvs_incompatible_warning = false`) demotes it to `debug` —
+            // silent at default verbosity, reachable when the engine log level
+            // is raised. The per-project fallback (`Some(false)`) is identical
+            // regardless; only the notice's level differs. The level can't be a
+            // runtime value in `tracing::event!`, so the message is built once
+            // and the macro selected by branch.
+            let msg = format!(
                 "`{name}` isn't compatible with aube's global virtual store — \
                  installing per-project instead. Install still succeeds; repeat \
                  installs of this project just won't share materialized packages \
@@ -31,6 +38,12 @@ pub(super) fn resolve_global_virtual_store_override(
                  auto-detection entirely. \
                  Details: https://aube.jdx.dev/package-manager/global-virtual-store"
             );
+            let code = aube_codes::warnings::WARN_AUBE_GVS_INCOMPATIBLE;
+            if aube_util::embedder().gvs_incompatible_warning {
+                tracing::warn!(code, "{msg}");
+            } else {
+                tracing::debug!(code, "{msg}");
+            }
             Some(false)
         } else {
             None

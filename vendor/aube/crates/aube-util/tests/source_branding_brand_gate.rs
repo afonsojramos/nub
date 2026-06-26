@@ -38,6 +38,7 @@ static NUBLIKE: Embedder = Embedder {
     self_update_enabled: false,
     warm_store_verify: false,
     read_branded_settings_env: false,
+    gvs_incompatible_warning: true,
     no_churn_lockfile_write: true,
     primer_ttl: None,
     cpu_budget: None,

@@ -198,6 +198,17 @@ pub struct Embedder {
     ///
     /// [`read_branded_pnpm_config`]: crate::engine_context::EngineContext::read_branded_pnpm_config
     pub read_branded_settings_env: bool,
+    /// When `true` (aube's default), the global-virtual-store *incompatible
+    /// package* auto-fallback emits a user-facing `WARN_AUBE_GVS_INCOMPATIBLE`
+    /// warning: an incompatible dep (e.g. Next.js) was detected, so the install
+    /// silently dropped to per-project materialization instead of the shared
+    /// store. An embedder sets this `false` to demote that notice to
+    /// `debug`-level — it is unactionable by the end user (the only fix is an
+    /// upstream change in the offending package), so a host that owns its own
+    /// UX hides it at default verbosity while keeping it reachable when the
+    /// engine log level is raised to `debug`. Gates ONLY the notice's level;
+    /// the per-project fallback BEHAVIOR is identical either way. Embedder-fixed.
+    pub gvs_incompatible_warning: bool,
     /// How long after the bundled primer's build date (`generated_at`) the
     /// offline metadata primer is consulted at all. `None` = unlimited (the
     /// primer never expires); `Some(d)` = consult the primer only while
@@ -263,6 +274,7 @@ pub const AUBE: Embedder = Embedder {
     warm_store_verify: true,
     no_churn_lockfile_write: false,
     read_branded_settings_env: true,
+    gvs_incompatible_warning: true,
     primer_ttl: None,
     cpu_budget: None,
 };

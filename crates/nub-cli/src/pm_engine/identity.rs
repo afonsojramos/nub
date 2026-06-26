@@ -135,6 +135,13 @@ pub(crate) const NUB: aube_util::Embedder = aube_util::Embedder {
     warm_store_verify: false,
     no_churn_lockfile_write: true,
     read_branded_settings_env: false,
+    // The GVS-incompatible auto-fallback notice (e.g. Next.js drops the install
+    // to per-project) is unactionable by the user — the only fix is upstream in
+    // the package — so nub demotes it from a default-shown warning to a
+    // `debug`-level detail: silent under `nub i`, reachable with
+    // `--loglevel debug` / `RUST_LOG`. The per-project fallback behavior itself
+    // is unchanged; only the notice is silenced.
+    gvs_incompatible_warning: false,
     primer_ttl: None,
     // Cap aube's CPU-bound pools (linker rayon pool, tokio worker seed) to the
     // real cgroup CFS-CPU-quota budget on a constrained box; `None` on an
@@ -175,5 +182,6 @@ const _: () = {
     assert!(!NUB.self_update_enabled);
     assert!(NUB.no_churn_lockfile_write);
     assert!(!NUB.read_branded_settings_env);
+    assert!(!NUB.gvs_incompatible_warning);
     assert!(NUB.primer_ttl.is_none());
 };
