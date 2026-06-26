@@ -61,6 +61,8 @@ jobs:
           (cd crates/nub-native && cargo build)
           mkdir -p runtime/addons
           cp target/debug/libnub_native.so runtime/addons/nub-native.node
+      - name: Install runtime npm deps
+        run: npm ci --ignore-scripts
       - name: Stage the reusable nub bundle
         shell: bash
         run: |
@@ -69,6 +71,19 @@ jobs:
           mkdir -p nub-bundle
           cp target/debug/nub nub-bundle/nub
           cp -r runtime nub-bundle/runtime
+          # Vendor the pure-JS runtime polyfills into the bundle (same set as npm/build-local.sh).
+          # `reqFromRuntime()` in preload.cjs resolves packages relative to runtime/, so they
+          # must be in runtime/node_modules/. The source runtime/ tree has none; the published
+          # npm package copies them here during packaging. Mirror that in the CI bundle.
+          mkdir -p nub-bundle/runtime/node_modules
+          cp -r node_modules/urlpattern-polyfill nub-bundle/runtime/node_modules/
+          mkdir -p nub-bundle/runtime/node_modules/@petamoriken
+          cp -r "node_modules/@petamoriken/float16" nub-bundle/runtime/node_modules/@petamoriken/
+          mkdir -p nub-bundle/runtime/node_modules/@js-temporal
+          cp -r "node_modules/@js-temporal/polyfill" nub-bundle/runtime/node_modules/@js-temporal/
+          cp -r node_modules/jsbi nub-bundle/runtime/node_modules/
+          mkdir -p nub-bundle/runtime/node_modules/@oxc-project
+          cp -r "node_modules/@oxc-project/runtime" nub-bundle/runtime/node_modules/@oxc-project/
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: nub-bundle

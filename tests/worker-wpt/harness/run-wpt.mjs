@@ -175,9 +175,22 @@ const PASS = 0;
 
   for (const rel of files) {
     const entry = status.tests[rel];
-    if (entry.skip) {
+    // skip can be a string (unconditional) or {versioned:[{minMajor?,maxMajor?,reason}]}
+    // (version-gated: only skip when NODE_MAJOR falls inside a listed band).
+    const skipReason = (() => {
+      if (typeof entry.skip === "string") return entry.skip;
+      if (entry.skip && entry.skip.versioned) {
+        for (const v of entry.skip.versioned) {
+          const okMin = v.minMajor == null || NODE_MAJOR >= v.minMajor;
+          const okMax = v.maxMajor == null || NODE_MAJOR <= v.maxMajor;
+          if (okMin && okMax) return v.reason;
+        }
+      }
+      return null;
+    })();
+    if (skipReason) {
       skipped++;
-      report.push(`  skip  ${rel}  (${entry.skip})`);
+      report.push(`  skip  ${rel}  (${skipReason})`);
       continue;
     }
     const expectedFails = expectedFailsFor(entry);
