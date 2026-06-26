@@ -448,6 +448,14 @@ fn exec_dlx_grammar_accepts_documented_forms() {
                 &["dlx", "-p", "cowsay", "cowsay"],
                 "pnpm dlx -p (aube's --package short)",
             ),
+            // `x` is the short alias of `dlx` (bun's `bun x`): it must accept the
+            // exact same fetch-and-run grammar, including the `-p`/`--package`
+            // value-flag binding.
+            (&["x", "cowsay"], "nub x <pkg> (dlx alias)"),
+            (
+                &["x", "-p", "cowsay", "cowsay"],
+                "nub x -p (dlx alias, --package short)",
+            ),
         ],
     );
 }

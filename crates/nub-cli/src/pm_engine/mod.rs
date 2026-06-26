@@ -229,9 +229,12 @@ pub const ENGINE_VERBS: &[VerbSpec] = &[
         family: Family::Install,
         aube_args: "commands::deploy::DeployArgs",
     },
+    // `x` is the short fetch-and-run spelling (the `x` in `nubx`/`bunx`; `bun x`
+    // == `bunx` == dlx). It aliases dlx — NOT exec — so `nub x <tool>` fetches a
+    // missing tool, matching the `nubx` standalone binary.
     VerbSpec {
         canonical: "dlx",
-        aliases: &[],
+        aliases: &["x"],
         family: Family::Install,
         aube_args: "commands::dlx::DlxArgs",
     },
@@ -3117,15 +3120,27 @@ mod tests {
     }
 
     #[test]
+    fn x_is_an_alias_of_dlx() {
+        // `nub x <tool>` is the short fetch-and-run spelling — it resolves to the
+        // same `dlx` engine verb as `nub dlx`, so both share one dispatch path
+        // (`run_dlx` → `aube::commands::dlx`). It is NOT exec: `x` fetches a
+        // missing tool, exec does not.
+        let spec = lookup_verb("x").expect("x must be a registered verb");
+        assert_eq!(spec.canonical, "dlx");
+        assert_eq!(lookup_verb("dlx").map(|s| s.canonical), Some("dlx"));
+    }
+
+    #[test]
     fn verb_registry_excludes_reserved_and_tool_identity_verbs() {
         // nub-reserved spellings (collision policy) and aube tool-identity
         // verbs must never enter the registry — `upgrade` in particular is
-        // nub's self-update, not aube's update alias.
+        // nub's self-update, not aube's update alias. (`x` is deliberately
+        // ABSENT: it is a registered alias of `dlx` — asserted by
+        // `x_is_an_alias_of_dlx` — not a reserved exclusion.)
         for verb in [
             "run",
             "run-script",
             "exec",
-            "x",
             "test",
             "t",
             "start",

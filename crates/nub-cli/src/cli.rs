@@ -5250,7 +5250,7 @@ nub {v} — the all-in-one Node.js toolkit
   Run scripts and bins:
     run <script>              run a package.json script
     exec <bin>                run a node_modules/.bin binary
-    dlx / create              fetch and run a package or create template
+    dlx, x / create           fetch and run a package or create template
 
   Publish and registry:
     publish / pack / version  publish, pack, or bump the package version
@@ -5302,7 +5302,7 @@ nub {v} — the all-in-one Node.js toolkit
   Run code:
     run <script>             run a package.json script (workspace-aware)
     exec <bin> / nubx <bin>  run a node_modules/.bin binary
-    nubx <pkg> / dlx <pkg>   fetch-and-run a package's bin
+    dlx <pkg> / x <pkg>      fetch-and-run a package's bin (also: nubx)
     watch <file>             run a file in watch mode
 
   Manage dependencies:

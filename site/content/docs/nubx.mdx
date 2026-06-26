@@ -7,10 +7,14 @@ Run a command-line tool by name with `nubx`: a local bin from `node_modules/.bin
 
 ```bash
 nubx eslint .                          # resolve from node_modules/.bin and run
-nub exec eslint .                      # alias: nub exec === nubx
+nub dlx eslint .                       # the same fetch-and-run, as a nub subcommand
+nub x eslint .                         # short alias of nub dlx
+nub exec eslint .                      # local bin only — never fetches
 nubx --filter @org/api tsc --build     # run a local bin across a filtered workspace
 nub dlx -p cowsay -c 'cowsay hi | tr a-z A-Z'  # one-off tool, no install, shell pipeline
 ```
+
+Three spellings fetch-and-run — a local bin first, a registry fetch on a miss: the `nubx` standalone binary, and the `nub dlx` / `nub x` subcommands (`nub x` is the short alias of `nub dlx`, mirroring `bunx` / `bun x`). They share the fetch behaviour and the `-p`/`--package` flag; `nubx` additionally carries the workspace flags below, while `nub dlx`/`nub x` carry `-c`/`--shell-mode` and `--allow-build`. Separate from all three is [`nub exec`](#download-and-execute), which runs a local bin and never reaches the registry.
 
 For a locally-resolved bin, `nubx` does the `node_modules/.bin` walk-up in Rust and exec's the resolved binary directly, so the wrapper overhead that `npx` and `pnpm exec` pay on every call — a full Node bootstrap — approximately disappears: 19× lighter than `npx` on a native CLI like `esbuild` (and roughly 17× lighter than `pnpm exec`). The tool that actually runs is identical to what `npx` would run; only the wrapper gets out of the way.
 
@@ -80,7 +84,7 @@ dependencies:
                 ||     ||
 ```
 
-This fallback is unique to the `nubx` (and `nub exec`-as-`nubx`) entry point. Plain `nub exec` is no-network: a missing bin there prints an install suggestion and exits 127 instead of reaching the registry.
+This fallback is what `nubx`, `nub dlx`, and `nub x` do on a local miss. Plain `nub exec` is no-network: a missing bin there prints an install suggestion and exits 127 instead of reaching the registry.
 
 ## Version specifiers
 
