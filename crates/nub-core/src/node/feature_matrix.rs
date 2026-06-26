@@ -403,6 +403,75 @@ pub static FEATURES: &[Feature] = &[
         ],
         evidence: "TC39 Stage 4; native on Node 24+",
     },
+    // ── Uint8Array base64/hex ───────────────────────────────────────────────
+    // TC39 Stage 3 (Uint8Array to/from base64/hex). Native on Node 25+; absent on
+    // the whole 18.19–24.x range below, where nub installs a spec-faithful port of
+    // the proposal's reference polyfill (verified byte-for-byte against Node native).
+    // The toBase64 prototype method is the feature-detect anchor for the whole
+    // family (toBase64/fromBase64/setFromBase64/toHex/fromHex/setFromHex).
+    Feature {
+        name: "Uint8Array.toBase64",
+        mitigations: &[
+            (
+                band((18, 19, 0), Some((25, 0, 0))),
+                Mitigation::Polyfill {
+                    runtime_file: "polyfills.cjs",
+                    global: "Uint8Array.prototype.toBase64",
+                },
+            ),
+            (band((25, 0, 0), None), Mitigation::Native),
+        ],
+        evidence: "TC39 Stage 3; native on Node 25+ (V8 13.x)",
+    },
+    // ── DisposableStack / AsyncDisposableStack / SuppressedError ─────────────
+    // TC39 Stage 4 (Explicit Resource Management). The `using`/`await using` SYNTAX
+    // is down-leveled by nub's transpiler; these runtime CLASSES are native on Node
+    // 24+ and absent below, where nub polyfills them (spec LIFO disposal + the
+    // SuppressedError aggregation chain, verified byte-for-byte against native).
+    // The well-known symbols Symbol.dispose / Symbol.asyncDispose are present on
+    // every supported Node, so only the classes + SuppressedError need polyfilling.
+    Feature {
+        name: "DisposableStack",
+        mitigations: &[
+            (
+                band((18, 19, 0), Some((24, 0, 0))),
+                Mitigation::Polyfill {
+                    runtime_file: "polyfills.cjs",
+                    global: "globalThis.DisposableStack",
+                },
+            ),
+            (band((24, 0, 0), None), Mitigation::Native),
+        ],
+        evidence: "TC39 Stage 4 (Explicit Resource Management); native on Node 24+",
+    },
+    Feature {
+        name: "AsyncDisposableStack",
+        mitigations: &[
+            (
+                band((18, 19, 0), Some((24, 0, 0))),
+                Mitigation::Polyfill {
+                    runtime_file: "polyfills.cjs",
+                    global: "globalThis.AsyncDisposableStack",
+                },
+            ),
+            (band((24, 0, 0), None), Mitigation::Native),
+        ],
+        evidence: "TC39 Stage 4 (Explicit Resource Management); native on Node 24+",
+    },
+    Feature {
+        name: "SuppressedError",
+        mitigations: &[
+            (
+                band((18, 19, 0), Some((24, 0, 0))),
+                Mitigation::Polyfill {
+                    runtime_file: "polyfills.cjs",
+                    global: "globalThis.SuppressedError",
+                },
+            ),
+            (band((24, 0, 0), None), Mitigation::Native),
+        ],
+        evidence: "TC39 Stage 4 (Explicit Resource Management); native on Node 24+",
+    },
     // ── Temporal ────────────────────────────────────────────────────────────
     // Not shipped by ANY Node version, so polyfilled across the whole floor — but
     // installed as a LAZY global by the preload entry (A37: the polyfill is ~18ms

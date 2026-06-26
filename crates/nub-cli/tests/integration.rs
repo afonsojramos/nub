@@ -1119,6 +1119,68 @@ fn polyfills_available() {
     assert_eq!(stdout, "function function function", "stderr: {stderr}");
 }
 
+#[test]
+fn base64_and_resource_management_polyfills() {
+    // Uint8Array base64/hex (native Node 25+) and DisposableStack /
+    // AsyncDisposableStack / SuppressedError (native Node 24+) are polyfilled below
+    // their floors. On the dev box this exercises native; the ci.yml Node-matrix
+    // floor legs (22.13, 20.x, 18.19) are what validate the polyfill branch. The
+    // polyfills are verified byte-for-byte against Node native in the runtime
+    // batteries; this asserts the feature is reachable + correct through nub's real
+    // preload chain (round-trip, LIFO disposal, SuppressedError aggregation).
+    let fixture_path = fixtures_dir().join("vanilla-ts");
+    let test_file = fixture_path.join("_erm_check.mjs");
+    std::fs::write(
+        &test_file,
+        r#"
+const bytes = new TextEncoder().encode("Hi, Nub! \u{1F389}");
+const okB64 = new TextDecoder().decode(Uint8Array.fromBase64(bytes.toBase64())) === "Hi, Nub! \u{1F389}";
+const okUrl = bytes.toBase64({ alphabet: "base64url", omitPadding: true }).indexOf("=") === -1;
+const okHex = new TextDecoder().decode(Uint8Array.fromHex(bytes.toHex())) === "Hi, Nub! \u{1F389}";
+const order = [];
+{
+  const d = new DisposableStack();
+  d.defer(() => order.push("a"));
+  d.use({ [Symbol.dispose]() { order.push("b"); } });
+  d.dispose();
+}
+let agg = "";
+try {
+  const d = new DisposableStack();
+  d.defer(() => { throw new Error("first"); });
+  d.defer(() => { throw new Error("second"); });
+  d.dispose();
+} catch (e) {
+  agg = e.constructor.name + ":" + e.error.message + "/" + e.suppressed.message;
+}
+// .error/.suppressed are non-enumerable on native — assert the floor matches.
+const aggKeys = Object.keys(new SuppressedError(1, 2)).length;
+const a = new AsyncDisposableStack();
+let asyncRan = false;
+a.defer(() => { asyncRan = true; });
+await a.disposeAsync();
+console.log(JSON.stringify({ okB64, okUrl, okHex, order: order.join(","), agg, aggKeys, asyncRan }));
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(nub_binary())
+        .arg(test_file.to_str().unwrap())
+        .current_dir(&fixture_path)
+        .output()
+        .expect("failed to spawn nub");
+
+    let _ = std::fs::remove_file(&test_file);
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stdout,
+        r#"{"okB64":true,"okUrl":true,"okHex":true,"order":"b,a","agg":"SuppressedError:first/second","aggKeys":0,"asyncRan":true}"#,
+        "stderr: {stderr}"
+    );
+}
+
 /// Child processes spawned via `execSync("node ...")` inside a Nub-run
 /// script should inherit Nub's TypeScript augmentation through the PATH
 /// shim — `node` resolves to the shim symlink which points back to `nub`.
