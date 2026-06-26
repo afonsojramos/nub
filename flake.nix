@@ -117,17 +117,28 @@
             pname = "nub-native";
             inherit version;
             src = self;
-            buildAndTestSubdir = "crates/nub-native";
+            # crates/nub-native is a SELF-CONTAINED cargo workspace in a subdir (its
+            # own Cargo.toml + Cargo.lock), so it needs `cargoRoot` — NOT
+            # `buildAndTestSubdir`. buildAndTestSubdir keeps the cargo root at the
+            # source top, which makes the lock-consistency hook validate the ROOT
+            # workspace's Cargo.lock against the addon's vendor dir (built from the
+            # addon's lock) and fail. cargoRoot points the vendoring, the
+            # consistency check, and the build cwd at crates/nub-native, where the
+            # matching Cargo.lock lives. The cross-workspace `../nub-cache-key` path
+            # dep still resolves — src = self carries the whole tree.
+            cargoRoot = "crates/nub-native";
             cargoLock.lockFile = ./crates/nub-native/Cargo.lock;
             doCheck = false;
 
-            # Install the cdylib as the addon. The crate routes output into the
-            # repo-root target/ via its .cargo/config.toml, and nixpkgs may build
-            # under a target triple, so locate it by name rather than a fixed path.
+            # Install the cdylib as the addon. The crate's .cargo/config.toml routes
+            # output into the repo-root target/, and nixpkgs builds under a target
+            # triple, so search the whole build tree (cwd is crates/nub-native, but
+            # the artifact lands at <source>/target/<triple>/release/) by exact name
+            # — which skips the hash-suffixed deps/ copy.
             installPhase = ''
               runHook preInstall
               mkdir -p "$out/lib"
-              addon=$(find . -type f \
+              addon=$(find "$NIX_BUILD_TOP" -type f \
                 \( -name 'libnub_native.so' -o -name 'libnub_native.dylib' \) \
                 -path '*/release/*' | head -1)
               if [ -z "$addon" ]; then
