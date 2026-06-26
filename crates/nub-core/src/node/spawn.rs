@@ -1515,9 +1515,14 @@ fn find_preload(nub_binary: &Path) -> Option<String> {
     {
         let _ = nub_binary; // resolution is from the embedded blob, not the binary's dir
         super::runtime_cache::ensure_runtime().and_then(|dir| {
-            dir.join("preload.mjs")
-                .to_str()
-                .map(|s| strip_verbatim(s, cfg!(windows)))
+            let preload = dir.join("preload.mjs");
+            // Defense-in-depth: never trust a dir that isn't actually backed by the
+            // preload on disk (a self-heal that lost a race could hand back a dead dir);
+            // a missing file degrades to un-augmented rather than bricking the child.
+            preload
+                .is_file()
+                .then(|| preload.to_str().map(|s| strip_verbatim(s, cfg!(windows))))
+                .flatten()
         })
     }
 
