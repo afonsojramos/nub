@@ -35,6 +35,7 @@ static MYTOOL: Embedder = Embedder {
     read_branded_settings_env: true,
     primer_ttl: None,
     cpu_budget: None,
+    tty_progress: false,
 };
 
 #[test]

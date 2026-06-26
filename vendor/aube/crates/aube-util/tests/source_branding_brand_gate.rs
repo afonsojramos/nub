@@ -40,6 +40,7 @@ static NUBLIKE: Embedder = Embedder {
     no_churn_lockfile_write: true,
     primer_ttl: None,
     cpu_budget: None,
+    tty_progress: false,
 };
 
 #[test]

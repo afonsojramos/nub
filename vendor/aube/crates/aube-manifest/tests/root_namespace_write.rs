@@ -41,6 +41,7 @@ static ROOT_TOOL: Embedder = Embedder {
     read_branded_settings_env: true,
     primer_ttl: None,
     cpu_budget: None,
+    tty_progress: false,
 };
 
 fn read_manifest(dir: &std::path::Path) -> serde_json::Value {

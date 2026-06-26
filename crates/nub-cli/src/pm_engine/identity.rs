@@ -106,6 +106,13 @@
 ///   TTL, so this is a cold-install correctness fix, not a security weakening. A
 ///   user can set a finite `NUB_PRIMER_TTL` (e.g. `30d`) to make the primer
 ///   expire after that window.
+/// - `tty_progress` = `true` — nub makes the in-place single-line animated
+///   install bar its first-class UX on an interactive, non-CI terminal (the
+///   `uv`-for-Node feel), instead of standalone aube's append-only default.
+///   CI / piped / non-TTY output stays append-only regardless, so logs never
+///   carry cursor-control escapes. The animated renderer is also brand-safe
+///   under nub: the `AUBE_TTY_PROGRESS` opt-in is no longer required to reach
+///   it (and nub does not read that `AUBE_*` var), since the profile enables it.
 pub(crate) const NUB: aube_util::Embedder = aube_util::Embedder {
     name: "nub",
     display_name: "nub",
@@ -134,6 +141,9 @@ pub(crate) const NUB: aube_util::Embedder = aube_util::Embedder {
     // unconstrained box leaves them at full cores. Same detector the nub-side
     // install runtime uses (`build_runtime`), so both stay consistent.
     cpu_budget: Some(super::resource_limits::cpu_budget),
+    // The animated single-line install bar is nub's first-class TTY UX; the
+    // engine still falls back to append-only for CI / piped / non-TTY output.
+    tty_progress: true,
 };
 
 /// Register [`NUB`] as the active embedder profile. Idempotent (the engine's
@@ -168,4 +178,5 @@ const _: () = {
     assert!(NUB.no_churn_lockfile_write);
     assert!(!NUB.read_branded_settings_env);
     assert!(NUB.primer_ttl.is_none());
+    assert!(NUB.tty_progress);
 };

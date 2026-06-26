@@ -224,6 +224,18 @@ pub struct Embedder {
     /// Embedder-fixed pluggability (same shape as the other profile hooks); read
     /// through [`effective_cpu_cap`](crate::effective_cpu_cap).
     pub cpu_budget: Option<fn() -> Option<usize>>,
+    /// When `true`, the install progress UI uses the in-place single-line
+    /// animated bar by default on an interactive, non-CI terminal; when
+    /// `false` (aube's default), it stays append-only there unless
+    /// `AUBE_TTY_PROGRESS` opts the animated renderer in. CI / piped / non-TTY
+    /// output is append-only under either setting (cursor-control escapes must
+    /// never land in a log). Embedder-fixed: an embedder that wants the
+    /// animated bar as its first-class install UX flips this on; standalone
+    /// aube keeps append-only-by-default so its output is unchanged on the
+    /// default path. The progress→summary transition polish (a single clean
+    /// repaint, no leftover frame, no flash) is unconditional — only *whether
+    /// the animated renderer is the default* is gated here.
+    pub tty_progress: bool,
 }
 
 /// Standalone aube's embedder profile. Reproduces every hardcoded branding
@@ -253,6 +265,10 @@ pub const AUBE: Embedder = Embedder {
     read_branded_settings_env: true,
     primer_ttl: None,
     cpu_budget: None,
+    // Append-only by default on a TTY; the animated renderer stays an
+    // `AUBE_TTY_PROGRESS` opt-in for standalone aube, so default output is
+    // unchanged.
+    tty_progress: false,
 };
 
 static ACTIVE: OnceLock<&'static Embedder> = OnceLock::new();
@@ -423,6 +439,7 @@ mod tests {
         assert!(id.read_branded_settings_env);
         assert_eq!(id.config_env_prefix, Some("AUBE"));
         assert_eq!(id.primer_ttl, None);
+        assert!(!id.tty_progress);
     }
 
     /// Under the default (AUBE) profile the source-branding helpers reproduce

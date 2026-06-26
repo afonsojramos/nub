@@ -2,9 +2,14 @@
 //!
 //! Two modes live behind one API so call sites in `install::run` stay the same:
 //!
-//! * **TTY** — an animated clx bar, kept as an internal fallback for callers
-//!   that explicitly opt into an in-place display. It redraws by moving the
-//!   cursor and clearing the previous frame.
+//! * **TTY** — a single in-place animated line: header, unified bar, and the
+//!   live `cur/total · bytes · rate · ETA` label, redrawn on one row via
+//!   cursor movement. Deliberately *single-line*: there are no per-package
+//!   child rows, so the rendered region never grows or shrinks and there is no
+//!   multi-line collapse to flash. When the install completes the line is
+//!   cleared exactly once and the post-install dependency summary takes its
+//!   place — a clean handoff with no leftover bar frame and no trailing blanks,
+//!   matching pnpm / bun / cargo / uv.
 //! * **Append-only** — lines safe for terminals, GitHub Actions, and plain
 //!   pipes: a single repeating pnpm-style `Progress:` line emitted on a ~2s
 //!   heartbeat, showing `resolved` / `reused` / `downloaded` plus the byte
@@ -13,14 +18,14 @@
 //!   exactly *why* it's slow (network-bound vs linker-bound). No phase noise,
 //!   no child rows, no redraws.
 //!
-//! `try_new` picks the append-only mode by default. The clx TTY renderer
-//! clears the previous frame on every redraw; that makes installs look like
-//! the screen is blinking right before the post-install package summary lands.
-//! Set `AUBE_TTY_PROGRESS=1` to use the in-place renderer while it remains
-//! useful for local debugging.
-//! It returns `None` only when clx has been forced into text mode
-//! (`--silent`, `-v`, `--reporter=append-only|ndjson`) — those modes own
-//! their own output and we stay out of the way.
+//! `try_new` picks the renderer from the active embedder profile and the
+//! environment: the in-place TTY renderer when stderr is an interactive,
+//! non-CI terminal **and** the embedder opts in (`Embedder::tty_progress`, or
+//! the `AUBE_TTY_PROGRESS` env override) — otherwise append-only. CI / piped /
+//! non-TTY output is always append-only so a redirected log never carries
+//! cursor-control escapes. It returns `None` only when clx has been forced into
+//! text mode (`--silent`, `-v`, `--reporter=append-only|ndjson`) — those modes
+//! own their own output and we stay out of the way.
 
 mod ci;
 mod render;
@@ -38,13 +43,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
-/// Cap on the number of simultaneously-visible per-package fetch rows
-/// in TTY mode. Bursts above this are collapsed into a single overflow
-/// row labeled "N more packages…" so the animated display stays
-/// bounded on installs that fan out hundreds of tarball fetches at
-/// once.
-const TTY_MAX_VISIBLE_FETCH_ROWS: usize = 5;
-
 /// Fixed denominator clx's `{{progress_bar}}` is held at in TTY mode.
 /// We don't drive clx's progress_current/progress_total with raw
 /// package counts because the unified-bar formula needs sub-package
@@ -56,11 +54,6 @@ const TTY_MAX_VISIBLE_FETCH_ROWS: usize = 5;
 /// owned separately via the `count` prop so the scaled denominator
 /// never leaks into the user-facing text.
 const TTY_BAR_SCALE: usize = 10_000;
-
-fn overflow_fetch_label(count: usize) -> String {
-    let word = pluralizer::pluralize("package", count as isize, false);
-    format!("{count} more {word}…")
-}
 
 /// Trim `reused` so `reused + downloaded <= total`. No-op when the
 /// counters already fit. Called from `set_total` after a downward
@@ -197,21 +190,8 @@ enum Mode {
         /// install-elapsed denominator. `usize::MAX` sentinel = "not
         /// captured yet"; render falls back to `ETA …`.
         completed_at_fetch_start: Arc<AtomicUsize>,
-        /// Bounded visible-fetch-row bookkeeping. `visible` is the count
-        /// of live per-package child rows (capped at
-        /// `TTY_MAX_VISIBLE_FETCH_ROWS`); `overflow` is the count of
-        /// in-flight fetches folded into the single overflow row. The
-        /// overflow row itself is lazily added on first overspill and
-        /// retained for the rest of the install.
-        fetch_state: Arc<Mutex<FetchState>>,
     },
     Ci(Arc<CiState>),
-}
-
-struct FetchState {
-    visible: usize,
-    overflow: usize,
-    overflow_row: Option<Arc<ProgressJob>>,
 }
 
 impl Clone for InstallProgress {
@@ -238,12 +218,15 @@ impl InstallProgress {
         if clx::progress::output() == ProgressOutput::Text {
             return None;
         }
-        // The animated TTY renderer redraws via cursor movement plus
-        // clear-to-end-of-screen. That is fine for a standalone progress bar,
-        // but it looks like a screen wipe when followed by the post-install
-        // dependency summary. Default to append-only progress everywhere and
-        // leave the in-place renderer behind an explicit debugging opt-in.
-        if std::io::stderr().is_terminal() && !is_ci::cached() && env_truthy("AUBE_TTY_PROGRESS") {
+        // In-place animated bar only on an interactive, non-CI terminal, and
+        // only when the active embedder opts in (or the `AUBE_TTY_PROGRESS`
+        // override is set). Everything else — CI, a pipe, a redirected log —
+        // takes the append-only renderer so no cursor-control escape ever
+        // lands in a non-TTY stream. The renderer itself is single-line with a
+        // clean progress→summary handoff, so the in-place path is a first-class
+        // UX (nub enables it by default) rather than a debug-only fallback.
+        let tty_opt_in = aube_util::embedder().tty_progress || env_truthy("AUBE_TTY_PROGRESS");
+        if std::io::stderr().is_terminal() && !is_ci::cached() && tty_opt_in {
             Some(Self::new_tty())
         } else {
             Some(Self::new_ci())
@@ -284,7 +267,11 @@ impl InstallProgress {
             .prop("eta", "")
             .progress_current(0)
             .progress_total(TTY_BAR_SCALE)
-            .on_done(ProgressJobDoneBehavior::Collapse)
+            // Hide on done: at teardown `finish()` (and the `Drop` safety net)
+            // flip the root to `Done`, which then renders empty. That is what
+            // makes the clear race-free — see `finish()` for why a plain
+            // `stop_clear()` alone could leave a stray frame.
+            .on_done(ProgressJobDoneBehavior::Hide)
             .start();
         Self {
             mode: Mode::Tty {
@@ -299,11 +286,6 @@ impl InstallProgress {
                 estimated_bytes: Arc::new(AtomicU64::new(0)),
                 fetch_start: Arc::new(OnceLock::new()),
                 completed_at_fetch_start: Arc::new(AtomicUsize::new(usize::MAX)),
-                fetch_state: Arc::new(Mutex::new(FetchState {
-                    visible: 0,
-                    overflow: 0,
-                    overflow_row: None,
-                })),
             },
             unpacked_sizes: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -779,74 +761,35 @@ impl InstallProgress {
         );
     }
 
-    /// Add a transient child row for an in-flight tarball fetch. Drop the
-    /// returned `FetchRow` when the fetch completes to remove the row and
-    /// bump the `downloaded` bucket.
-    ///
-    /// In CI mode this creates no child row — the returned value just
-    /// increments the `downloaded` counter on drop so the heartbeat advances.
+    /// Register an in-flight tarball fetch. Drop the returned `FetchRow` when
+    /// the fetch completes to bump the `downloaded` bucket (which advances the
+    /// bar's fetching slice). `name`/`version` are accepted for call-site
+    /// symmetry but not displayed: the TTY renderer is single-line and shows no
+    /// per-package rows, so the fetch only moves the unified bar. CI mode
+    /// likewise just increments the `downloaded` counter on drop so the
+    /// heartbeat advances.
     pub fn start_fetch(&self, name: &str, version: &str) -> FetchRow {
+        let _ = (name, version);
         match &self.mode {
             Mode::Tty {
                 root,
-                fetch_state,
                 total,
                 target_total,
                 reused,
                 downloaded,
                 phase_num,
                 ..
-            } => {
-                let make_row = |child: Arc<ProgressJob>, visible: bool| FetchRow {
-                    inner: FetchRowInner::Tty {
-                        child,
-                        root: Arc::downgrade(root),
-                        fetch_state: Arc::downgrade(fetch_state),
-                        total: Arc::downgrade(total),
-                        target_total: Arc::downgrade(target_total),
-                        reused: Arc::downgrade(reused),
-                        downloaded: Arc::downgrade(downloaded),
-                        phase_num: Arc::downgrade(phase_num),
-                        visible,
-                    },
-                    completed: false,
-                };
-                let mut st = fetch_state.lock().unwrap();
-                if st.visible < TTY_MAX_VISIBLE_FETCH_ROWS {
-                    st.visible += 1;
-                    drop(st);
-                    let child = ProgressJobBuilder::new()
-                        .body("  {{spinner()}} {{label | flex}}")
-                        .body_text(None::<String>)
-                        .prop("label", &format!("{name}@{version}"))
-                        .status(ProgressStatus::Running)
-                        .on_done(ProgressJobDoneBehavior::Hide)
-                        .build();
-                    let child = root.add(child);
-                    return make_row(child, true);
-                }
-                // Over the visible-row cap: fold this fetch into the
-                // single "N more packages…" overflow row. Lazily
-                // create the row on first overspill; it persists for
-                // the rest of the install (no promotion back to
-                // visible — avoids row churn on flappy fetch queues).
-                st.overflow += 1;
-                if st.overflow_row.is_none() {
-                    let row = ProgressJobBuilder::new()
-                        .body("  {{spinner()}} {{label | flex}}")
-                        .body_text(None::<String>)
-                        .prop("label", &overflow_fetch_label(st.overflow))
-                        .status(ProgressStatus::Running)
-                        .on_done(ProgressJobDoneBehavior::Hide)
-                        .build();
-                    st.overflow_row = Some(root.add(row));
-                } else if let Some(row) = &st.overflow_row {
-                    row.prop("label", &overflow_fetch_label(st.overflow));
-                }
-                let child = st.overflow_row.as_ref().unwrap().clone();
-                drop(st);
-                make_row(child, false)
-            }
+            } => FetchRow {
+                inner: FetchRowInner::Tty {
+                    root: Arc::downgrade(root),
+                    total: Arc::downgrade(total),
+                    target_total: Arc::downgrade(target_total),
+                    reused: Arc::downgrade(reused),
+                    downloaded: Arc::downgrade(downloaded),
+                    phase_num: Arc::downgrade(phase_num),
+                },
+                completed: false,
+            },
             Mode::Ci(s) => FetchRow {
                 inner: FetchRowInner::Ci(Arc::downgrade(s)),
                 completed: false,
@@ -854,10 +797,12 @@ impl InstallProgress {
         }
     }
 
-    /// Finalize the progress display. TTY mode leaves the collapsed final
-    /// root row behind so the terminal does not visibly blink/clear right
-    /// before the install summary. CI mode blocks until the heartbeat thread has actually
-    /// stopped so no stray tick can appear after this returns, and
+    /// Finalize the progress display. TTY mode clears the single in-place
+    /// progress line exactly once and stops the render loop, so the
+    /// post-install dependency summary (or an early-return status line) takes
+    /// its place with a clean handoff — no leftover bar frame, no flash, and no
+    /// trailing blank line. CI mode blocks until the heartbeat thread has
+    /// actually stopped so no stray tick can appear after this returns, and
     /// optionally writes the final framed `[ ✓ … ]` status line.
     /// Idempotent.
     ///
@@ -865,39 +810,36 @@ impl InstallProgress {
     /// print its own end-of-install line (so the main install path
     /// doesn't double up with [`print_install_summary`]). Set to `true`
     /// for early-return paths (`--lockfile-only`, drift check) that
-    /// want the framed summary to remain the end of CI log output.
+    /// want the framed summary to remain the end of CI log output. Ignored in
+    /// TTY mode, which prints its summary separately via
+    /// [`print_install_summary`] after this clears the bar.
     pub fn finish(&self, print_ci_summary: bool) {
         match &self.mode {
-            Mode::Tty {
-                root,
-                finished,
-                total,
-                target_total,
-                reused,
-                downloaded,
-                phase_num,
-                ..
-            } => {
-                // Promote to the "done" phase and repaint at 100%
-                // before retiring the display. The mid-work 95% cap
-                // is about not lying while linking is in flight; at
-                // `finish()` the install is fully complete and the
-                // last frame the user sees should match that. Clear
-                // the phase word so the header reads cleanly without
-                // a stale "— linking" trailing the full bar.
-                phase_num.store(4, Ordering::Relaxed);
-                root.prop("phase", "");
-                refresh_tty_bar_from_atomics(
-                    root,
-                    total,
-                    target_total,
-                    reused,
-                    downloaded,
-                    phase_num,
-                );
-                root.set_status(ProgressStatus::Done);
+            Mode::Tty { root, finished, .. } => {
+                // Clear the bar instead of leaving a final frame: the success
+                // line that follows (`✓ installed N packages`) is the
+                // completion cue, so a lingering 100% bar above it would just
+                // be a redundant second `nub …` line bracketing the dependency
+                // summary. Because the renderer is a single line, the clear is
+                // a one-row erase — no multi-line region collapse, no flash.
+                //
+                // Flip the root to `Done` (it is `on_done = Hide`, so it now
+                // renders empty) BEFORE stopping the loop. This is what makes
+                // the teardown race-free: `set_status(Done)` runs a synchronous
+                // `refresh_once()` under clx's `REFRESH_LOCK`, which serializes
+                // against the background render thread, so any in-flight frame
+                // is followed by an empty render that erases it. A bare
+                // `stop_clear()` takes only `TERM_LOCK` (not `REFRESH_LOCK`), so
+                // a render-thread frame could land *after* the clear and leave
+                // a stray bar; rendering the root empty closes that window —
+                // even a late frame paints nothing. `finished` tells `Drop` the
+                // teardown already happened so it doesn't repeat it, and
+                // `stop_clear` is itself idempotent (once `STOPPING` latches and
+                // `LINES` is 0 a repeat erases nothing), covering a double
+                // `finish()`.
                 finished.store(true, Ordering::Relaxed);
-                clx::progress::stop();
+                root.set_status(ProgressStatus::Done);
+                clx::progress::stop_clear();
             }
             Mode::Ci(s) => s.stop(print_ci_summary),
         }
@@ -1056,8 +998,9 @@ impl Drop for InstallProgress {
     }
 }
 
-/// A single in-flight fetch row. Dropping completes it (hide + bump the
-/// download counter in TTY mode; download-counter-only in CI mode).
+/// A single in-flight fetch. Dropping completes it by bumping the download
+/// counter (which advances the bar's fetching slice in TTY mode and the
+/// heartbeat in CI mode). No per-package row is shown in either mode.
 pub struct FetchRow {
     inner: FetchRowInner,
     completed: bool,
@@ -1065,30 +1008,20 @@ pub struct FetchRow {
 
 enum FetchRowInner {
     Tty {
-        child: Arc<ProgressJob>,
-        /// Weak ref so orphaned rows (e.g. spawned fetch tasks still in flight
-        /// after an error short-circuits the install) don't hold the root job
-        /// alive and block `InstallProgress::Drop` from clearing the display.
+        /// Weak refs to every TTY counter the unified-bar refresh reads.
+        /// Bundled here so `FetchRow::drop` can recompute the bar fill + count
+        /// label after bumping `downloaded`, without a back-pointer to
+        /// `InstallProgress` (which is not itself reference-counted). Mirrors
+        /// the field set `refresh_tty_bar` reads off `Mode::Tty`. Weak so an
+        /// orphaned row (a fetch task still in flight after an error
+        /// short-circuits the install) can't pin the root job alive and block
+        /// `InstallProgress::Drop` from clearing the display.
         root: Weak<ProgressJob>,
-        /// Weak ref to the shared fetch bookkeeping so drop can
-        /// decrement visible/overflow counters and refresh the
-        /// overflow row label without pinning it alive.
-        fetch_state: Weak<Mutex<FetchState>>,
-        /// Weak refs to every TTY counter the unified-bar refresh
-        /// reads. Bundled here so `FetchRow::drop` can recompute the
-        /// bar fill + count label after bumping `downloaded`, without
-        /// requiring a back-pointer to `InstallProgress` (which is
-        /// not itself reference-counted). Mirrors the field set
-        /// `refresh_tty_bar` reads off `Mode::Tty`.
         total: Weak<AtomicUsize>,
         target_total: Weak<AtomicUsize>,
         reused: Weak<AtomicUsize>,
         downloaded: Weak<AtomicUsize>,
         phase_num: Weak<AtomicUsize>,
-        /// Whether this row occupies one of the `TTY_MAX_VISIBLE_FETCH_ROWS`
-        /// visible slots. Overflow rows share a single child job; they
-        /// only bump the overflow counter and the label on drop.
-        visible: bool,
     },
     /// Matches the TTY variant's weak-ref discipline: orphaned CI fetch
     /// rows shouldn't prevent `CiState` from being dropped after the
@@ -1104,26 +1037,21 @@ impl FetchRow {
         self.completed = true;
         match &self.inner {
             FetchRowInner::Tty {
-                child,
                 root,
-                fetch_state,
                 total,
                 target_total,
                 reused,
                 downloaded,
                 phase_num,
-                visible,
             } => {
-                // Bump the downloaded counter, then refresh the
-                // unified bar (clx `progress_current` + `count` prop)
-                // by upgrading the weak refs to each TTY atomic.
-                // `refresh_eta` is *not* called here — the ETA prop
-                // is recomputed on every `inc_downloaded_bytes`
-                // event, which fires once per tarball before this
-                // drop. The off-by-one (ETA computed against pre-bump
-                // `downloaded`) self-corrects on the next fetch's
-                // bytes; for the very last fetch, `set_phase("linking")`
-                // immediately clears the prop.
+                // Bump the downloaded counter, then refresh the unified bar
+                // (clx `progress_current` + `count` prop) by upgrading the weak
+                // refs to each TTY atomic. `refresh_eta` is *not* called here —
+                // the ETA prop is recomputed on every `inc_downloaded_bytes`
+                // event, which fires once per tarball before this drop. The
+                // off-by-one (ETA computed against pre-bump `downloaded`)
+                // self-corrects on the next fetch's bytes; for the very last
+                // fetch, `set_phase("linking")` immediately clears the prop.
                 if let Some(d) = downloaded.upgrade() {
                     d.fetch_add(1, Ordering::Relaxed);
                 }
@@ -1150,27 +1078,6 @@ impl FetchRow {
                         &downloaded,
                         &phase_num,
                     );
-                }
-                if *visible {
-                    child.set_status(ProgressStatus::Done);
-                    if let Some(st) = fetch_state.upgrade() {
-                        let mut st = st.lock().unwrap();
-                        if st.visible > 0 {
-                            st.visible -= 1;
-                        }
-                    }
-                } else if let Some(st) = fetch_state.upgrade() {
-                    let mut st = st.lock().unwrap();
-                    if st.overflow > 0 {
-                        st.overflow -= 1;
-                    }
-                    if st.overflow == 0 {
-                        if let Some(row) = st.overflow_row.take() {
-                            row.set_status(ProgressStatus::Done);
-                        }
-                    } else if let Some(row) = &st.overflow_row {
-                        row.prop("label", &overflow_fetch_label(st.overflow));
-                    }
                 }
             }
             FetchRowInner::Ci(weak) => {
@@ -1311,12 +1218,6 @@ impl Drop for PausingWriterGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn overflow_fetch_label_pluralizes_count() {
-        assert_eq!(overflow_fetch_label(1), "1 more package…");
-        assert_eq!(overflow_fetch_label(2), "2 more packages…");
-    }
 
     #[test]
     fn clamp_reused_trims_overshoot_after_downward_rebase() {
