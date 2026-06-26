@@ -195,6 +195,74 @@ fn undeclared_multi_lockfile_projects_error_as_ambiguous() {
     );
 }
 
+/// The over-scope regression (maintainer report 2026-06-26): the ambiguity
+/// guard belongs ONLY to the mutating install family that writes a lockfile.
+/// A TRANSIENT fetch-and-run — `nubx <tool>` / `nub dlx <tool>` — never touches
+/// the project's lockfile, so a multi-lockfile project must run it without the
+/// `ERR_NUB_LOCKFILE_AMBIGUOUS` hard error (matching `npx`/`pnpm dlx`/`bunx`).
+/// The mutating-side guard stays proven by
+/// [`undeclared_multi_lockfile_projects_error_as_ambiguous`].
+#[test]
+fn transient_runs_do_not_error_on_multi_lockfile_projects() {
+    let dir = project("ambiguous-transient", r#"{"name":"app","version":"1.0.0"}"#);
+    std::fs::write(
+        dir.join("package-lock.json"),
+        r#"{"name":"app","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{}}"#,
+    )
+    .unwrap();
+    std::fs::write(dir.join("yarn.lock"), "# yarn lockfile v1\n").unwrap();
+    // These arms get PAST identity and reach the (dead-port) registry; drop the
+    // retry backoff so the fetch fails fast instead of sleeping ~70s.
+    std::fs::write(
+        dir.join(".npmrc"),
+        "registry=http://127.0.0.1:1/\nfetch-retries=0\n",
+    )
+    .unwrap();
+
+    // `nub dlx <tool>`: the dead-port registry (see `project`) makes the fetch
+    // itself fail, but the point is the command gets PAST identity resolution —
+    // no ambiguity hard-error in preflight, where it used to die.
+    let (_, stderr, _) = run(&dir, &["dlx", "cowsay"]);
+    assert!(
+        !stderr.contains("ERR_NUB_LOCKFILE_AMBIGUOUS"),
+        "dlx must not raise the ambiguity guard in a multi-lockfile project: {stderr}"
+    );
+    // Positive proof it cleared the identity preflight and reached the (dead-port)
+    // registry, rather than no-op-passing on some unrelated early exit.
+    assert!(
+        stderr.contains("ERR_NUB_REGISTRY_ERROR"),
+        "dlx should get past identity to the registry fetch: {stderr}"
+    );
+
+    // The reported repro, exactly: invoked as `nubx`. argv0 dispatch selects the
+    // nubx entry point from a symlink named `nubx`. (Unix-only — Windows symlink
+    // creation needs privilege; the `dlx` arm above already covers the same
+    // transient session on every platform.)
+    #[cfg(unix)]
+    {
+        let nubx = dir.join("nubx");
+        std::os::unix::fs::symlink(nub_binary(), &nubx).unwrap();
+        let out = Command::new(&nubx)
+            .args(["cowsay", "hi"])
+            .current_dir(&dir)
+            .env("XDG_DATA_HOME", dir.join("xdg-data"))
+            .env("XDG_CACHE_HOME", dir.join("xdg-cache"))
+            .output()
+            .expect("failed to spawn nubx");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !stderr.contains("ERR_NUB_LOCKFILE_AMBIGUOUS"),
+            "nubx must not raise the ambiguity guard in a multi-lockfile project: {stderr}"
+        );
+        // Confirms argv0 actually routed to the nubx DLX fallback (not an
+        // unrelated help/early exit that would no-op-pass the assert above).
+        assert!(
+            stderr.contains("ERR_NUB_REGISTRY_ERROR"),
+            "nubx should get past identity to the registry fetch: {stderr}"
+        );
+    }
+}
+
 /// The declared-yarn corner of the fresh row: identity resolves to yarn with
 /// no yarn.lock on disk, and the first install would CREATE yarn.lock — the
 /// gated write. Refused with the gate message, nothing written.
