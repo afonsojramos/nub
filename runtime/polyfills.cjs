@@ -611,8 +611,21 @@ function installDisposableStacks() {
     class SuppressedError extends Error {
       constructor(error, suppressed, message) {
         super(message);
-        this.error = error;
-        this.suppressed = suppressed;
+        // Spec (and native Node 24+) install .error/.suppressed as non-enumerable
+        // data props — plain assignment would make them enumerable, so Object.keys()
+        // / JSON.stringify() would leak them on the floor but not on native.
+        Object.defineProperty(this, "error", {
+          value: error,
+          writable: true,
+          enumerable: false,
+          configurable: true,
+        });
+        Object.defineProperty(this, "suppressed", {
+          value: suppressed,
+          writable: true,
+          enumerable: false,
+          configurable: true,
+        });
       }
     }
     Object.defineProperty(SuppressedError.prototype, "name", {

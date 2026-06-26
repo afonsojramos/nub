@@ -1153,11 +1153,13 @@ try {
 } catch (e) {
   agg = e.constructor.name + ":" + e.error.message + "/" + e.suppressed.message;
 }
+// .error/.suppressed are non-enumerable on native — assert the floor matches.
+const aggKeys = Object.keys(new SuppressedError(1, 2)).length;
 const a = new AsyncDisposableStack();
 let asyncRan = false;
 a.defer(() => { asyncRan = true; });
 await a.disposeAsync();
-console.log(JSON.stringify({ okB64, okUrl, okHex, order: order.join(","), agg, asyncRan }));
+console.log(JSON.stringify({ okB64, okUrl, okHex, order: order.join(","), agg, aggKeys, asyncRan }));
 "#,
     )
     .unwrap();
@@ -1174,7 +1176,7 @@ console.log(JSON.stringify({ okB64, okUrl, okHex, order: order.join(","), agg, a
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(
         stdout,
-        r#"{"okB64":true,"okUrl":true,"okHex":true,"order":"b,a","agg":"SuppressedError:first/second","asyncRan":true}"#,
+        r#"{"okB64":true,"okUrl":true,"okHex":true,"order":"b,a","agg":"SuppressedError:first/second","aggKeys":0,"asyncRan":true}"#,
         "stderr: {stderr}"
     );
 }
