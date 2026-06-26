@@ -64,6 +64,9 @@ irm https://nubjs.com/install.ps1 | iex
 # Homebrew (macOS / Linux)
 brew install nubjs/tap/nub
 
+# Nix (flakes)
+nix run github:nubjs/nub
+
 # Or via npm (pnpm / yarn global add work too)
 npm install -g --ignore-scripts=false @nubjs/nub
 ```

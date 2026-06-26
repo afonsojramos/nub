@@ -1,0 +1,57 @@
+name: Nix flake
+
+# Validates the prebuilt-binary flake (flake.nix) that lets Nix users install via
+# `nix run github:nubjs/nub`. There is no Nix on the dev host, so THIS job is the
+# flake's only validation: it evaluates every system's outputs, builds the package
+# for the runner's own system (fetchurl + autoPatchelf), and smoke-runs the binary.
+#
+# Path-filtered to the flake files so it fires only when they change — not on every
+# Rust or docs commit.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "flake.nix"
+      - "flake.lock"
+      - "**/*.nix"
+      - ".github/workflows/nix.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "flake.nix"
+      - "flake.lock"
+      - "**/*.nix"
+      - ".github/workflows/nix.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: nix flake check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v16
+
+      # Evaluate every system's outputs (the locked flake must evaluate for all
+      # four targets, including the Darwin ones that cannot build on this runner).
+      - name: nix flake check
+        run: nix flake check --all-systems --print-build-logs
+
+      # Build the package for x86_64-linux: fetchurl the release tarball, run
+      # autoPatchelfHook against the glibc binary + nub-native.node, lay out the
+      # bin/ + runtime/ tree. Proves the install layout actually realizes.
+      - name: nix build .#default
+        run: nix build .#default --print-build-logs
+
+      # Smoke the patched binary end to end: `nix run` execs $out/bin/nub, which
+      # canonicalizes current_exe() and resolves the runtime/ sibling. A clean
+      # version print proves the layout + autoPatchelf produced a runnable nub.
+      - name: nix run .#default -- --version
+        run: nix run .#default -- --version
