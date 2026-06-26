@@ -1,9 +1,14 @@
 name: Nix flake
 
-# Validates the prebuilt-binary flake (flake.nix) that lets Nix users install via
-# `nix run github:nubjs/nub`. There is no Nix on the dev host, so THIS job is the
-# flake's only validation: it evaluates every system's outputs, builds the package
-# for the runner's own system (fetchurl + autoPatchelf), and smoke-runs the binary.
+# Validates the from-source flake (flake.nix) that lets Nix users install via
+# `nix run github:nubjs/nub`. nub now ships as a single self-contained binary
+# (the runtime/ tree is embedded via the `embed-runtime` cargo feature and
+# JIT-extracted on first run), so the flake builds nub FROM SOURCE — it builds the
+# N-API addon, stages the vendored runtime node_modules, and cargo-builds the
+# binary with the runtime embedded; there is no prebuilt tarball and no sidecar to
+# patch. There is no Nix on the dev host, so THIS job is the flake's only
+# validation: it evaluates every system's outputs, builds the package for the
+# runner's own system, and cold-runs a TypeScript fixture end to end.
 #
 # Path-filtered to the flake files so it fires only when they change — not on every
 # Rust or docs commit.
@@ -32,26 +37,43 @@ jobs:
   check:
     name: nix flake check
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # A cold from-source build of the whole nub + vendored-aube workspace under Nix
+    # (no Swatinem cache) is far heavier than the old fetchurl repackage.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@v16
 
+      # Real Node on PATH so the cold TS run below exercises the embedded-runtime
+      # extraction deterministically instead of provisioning a Node first.
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "24"
+
       # Evaluate every system's outputs (the locked flake must evaluate for all
       # four targets, including the Darwin ones that cannot build on this runner).
       - name: nix flake check
         run: nix flake check --all-systems --print-build-logs
 
-      # Build the package for x86_64-linux: fetchurl the release tarball, run
-      # autoPatchelfHook against the glibc binary + nub-native.node, lay out the
-      # bin/ + runtime/ tree. Proves the install layout actually realizes.
+      # Build the package for x86_64-linux from source: build the N-API addon,
+      # stage the vendored runtime node_modules, cargo-build nub with the runtime
+      # embedded. Proves the from-source single binary actually realizes.
       - name: nix build .#default
         run: nix build .#default --print-build-logs
 
-      # Smoke the patched binary end to end: `nix run` execs $out/bin/nub, which
-      # canonicalizes current_exe() and resolves the runtime/ sibling. A clean
-      # version print proves the layout + autoPatchelf produced a runnable nub.
       - name: nix run .#default -- --version
         run: nix run .#default -- --version
+
+      # End-to-end: a cold `nix run` must extract the embedded runtime to a fresh
+      # cache and transpile+run a TypeScript fixture. Run under an empty HOME so the
+      # extraction path is exercised from scratch, and a wrong/incomplete embedded
+      # runtime fails here rather than silently shipping.
+      - name: nix run — cold TS extract + transpile + run
+        run: |
+          printf 'const greet = (who: string): string => `hello, ${who}`;\nconsole.log(greet("nix"));\n' > /tmp/smoke.ts
+          export HOME="$(mktemp -d)"
+          out="$(nix run .#default -- /tmp/smoke.ts)"
+          echo "got: $out"
+          test "$out" = "hello, nix"
