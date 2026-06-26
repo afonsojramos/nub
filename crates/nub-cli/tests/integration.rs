@@ -1608,6 +1608,78 @@ fn sessionstorage_works_by_default_localstorage_needs_user_file() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// On the flag-needed band (22.4–24.x), the neutralized `localStorage` must be
+/// ABSENT (`'localStorage' in globalThis === false`), matching vanilla Node 24 —
+/// NOT present-but-undefined. A present-but-undefined global broke isomorphic
+/// libraries that gate on `'localStorage' in window/globalThis` (vitest's happy-dom
+/// `getWindowKeys`): the present property made them SKIP installing their own
+/// store, so user code read nub's `undefined` and crashed (#166). nub now `delete`s
+/// the throwing getter inside the neutralize gate, restoring the absent shape so
+/// such libraries install their own. `sessionStorage` stays working (the flag is
+/// still injected). Gated to the band nub actually neutralizes on: on 25+ Node has
+/// webstorage native and nub injects nothing, so the global is natively present and
+/// this assertion would not apply.
+#[test]
+fn neutralized_localstorage_is_absent_not_present_undefined() {
+    let (maj, min, _) = target_node_version();
+    let on_band = (maj == 22 && min >= 4) || maj == 23 || maj == 24;
+    if !on_band {
+        eprintln!("skipping: neutralize path only runs on the 22.4–24 band (target is off-band)");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("nub-ws-absent-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("package.json"), r#"{"name":"ws-absent"}"#).unwrap();
+    let cache = dir.join("cache");
+
+    // `'localStorage' in globalThis` is read FIRST, then `typeof`. On the raw band a
+    // working/throwing getter would make `in` true; the neutralize `delete` makes it
+    // false. sessionStorage proves the webstorage flag stays injected (it needs only
+    // the flag, no file). Each token is tagged so a failure is self-debugging.
+    std::fs::write(
+        dir.join("probe.js"),
+        "console.log('IN:' + ('localStorage' in globalThis));\n\
+         console.log('TYPEOF:' + typeof localStorage);\n\
+         sessionStorage.setItem('k', 'v');\n\
+         console.log('SS:' + sessionStorage.getItem('k'));",
+    )
+    .unwrap();
+
+    let out = Command::new(nub_binary())
+        .args(["probe.js"])
+        .current_dir(&dir)
+        .env("XDG_CACHE_HOME", &cache)
+        .output()
+        .expect("failed to spawn nub");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "probe must not throw: stdout={stdout:?} stderr={stderr:?}"
+    );
+    // The contract that fixes #166: the neutralized global is ABSENT, so a library
+    // gating on `'localStorage' in globalThis` installs its own store.
+    assert!(
+        stdout.contains("IN:false"),
+        "neutralized localStorage must be ABSENT (`'localStorage' in globalThis === false`), \
+         matching vanilla Node 24, not present-undefined; stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(
+        stdout.contains("TYPEOF:undefined"),
+        "`typeof localStorage` must be \"undefined\" (no throw); stdout={stdout:?} stderr={stderr:?}"
+    );
+    // sessionStorage must STILL work — the webstorage flag stays injected; only the
+    // throwing localStorage getter is deleted.
+    assert!(
+        stdout.contains("SS:v"),
+        "sessionStorage must still work after the localStorage delete; stdout={stdout:?} stderr={stderr:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A user-set `NODE_OPTIONS=--localstorage-file=<their path>` must reach Node
 /// untouched: nub never injects its own store and never strips the user's, so the
 /// user's file gets the data and nub's cache dir stays empty of any webstorage

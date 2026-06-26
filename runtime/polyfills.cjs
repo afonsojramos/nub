@@ -39,29 +39,31 @@ function installSyncPolyfills(preloaded) {
   // `typeof localStorage` throws, so feature-detection is impossible and the throw
   // can surface before user code expects it. The spawn layer signals this case via
   // the internal `__NUB_NEUTRALIZE_LOCALSTORAGE` env var (set iff unflagged ∧
-  // no user file). Replace the throwing getter with a plain `undefined` value —
-  // matching Node 25+'s clean shape — so `typeof localStorage === "undefined"` is
-  // true and no throw occurs; `sessionStorage`, which needs only the flag, keeps
-  // working. This runs in the preload BEFORE any user code, so the throwing getter
-  // is never observed. When the user passes `--localstorage-file`, the env var is
-  // absent and `localStorage` works normally (we do not touch it). We deliberately
-  // KEEP the env var set so it inherits to the whole process subtree: a `node`- or
+  // no user file). DELETE the throwing getter so the global becomes ABSENT —
+  // matching vanilla Node 24's shape on this band (`'localStorage' in globalThis
+  // === false`), not present-but-undefined. Absent is the additive choice: a bare
+  // `localStorage` read throws ReferenceError exactly as on vanilla Node 24, and
+  // `typeof localStorage === "undefined"` stays true with no throw. The earlier
+  // present-undefined define matched Node 26's shape, but that broke isomorphic
+  // libraries that gate on `'localStorage' in window/globalThis` (e.g. vitest's
+  // happy-dom `getWindowKeys`): a present property made them SKIP installing their
+  // own store, so user code then read nub's `undefined` and crashed (#166). This
+  // runs in the preload BEFORE any user code, so the throwing getter is never
+  // observed. When the user passes `--localstorage-file`, the env var is absent and
+  // `localStorage` works normally (we do not touch it). We deliberately KEEP the
+  // env var set so it inherits to the whole process subtree: a `node`- or
   // `nub`-spawned grandchild re-inherits the webstorage flag via NODE_OPTIONS and
   // would otherwise re-install the throwing getter with no neutralize signal. It's
   // an internal `__NUB_*` plumbing var that's explicitly fine to leak to children.
-  // Neutralization is idempotent — a descendant re-running this preload with the
-  // var still set just re-defines `localStorage` to undefined again, which is
-  // harmless. The descriptor is configurable+writable so user code can still assign
-  // its own `localStorage`.
+  // Neutralization is idempotent — a descendant re-running this preload deletes an
+  // already-absent or re-installed `localStorage` again, which is harmless. The
+  // property is configurable (the define that replaced it before already proved
+  // that), so `delete` cannot throw; the try/catch guards only a hypothetical
+  // non-configurable runtime, where we leave Node's behavior.
   if (process.env.__NUB_NEUTRALIZE_LOCALSTORAGE) {
     try {
-      Object.defineProperty(globalThis, "localStorage", {
-        value: undefined,
-        configurable: true,
-        writable: true,
-        enumerable: false,
-      });
-    } catch { /* descriptor non-configurable on this runtime: leave Node's behavior */ }
+      delete globalThis.localStorage;
+    } catch { /* non-configurable on this runtime: leave Node's behavior */ }
   }
 
   // ── reportError (WinterTC min-common-API, not in any Node) ──────────
