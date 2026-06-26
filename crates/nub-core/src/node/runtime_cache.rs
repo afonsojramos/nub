@@ -14,15 +14,32 @@
 //!   sibling won the race (target already exists) the loser removes its tmp and
 //!   uses the winner's dir. No flock, no partial-population window.
 //!
-//! - **Existence ⟺ integrity.** The dir name embeds the blob's content hash and
-//!   only ever appears via the atomic rename, so the dir being present means a
-//!   COMPLETE extraction of THIS EXACT blob. That is the integrity sentinel — the
-//!   hot path hashes nothing.
+//! - **R1 — safe, per-user extraction base (access-control front-line).** The base
+//!   is created `0700` and, before a PRE-EXISTING base is adopted, validated:
+//!   owner == current euid, no group/world write bit, not a symlink (unix). A base
+//!   that fails validation is NOT used and NOT destroyed (we don't own it) — we
+//!   skip to the next candidate, recovering rather than bricking. The `$TMPDIR`
+//!   fallback is per-user (`$TMPDIR/nub-<uid>`), so a shared world-writable `/tmp`
+//!   can't host a base another user planted into. On a 0700 owner-only base in a
+//!   sticky `/tmp`, a cross-uid attacker can neither write inside it nor rename it
+//!   away, which also closes the verify→load (TOCTOU) window for any principal but
+//!   the user themselves (same-uid is already game-over — they own the binary).
+//!   Windows: `%USERPROFILE%\.cache` / `%TEMP%` are per-user ACL'd by the OS, so
+//!   there is no shared-temp planted-dir class; the unix stat checks are skipped.
 //!
-//! - **RO-FS fallback.** `~/.cache/nub` first; if it can't be written (immutable
-//!   container, read-only `$HOME`) fall back to `$TMPDIR/nub`. The runtime is
-//!   needed on every invocation, so a silent `$TMPDIR` fallback keeps nub working
-//!   rather than erroring; only when NEITHER is writable do we give up (and log).
+//! - **R2 — verify the loaded code against a baked-in hash (integrity backstop).**
+//!   `build.rs` bakes the BLAKE3 digest of the three directly-loaded entrypoints
+//!   (`preload.mjs`, `preload.cjs`, `addons/nub-native.node`) into the binary. On
+//!   the load path (once per process, inside the OnceLock init, ~6 ms for the ~9 MB
+//!   addon on aarch64 — BLAKE3 over software SHA-256's ~28 ms there) the EXTRACTED
+//!   entrypoints are re-hashed against those consts. On mismatch we
+//!   SELF-HEAL: re-extract the trusted in-binary blob over the dir and re-verify —
+//!   silent success means the on-disk copy was stale/corrupt/tampered and we
+//!   replaced it with the trusted bytes. A PERSISTENT mismatch (still wrong after a
+//!   clean re-extract: a hashing bug, or a writer racing the extraction) is a
+//!   genuine anomaly: under the default canary mode it emits a NON-FATAL warning to
+//!   stderr and PROCEEDS (a verify-on-load bug must never brick nub on day one);
+//!   flip [`INTEGRITY_ENFORCE`] to fail closed once the wild mismatch rate is ~0.
 //!
 //! - **Age-based GC.** After a fresh extract, sibling `runtime-*` dirs older than
 //!   30 days are removed (best-effort). Age-based, not "delete all non-current",
@@ -44,6 +61,34 @@ static RUNTIME_BLOB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime.t
 /// `runtime-<pkg version>-<blobhash8>` — a compile-time literal baked by build.rs.
 const CACHE_KEY: &str = env!("NUB_RUNTIME_CACHE_KEY");
 
+/// R2: per-entrypoint BLAKE3 digest (hex), baked by build.rs from the staged
+/// runtime. These verify the EXTRACTED files on the load path; they live inside the
+/// (signed) binary so a tampered on-disk file can't swap its own hash alongside it.
+const HASH_PRELOAD_MJS: &str = env!("NUB_RUNTIME_HASH_PRELOAD_MJS");
+const HASH_PRELOAD_CJS: &str = env!("NUB_RUNTIME_HASH_PRELOAD_CJS");
+const HASH_ADDON: &str = env!("NUB_RUNTIME_HASH_ADDON");
+
+/// The three directly-loaded entrypoints and their baked digests. The native addon
+/// (`dlopen`'d) and the preload scripts (`--require`d) are the actual code-load
+/// surface; the vendored `node_modules` polyfills are intentionally OUT of the
+/// per-load hash (R1's 0700 owner-only base already closes their planted-file
+/// vector, and hashing the whole ~13 MB tree every run would be a real regression
+/// for a fast script runner — the entrypoints keep the cost ~1-2 ms).
+const VERIFIED_ENTRYPOINTS: [(&str, &str); 3] = [
+    ("preload.mjs", HASH_PRELOAD_MJS),
+    ("preload.cjs", HASH_PRELOAD_CJS),
+    ("addons/nub-native.node", HASH_ADDON),
+];
+
+/// Fail-closed switch for R2. `false` = CANARY: a persistent post-re-extract
+/// integrity mismatch warns and PROCEEDS (a verify-on-load bug must not brick nub).
+/// `true` = ENFORCE: refuse to load on a persistent mismatch. Ship canary, watch for
+/// real-world warning reports, then flip this one line to `true` once the wild
+/// mismatch rate is confirmed ~0. (Self-heal — re-extracting the trusted blob over a
+/// stale/corrupt/tampered on-disk copy — runs in BOTH modes; this only governs the
+/// terminal decision when a FRESH extraction still fails to verify.)
+const INTEGRITY_ENFORCE: bool = false;
+
 /// Stale-version eviction threshold.
 const MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
@@ -60,79 +105,127 @@ pub fn ensure_runtime() -> Option<PathBuf> {
 }
 
 fn extract_once() -> Option<PathBuf> {
-    let candidates = base_candidates();
+    extract_with(&base_candidates())
+}
 
-    // Fast path: a candidate already holds the extracted dir — one stat, no write.
-    // (Both `~/.cache/nub` and the `$TMPDIR` fallback are checked so a machine that
-    // extracted to the fallback on a read-only `$HOME` still hits the cache.)
-    // `preload.mjs` is the completeness sentinel: the dir only ever appears via the
-    // atomic rename of a fully-unpacked tree, so probing the file (still one stat)
-    // rather than just the dir also rejects an externally-induced empty leftover dir
-    // for free — it falls through to a re-extract instead of being trusted.
-    for base in &candidates {
-        let target = base.join(CACHE_KEY);
+/// The candidate-driven core of [`extract_once`], split out so tests can drive it
+/// with controlled bases (e.g. an unsafe base followed by a safe one — proving R1
+/// recovers rather than bricks).
+fn extract_with(candidates: &[PathBuf]) -> Option<PathBuf> {
+    // Warm path: a SAFE candidate already holds the extracted dir. Each base is
+    // owner/perms-validated (R1) BEFORE its cached dir is trusted, and the dir's
+    // entrypoints are verified (R2) before adoption. `preload.mjs` existence is the
+    // cheap completeness pre-check (one stat) before paying for the hashes — the dir
+    // only ever appears via the atomic rename of a fully-unpacked tree, so a missing
+    // sentinel means re-extract, not trust.
+    for base in candidates {
+        let Some(safe_base) = ensure_safe_base(base) else {
+            continue;
+        };
+        let target = safe_base.join(CACHE_KEY);
         if target.join("preload.mjs").is_file() {
-            return Some(target);
+            if let Some(dir) = verify_or_heal(&safe_base, &target, false) {
+                return Some(dir);
+            }
+            // `None` here is the ENFORCE refusal for THIS base (a fresh re-extract
+            // still failed to verify). Re-extracting into another base would produce
+            // the same bytes and the same verdict, so don't fall through to a cold
+            // extract — try the next candidate's warm cache, then give up.
+            continue;
         }
     }
 
-    // First run for this blob: extract into the first writable base. `try_extract`
-    // probes writability by actually creating its tmp dir, so a read-only primary
-    // falls through to `$TMPDIR`.
-    for base in &candidates {
-        if let Some(dir) = try_extract(base) {
-            return Some(dir);
+    // Cold path: extract into the first SAFE, writable base. `try_extract` probes
+    // writability by creating its tmp dir, so a read-only primary falls through.
+    for base in candidates {
+        let Some(safe_base) = ensure_safe_base(base) else {
+            continue;
+        };
+        if let Some(dir) = try_extract(&safe_base) {
+            // A freshly-extracted-from-blob dir should always verify; a mismatch
+            // here means a build.rs hashing bug or a same-process writer (already
+            // fresh ⇒ no heal, straight to the canary/enforce decision).
+            return verify_or_heal(&safe_base, &dir, true);
         }
     }
 
-    tracing::warn!(
-        "could not extract the nub runtime (no writable cache dir); \
+    eprintln!(
+        "nub: could not extract the embedded runtime (no writable cache dir); \
          set XDG_CACHE_HOME to a writable path"
     );
     None
 }
 
 /// Candidate cache bases in priority order: `~/.cache/nub` (or `$XDG_CACHE_HOME/nub`)
-/// then `$TMPDIR/nub`. Deduplicated so an exotic `TMPDIR == cache_dir` setup
-/// doesn't try the same path twice.
+/// then the per-user `$TMPDIR/nub-<uid>`. Deduplicated so an exotic
+/// `TMPDIR == cache_dir` setup doesn't try the same path twice.
 fn base_candidates() -> Vec<PathBuf> {
     let mut out = Vec::with_capacity(2);
     if let Some(c) = discovery::cache_dir() {
         out.push(c);
     }
-    let tmp = std::env::temp_dir().join("nub");
+    let tmp = std::env::temp_dir().join(tmp_subdir_name());
     if !out.contains(&tmp) {
         out.push(tmp);
     }
     out
 }
 
-/// Extract the blob into `<base>/runtime-<key>/` via a unique tmp dir + atomic
-/// rename. Returns the final dir on success (ours or a concurrent winner's), or
-/// `None` if this base is unusable (read-only) or the extraction failed.
-fn try_extract(base: &Path) -> Option<PathBuf> {
-    // create_dir_all is the writability probe: a read-only base fails here and the
-    // caller moves on to the next candidate.
-    if fs::create_dir_all(base).is_err() {
-        return None;
+/// The `$TMPDIR` fallback subdir name. Per-user on unix (`nub-<euid>`) so a shared,
+/// world-writable `/tmp` can't host a base another user planted into — even before
+/// the owner validation runs. Windows `%TEMP%` is already per-user ACL'd, so there's
+/// no uid to scope by.
+#[cfg(unix)]
+fn tmp_subdir_name() -> String {
+    format!("nub-{}", current_euid())
+}
+#[cfg(not(unix))]
+fn tmp_subdir_name() -> String {
+    "nub".to_string()
+}
+
+/// R1: resolve `base` to a SAFE per-user dir, or `None` if it can't be made/validated
+/// safe (the caller then recovers by trying the next candidate — never bricks).
+///
+/// - If absent: create it `0700`. `create_dir_all` is also the writability probe (a
+///   read-only FS fails here → `None` → next candidate).
+/// - Validate ownership/perms (unix) even on a dir we just "created": `create_dir_all`
+///   returns `Ok` when an attacker pre-created the path (`mkdir` → `EEXIST`, tolerated),
+///   so the POST-create owner check is what actually rejects a planted base. A failed
+///   validation returns `None` — we neither use nor destroy a dir we don't own.
+fn ensure_safe_base(base: &Path) -> Option<PathBuf> {
+    if !base.exists() {
+        if fs::create_dir_all(base).is_err() {
+            return None;
+        }
+        set_owner_only(base);
     }
+    if is_safe_dir(base) {
+        Some(base.to_path_buf())
+    } else {
+        None
+    }
+}
+
+/// Extract the blob into `<base>/runtime-<key>/` via a unique tmp dir + atomic
+/// rename. The caller has already [`ensure_safe_base`]'d `base`. Returns the final
+/// dir on success (ours or a concurrent winner's), or `None` if the extraction
+/// failed.
+fn try_extract(base: &Path) -> Option<PathBuf> {
     let target = base.join(CACHE_KEY);
 
-    let tmp = base.join(format!(
-        ".{CACHE_KEY}.{}.{}.tmp",
-        std::process::id(),
-        rand_suffix()
-    ));
+    let tmp = unique_tmp(base);
     // A leftover tmp from a crashed run with the same name is vanishingly unlikely
     // (pid + monotonic-ish rand), but clear it so create + unpack start clean.
     let _ = fs::remove_dir_all(&tmp);
     if fs::create_dir_all(&tmp).is_err() {
         return None;
     }
+    set_owner_only(&tmp); // target inherits this mode via the rename below
 
     if let Err(e) = unpack_blob(&tmp) {
         let _ = fs::remove_dir_all(&tmp);
-        tracing::warn!("failed to inflate the embedded nub runtime: {e}");
+        eprintln!("nub: failed to inflate the embedded runtime: {e}");
         return None;
     }
 
@@ -148,6 +241,200 @@ fn try_extract(base: &Path) -> Option<PathBuf> {
             // winner's dir if it materialized.
             let _ = fs::remove_dir_all(&tmp);
             if target.is_dir() { Some(target) } else { None }
+        }
+    }
+}
+
+/// A unique, hidden tmp dir under `base` for an in-progress extraction.
+fn unique_tmp(base: &Path) -> PathBuf {
+    base.join(format!(
+        ".{CACHE_KEY}.{}.{}.tmp",
+        std::process::id(),
+        rand_suffix()
+    ))
+}
+
+// ---- R1 helpers: per-user 0700 base + owner/perms/symlink validation ----------
+
+#[cfg(unix)]
+fn current_euid() -> u32 {
+    // Safe: `geteuid` has no preconditions and cannot fail.
+    unsafe { libc::geteuid() }
+}
+
+#[cfg(unix)]
+fn set_owner_only(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
+}
+#[cfg(not(unix))]
+fn set_owner_only(_path: &Path) {}
+
+/// Is `path` a real directory, owned by us, with no group/world write bit, and not a
+/// symlink? On non-unix this is just "a real directory" — `%USERPROFILE%`/`%TEMP%`
+/// are per-user ACL'd by the OS, so there is no shared-temp planted-dir class the
+/// unix checks defend against.
+#[cfg(unix)]
+fn is_safe_dir(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    // symlink_metadata: do NOT traverse a final symlink — a symlinked base is itself
+    // the reject (an attacker could point it at a dir they control).
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return false;
+    }
+    // Owner must be us: a dir pre-created under a shared /tmp by another principal is
+    // owned by THEM, and adopting it would load their planted files.
+    if meta.uid() != current_euid() {
+        return false;
+    }
+    // No group/other write (0o022): a group/world-writable base lets another
+    // principal swap our extracted files between verification and load.
+    meta.mode() & 0o022 == 0
+}
+#[cfg(not(unix))]
+fn is_safe_dir(path: &Path) -> bool {
+    path.is_dir()
+}
+
+// ---- R2 helpers: per-entrypoint hash verification + self-heal -----------------
+
+/// Whether to refuse (vs. warn-and-proceed) on a PERSISTENT integrity mismatch.
+/// Reads [`INTEGRITY_ENFORCE`] in production; a `#[cfg(test)]` override lets tests
+/// exercise the would-be-fatal path without flipping the shipped const.
+fn enforce() -> bool {
+    #[cfg(test)]
+    {
+        match TEST_ENFORCE.load(Ordering::Relaxed) {
+            1 => return false,
+            2 => return true,
+            _ => {}
+        }
+    }
+    INTEGRITY_ENFORCE
+}
+
+/// Test-only override of [`enforce`]: `0` = use the const, `1` = force off (canary),
+/// `2` = force on (enforce).
+#[cfg(test)]
+static TEST_ENFORCE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// BLAKE3 (lowercase hex) of a file's bytes, or `None` if it can't be read.
+fn file_blake3_hex(path: &Path) -> Option<String> {
+    let bytes = fs::read(path).ok()?;
+    Some(blake3::hash(&bytes).to_hex().to_string())
+}
+
+/// Re-hash the extracted entrypoints in `dir` against the baked digests. All three
+/// must read AND match. ~6 ms (entrypoints only, addon-dominated), paid at most once
+/// per process (the caller runs inside the `EXTRACTED` OnceLock init).
+fn verify_entrypoints(dir: &Path) -> bool {
+    VERIFIED_ENTRYPOINTS
+        .iter()
+        .all(|(rel, expected)| file_blake3_hex(&dir.join(rel)).as_deref() == Some(*expected))
+}
+
+/// R2 decision for a candidate `target` dir.
+///
+/// - Verifies clean → adopt it.
+/// - Mismatch + `!already_fresh` (a WARM on-disk cache) → SELF-HEAL: re-extract the
+///   trusted in-binary blob over `target` and re-verify; success ⇒ adopt the healed
+///   dir (the on-disk copy was stale/corrupt/tampered, now trusted).
+/// - Persistent mismatch (a fresh re-extract STILL fails, or a cold extraction
+///   failed straight away) → genuine anomaly: ENFORCE ⇒ refuse (`None`); CANARY ⇒
+///   warn to stderr and proceed with the dir (never brick on a verify-on-load bug).
+fn verify_or_heal(base: &Path, target: &Path, already_fresh: bool) -> Option<PathBuf> {
+    if verify_entrypoints(target) {
+        return Some(target.to_path_buf());
+    }
+
+    if !already_fresh {
+        // The on-disk cache diverged from the embedded blob — stale (a half-written
+        // / AV-quarantined / temp-cleanup-corrupted copy the presence-check trusts),
+        // or tampered (a planted file on a base whose perms were somehow bypassed).
+        // Either way, re-extract the trusted bytes the binary carries.
+        eprintln!(
+            "nub: runtime cache at {} did not match the embedded runtime; re-extracting",
+            target.display()
+        );
+        if let Some(healed) = swap_extract(base, target) {
+            if verify_entrypoints(&healed) {
+                return Some(healed);
+            }
+        }
+    }
+
+    // Persistent: a FRESH extraction from the embedded blob still does not match the
+    // baked hashes. That is not a stale-cache story — it's a hashing/build bug or
+    // something rewriting the file mid-extraction. Canary by default.
+    if enforce() {
+        eprintln!(
+            "nub: runtime integrity check failed at {} after re-extraction; \
+             refusing to load",
+            target.display()
+        );
+        return None;
+    }
+    eprintln!(
+        "nub: runtime integrity check failed at {} after re-extraction; proceeding \
+         anyway. Please report this at https://github.com/nubjs/nub/issues with your \
+         OS and `nub --version`.",
+        target.display()
+    );
+    Some(target.to_path_buf())
+}
+
+/// Self-heal: re-extract the embedded blob into a fresh tmp and atomically swap it
+/// onto `target`, replacing the stale/corrupt/tampered copy. Rare path (only on a
+/// verify mismatch). Returns the published dir, or `None` if the re-extract couldn't
+/// be written (e.g. the base went read-only).
+///
+/// The stale dir is moved aside (atomic rename) then the fresh dir is renamed onto
+/// the canonical name; a concurrent reader sees the complete old dir, a brief
+/// absence, then the complete new dir — never a partial tree. The absence window is
+/// same-uid-only (R1's 0700 owner-only base) and triggers at worst a redundant
+/// cold-extract in a racing process, which is itself safe.
+fn swap_extract(base: &Path, target: &Path) -> Option<PathBuf> {
+    let tmp = unique_tmp(base);
+    let _ = fs::remove_dir_all(&tmp);
+    if fs::create_dir_all(&tmp).is_err() {
+        return None;
+    }
+    set_owner_only(&tmp);
+    if let Err(e) = unpack_blob(&tmp) {
+        let _ = fs::remove_dir_all(&tmp);
+        eprintln!("nub: failed to re-inflate the embedded runtime during self-heal: {e}");
+        return None;
+    }
+
+    let stale = base.join(format!(
+        ".stale.{CACHE_KEY}.{}.{}",
+        std::process::id(),
+        rand_suffix()
+    ));
+    let moved_aside = fs::rename(target, &stale).is_ok();
+    match fs::rename(&tmp, target) {
+        Ok(()) => {
+            if moved_aside {
+                let _ = fs::remove_dir_all(&stale);
+            }
+            Some(target.to_path_buf())
+        }
+        Err(_) => {
+            // A concurrent healer republished `target`, or the publish failed. Drop
+            // our tmp; restore the stale copy if `target` is now empty, else discard
+            // it and adopt whatever published `target`.
+            let _ = fs::remove_dir_all(&tmp);
+            if moved_aside {
+                if !target.exists() {
+                    let _ = fs::rename(&stale, target);
+                } else {
+                    let _ = fs::remove_dir_all(&stale);
+                }
+            }
+            target.is_dir().then(|| target.to_path_buf())
         }
     }
 }
@@ -311,15 +598,173 @@ mod tests {
 
     #[test]
     fn read_only_base_create_probe_fails_cleanly() {
-        // `try_extract`'s writability probe is `create_dir_all(base)`. Point it at a
-        // path whose parent is a FILE (so create_dir_all can't succeed) and confirm
-        // the probe fails rather than panicking — the production fallback to $TMPDIR
-        // rides on exactly this `is_err()`.
+        // `ensure_safe_base`'s writability probe is `create_dir_all(base)`. Point it
+        // at a path whose parent is a FILE (so create_dir_all can't succeed) and
+        // confirm the probe fails rather than panicking — the production recovery to
+        // the next candidate ($TMPDIR) rides on exactly this `is_err()`.
         let file = std::env::temp_dir().join(format!("nub-rtc-file-{}", rand_suffix()));
         fs::write(&file, b"x").unwrap();
         let unusable = file.join("subdir"); // parent is a file → create_dir_all errors
-        assert!(fs::create_dir_all(&unusable).is_err());
+        assert!(ensure_safe_base(&unusable).is_none());
         fs::remove_file(&file).unwrap();
+    }
+
+    /// Fresh per-test base under `$TMPDIR`, pre-cleared.
+    fn tmp_base(prefix: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("{prefix}-{}", rand_suffix()));
+        let _ = fs::remove_dir_all(&p);
+        p
+    }
+
+    // ---- R2: verify-on-load against the REAL embedded blob + baked hashes --------
+
+    #[test]
+    fn embedded_blob_verifies_clean() {
+        // The load-bearing zero-false-positive guarantee: a clean extraction of the
+        // blob THIS binary embeds verifies against the hashes build.rs baked. If this
+        // fails, verify-on-load would brick nub on this platform — so it runs wherever
+        // `cargo test --features embed-runtime` does (the ci-gate embed-runtime job).
+        let dir = tmp_base("nub-rtc-clean");
+        fs::create_dir_all(&dir).unwrap();
+        unpack_blob(&dir).unwrap();
+        assert!(
+            verify_entrypoints(&dir),
+            "a clean extraction of the embedded blob must verify (zero false-positive)"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn baked_hashes_match_embedded_blob_entries() {
+        // build.rs determinism: the digest the binary will COMPARE against must equal
+        // the digest of the bytes it EXTRACTS. (build.rs hashes the staged file; tar
+        // is byte-exact, so extracted == staged — this confirms it end-to-end.)
+        let dir = tmp_base("nub-rtc-bake");
+        fs::create_dir_all(&dir).unwrap();
+        unpack_blob(&dir).unwrap();
+        for (rel, expected) in VERIFIED_ENTRYPOINTS {
+            let got = file_blake3_hex(&dir.join(rel)).unwrap();
+            assert_eq!(
+                got, expected,
+                "baked digest for {rel} must equal blake3 of the extracted entry"
+            );
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn tampered_entrypoint_is_detected_and_self_healed() {
+        // A WARM cache whose addon was swapped (planted / AV-corrupted) must be
+        // detected and self-healed: re-extract the trusted in-binary blob over it,
+        // restoring the verified bytes — never bricked, never silently loaded.
+        let base = tmp_base("nub-rtc-heal");
+        let target = base.join(CACHE_KEY);
+        fs::create_dir_all(&target).unwrap();
+        unpack_blob(&target).unwrap();
+        assert!(verify_entrypoints(&target), "fresh real-blob extraction verifies");
+
+        fs::write(target.join("addons/nub-native.node"), b"malicious").unwrap();
+        assert!(!verify_entrypoints(&target), "tamper must be detected");
+
+        let healed = verify_or_heal(&base, &target, false).expect("self-heal returns the dir");
+        assert_eq!(healed, target);
+        assert!(
+            verify_entrypoints(&target),
+            "self-heal must restore the trusted bytes"
+        );
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn persistent_mismatch_is_canary_by_default_and_refuses_under_enforce() {
+        // A dir whose entrypoints will NEVER match the baked hashes. `already_fresh`
+        // skips the heal so we hit the terminal decision directly: canary proceeds
+        // (never brick on a verify bug), enforce refuses (the flipped-on behavior).
+        let base = tmp_base("nub-rtc-decide");
+        let target = base.join(CACHE_KEY);
+        fs::create_dir_all(target.join("addons")).unwrap();
+        fs::write(target.join("preload.mjs"), b"wrong").unwrap();
+        fs::write(target.join("preload.cjs"), b"wrong").unwrap();
+        fs::write(target.join("addons/nub-native.node"), b"wrong").unwrap();
+        assert!(!verify_entrypoints(&target));
+
+        TEST_ENFORCE.store(1, Ordering::Relaxed); // canary
+        assert_eq!(
+            verify_or_heal(&base, &target, true).as_deref(),
+            Some(target.as_path()),
+            "canary mode proceeds with the dir"
+        );
+
+        TEST_ENFORCE.store(2, Ordering::Relaxed); // enforce
+        assert!(
+            verify_or_heal(&base, &target, true).is_none(),
+            "enforce mode refuses on a persistent mismatch"
+        );
+
+        TEST_ENFORCE.store(0, Ordering::Relaxed); // reset for other tests
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    // ---- R1: per-user 0700 base + owner/perms/symlink validation -----------------
+
+    #[cfg(unix)]
+    #[test]
+    fn is_safe_dir_accepts_owner_only_rejects_world_writable_and_symlink() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = tmp_base("nub-rtc-safe");
+        fs::create_dir_all(&base).unwrap();
+
+        fs::set_permissions(&base, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(is_safe_dir(&base), "0700 owner-only dir is safe");
+
+        fs::set_permissions(&base, fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(!is_safe_dir(&base), "group/world-writable dir is rejected");
+
+        fs::set_permissions(&base, fs::Permissions::from_mode(0o700)).unwrap();
+        let link = base.with_extension("link");
+        let _ = fs::remove_file(&link);
+        std::os::unix::fs::symlink(&base, &link).unwrap();
+        assert!(!is_safe_dir(&link), "a symlinked base is rejected (no traversal)");
+
+        fs::remove_file(&link).unwrap();
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extract_with_recovers_from_an_unsafe_base() {
+        // R1 recovery, end-to-end: an unsafe (world-writable) candidate must be
+        // SKIPPED, not bricked, and extraction must land in a fresh safe per-user
+        // base — then verify clean.
+        use std::os::unix::fs::PermissionsExt;
+        let root = tmp_base("nub-rtc-recover");
+        fs::create_dir_all(&root).unwrap();
+
+        let unsafe_base = root.join("unsafe");
+        fs::create_dir_all(&unsafe_base).unwrap();
+        fs::set_permissions(&unsafe_base, fs::Permissions::from_mode(0o777)).unwrap();
+        let safe_base = root.join("safe"); // absent → ensure_safe_base creates it 0700
+
+        let got = extract_with(&[unsafe_base.clone(), safe_base.clone()])
+            .expect("recovers to the safe base");
+        assert!(
+            got.starts_with(&safe_base),
+            "extraction must land in the safe base, got {got:?}"
+        );
+        assert!(verify_entrypoints(&got), "recovered extraction verifies");
+        assert!(
+            !unsafe_base.join(CACHE_KEY).exists(),
+            "must never extract into an unsafe base"
+        );
+
+        // The created safe base is 0700.
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(
+            fs::metadata(&safe_base).unwrap().mode() & 0o777,
+            0o700,
+            "the safe base is created owner-only"
+        );
+        fs::remove_dir_all(&root).unwrap();
     }
 
     // Unix-only: the eviction assertion needs `filetime_set` to backdate the stale

@@ -180,45 +180,97 @@ jobs:
         run: tests/brand-lint/check-env-reads.sh
 
   # The single-binary `embed-runtime` feature is OFF in every default build, so the
-  # feature-off `test` job never RUNS the runtime_cache extraction/race/GC unit
-  # tests, and build.rs's tar+zstd blob arm + the tar/zstd/sha2 build-dep wiring go
+  # feature-off `test` job never RUNS the runtime_cache extraction/race/GC/INTEGRITY
+  # tests, and build.rs's tar+zstd blob arm + per-entrypoint hash baking go
   # unexercised on PRs (they would first break at a release tag). Build + test the
-  # feature-on path here so an embed/extract regression fails a PR. One platform
-  # suffices for the logic; the tracked runtime/*.mjs satisfy build.rs's staging
-  # probe with no extra assembly.
+  # feature-on path here so an embed/extract/verify regression fails a PR.
+  #
+  # CRITICAL: the R2 verify-on-load suite (zero-false-positive on a clean extraction,
+  # tamper→self-heal, canary/enforce decision, R1 0700/owner/symlink validation,
+  # build.rs hash determinism) runs against the REAL embedded blob — and a verify
+  # FALSE-POSITIVE would BRICK nub on that platform. So it runs on every hosted OS
+  # (Windows path semantics + macOS + linux all differ), is ci-gate-required, and the
+  # musl divergence is covered by the sibling `embed-runtime-musl` job. The addon is
+  # gitignored (built locally / staged in release.yml), so a placeholder is staged so
+  # build.rs's three-entrypoint hash set is complete; it is never dlopen'd here (the
+  # tests verify hash CONSISTENCY — baked == extracted — not native loading).
   embed-runtime:
-    name: embed-runtime (single-binary)
+    name: embed-runtime verify (${{ matrix.os }})
     needs: matrix-plan
     if: needs.matrix-plan.outputs.run_rust == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-14]
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
         with:
-          shared-key: ci-embed-runtime
+          shared-key: ci-embed-runtime-${{ runner.os }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Stage placeholder addon for the embed build
+        shell: bash
+        run: |
+          mkdir -p runtime/addons
+          printf 'placeholder-addon' > runtime/addons/nub-native.node
       - run: cargo test -p nub-core --features embed-runtime
-      - run: cargo build -p nub-cli --features embed-runtime
+      # The feature-on binary build (build.rs blob arm + the find_preload wire-in) is
+      # OS-agnostic; one leg is enough.
+      - name: Build the feature-on binary
+        if: runner.os == 'Linux'
+        run: cargo build -p nub-cli --features embed-runtime
+
+  # musl is the known divergence point the embed feature flagged (static-link + the
+  # dlopen path). R2's verify is pure-Rust (fs::read + sha2 + libc::geteuid /
+  # symlink_metadata), so this exercises verify-on-load on a musl-target build. The
+  # test binary is musl-STATIC, so it runs directly on the glibc host — no container
+  # (which would hit the node-on-alpine checkout problem). rustls→ring + the zstd
+  # build-dep's libzstd need a musl C toolchain (musl-tools provides musl-gcc).
+  embed-runtime-musl:
+    name: embed-runtime verify (linux-musl)
+    needs: matrix-plan
+    if: needs.matrix-plan.outputs.run_rust == 'true'
+    runs-on: ubuntu-latest
+    env:
+      CC_x86_64_unknown_linux_musl: musl-gcc
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          shared-key: ci-embed-runtime-musl
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Stage placeholder addon for the embed build
+        run: |
+          mkdir -p runtime/addons
+          printf 'placeholder-addon' > runtime/addons/nub-native.node
+      - run: cargo test -p nub-core --features embed-runtime --target x86_64-unknown-linux-musl
 
   # TEMPORARY (PR #175 data point) — remove after Windows embed behavior is confirmed.
   #
   # The single-binary first-run mechanism is novel ON WINDOWS specifically: the binary
   # extracts the embedded nub-native.node (a DLL) to a cache dir and dlopen's it on the
   # first run — the "process writes a DLL then loads it" shape Windows Defender real-time
-  # scanning can flag. No other CI leg exercises extract-then-load: the `embed-runtime`
-  # job above only BUILDS the feature-on binary, and the release.yml test-install runs
-  # post-publish. This job builds the REAL release single binary (--features embed-runtime,
-  # with the actual release nub-native addon staged into the embedded blob), runs a TS
-  # fixture end-to-end on a runner with Defender enabled, and asserts the full first-run
-  # round-trip — extract -> dlopen -> transpile -> execute — plus warm-cache reuse, and
-  # surfaces any Defender detection so a silent quarantine can't pass as green. A clean
-  # exit 0 with correct output is the proof Defender did not block the write/load.
+  # scanning can flag. The `embed-runtime` matrix above runs the R2 verify LOGIC against
+  # the real blob on every OS, but only with a placeholder addon; this job is the one
+  # place the REAL release DLL is extracted, R2-verified, AND dlopen'd. It builds the
+  # real single binary (--features embed-runtime, real nub-native addon in the blob),
+  # runs a TS fixture end-to-end on a Defender-enabled runner, and asserts the full
+  # first-run round-trip — extract -> VERIFY -> dlopen -> transpile -> execute — plus
+  # warm-cache reuse, R2 zero-false-positive (no integrity warning on a clean run), R2
+  # self-heal (tamper the extracted DLL → re-extract → restore → still execute), and
+  # surfaces any Defender detection so a silent quarantine can't pass as green.
   #
-  # Scope: this proves the Defender real-time-scan + extract/dlopen mechanism. It does
-  # NOT reproduce SmartScreen Mark-of-the-Web reputation (that needs a browser-downloaded,
-  # internet-zoned nub.exe — a separate download-UX concern). Standalone (NOT wired into
-  # ci-gate): it is a non-blocking data point, not a new required check.
+  # Scope: this proves the Defender real-time-scan + extract/verify/dlopen/self-heal
+  # mechanism with a real DLL. It does NOT reproduce SmartScreen Mark-of-the-Web
+  # reputation (that needs a browser-downloaded, internet-zoned nub.exe — a separate
+  # download-UX concern). Standalone (NOT wired into ci-gate): a non-blocking real-DLL
+  # data point on top of the ci-gate-required `embed-runtime` verify matrix.
   windows-embed-roundtrip:
     name: Windows embed round-trip (TEMPORARY, PR #175)
     if: github.event_name == 'pull_request'
@@ -349,6 +401,35 @@ jobs:
           if ($mtime1 -ne $mtime2) { throw "warm run re-extracted (dir mtime $mtime1 -> $mtime2)" }
           Write-Host "warm-cache reuse confirmed (dir mtime unchanged: $mtime1)"
 
+          # --- R2 zero-false-positive: a CLEAN extraction must emit NO integrity
+          # warning. A false-positive here would brick nub under enforce, so fail the
+          # job if either run printed the canary/self-heal markers. ---
+          foreach ($o in @($out1, $out2)) {
+            if ($o -match "runtime integrity check failed" -or $o -match "did not match the embedded runtime") {
+              throw "verify-on-load FALSE-POSITIVE on a clean extraction (would brick under enforce):`n$o"
+            }
+          }
+          Write-Host "R2 zero-false-positive confirmed (no integrity warning on clean runs)"
+
+          # --- R2 self-heal: tamper the extracted addon (a planted/corrupt DLL), run
+          # again, and require the binary to detect it, re-extract the trusted blob,
+          # restore the bytes, and STILL execute (canary mode never bricks). ---
+          $addon = Join-Path $dir "addons\nub-native.node"
+          $origHash = (Get-FileHash $addon -Algorithm SHA256).Hash
+          [System.IO.File]::WriteAllBytes($addon, [byte[]](0x4d,0x5a,0x90,0x00))  # corrupt
+          Push-Location $work
+          $out3 = & $nub $fixture 2>&1 | Out-String
+          $code3 = $LASTEXITCODE
+          Pop-Location
+          Write-Host "tamper-run exit=$code3"
+          Write-Host "tamper-run output: $out3"
+          if ($code3 -ne 0) { throw "self-heal run exited $code3 — a tampered cache must self-heal, not brick" }
+          if ($out3 -notmatch "embed-roundtrip-ok-42") { throw "self-heal run wrong output: $out3" }
+          if ($out3 -notmatch "did not match the embedded runtime") { throw "expected a self-heal notice on a tampered cache; got: $out3" }
+          $healedHash = (Get-FileHash $addon -Algorithm SHA256).Hash
+          if ($origHash -ne $healedHash) { throw "self-heal did not restore the addon bytes ($origHash -> $healedHash)" }
+          Write-Host "R2 self-heal confirmed: tampered addon detected, re-extracted, restored, still executed"
+
           # --- Defender: surface any detection so a silent quarantine can't pass green ---
           Write-Host "=== Get-MpComputerStatus ==="
           try {
@@ -374,7 +455,101 @@ jobs:
             Write-Host "no Defender threat detections"
           }
 
-          Write-Host "ROUND-TRIP OK: extract -> dlopen -> transpile -> execute -> warm-cache reuse; Defender did not block"
+          Write-Host "ROUND-TRIP OK: extract -> verify -> dlopen -> transpile -> execute -> warm-cache reuse -> R2 zero-false-positive + self-heal; Defender did not block"
+
+  # TEMPORARY (PR #175 data point) — the macOS sibling of windows-embed-roundtrip:
+  # the one place the REAL release dylib is extracted, R2-verified, and dlopen'd on
+  # macOS (the embed-runtime matrix hashes only a placeholder addon). Same assertions:
+  # extract -> verify -> dlopen -> execute -> warm reuse -> R2 zero-false-positive +
+  # self-heal. Non-blocking (NOT in ci-gate); the verify LOGIC is ci-gate-required via
+  # the embed-runtime macos leg. Delete alongside windows-embed-roundtrip post-decision.
+  macos-embed-roundtrip:
+    name: macOS embed round-trip (TEMPORARY, PR #175)
+    if: github.event_name == 'pull_request'
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          shared-key: ci-mac-embed-roundtrip
+          save-if: false
+          workspaces: |
+            .
+            crates/nub-native
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: "24"
+      - name: Build + stage release nub-native addon
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd crates/nub-native && cargo build --release)
+          mkdir -p runtime/addons
+          cp target/release/libnub_native.dylib runtime/addons/nub-native.node
+      - name: Build release nub (--features embed-runtime)
+        run: cargo build -p nub-cli --release --features embed-runtime
+      - name: Round-trip — extract, verify, dlopen, execute, warm cache, R2 self-heal
+        shell: bash
+        run: |
+          set -uo pipefail
+          cache="$RUNNER_TEMP/nub-embed-cache"
+          rm -rf "$cache"
+          export XDG_CACHE_HOME="$cache"
+          nubroot="$cache/nub"
+          nub="$PWD/target/release/nub"
+          test -x "$nub" || { echo "nub not found at $nub"; exit 1; }
+
+          work="$RUNNER_TEMP/fixture"
+          rm -rf "$work"; mkdir -p "$work"
+          fixture="$work/embed.ts"
+          cat > "$fixture" <<'EOF'
+          const greeting: string = "embed-roundtrip-ok";
+          const n: number = 21 * 2;
+          console.log(`${greeting}-${n}`);
+          EOF
+
+          # --- First run: extract -> verify -> dlopen -> transpile -> execute ---
+          out1="$(cd "$work" && "$nub" "$fixture" 2>&1)"; code1=$?
+          echo "first-run exit=$code1"; echo "first-run output: $out1"
+          [ "$code1" -eq 0 ] || { echo "first run failed"; exit 1; }
+          echo "$out1" | grep -q "embed-roundtrip-ok-42" || { echo "wrong output"; exit 1; }
+
+          count="$(find "$nubroot" -maxdepth 1 -type d -name 'runtime-*' | wc -l | tr -d ' ')"
+          [ "$count" = "1" ] || { echo "expected one runtime-* dir, got $count"; exit 1; }
+          dir="$(find "$nubroot" -maxdepth 1 -type d -name 'runtime-*' | head -1)"
+          echo "extracted: $dir"
+          { test -f "$dir/preload.mjs" && test -f "$dir/addons/nub-native.node"; } || { echo "entrypoints missing"; exit 1; }
+          [ -z "$(find "$nubroot" -maxdepth 1 -type d -name '.runtime-*')" ] || { echo "leftover .tmp"; exit 1; }
+          mtime1="$(stat -f %m "$dir")"
+
+          # --- Second run: warm reuse, no re-extract ---
+          out2="$(cd "$work" && "$nub" "$fixture" 2>&1)"; code2=$?
+          [ "$code2" -eq 0 ] || { echo "second run failed: $out2"; exit 1; }
+          echo "$out2" | grep -q "embed-roundtrip-ok-42" || { echo "warm wrong output"; exit 1; }
+          [ "$mtime1" = "$(stat -f %m "$dir")" ] || { echo "warm run re-extracted"; exit 1; }
+          echo "warm-cache reuse confirmed"
+
+          # --- R2 zero-false-positive: no integrity warning on clean runs ---
+          if printf '%s\n%s\n' "$out1" "$out2" | grep -Eq "runtime integrity check failed|did not match the embedded runtime"; then
+            echo "verify-on-load FALSE-POSITIVE on a clean extraction"; exit 1
+          fi
+          echo "R2 zero-false-positive confirmed"
+
+          # --- R2 self-heal: tamper the extracted dylib -> detect -> re-extract -> restore ---
+          addon="$dir/addons/nub-native.node"
+          orig="$(shasum -a 256 "$addon" | cut -d' ' -f1)"
+          printf 'corrupt' > "$addon"
+          out3="$(cd "$work" && "$nub" "$fixture" 2>&1)"; code3=$?
+          echo "tamper-run exit=$code3"; echo "tamper-run output: $out3"
+          [ "$code3" -eq 0 ] || { echo "self-heal run bricked"; exit 1; }
+          echo "$out3" | grep -q "embed-roundtrip-ok-42" || { echo "self-heal wrong output"; exit 1; }
+          echo "$out3" | grep -q "did not match the embedded runtime" || { echo "no self-heal notice"; exit 1; }
+          healed="$(shasum -a 256 "$addon" | cut -d' ' -f1)"
+          [ "$orig" = "$healed" ] || { echo "self-heal did not restore the dylib ($orig -> $healed)"; exit 1; }
+          echo "R2 self-heal confirmed: tampered dylib detected, re-extracted, restored, still executed"
+          echo "ROUND-TRIP OK (macOS): extract -> verify -> dlopen -> execute -> warm reuse -> R2"
 
   test:
     name: Test (${{ matrix.os }}, node ${{ matrix.node }})

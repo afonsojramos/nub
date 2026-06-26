@@ -95,6 +95,43 @@ fn main() {
     let hash8: String = digest.iter().take(4).map(|b| format!("{b:02x}")).collect();
     let version = std::env::var("CARGO_PKG_VERSION").unwrap();
     println!("cargo:rustc-env=NUB_RUNTIME_CACHE_KEY=runtime-{version}-{hash8}");
+
+    // R2 integrity backstop: bake the BLAKE3 digest of the directly-LOADED
+    // entrypoints — the preload scripts node `--require`s and the addon it
+    // `dlopen`s — as compile-time consts. `runtime_cache::verify_entrypoints`
+    // re-hashes the EXTRACTED files against these on the load path; a mismatch means
+    // the on-disk cache diverged from what this binary embeds (stale / AV-corrupted
+    // / tampered), and the binary self-heals by re-extracting the trusted blob. The
+    // digests live INSIDE the (signed) binary, so a tampered on-disk file can't swap
+    // its own expected hash alongside it (the Electron-asar insight). The full-blob
+    // `<hash8>` above is the cache KEY (32-bit, of the COMPRESSED archive) — wrong
+    // preimage + too short to verify an extracted file; these are the real per-file
+    // digests.
+    //
+    // BLAKE3 (not SHA-256, which the cache key uses): the runtime re-hashes the ~9 MB
+    // addon on every warm load and software SHA-256 is ~28 ms on aarch64 vs ~6 ms for
+    // BLAKE3 — see the runtime dep note. Hashing the STAGED file is equivalent to
+    // hashing the EXTRACTED file (tar is byte-exact), which the
+    // `embedded_blob_verifies_clean` test confirms end-to-end against the real blob.
+    // All three are required (fail loud): release.yml always stages the real addon,
+    // and the addon-less ubuntu `embed-runtime` PR job stages a placeholder — so a
+    // release can never silently ship an unhashed entrypoint.
+    for (rel, var) in [
+        ("preload.mjs", "NUB_RUNTIME_HASH_PRELOAD_MJS"),
+        ("preload.cjs", "NUB_RUNTIME_HASH_PRELOAD_CJS"),
+        ("addons/nub-native.node", "NUB_RUNTIME_HASH_ADDON"),
+    ] {
+        let p = staging.join(rel);
+        let bytes = std::fs::read(&p).unwrap_or_else(|e| {
+            panic!(
+                "embed-runtime: cannot read entrypoint {} for integrity hashing: {e} \
+                 (stage the full runtime incl. addons/nub-native.node before the build)",
+                p.display()
+            )
+        });
+        let hex = blake3::hash(&bytes).to_hex();
+        println!("cargo:rustc-env={var}={hex}");
+    }
 }
 
 #[cfg(not(feature = "embed-runtime"))]

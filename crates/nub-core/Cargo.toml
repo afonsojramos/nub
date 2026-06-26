@@ -15,7 +15,7 @@ repository.workspace = true
 # it on via `nub-cli/embed-runtime`. The optional deps are pulled in ONLY here:
 # `ruzstd` (pure-Rust decode at runtime) ships in the binary; `zstd`/`tar`/`sha2`
 # (encode + key-hash at build time) are build-deps that never reach the binary.
-embed-runtime = ["dep:ruzstd", "dep:zstd", "dep:tar", "dep:sha2"]
+embed-runtime = ["dep:ruzstd", "dep:zstd", "dep:tar", "dep:sha2", "dep:blake3"]
 
 [dependencies]
 anyhow.workspace = true
@@ -56,6 +56,13 @@ tracing.workspace = true
 # shipped binary; the one-time ~tens-of-ms decode is irrelevant. Encode happens
 # at build time with the `zstd` build-dep (libzstd) — decode never needs it.
 ruzstd = { version = "0.8", optional = true }
+# R2 verify-on-load digest (embed-runtime only). BLAKE3, not SHA-256: the verify
+# re-hashes the ~9 MB addon on EVERY warm load, and software SHA-256 measured ~28 ms
+# on aarch64 (Apple Silicon — no auto HW-SHA there; sha2's `asm` path won't build on
+# win-arm64/musl), vs ~6 ms for BLAKE3's portable SIMD. BLAKE3 is collision/preimage
+# resistant — fully adequate for integrity — and builds identically on every target.
+# (`sha2` stays for the 32-bit cache KEY, which is not on the hot path.)
+blake3 = { workspace = true, optional = true }
 
 # Build-time only (embed-runtime): tar + zstd-compress the staged runtime tree
 # into `$OUT_DIR/runtime.tar.zst` and hash it for the cache key. Build-deps never
@@ -64,6 +71,9 @@ ruzstd = { version = "0.8", optional = true }
 tar = { version = "0.4", optional = true }
 zstd = { version = "0.13", optional = true }
 sha2 = { version = "0.10", optional = true }
+# Bakes the R2 per-entrypoint BLAKE3 digests (the runtime side decodes with the
+# `blake3` dep above). build-deps never reach the shipped binary.
+blake3 = { version = "1", optional = true }
 
 # Unix-only: terminating-signal forwarding to the child (SIGINT/SIGTERM/SIGHUP).
 # Gated so the Windows build (which uses a different ctrl_c path) doesn't pull it.
