@@ -141,11 +141,13 @@ fn extract_with(candidates: &[PathBuf]) -> Option<PathBuf> {
         let Some(safe_base) = ensure_safe_base(base) else {
             continue;
         };
-        if let Some(dir) = try_extract(&safe_base) {
-            // A freshly-extracted-from-blob dir should always verify; a mismatch
-            // here means a build.rs hashing bug or a same-process writer (already
-            // fresh ⇒ no heal, straight to the canary/enforce decision).
-            return verify_or_heal(&safe_base, &dir, true);
+        if let Some((dir, self_extracted)) = try_extract(&safe_base) {
+            // A dir WE just extracted should always verify; a mismatch means a
+            // build.rs hashing bug (self_extracted ⇒ already_fresh ⇒ no pointless
+            // re-extract, straight to the canary/enforce decision). But if we ADOPTED
+            // a concurrent winner's dir (rename lost the race), treat it as warm
+            // (already_fresh=false) so a winner corrupted after publish still self-heals.
+            return verify_or_heal(&safe_base, &dir, self_extracted);
         }
     }
 
@@ -187,18 +189,16 @@ fn tmp_subdir_name() -> String {
 /// R1: resolve `base` to a SAFE per-user dir, or `None` if it can't be made/validated
 /// safe (the caller then recovers by trying the next candidate — never bricks).
 ///
-/// - If absent: create it `0700`. `create_dir_all` is also the writability probe (a
-///   read-only FS fails here → `None` → next candidate).
-/// - Validate ownership/perms (unix) even on a dir we just "created": `create_dir_all`
-///   returns `Ok` when an attacker pre-created the path (`mkdir` → `EEXIST`, tolerated),
-///   so the POST-create owner check is what actually rejects a planted base. A failed
-///   validation returns `None` — we neither use nor destroy a dir we don't own.
+/// - If absent: create the leaf `0700` ATOMICALLY (no umask window where the base is
+///   briefly world-writable — see [`create_base_dir`]). This is also the writability
+///   probe (a read-only FS fails here → `None` → next candidate).
+/// - Validate ownership/perms (unix) even on a dir we just "created": creation tolerates
+///   an attacker who pre-created the path (`EEXIST`), so the POST-create owner check is
+///   what actually rejects a planted base. A failed validation returns `None` — we
+///   neither use nor destroy a dir we don't own.
 fn ensure_safe_base(base: &Path) -> Option<PathBuf> {
-    if !base.exists() {
-        if fs::create_dir_all(base).is_err() {
-            return None;
-        }
-        set_owner_only(base);
+    if !base.exists() && create_base_dir(base).is_err() {
+        return None;
     }
     if is_safe_dir(base) {
         Some(base.to_path_buf())
@@ -207,11 +207,34 @@ fn ensure_safe_base(base: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Create `base` (and any missing parents) with the leaf at `0700`, atomically on
+/// unix — `DirBuilder::mode` applies the mode in the `mkdir` syscall itself, so there
+/// is no window (as a `create_dir_all` + `chmod` pair has under `umask 000`) where the
+/// leaf is world-writable and a cross-uid attacker could plant into it. `EEXIST` is
+/// tolerated (the caller's `is_safe_dir` then rejects a pre-created/planted base on the
+/// owner check). On non-unix, mode is a no-op and `%USERPROFILE%`/`%TEMP%` ACLs apply.
+#[cfg(unix)]
+fn create_base_dir(base: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    if let Some(parent) = base.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    match fs::DirBuilder::new().mode(0o700).create(base) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+#[cfg(not(unix))]
+fn create_base_dir(base: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(base)
+}
+
 /// Extract the blob into `<base>/runtime-<key>/` via a unique tmp dir + atomic
-/// rename. The caller has already [`ensure_safe_base`]'d `base`. Returns the final
-/// dir on success (ours or a concurrent winner's), or `None` if the extraction
-/// failed.
-fn try_extract(base: &Path) -> Option<PathBuf> {
+/// rename. The caller has already [`ensure_safe_base`]'d `base`. Returns
+/// `(dir, self_extracted)` — `self_extracted` is `true` if WE published the dir,
+/// `false` if we adopted a concurrent winner's — or `None` if the extraction failed.
+fn try_extract(base: &Path) -> Option<(PathBuf, bool)> {
     let target = base.join(CACHE_KEY);
 
     let tmp = unique_tmp(base);
@@ -232,15 +255,20 @@ fn try_extract(base: &Path) -> Option<PathBuf> {
     match fs::rename(&tmp, &target) {
         Ok(()) => {
             gc_stale(base, &target);
-            Some(target)
+            Some((target, true))
         }
         Err(_) => {
             // Either a concurrent extractor already published `target` (the common,
             // benign case — `rename` onto a populated dir fails on both Unix and
             // Windows), or a genuine FS error. Clean up our tmp and adopt the
-            // winner's dir if it materialized.
+            // winner's dir if it materialized (marked NOT self-extracted, so the
+            // caller re-verifies it as a warm dir).
             let _ = fs::remove_dir_all(&tmp);
-            if target.is_dir() { Some(target) } else { None }
+            if target.is_dir() {
+                Some((target, false))
+            } else {
+                None
+            }
         }
     }
 }
@@ -451,10 +479,12 @@ fn unpack_blob(dest: &Path) -> std::io::Result<()> {
     archive.unpack(dest)
 }
 
-/// Remove sibling `runtime-*` dirs older than [`MAX_AGE`]. Best-effort, never
-/// throws, and never touches the current dir or any in-progress `.tmp` dir (those
-/// start with `.`, so the `runtime-` prefix check skips them). Runs only on the
-/// rare fresh-extract path.
+/// Remove stale siblings older than [`MAX_AGE`]: superseded `runtime-*` versions AND
+/// leftover `.<key>.<pid>.<rand>.tmp` / `.stale.*` dirs orphaned by a crash mid-extract
+/// or mid-self-heal. Best-effort, never throws, never touches the current dir. The age
+/// gate is what makes evicting `.tmp`/`.stale.*` safe: a >30-day-old one is definitely
+/// abandoned, never a concurrent extractor's in-progress dir (those are seconds old).
+/// Runs only on the rare fresh-extract path.
 fn gc_stale(base: &Path, current: &Path) {
     let Ok(entries) = fs::read_dir(base) else {
         return;
@@ -465,7 +495,10 @@ fn gc_stale(base: &Path, current: &Path) {
         if path == *current {
             continue;
         }
-        if !entry.file_name().to_string_lossy().starts_with("runtime-") {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let evictable =
+            name.starts_with("runtime-") || name.starts_with(".stale.") || name.ends_with(".tmp");
+        if !evictable {
             continue;
         }
         let Ok(meta) = entry.metadata() else { continue };
@@ -661,7 +694,10 @@ mod tests {
         let target = base.join(CACHE_KEY);
         fs::create_dir_all(&target).unwrap();
         unpack_blob(&target).unwrap();
-        assert!(verify_entrypoints(&target), "fresh real-blob extraction verifies");
+        assert!(
+            verify_entrypoints(&target),
+            "fresh real-blob extraction verifies"
+        );
 
         fs::write(target.join("addons/nub-native.node"), b"malicious").unwrap();
         assert!(!verify_entrypoints(&target), "tamper must be detected");
@@ -724,7 +760,10 @@ mod tests {
         let link = base.with_extension("link");
         let _ = fs::remove_file(&link);
         std::os::unix::fs::symlink(&base, &link).unwrap();
-        assert!(!is_safe_dir(&link), "a symlinked base is rejected (no traversal)");
+        assert!(
+            !is_safe_dir(&link),
+            "a symlinked base is rejected (no traversal)"
+        );
 
         fs::remove_file(&link).unwrap();
         fs::remove_dir_all(&base).unwrap();
@@ -779,13 +818,17 @@ mod tests {
 
         let current = base.join("runtime-cur");
         let stale = base.join("runtime-old");
-        let tmp = base.join(".runtime-old.123.tmp");
-        for d in [&current, &stale, &tmp] {
+        let tmp = base.join(".runtime-old.123.tmp"); // RECENT in-progress tmp
+        let old_orphan = base.join(".stale.runtime-old.99.7"); // crashed-heal leftover
+        let old_tmp = base.join(".runtime-old.42.9.tmp"); // crashed-extract leftover
+        for d in [&current, &stale, &tmp, &old_orphan, &old_tmp] {
             fs::create_dir_all(d).unwrap();
         }
-        // Backdate the stale dir well past MAX_AGE.
+        // Backdate the stale version + the two abandoned orphans well past MAX_AGE.
         let old = SystemTime::now() - Duration::from_secs(40 * 24 * 60 * 60);
-        filetime_set(&stale, old);
+        for d in [&stale, &old_orphan, &old_tmp] {
+            filetime_set(d, old);
+        }
 
         gc_stale(&base, &current);
 
@@ -793,8 +836,13 @@ mod tests {
         assert!(!stale.is_dir(), "a >30d sibling must be evicted");
         assert!(
             tmp.is_dir(),
-            "an in-progress .tmp dir must never be touched"
+            "a RECENT in-progress .tmp dir must never be touched"
         );
+        assert!(
+            !old_orphan.is_dir(),
+            "a >30d .stale.* orphan must be evicted"
+        );
+        assert!(!old_tmp.is_dir(), "a >30d .tmp orphan must be evicted");
         fs::remove_dir_all(&base).unwrap();
     }
 

@@ -166,6 +166,14 @@ jobs:
           workspaces: |
             .
             crates/nub-native
+      # --all-features enables `embed-runtime`, whose build.rs bakes the integrity
+      # digest of runtime/addons/nub-native.node (gitignored — built locally / staged
+      # in release.yml) and fails loud if it's absent. Stage a placeholder so the lint
+      # build's three-entrypoint set is complete; clippy never runs the binary.
+      - name: Stage placeholder addon for the embed-runtime lint build
+        run: |
+          mkdir -p runtime/addons
+          printf 'placeholder-addon' > runtime/addons/nub-native.node
       - run: cargo clippy --all-targets --all-features -- -D warnings
       # nub-native is its OWN workspace (split so the CLI uses panic=abort while
       # the cdylib stays panic=unwind), `exclude`d from the root workspace — so the
@@ -189,11 +197,17 @@ jobs:
   # tamper→self-heal, canary/enforce decision, R1 0700/owner/symlink validation,
   # build.rs hash determinism) runs against the REAL embedded blob — and a verify
   # FALSE-POSITIVE would BRICK nub on that platform. So it runs on every hosted OS
-  # (Windows path semantics + macOS + linux all differ), is ci-gate-required, and the
-  # musl divergence is covered by the sibling `embed-runtime-musl` job. The addon is
-  # gitignored (built locally / staged in release.yml), so a placeholder is staged so
-  # build.rs's three-entrypoint hash set is complete; it is never dlopen'd here (the
-  # tests verify hash CONSISTENCY — baked == extracted — not native loading).
+  # (Windows path semantics + macOS + linux all differ) and is ci-gate-required. The
+  # verify logic is pure-Rust (fs::read + blake3 + libc::geteuid / symlink_metadata),
+  # identical on musl — and the musl RUNTIME is exercised by the `Docker smoke (musl,
+  # node:22-alpine)` leg + release.yml's musl binary build. (A standalone `cargo test
+  # --target x86_64-unknown-linux-musl` leg was attempted but blocked by a PRE-EXISTING,
+  # unrelated musl-compile error in spawn.rs's PTY ioctl — `libc::TIOCSCTTY as c_ulong`,
+  # where libc's Ioctl request type is c_int on musl vs c_ulong on glibc — which is a
+  # separate fix outside this integrity change.) The addon is gitignored (built locally
+  # / staged in release.yml), so a placeholder is staged so build.rs's three-entrypoint
+  # hash set is complete; it is never dlopen'd here (the tests verify hash CONSISTENCY —
+  # baked == extracted — not native loading).
   embed-runtime:
     name: embed-runtime verify (${{ matrix.os }})
     needs: matrix-plan
@@ -221,35 +235,6 @@ jobs:
       - name: Build the feature-on binary
         if: runner.os == 'Linux'
         run: cargo build -p nub-cli --features embed-runtime
-
-  # musl is the known divergence point the embed feature flagged (static-link + the
-  # dlopen path). R2's verify is pure-Rust (fs::read + sha2 + libc::geteuid /
-  # symlink_metadata), so this exercises verify-on-load on a musl-target build. The
-  # test binary is musl-STATIC, so it runs directly on the glibc host — no container
-  # (which would hit the node-on-alpine checkout problem). rustls→ring + the zstd
-  # build-dep's libzstd need a musl C toolchain (musl-tools provides musl-gcc).
-  embed-runtime-musl:
-    name: embed-runtime verify (linux-musl)
-    needs: matrix-plan
-    if: needs.matrix-plan.outputs.run_rust == 'true'
-    runs-on: ubuntu-latest
-    env:
-      CC_x86_64_unknown_linux_musl: musl-gcc
-    steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
-        with:
-          targets: x86_64-unknown-linux-musl
-      - run: sudo apt-get update && sudo apt-get install -y musl-tools
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
-        with:
-          shared-key: ci-embed-runtime-musl
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Stage placeholder addon for the embed build
-        run: |
-          mkdir -p runtime/addons
-          printf 'placeholder-addon' > runtime/addons/nub-native.node
-      - run: cargo test -p nub-core --features embed-runtime --target x86_64-unknown-linux-musl
 
   # TEMPORARY (PR #175 data point) — remove after Windows embed behavior is confirmed.
   #
