@@ -6042,8 +6042,12 @@ fn resolve_provision_declare(
     // same file to the provisioner instead of letting it re-download. (`dist` was
     // resolved against the project's authed/mirror registry config above — the
     // contract `provision_pm_from_tarball` requires.)
-    let fetched = fetch_verify_and_hash_tarball(name, &dist, cfg.auth.as_ref())
-        .map_err(|e| humanize_transport_error(e, &cfg.base))?;
+    // Host-match the registry auth to the resolved tarball before downloading it:
+    // a (malicious/MITM) packument's `dist.tarball` can name a foreign host, and
+    // the registry `_authToken` must never leave the registry's own origin (N1b).
+    let fetched =
+        fetch_verify_and_hash_tarball(name, &dist, registry::auth_for_tarball(&cfg, &dist.tarball))
+            .map_err(|e| humanize_transport_error(e, &cfg.base))?;
     let hex = &fetched.hex;
 
     if let Some(pm) = pm {

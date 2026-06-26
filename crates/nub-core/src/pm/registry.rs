@@ -325,6 +325,30 @@ pub fn rewrite_tarball_origin(tarball: &str, registry_base: &str) -> String {
     format!("{reg_origin}{rest}")
 }
 
+/// The registry credential to present when DOWNLOADING `tarball_url` — `cfg.auth`,
+/// but ONLY when the tarball is served from the SAME `scheme://host[:port]` origin
+/// the credential belongs to. `dist.tarball` is an absolute URL the packument
+/// declares, so under a malicious / MITM'd registry it can name an ARBITRARY
+/// foreign host; attaching the registry bearer token (`_authToken`) to that
+/// request would disclose the credential in flight (N1b). The packument fetch is
+/// unaffected — it always targets `cfg.base` and keeps full auth; this gate is
+/// only for the tarball download. For a private mirror [`rewrite_tarball_origin`]
+/// has already pinned the tarball onto the registry's own origin, so this matches
+/// and auth is attached exactly as before; the public-registry tarball is on the
+/// registry host, so it matches too. The only request that loses auth is one to a
+/// host the credential was never issued for — the leak. Mirrors aube matching
+/// tarball auth to the tarball's own host.
+pub fn auth_for_tarball<'a>(cfg: &'a RegistryConfig, tarball_url: &str) -> Option<&'a Auth> {
+    let reg_origin = origin_of(&cfg.base)?;
+    let tar_origin = origin_of(tarball_url)?;
+    // scheme + host are ASCII-case-insensitive; the origin carries no path/query.
+    if reg_origin.eq_ignore_ascii_case(tar_origin) {
+        cfg.auth.as_ref()
+    } else {
+        None
+    }
+}
+
 /// The `scheme://host[:port]` origin of a URL — everything up to (not including)
 /// the first `/` after the `://`. Returns `None` for a URL with no `://`.
 fn origin_of(url: &str) -> Option<&str> {
@@ -398,9 +422,41 @@ pub(crate) fn normalize_range(spec: &str) -> String {
     spec.split_whitespace().collect::<Vec<_>>().join(", ")
 }
 
+/// Reject a registry-declared version string before it becomes a STORE PATH
+/// component (and a `.tmp-<version>-…` work-dir name) that nub then EXECUTES. The
+/// dist-tag branch of [`resolve_dist`] passes a raw, registry-controlled
+/// `dist-tags.<tag>` value straight into [`dist_from_meta`], and the runnable
+/// target is built `<store>/pm/<pm>/<version>/package/<bin>` via `Path::join`,
+/// which an absolute or `..`-laden version escapes (the F0c registry-exec
+/// boundary). Mirrors the engine's own guard `aube_store::validate_version`
+/// (nub-core has no aube dep, so the char-blocklist is restated here, the same
+/// way [`safe_bin_subpath`] mirrors aube's bin-path guard): reject path
+/// separators on any platform, NUL, control chars, and the `.`/`..` dir aliases.
+/// A normal semver — `9.5.0`, `11.0.0-rc.1` — passes untouched.
+fn validate_version(version: &str) -> bool {
+    if version.is_empty() || version.len() > 256 {
+        return false;
+    }
+    if version
+        .bytes()
+        .any(|b| b.is_ascii_control() || matches!(b, b'/' | b'\\' | b'\0'))
+    {
+        return false;
+    }
+    !matches!(version, "." | "..")
+}
+
 /// Build a [`VersionDist`] from one `versions[X.Y.Z]` entry. `version` is the
 /// resolved key (so callers print the concrete version, never the spec).
 fn dist_from_meta(version: &str, meta: &Value) -> Result<VersionDist> {
+    // The sole construction point of `VersionDist`, so the single chokepoint for
+    // the version string before it flows into a store path. The dist-tag branch
+    // feeds a raw registry value here; reject anything that could escape the join.
+    if !validate_version(version) {
+        bail!(
+            "registry returned an unsafe version string {version:?} — refusing to use it as a store path"
+        );
+    }
     let dist = meta
         .get("dist")
         .with_context(|| format!("version {version} has no \"dist\" object"))?;
@@ -827,6 +883,103 @@ mod tests {
         assert!(
             resolve_dist(&meta, "9.0.0").is_err(),
             "an escaping bin must fail resolution, never yield a runnable out-of-package target"
+        );
+    }
+
+    #[test]
+    fn validate_version_accepts_semver_and_rejects_path_escapes() {
+        // Legitimate version strings the resolver must keep accepting.
+        for ok in [
+            "9.5.0",
+            "11.0.0-rc.1",
+            "1.2.3+build.5",
+            "0.0.0-canary.20240101",
+        ] {
+            assert!(validate_version(ok), "{ok:?} is a legitimate version");
+        }
+        // Anything that could escape `<store>/pm/<pm>/<version>` when joined, or
+        // alias a directory, must be refused (F0c).
+        for bad in [
+            "../evil",
+            "..",
+            ".",
+            "a/b",
+            "a\\b",
+            "x\u{0}y",
+            "ctrl\u{7}x",
+            "",
+        ] {
+            assert!(
+                !validate_version(bad),
+                "{bad:?} must be rejected as a store-path component"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_dist_rejects_a_dist_tag_pointing_at_a_path_escaping_version() {
+        // F0c: a malicious / MITM registry points a dist-tag at a version KEY that
+        // carries `..`. The runnable PM target is `<store>/pm/<pm>/<version>/…`
+        // built with `Path::join`, so an escaping version would relocate the
+        // executed bin outside the store. The dist-tag branch is the one that
+        // passes a raw registry string straight to `dist_from_meta`; resolution
+        // must refuse it rather than hand back a traversal-bearing `VersionDist`.
+        let p: Value = serde_json::from_str(
+            r#"{
+                "name": "pnpm",
+                "dist-tags": { "latest": "../../../../tmp/evil" },
+                "versions": {
+                    "../../../../tmp/evil": {
+                        "name": "pnpm",
+                        "bin": { "pnpm": "bin/pnpm.cjs" },
+                        "dist": {
+                            "tarball": "https://registry.npmjs.org/pnpm/-/pnpm-evil.tgz",
+                            "integrity": "sha512-EVIL"
+                        }
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        let err = resolve_dist(&p, "latest").unwrap_err().to_string();
+        assert!(
+            err.contains("unsafe version"),
+            "an escaping dist-tag version must be refused: {err}"
+        );
+    }
+
+    #[test]
+    fn auth_for_tarball_attaches_only_to_the_registry_origin() {
+        let auth = Auth::Bearer("secret-token".into());
+        let cfg = RegistryConfig {
+            base: "https://npm.corp.test/api/npm".into(),
+            auth: Some(auth.clone()),
+        };
+        // Same origin (the private-mirror case, post origin-rewrite) → auth rides.
+        assert_eq!(
+            auth_for_tarball(&cfg, "https://npm.corp.test/pnpm/-/pnpm-10.0.0.tgz"),
+            Some(&auth)
+        );
+        // A foreign-host tarball a malicious/MITM packument named must NOT receive
+        // the registry credential (N1b — the leak this guard closes).
+        assert_eq!(
+            auth_for_tarball(&cfg, "https://evil.test/pnpm/-/pnpm-10.0.0.tgz"),
+            None
+        );
+        // An https→http downgrade to the same host is a different origin → no auth
+        // (belt-and-suspenders with the redirect-policy downgrade stop).
+        assert_eq!(
+            auth_for_tarball(&cfg, "http://npm.corp.test/pnpm/-/pnpm-10.0.0.tgz"),
+            None
+        );
+        // No auth configured (the public-registry default) → nothing to leak.
+        let no_auth = RegistryConfig {
+            base: PUBLIC_REGISTRY.into(),
+            auth: None,
+        };
+        assert_eq!(
+            auth_for_tarball(&no_auth, "https://registry.npmjs.org/x/-/x-1.0.0.tgz"),
+            None
         );
     }
 

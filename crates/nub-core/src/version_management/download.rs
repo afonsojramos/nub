@@ -52,11 +52,31 @@ const RETRY_BACKOFF: Duration = Duration::from_millis(400);
 
 /// Blocking HTTP client: rustls (no OpenSSL), native roots so corporate MITM CAs
 /// keep working, and `HTTP(S)_PROXY` / `NO_PROXY` honored for free by reqwest.
+///
+/// The redirect policy blocks an https→http DOWNGRADE on redirect (N1; mirrors
+/// the engine's `aube-registry` client). reqwest already strips `Authorization`
+/// on a cross-HOST redirect as of 0.12, but an https→http hop to the SAME
+/// host+port is not "cross-host" by that check — so a `302` from a good registry
+/// to `http://<same-host>/` would otherwise carry the `_authToken` (which
+/// `fetch_text_auth` / `download_to_file_auth` attach) into cleartext. The hop
+/// cap matches reqwest's own default (≤10) so the only behavior change is the
+/// scheme guard.
 fn client() -> Result<reqwest::blocking::Client> {
     reqwest::blocking::Client::builder()
         .user_agent(concat!("nub/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(30))
         .timeout(Duration::from_secs(600))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 10 {
+                return attempt.error("too many redirects");
+            }
+            if let Some(prev) = attempt.previous().last() {
+                if prev.scheme() == "https" && attempt.url().scheme() != "https" {
+                    return attempt.stop();
+                }
+            }
+            attempt.follow()
+        }))
         .build()
         .context("building HTTP client")
 }

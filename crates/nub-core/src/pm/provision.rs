@@ -158,7 +158,11 @@ pub fn provision_pm_announced(
         &pm_store,
         &final_dir,
         pin_hash,
-        cfg.auth.as_ref(),
+        // Host-match the registry auth to the tarball before attaching it: a
+        // packument's `dist.tarball` can name a foreign host, and the bearer
+        // token must never leave the registry's own origin (N1b). The packument
+        // fetch above already used the full `cfg.auth`.
+        registry::auth_for_tarball(&cfg, &dist.tarball),
         resolved_from,
         on_resolved.is_some(),
     )?;

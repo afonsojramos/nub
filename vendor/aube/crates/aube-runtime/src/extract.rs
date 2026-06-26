@@ -4,7 +4,67 @@
 //! discovery.
 
 use crate::error::Error;
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
+
+/// Maximum total decompressed bytes accepted from a single runtime archive — the
+/// decompression-bomb ceiling. 1 GiB, mirroring
+/// `aube_store::MAX_TARBALL_DECOMPRESSED_BYTES`. A stock Node release unpacks to
+/// well under 100 MiB, so this sits an order of magnitude above any real artifact
+/// while stopping a malicious/mirror-served small-compressed / huge-decompressed
+/// payload from exhausting disk or memory. The download is checksum-verified
+/// before extraction, so this is defense-in-depth against a forged-checksum MITM.
+/// Lowered under `cfg(test)` (as `aube_store` does) so a bomb test stays cheap.
+#[cfg(not(test))]
+const MAX_ARCHIVE_DECOMPRESSED_BYTES: u64 = 1 << 30;
+#[cfg(test)]
+const MAX_ARCHIVE_DECOMPRESSED_BYTES: u64 = 1 << 20;
+
+/// Maximum bytes for a single zip entry — the per-file cap on the zip path,
+/// matching `aube_store::MAX_TARBALL_ENTRY_BYTES`.
+#[cfg(not(test))]
+const MAX_ARCHIVE_ENTRY_BYTES: u64 = 512 << 20;
+#[cfg(test)]
+const MAX_ARCHIVE_ENTRY_BYTES: u64 = 1 << 20;
+
+/// A `Read` wrapper that refuses to deliver more than `remaining` bytes,
+/// surfacing exhaustion as an `io::Error` rather than a clean EOF — so a crafted
+/// archive can't silently truncate a tar stream into a partial tree at a block
+/// boundary. Local mirror of `aube_store`'s `CappedReader` (it is `pub(crate)`
+/// there, so it can't be shared across the crate boundary).
+struct CappedReader<R: Read> {
+    inner: R,
+    remaining: u64,
+}
+
+impl<R: Read> CappedReader<R> {
+    fn new(inner: R, cap: u64) -> Self {
+        Self {
+            inner,
+            remaining: cap,
+        }
+    }
+}
+
+impl<R: Read> Read for CappedReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        if self.remaining == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "archive decompression exceeds the {MAX_ARCHIVE_DECOMPRESSED_BYTES}-byte cap"
+                ),
+            ));
+        }
+        let want = buf.len().min(self.remaining as usize);
+        let n = self.inner.read(&mut buf[..want])?;
+        self.remaining -= n as u64;
+        Ok(n)
+    }
+}
 
 /// Extract `archive_path` into `dest`. `strip_first` drops the
 /// top-level directory (`node-v{V}-{slug}/`; aube release archives
@@ -28,7 +88,12 @@ pub(crate) fn extract_archive(
 fn extract_tar_gz(archive_path: &Path, dest: &Path, strip_first: bool) -> Result<(), Error> {
     let file = std::fs::File::open(archive_path)
         .map_err(|e| Error::io(format!("open {}", archive_path.display()), e))?;
-    let decoder = flate2::read::GzDecoder::new(std::io::BufReader::new(file));
+    // Cap the DECOMPRESSED stream against a gzip bomb (defense-in-depth on top of
+    // the upstream checksum gate).
+    let decoder = CappedReader::new(
+        flate2::read::GzDecoder::new(std::io::BufReader::new(file)),
+        MAX_ARCHIVE_DECOMPRESSED_BYTES,
+    );
     let mut archive = tar::Archive::new(decoder);
     for entry in archive.entries().map_err(|e| Error::ExtractFailed {
         reason: e.to_string(),
@@ -104,6 +169,9 @@ fn extract_zip(archive_path: &Path, dest: &Path, strip_first: bool) -> Result<()
     let mut zip = zip::ZipArchive::new(file).map_err(|e| Error::ExtractFailed {
         reason: e.to_string(),
     })?;
+    // Running decompressed total, capped per-entry and per-archive against a zip
+    // bomb (defense-in-depth on top of the upstream checksum gate).
+    let mut total: u64 = 0;
     for i in 0..zip.len() {
         let mut entry = zip.by_index(i).map_err(|e| Error::ExtractFailed {
             reason: e.to_string(),
@@ -128,9 +196,31 @@ fn extract_zip(archive_path: &Path, dest: &Path, strip_first: bool) -> Result<()
         }
         let mut out = std::fs::File::create(&dest_path)
             .map_err(|e| Error::io(format!("create {}", dest_path.display()), e))?;
-        std::io::copy(&mut entry, &mut out).map_err(|e| Error::ExtractFailed {
+        // Per-entry cap (+1 so a write of exactly the cap is detectable) plus the
+        // running archive total — a lying header can't amplify past either.
+        let written = std::io::copy(
+            &mut (&mut entry).take(MAX_ARCHIVE_ENTRY_BYTES + 1),
+            &mut out,
+        )
+        .map_err(|e| Error::ExtractFailed {
             reason: format!("{}: {e}", stripped.display()),
         })?;
+        if written > MAX_ARCHIVE_ENTRY_BYTES {
+            return Err(Error::ExtractFailed {
+                reason: format!(
+                    "{} exceeds the {MAX_ARCHIVE_ENTRY_BYTES}-byte per-entry cap",
+                    stripped.display()
+                ),
+            });
+        }
+        total = total.saturating_add(written);
+        if total > MAX_ARCHIVE_DECOMPRESSED_BYTES {
+            return Err(Error::ExtractFailed {
+                reason: format!(
+                    "archive exceeds the {MAX_ARCHIVE_DECOMPRESSED_BYTES}-byte decompression cap"
+                ),
+            });
+        }
     }
     Ok(())
 }
@@ -274,6 +364,75 @@ mod tests {
             Path::new("bin/npm"),
             Path::new("/etc/passwd")
         ));
+    }
+
+    #[test]
+    fn tar_gz_decompression_bomb_is_capped() {
+        // A small-compressed / huge-decompressed `.tar.gz` (the gzip-bomb shape)
+        // must be refused by the CappedReader before the payload exhausts disk.
+        // Test cap is 1 MiB; author well past it from a tiny compressed input.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
+            Vec::new(),
+            flate2::Compression::best(),
+        ));
+        let big = vec![0u8; 4 * 1024 * 1024];
+        let mut header = tar::Header::new_gnu();
+        header.set_size(big.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "top/big.bin", &big[..])
+            .unwrap();
+        let bytes = builder.into_inner().unwrap().finish().unwrap();
+        assert!(
+            bytes.len() < 64 * 1024,
+            "compressed bomb must be tiny: {}",
+            bytes.len()
+        );
+        let archive = tmp.path().join("bomb.tar.gz");
+        std::fs::write(&archive, bytes).unwrap();
+        let dest = tmp.path().join("out");
+        std::fs::create_dir_all(&dest).unwrap();
+        // Extraction must be refused, and the cap must have interrupted the write
+        // BEFORE the full 4 MiB landed (the tar-crate unpack error wraps the
+        // CappedReader's io error without surfacing its message, so assert the
+        // truncation behavior, not the wording).
+        assert!(
+            extract_archive(&archive, &dest, false, true).is_err(),
+            "a decompression bomb must be refused"
+        );
+        if let Ok(meta) = std::fs::metadata(dest.join("big.bin")) {
+            assert!(
+                meta.len() <= MAX_ARCHIVE_DECOMPRESSED_BYTES,
+                "the cap must interrupt the write; any partial file is at most the cap, got {} bytes",
+                meta.len()
+            );
+        }
+    }
+
+    #[test]
+    fn zip_oversized_entry_is_capped() {
+        use std::io::Write;
+        // A zip entry decompressing past the per-entry cap (1 MiB under test) must
+        // be refused rather than written in full.
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = tmp.path().join("bomb.zip");
+        let file = std::fs::File::create(&archive).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        let opts: zip::write::SimpleFileOptions = Default::default();
+        writer.start_file("top/big.bin", opts).unwrap();
+        writer.write_all(&vec![0u8; 4 * 1024 * 1024]).unwrap();
+        writer.finish().unwrap();
+        assert!(std::fs::metadata(&archive).unwrap().len() < 64 * 1024);
+        let dest = tmp.path().join("out");
+        std::fs::create_dir_all(&dest).unwrap();
+        let err = extract_archive(&archive, &dest, true, true).unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(
+            msg.to_lowercase().contains("cap"),
+            "an oversized zip entry must be refused by the cap: {msg}"
+        );
     }
 
     #[test]

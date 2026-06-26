@@ -495,12 +495,21 @@ fn fingerprint(pkg: &LockedPackage, patch_hash: Option<&str>, project_root: &Pat
             LocalSource::Exec(p) => {
                 h.update(b"exec");
                 update_field(&mut h, b"path", p.to_string_lossy().as_bytes());
-                let script = if p.is_absolute() {
-                    p.as_path().to_path_buf()
-                } else {
-                    project_root.join(p)
-                };
-                if let Ok(content) = std::fs::read(script) {
+                // Fold the generator script's content so a changed script lands
+                // in the `changed` bucket on the next install. Resolve it through
+                // the SAME containment guard the exec *execution* sink uses
+                // (`resolve_exec_script_path`: canonicalize, assert the path stays
+                // under `project_root`, reject absolute) before reading. Without
+                // it a malicious committed lockfile's `exec:/etc/shadow` or
+                // `exec:../escape` turned this change-hash read into an
+                // out-of-project arbitrary-file read, and `exec:/dev/zero` into an
+                // unbounded one (DoS). A legit in-project script canonicalizes to
+                // the same bytes, so the fingerprint is unchanged; an
+                // out-of-project script is skipped here and rejected at execution
+                // time anyway, so omitting its content costs nothing.
+                if let Ok(script) = aube_resolver::resolve_exec_script_path(src, project_root)
+                    && let Ok(content) = std::fs::read(&script)
+                {
                     update_field(&mut h, b"content", &content);
                 }
             }
@@ -652,6 +661,39 @@ mod tests {
         let after = fingerprint(&pkg, None, temp.path());
 
         assert_ne!(before, after);
+    }
+
+    #[test]
+    fn fingerprint_skips_out_of_project_exec_script_content() {
+        // N3: a committed lockfile's `exec:` source whose path escapes the project
+        // root must NOT have its content folded into the change-hash — the read is
+        // contained to the project the same way the execution sink is. Proof:
+        // mutating the out-of-project file leaves the fingerprint unchanged (the
+        // pre-fix code read `project_root.join(p)` / the absolute path directly, so
+        // a `../escape` or `/etc/shadow` became an arbitrary out-of-project read,
+        // and `/dev/zero` an unbounded one). The legit in-project case is covered
+        // by `fingerprint_changes_on_exec_script_edit` above.
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().join("project");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let outside = temp.path().join("outside.js");
+        std::fs::write(&outside, "module.exports = { name: 'before' }").unwrap();
+
+        for escaping in [
+            std::path::PathBuf::from("../outside.js"), // relative escape
+            outside.clone(),                           // absolute escape
+        ] {
+            let mut pkg = pkg("generated", "1.0.0");
+            pkg.local_source = Some(LocalSource::Exec(escaping.clone()));
+            let before = fingerprint(&pkg, None, &project_root);
+            std::fs::write(&outside, "module.exports = { name: 'after-DIFFERENT' }").unwrap();
+            let after = fingerprint(&pkg, None, &project_root);
+            std::fs::write(&outside, "module.exports = { name: 'before' }").unwrap(); // reset
+            assert_eq!(
+                before, after,
+                "out-of-project exec source {escaping:?} must not have its content read into the hash"
+            );
+        }
     }
 
     #[test]
