@@ -1500,21 +1500,46 @@ pub fn find_public_preload(nub_binary: &Path) -> Option<String> {
 }
 
 fn find_preload(nub_binary: &Path) -> Option<String> {
-    // Walk up from the binary's directory to find runtime/preload.mjs.
-    let mut dir = nub_binary.parent()?.to_path_buf();
-    for _ in 0..5 {
-        let candidate = dir.join("runtime").join("preload.mjs");
-        if candidate.is_file() {
-            // Strip the `\\?\` verbatim prefix `fs::canonicalize` adds on Windows so
-            // the path is usable in NODE_PATH and convertible to a valid file:// URL.
-            return candidate.to_str().map(|s| strip_verbatim(s, cfg!(windows)));
-        }
-        if !dir.pop() {
-            break;
-        }
+    // Single-binary mode: the runtime is embedded in the binary. Extract it once
+    // (memoized) to a versioned cache dir and point the preload there. This runs
+    // synchronously, BEFORE preload injection / NODE_OPTIONS assembly / the child
+    // spawn (find_preload is the first thing spawn touches), so extraction is
+    // complete before any path is read. The returned `.mjs` path is the
+    // byte-identical sibling of today's sidecar `preload.mjs`; only its directory
+    // moved (sidecar → cache), so `preload_injection_for`'s `--require <stem>.cjs`,
+    // `vendored_node_path`'s `<dir>/node_modules`, and the addon's
+    // `./addons/nub-native.node` all resolve unchanged. A `None` here (no writable
+    // cache dir anywhere) leaves nub un-augmented, exactly as a not-found sidecar
+    // would — never falls through to the (sidecar-less) walk below.
+    #[cfg(feature = "embed-runtime")]
+    {
+        let _ = nub_binary; // resolution is from the embedded blob, not the binary's dir
+        super::runtime_cache::ensure_runtime().and_then(|dir| {
+            dir.join("preload.mjs")
+                .to_str()
+                .map(|s| strip_verbatim(s, cfg!(windows)))
+        })
     }
-    tracing::warn!("preload not found relative to nub binary");
-    None
+
+    // Dev / feature-off: walk up from the binary's directory to find
+    // runtime/preload.mjs (the in-repo, live-editable sidecar).
+    #[cfg(not(feature = "embed-runtime"))]
+    {
+        let mut dir = nub_binary.parent()?.to_path_buf();
+        for _ in 0..5 {
+            let candidate = dir.join("runtime").join("preload.mjs");
+            if candidate.is_file() {
+                // Strip the `\\?\` verbatim prefix `fs::canonicalize` adds on Windows so
+                // the path is usable in NODE_PATH and convertible to a valid file:// URL.
+                return candidate.to_str().map(|s| strip_verbatim(s, cfg!(windows)));
+            }
+            if !dir.pop() {
+                break;
+            }
+        }
+        tracing::warn!("preload not found relative to nub binary");
+        None
+    }
 }
 
 /// Resolve the path to the currently running Nub binary (follows symlinks).

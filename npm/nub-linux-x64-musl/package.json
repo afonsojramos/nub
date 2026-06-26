@@ -11,8 +11,7 @@
     "x64"
   ],
   "files": [
-    "bin",
-    "runtime"
+    "bin"
   ],
   "libc": [
     "musl"

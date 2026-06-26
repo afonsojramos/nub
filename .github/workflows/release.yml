@@ -391,12 +391,84 @@ jobs:
         # `--git` (a from-source rebuild of cross on every cross-target job).
         run: cargo install cross --version 0.2.5 --locked
 
-      - name: Build binary
+      # SINGLE-BINARY EMBED — the runtime now ships INSIDE the binary. Stage the
+      # runtime (per-platform addon + the os/cpu-agnostic vendored node_modules)
+      # into the repo's runtime/ BEFORE building nub-cli, so nub-core's build.rs
+      # tars + zstd-19-compresses it and `include_bytes!`-embeds it into THIS
+      # platform's binary. build.rs reads <repo>/runtime by default, so the staging
+      # location needs no env override (and so it works inside the cross containers,
+      # which mount the project — no AUBE_*-style passthrough needed).
+      - name: Build + stage nub-native addon (embedded into the binary)
+        run: |
+          CMD="cargo"; [ "${{ matrix.cross }}" = "true" ] && CMD="cross"
+          case "${{ matrix.target }}" in
+            *-musl)
+              # musl's default crt-static can't produce a cdylib (a .node is a
+              # dynamic lib); disable it for the ADDON only so it builds dynamic.
+              # The static nub BINARY (built below) is untouched. napi-rs's canonical
+              # musl recipe (what oxc/swc ship); the crate-local Cross.toml carries
+              # the RUSTFLAGS passthrough into the cross container.
+              (cd crates/nub-native && RUSTFLAGS="-C target-feature=-crt-static" $CMD build --release --target ${{ matrix.target }})
+              ;;
+            *)
+              (cd crates/nub-native && $CMD build --release --target ${{ matrix.target }})
+              ;;
+          esac
+          mkdir -p runtime/addons
+          if [[ "${{ matrix.platform }}" == win32-* ]]; then
+            cp "target/${{ matrix.target }}/release/nub_native.dll" runtime/addons/nub-native.node
+          elif [[ "${{ matrix.platform }}" == darwin-* ]]; then
+            cp "target/${{ matrix.target }}/release/libnub_native.dylib" runtime/addons/nub-native.node
+          else
+            cp "target/${{ matrix.target }}/release/libnub_native.so" runtime/addons/nub-native.node
+          fi
+          # The addon is MANDATORY — if it didn't build, it would be silently absent
+          # from the embedded runtime and the data-format loaders would be dead. Gate
+          # it here, BEFORE the binary build embeds the staged tree.
+          test -f runtime/addons/nub-native.node \
+            || { echo "::error::missing nub-native.node for ${{ matrix.platform }} — the addon didn't build; it would be absent from the embedded runtime. Fix the addon build before releasing."; exit 1; }
+        shell: bash
+
+      - name: Stage vendored runtime node_modules (embedded into the binary)
+        shell: bash
+        run: |
+          # Vendor the pure-JS runtime deps into runtime/node_modules at the EXACT
+          # versions installed in the workspace (so a shipped nub's transpile output
+          # is byte-identical to dev's). Read versions by relative-FILE require from
+          # the workspace root (cwd), which is Windows-safe and bypasses package
+          # `exports` (modern packages don't export ./package.json). Only the deps the
+          # EMITTED code / JS runtime need are vendored: @oxc-project/runtime (helper
+          # imports) + the web-API polyfills; oxc itself is compiled into the addon.
+          ver() { node -p "require('./node_modules/$1/package.json').version"; }
+          OXCRT_VERSION=$(ver @oxc-project/runtime)
+          URLP_VERSION=$(ver urlpattern-polyfill)
+          TEMPORAL_VERSION=$(ver @js-temporal/polyfill)
+          FLOAT16_VERSION=$(ver @petamoriken/float16)
+          rm -rf runtime/node_modules
+          mkdir -p runtime/node_modules
+          cd runtime
+          npm init -y > /dev/null 2>&1
+          # SINGLE install — a second --no-save install would prune the first as
+          # "extraneous" (the 0.0.7 breakage). Keep it one call.
+          npm install --no-save \
+            "@oxc-project/runtime@$OXCRT_VERSION" \
+            "urlpattern-polyfill@$URLP_VERSION" \
+            "@js-temporal/polyfill@$TEMPORAL_VERSION" \
+            "@petamoriken/float16@$FLOAT16_VERSION" \
+            2>&1 | tail -8
+          for d in "@oxc-project/runtime"; do
+            test -d "node_modules/$d" \
+              || { echo "::error::vendored dep missing from runtime/node_modules: $d"; exit 1; }
+          done
+          rm -f package.json package-lock.json
+          cd "$GITHUB_WORKSPACE"
+
+      - name: Build binary (embeds the staged runtime)
         run: |
           if [ "${{ matrix.cross }}" = "true" ]; then
-            cross build --release -p nub-cli --target ${{ matrix.target }}
+            cross build --release -p nub-cli --features embed-runtime --target ${{ matrix.target }}
           else
-            cargo build --release -p nub-cli --target ${{ matrix.target }}
+            cargo build --release -p nub-cli --features embed-runtime --target ${{ matrix.target }}
           fi
         shell: bash
 
@@ -431,41 +503,14 @@ jobs:
             exit 1
           fi
 
-      - name: Build nub-native addon
-        run: |
-          CMD="cargo"; [ "${{ matrix.cross }}" = "true" ] && CMD="cross"
-          case "${{ matrix.target }}" in
-            *-musl)
-              # musl's default fully-static crt can't produce a cdylib (a .node is a
-              # dynamic lib). Disable crt-static for the ADDON only on musl so it
-              # builds as a dynamic lib; the static nub BINARY (built above) is
-              # untouched and stays portable. The resulting .node dyn-links
-              # libgcc_s.so.1 (Rust's musl unwinder) — present on node:*-alpine
-              # (pulled via libstdc++), so it loads. This is napi-rs's canonical
-              # musl recipe (what oxc/swc ship). The addon builds from inside its
-              # own workspace (`cd crates/nub-native`; it is excluded from the root
-              # workspace), so `cross` reads crates/nub-native/Cross.toml — NOT the
-              # repo-root one — for its RUSTFLAGS passthrough; that crate-local
-              # Cross.toml carries the passthrough so -C target-feature=-crt-static
-              # reaches the cross container. Verified in Docker: builds + loads
-              # under node:alpine, exporting parseYaml/etc.
-              (cd crates/nub-native && RUSTFLAGS="-C target-feature=-crt-static" $CMD build --release --target ${{ matrix.target }})
-              ;;
-            *)
-              (cd crates/nub-native && $CMD build --release --target ${{ matrix.target }})
-              ;;
-          esac
-        shell: bash
-
-      - name: Assemble platform package
+      - name: Assemble platform package (single binary — bin/ only)
         shell: bash
         run: |
+          # The runtime is EMBEDDED in the binary (staged + built above), so the
+          # platform package ships ONLY bin/ — no runtime/ sidecar. Both verbs are
+          # real binary copies (nub picks its verb from the argv[0] basename).
           PKG="npm/nub-${{ matrix.platform }}"
-          mkdir -p "$PKG/bin" "$PKG/runtime/addons"
-
-          # Binary — staged under BOTH names (nub, nubx). The POSIX launcher heals
-          # the on-PATH entry into a minimal sh trampoline that exec's bin/<verb>,
-          # whose argv[0] basename is the verb, so nubx must be a real second copy.
+          mkdir -p "$PKG/bin"
           if [[ "${{ matrix.platform }}" == win32-* ]]; then
             cp "target/${{ matrix.target }}/release/nub.exe" "$PKG/bin/nub.exe"
             cp "target/${{ matrix.target }}/release/nub.exe" "$PKG/bin/nubx.exe"
@@ -474,80 +519,6 @@ jobs:
             cp "target/${{ matrix.target }}/release/nub" "$PKG/bin/nubx"
             chmod +x "$PKG/bin/nub" "$PKG/bin/nubx"
           fi
-
-          # Runtime files — copy EVERY top-level runtime module: the .mjs ESM
-          # modules AND the .cjs preload chain (preload.cjs / preload-common.cjs /
-          # polyfills.cjs, used by the fast-tier `--require`). The old `*.mjs`-only
-          # glob silently dropped the .cjs files and shipped a package that can't
-          # load (0.0.13). `find -type f` ships new modules of any extension without
-          # editing a whitelist. node_modules/ + addons/ are handled below.
-          find runtime -maxdepth 1 -type f -exec cp {} "$PKG/runtime/" \;
-
-          # Native addon
-          if [[ "${{ matrix.platform }}" == win32-* ]]; then
-            cp "target/${{ matrix.target }}/release/nub_native.dll" "$PKG/runtime/addons/nub-native.node" 2>/dev/null || true
-          elif [[ "${{ matrix.platform }}" == darwin-* ]]; then
-            cp "target/${{ matrix.target }}/release/libnub_native.dylib" "$PKG/runtime/addons/nub-native.node" 2>/dev/null || true
-          else
-            cp "target/${{ matrix.target }}/release/libnub_native.so" "$PKG/runtime/addons/nub-native.node" 2>/dev/null || true
-          fi
-
-          # The addon is MANDATORY — the data-format loaders (YAML/TOML/JSON5/JSONC)
-          # are dead without it. Gate its presence (mirrors the oxc-binding gates
-          # below) so a failed/missing addon build can't silently ship a broken
-          # package (A36-adjacent). The post-publish smoke also imports a data file
-          # to validate this end-to-end on the installed package.
-          test -f "$PKG/runtime/addons/nub-native.node" \
-            || { echo "::error::missing nub-native.node for ${{ matrix.platform }} — the addon didn't build; data-format loaders would be dead. Fix the addon build before releasing."; exit 1; }
-
-          # Vendor node_modules into a self-contained runtime directory, pinned to
-          # the EXACT versions installed in the workspace so a shipped nub's transpile
-          # output is byte-identical to dev's. Read versions by package-NAME
-          # resolution (cwd is the workspace root here, which has node_modules) —
-          # never via an absolute path inside a `node -e` string, because on Windows
-          # $GITHUB_WORKSPACE is a backslash path (D:\a\nub\nub) that breaks require().
-          # Relative FILE path on purpose: a package-name require ('pkg/package.json')
-          # hits the package `exports` map, and modern packages (e.g. @oxc-project/runtime)
-          # don't export ./package.json -> ERR_PACKAGE_PATH_NOT_EXPORTED. A relative
-          # path bypasses exports AND is Windows-safe (forward slashes in a relative
-          # specifier work on win32, unlike the backslash $GITHUB_WORKSPACE).
-          ver() { node -p "require('./node_modules/$1/package.json').version"; }
-          OXCRT_VERSION=$(ver @oxc-project/runtime)
-          URLP_VERSION=$(ver urlpattern-polyfill)
-          TEMPORAL_VERSION=$(ver @js-temporal/polyfill)
-          FLOAT16_VERSION=$(ver @petamoriken/float16)
-          mkdir -p "$PKG/runtime/node_modules"
-          cd "$PKG/runtime"
-          npm init -y > /dev/null 2>&1
-          # The TS/JSX transpiler + module detection, tsconfig discovery/parse + the
-          # additive TS-resolver, AND the transpile cache are now IN-PROCESS in nub-native
-          # (the Rust addon, with oxc compiled in) — so oxc-transform / oxc-parser and
-          # their per-platform @oxc-transform/@oxc-parser bindings, AND get-tsconfig (+ its
-          # resolve-pkg-maps dep), are NO LONGER vendored (that whole npm-resolution
-          # surface, the source of the 0.0.7/0.0.13 breakage, is gone — nub loads zero npm
-          # packages internally now). Only the pure-JS deps the EMITTED code or the JS
-          # runtime still need are vendored: @oxc-project/runtime (helper imports the
-          # transpile output references, e.g. usingCtx/decorate) and the web-API polyfills.
-          # All are os/cpu-agnostic, so no --force is needed.
-          #
-          # SINGLE install — do NOT re-split into a second `npm install` in this dir:
-          # with --no-save a second install reconciles node_modules to the ideal tree and
-          # PRUNES the first install's packages as "extraneous" (this is what shipped the
-          # broken 0.0.7). Keep it one call.
-          npm install --no-save \
-            "@oxc-project/runtime@$OXCRT_VERSION" \
-            "urlpattern-polyfill@$URLP_VERSION" \
-            "@js-temporal/polyfill@$TEMPORAL_VERSION" \
-            "@petamoriken/float16@$FLOAT16_VERSION" \
-            2>&1 | tail -8
-          # Confirm the critical JS dep actually landed (a 404'd version or a future
-          # re-split that reintroduces the prune bug dies here, not in a shipped package).
-          for d in "@oxc-project/runtime"; do
-            test -d "node_modules/$d" \
-              || { echo "::error::vendored dep missing from runtime/node_modules: $d"; exit 1; }
-          done
-          rm -f package.json package-lock.json
-          cd "$GITHUB_WORKSPACE"
 
       - name: Upload platform package
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
@@ -821,15 +792,15 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
 
-      - name: Package release archives (binary + runtime)
+      - name: Package release archives (single binary)
         run: |
-          # Per-platform archives containing bin/ + runtime/ (preload + vendored
-          # node_modules), so a curl|sh / irm install is self-contained and can
-          # transpile (A30). Distinct names per platform avoid the GitHub-Release
-          # asset collision of uploading bare `nub` for every target (A31).
-          # A `.sha256` sidecar is published next to each archive so the
-          # self-owned `~/.nub` upgrade channel (`nub upgrade`) can verify the
-          # download before swapping it into place. Format is `sha256sum`'s
+          # Per-platform archives containing ONLY bin/ — nub is a single self-
+          # contained binary that embeds its runtime and JIT-extracts it on first
+          # run, so the archive needs no runtime/ sidecar. Distinct names per
+          # platform avoid the GitHub-Release asset collision of uploading bare `nub`
+          # for every target (A31). A `.sha256` sidecar is published next to each
+          # archive so the self-owned `~/.nub` upgrade channel (`nub upgrade`) can
+          # verify the download before swapping it into place. Format is `sha256sum`'s
           # `<hex>  <name>`; `nub upgrade` reads the first field.
           mkdir -p release-archives
           for platform in darwin-arm64 darwin-x64 linux-x64 linux-x64-musl linux-arm64 linux-arm64-musl win32-x64 win32-arm64; do
@@ -837,7 +808,7 @@ jobs:
             [ -d "$PKG" ] || { echo "skip $platform (not built)"; continue; }
             if [[ "$platform" == win32-* ]]; then
               archive="nub-$platform.zip"
-              (cd "$PKG" && zip -qr "$GITHUB_WORKSPACE/release-archives/$archive" bin runtime)
+              (cd "$PKG" && zip -qr "$GITHUB_WORKSPACE/release-archives/$archive" bin)
             else
               # Re-apply +x BEFORE tarring: the build job's chmod (assemble step)
               # does NOT survive the upload-artifact → download-artifact round-trip
@@ -849,7 +820,7 @@ jobs:
               # the curl|sh installer and `nub upgrade` get an executable binary.
               chmod +x "$PKG/bin/nub" "$PKG/bin/nubx"
               archive="nub-$platform.tar.gz"
-              tar -czf "release-archives/$archive" -C "$PKG" bin runtime
+              tar -czf "release-archives/$archive" -C "$PKG" bin
             fi
             (cd release-archives && sha256sum "$archive" > "$archive.sha256")
           done

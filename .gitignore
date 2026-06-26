@@ -77,9 +77,11 @@ compile_commands.json
 runtime/addons/*.node
 # tests/node-suite is a registered git submodule (see .gitmodules), not ignored content. Git manages its working tree across the submodule boundary and the gitlink is committed (mode 160000), so an ignore rule here only contradicts .gitmodules and risks confusing `git submodule update` / `actions/checkout` in CI. Test-run artifacts that land inside it surface as the submodule's own "untracked content" and never leak into this repo's index.
 
-# npm platform packages (built artifacts)
+# npm platform packages (built artifacts). The single-binary build embeds the
+# runtime in the binary, so platform packages ship only bin/ — no per-package
+# runtime/ is produced anymore. The repo's own runtime/ (staged into the binary
+# at build time) is covered by the node_modules/ + runtime/addons/*.node rules above.
 npm/nub-*/bin/
-npm/nub-*/runtime/
 npm/nub/*.tgz
 npm/nub-*/*.tgz
 

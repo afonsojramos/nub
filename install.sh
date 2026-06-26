@@ -80,9 +80,10 @@ info "Installing nub v${version} for ${target}..."
 
 mkdir -p "$bin_dir" || error "Failed to create install directory: $bin_dir"
 
-# Download the per-platform archive (binary + runtime) and extract it into the
-# install dir. The archive ships bin/nub alongside runtime/ (preload.mjs +
-# vendored node_modules); without runtime/, nub cannot transpile at all (A30).
+# Download the per-platform archive and extract it into the install dir. The
+# archive ships ONLY bin/ — nub is a single self-contained binary that embeds its
+# runtime (preload + vendored node_modules + native addon) and JIT-extracts it to
+# ~/.cache/nub on first run, so there is no sidecar runtime/ to ship.
 # (Windows is handled by install.ps1 above, so $target is always darwin/linux.)
 url="https://github.com/nubjs/nub/releases/download/v${version}/nub-${target}.tar.gz"
 
@@ -92,8 +93,9 @@ trap 'rm -f "$tmp_archive"' EXIT
 curl --fail --location --progress-bar --output "$tmp_archive" "$url" ||
     error "Failed to download nub from: $url"
 
-# Replace any prior bin/ + runtime/ for a clean upgrade (other files under
-# $install_dir, e.g. caches, are preserved), then extract bin/ + runtime/.
+# Replace any prior bin/ for a clean upgrade (other files under $install_dir,
+# e.g. caches, are preserved). A stale runtime/ from a pre-single-binary install
+# is also removed so it can't shadow the embedded runtime. Then extract bin/.
 rm -rf "${install_dir:?}/bin" "${install_dir:?}/runtime"
 tar -xzf "$tmp_archive" -C "$install_dir" ||
     error "Failed to extract nub archive from: $url"

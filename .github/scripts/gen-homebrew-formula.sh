@@ -78,26 +78,18 @@ class Nub < Formula
   end
 
   def install
-    # The release archive is a tree (bin/nub, bin/nubx, runtime/), not a bare
-    # binary: nub loads runtime/ (preload + vendored polyfills + native addon)
-    # relative to the real binary, so the whole tree must stay together. Install
-    # it into libexec and symlink the executables onto PATH. Plain symlinks (no
-    # wrapper script) so each call execs the native binary with zero overhead;
-    # nub canonicalizes current_exe() to find runtime/ beside the real binary.
-    libexec.install Dir["*"]
-    bin.install_symlink libexec/"bin/nub"
-    bin.install_symlink libexec/"bin/nubx"
+    # nub is a single self-contained binary: it embeds its runtime (preload +
+    # vendored polyfills + native addon) and JIT-extracts it to ~/.cache/nub on
+    # first run, so there is no sidecar to keep beside the binary. The archive ships
+    # bin/nub + bin/nubx (both real copies; nub picks its verb from the argv[0]
+    # basename), so install them straight onto PATH — no libexec, no symlink dance.
+    bin.install "bin/nub", "bin/nubx"
   end
 
   test do
     assert_match version.to_s, shell_output("#{bin}/nub --version")
-
-    # Prove the runtime tree (preload + vendored polyfills + native addon) was
-    # installed alongside the binary — a bare-binary install would be missing it.
     # Do NOT run a transpile here: \`brew test\` runs on a clean machine with no Node
     # on PATH, and nub augments the user's Node rather than bundling one.
-    assert_path_exists libexec/"runtime/preload.mjs"
-    assert_path_exists libexec/"runtime/addons/nub-native.node"
   end
 end
 EOF

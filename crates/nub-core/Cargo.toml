@@ -6,6 +6,17 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# Release-only single-binary mode: `build.rs` tars+zstd-compresses the staged
+# `runtime/` tree into the binary (`include_bytes!`) and `runtime_cache` extracts
+# it once, on first run, to a versioned cache dir. OFF by default so the dev loop
+# (`--profile fast`, `make install-dev`) pays no blob re-tar and `find_preload`
+# keeps walking to the in-repo `runtime/` (live-editable). CI release builds turn
+# it on via `nub-cli/embed-runtime`. The optional deps are pulled in ONLY here:
+# `ruzstd` (pure-Rust decode at runtime) ships in the binary; `zstd`/`tar`/`sha2`
+# (encode + key-hash at build time) are build-deps that never reach the binary.
+embed-runtime = ["dep:ruzstd", "dep:zstd", "dep:tar", "dep:sha2"]
+
 [dependencies]
 anyhow.workspace = true
 camino.workspace = true
@@ -40,6 +51,19 @@ tar.workspace = true
 zip.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+# Pure-Rust zstd DECODER for inflating the embedded runtime blob on first run
+# (embed-runtime only). Pure-Rust on purpose: no libzstd/C toolchain in the
+# shipped binary; the one-time ~tens-of-ms decode is irrelevant. Encode happens
+# at build time with the `zstd` build-dep (libzstd) — decode never needs it.
+ruzstd = { version = "0.8", optional = true }
+
+# Build-time only (embed-runtime): tar + zstd-compress the staged runtime tree
+# into `$OUT_DIR/runtime.tar.zst` and hash it for the cache key. Build-deps never
+# reach the shipped binary, so libzstd's C build lives here, not in the product.
+[build-dependencies]
+tar = { version = "0.4", optional = true }
+zstd = { version = "0.13", optional = true }
+sha2 = { version = "0.10", optional = true }
 
 # Unix-only: terminating-signal forwarding to the child (SIGINT/SIGTERM/SIGHUP).
 # Gated so the Windows build (which uses a different ctrl_c path) doesn't pull it.
@@ -49,6 +73,10 @@ signal-hook = "0.3"
 [dev-dependencies]
 criterion.workspace = true
 blake3 = { workspace = true }
+# Encoder for the runtime_cache unit tests (they build a tiny tar.zst to exercise
+# the decode/unpack/rename/GC path). The PRODUCT decodes with pure-Rust `ruzstd`;
+# only the test fixtures need the libzstd encoder, so it stays a dev-dep.
+zstd = "0.13"
 
 [[bench]]
 name = "workspace_filter"

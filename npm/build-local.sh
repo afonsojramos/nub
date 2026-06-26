@@ -11,46 +11,36 @@ case "$PLATFORM" in darwin) ;; linux) ;; *) echo "Unsupported: $PLATFORM"; exit 
 case "$ARCH" in arm64|aarch64) ARCH="arm64" ;; x86_64|amd64) ARCH="x64" ;; *) echo "Unsupported: $ARCH"; exit 1 ;; esac
 
 PKG_DIR="$REPO_ROOT/npm/nub-${PLATFORM}-${ARCH}"
-echo "Building for ${PLATFORM}-${ARCH} → $PKG_DIR"
+echo "Building for ${PLATFORM}-${ARCH} → $PKG_DIR (single binary, embedded runtime)"
 
-# 1. Build release binary
-cargo build --release -p nub-cli
+# Single-binary build: the runtime is EMBEDDED in the binary, so we stage it into
+# the repo's runtime/ FIRST, then build nub-cli with --features embed-runtime so
+# nub-core's build.rs tars + zstd-embeds it. `make npm-build` runs `make build`
+# (= addon) first, so runtime/addons/nub-native.node is already staged here.
 
-# 2. Copy binary — under BOTH names (nub, nubx). The launcher heals the on-PATH
-# entry into a minimal sh trampoline that exec's bin/<verb> directly; the verb is
-# the binary's own argv[0] basename, so nubx must be a real second copy here.
+# 1. Vendor node_modules into the REPO runtime/ (embedded, not a $PKG sidecar).
+#    Pure-JS deps only — oxc is compiled into the addon. @oxc-project/runtime
+#    supplies the emit-helper imports; the rest are web-API polyfills.
+rm -rf "$REPO_ROOT/runtime/node_modules"
+mkdir -p "$REPO_ROOT/runtime/node_modules/@oxc-project" \
+         "$REPO_ROOT/runtime/node_modules/@js-temporal" \
+         "$REPO_ROOT/runtime/node_modules/@petamoriken"
+cp -RL "$REPO_ROOT/node_modules/@oxc-project/runtime" "$REPO_ROOT/runtime/node_modules/@oxc-project/"
+cp -RL "$REPO_ROOT/node_modules/urlpattern-polyfill" "$REPO_ROOT/runtime/node_modules/"
+cp -RL "$REPO_ROOT/node_modules/@js-temporal/polyfill" "$REPO_ROOT/runtime/node_modules/@js-temporal/"
+cp -RL "$REPO_ROOT/node_modules/jsbi" "$REPO_ROOT/runtime/node_modules/"
+cp -RL "$REPO_ROOT/node_modules/@petamoriken/float16" "$REPO_ROOT/runtime/node_modules/@petamoriken/"
+
+# 2. Build the release binary with the runtime embedded.
+cargo build --release -p nub-cli --features embed-runtime
+
+# 3. Copy ONLY the binary — under BOTH names (nub, nubx). The verb is the binary's
+#    own argv[0] basename, so nubx must be a real second copy. No runtime/ sidecar.
+rm -rf "$PKG_DIR/runtime"
 mkdir -p "$PKG_DIR/bin"
 cp "$REPO_ROOT/target/release/nub" "$PKG_DIR/bin/nub"
 cp "$REPO_ROOT/target/release/nub" "$PKG_DIR/bin/nubx"
 chmod +x "$PKG_DIR/bin/nub" "$PKG_DIR/bin/nubx"
-
-# 3. Copy runtime
-rm -rf "$PKG_DIR/runtime"
-cp -r "$REPO_ROOT/runtime" "$PKG_DIR/runtime"
-
-# 4. Vendor node_modules — pure-JS deps only. The TS/JSX transpiler + module
-# detection, tsconfig discovery/parse + the additive TS-resolver, AND the transpile
-# cache are now IN-PROCESS in nub-native (Rust addon, oxc compiled in), so
-# oxc-transform / oxc-parser and get-tsconfig (+ its resolve-pkg-maps dep) are NO
-# LONGER vendored. nub loads zero npm packages internally now.
-rm -rf "$PKG_DIR/runtime/node_modules"
-mkdir -p "$PKG_DIR/runtime/node_modules"
-# @oxc-project/runtime — oxc-transform emits helper imports from it (e.g.
-# `@oxc-project/runtime/helpers/decorate`) for decorators; oxc has zero deps, so
-# it never arrives transitively (A30). cp the package symlink (cp -r follows the
-# source symlink) into a freshly-made scope dir.
-mkdir -p "$PKG_DIR/runtime/node_modules/@oxc-project"
-cp -r "$REPO_ROOT/node_modules/@oxc-project/runtime" "$PKG_DIR/runtime/node_modules/@oxc-project/"
-# Clobbered/lazy polyfills nub provides as internal deps: URLPattern (A39, Node
-# 22.x), Temporal (A37), and Float16Array (D5/A25, Node 22.x). @js-temporal/
-# polyfill pulls jsbi (its only dep), kept flat alongside so the package resolves
-# it; @petamoriken/float16 has zero deps.
-cp -r "$REPO_ROOT/node_modules/urlpattern-polyfill" "$PKG_DIR/runtime/node_modules/"
-mkdir -p "$PKG_DIR/runtime/node_modules/@js-temporal"
-cp -r "$REPO_ROOT/node_modules/@js-temporal/polyfill" "$PKG_DIR/runtime/node_modules/@js-temporal/"
-cp -r "$REPO_ROOT/node_modules/jsbi" "$PKG_DIR/runtime/node_modules/"
-mkdir -p "$PKG_DIR/runtime/node_modules/@petamoriken"
-cp -r "$REPO_ROOT/node_modules/@petamoriken/float16" "$PKG_DIR/runtime/node_modules/@petamoriken/"
 
 echo ""
 echo "✓ Platform package ready: $PKG_DIR ($(du -sh "$PKG_DIR" | cut -f1))"

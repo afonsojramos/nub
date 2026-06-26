@@ -10,6 +10,14 @@ repository.workspace = true
 name = "nub"
 path = "src/main.rs"
 
+[features]
+# Single self-contained binary: embed the `runtime/` tree as a compressed blob and
+# JIT-extract it on first run (forwards to nub-core, where the extract module +
+# build.rs blob generation live). OFF by default — the `--profile fast` dev loop
+# and `make install-dev` keep walking to the in-repo `runtime/`. CI release builds
+# pass `--features embed-runtime`.
+embed-runtime = ["nub-core/embed-runtime"]
+
 [dependencies]
 nub-core = { path = "../nub-core" }
 # Vendored aube (vendor/aube — plain in-tree files, vendored from nubjs/aube). aube-lockfile
