@@ -1140,6 +1140,14 @@ fn run_nub() -> Result<i32> {
     let mut help_verbose = false;
     let mut show_warnings = false;
     let mut silent = false;
+    // Pre-verb PM output flags (`nub --reporter=silent install`,
+    // `nub --loglevel=error add foo`): captured here and recorded as process
+    // defaults below so the per-verb `OutputFlags` resolution can fall back to
+    // them (per-verb always wins). Without these arms a leading `--reporter`/
+    // `--loglevel` falls through to the file-run path and is shipped to Node
+    // (`node: bad option`). `--silent`/`-s` is already captured above.
+    let mut reporter_val: Option<String> = None;
+    let mut loglevel_val: Option<String> = None;
     // Top-level `--node`: provision the project's Node (version management stays
     // on) but run with zero augmentation — the compat escape hatch. Routed to
     // `run_file_with_compat(_, true)`. See wiki/commands/node.md.
@@ -1189,6 +1197,30 @@ fn run_nub() -> Result<i32> {
             }
             s if s == "--color" || s.starts_with("--color=") || s == "--no-color" => {
                 // --color (no value), --color=always, --no-color: all consumed, not forwarded
+            }
+            // Pre-verb PM output flags. `--reporter`/`--loglevel` only appear
+            // here BEFORE a subcommand (after the verb they belong to the
+            // verb's own clap surface and never reach this scan). Captured, not
+            // forwarded to Node; recorded as process defaults below. The value
+            // is validated where it's recorded (clean usage error on a bad
+            // spelling) — a separate concern from grabbing the token here.
+            "--reporter" => {
+                i += 1;
+                if i < raw_args.len() {
+                    reporter_val = Some(raw_args[i].clone());
+                }
+            }
+            s if s.starts_with("--reporter=") => {
+                reporter_val = Some(s["--reporter=".len()..].to_string());
+            }
+            "--loglevel" => {
+                i += 1;
+                if i < raw_args.len() {
+                    loglevel_val = Some(raw_args[i].clone());
+                }
+            }
+            s if s.starts_with("--loglevel=") => {
+                loglevel_val = Some(s["--loglevel=".len()..].to_string());
             }
             s if s == "--env-file"
                 || s.starts_with("--env-file=")
@@ -1322,6 +1354,32 @@ fn run_nub() -> Result<i32> {
 
     SHOW_WARNINGS.store(show_warnings, Ordering::Relaxed);
     SILENT.store(silent, Ordering::Relaxed);
+
+    // Record the pre-verb PM output flags as process defaults so a PM verb
+    // dispatched below (`nub --silent install`, `nub --reporter=silent add foo`)
+    // honors them — the per-verb clap flag still wins. A `run`/file-run path
+    // simply doesn't read these defaults (run carries its own `--reporter`), so
+    // they're inert there. Invalid `--reporter`/`--loglevel` values get the same
+    // clean usage error clap gives for the per-verb form.
+    if silent {
+        crate::pm_engine::output::set_global_silent();
+    }
+    if let Some(ref value) = reporter_val
+        && let Err(bad) = crate::pm_engine::output::set_global_reporter_str(value)
+    {
+        bail!(
+            "invalid value '{bad}' for '--reporter <NAME>'\n  \
+             [possible values: default, append-only, silent]"
+        );
+    }
+    if let Some(ref value) = loglevel_val
+        && let Err(bad) = crate::pm_engine::output::set_global_loglevel_str(value)
+    {
+        bail!(
+            "invalid value '{bad}' for '--loglevel <LEVEL>'\n  \
+             [possible values: silent, error, warn, info, debug]"
+        );
+    }
 
     if let Some(ref dir) = cwd {
         env::set_current_dir(dir)?;

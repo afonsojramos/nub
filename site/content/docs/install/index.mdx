@@ -258,7 +258,7 @@ The accepted flags are pnpm's spellings:
 --loglevel <level>    # debug, info, warn, error, silent
 ```
 
-To quiet the progress output, pass `--silent` (or `-s`, or `--reporter=silent`): nothing reaches stderr but a fatal error, matching `pnpm install --silent`. The `--reporter=append-only` form drops the live progress display while keeping the dependency summary, and `--loglevel error` hides warnings without touching the rest. These spellings apply to every install-family command — `install`, `ci`, `add`, `remove`, `update`, `dedupe`, `import`.
+To quiet the progress output, pass `--silent` (or `-s`, or `--reporter=silent`): nothing reaches stderr but a fatal error, matching `pnpm install --silent`. The `--reporter=append-only` form drops the live progress display while keeping the dependency summary, and `--loglevel error` hides warnings without touching the rest. These spellings apply to every install-family command — `install`, `ci`, `add`, `remove`, `update`, `dedupe`, `import` — and work either after the command (`nub install --silent`) or before it (`nub --silent install`).
 
 In a workspace, `install` and `ci` accept the same selector flags as script running — install only the packages a filter matches:
 

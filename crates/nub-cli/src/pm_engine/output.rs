@@ -21,7 +21,101 @@
 //!   (`error` hides warnings; `info`/`debug` surface more). `debug` also
 //!   forces text so logs don't collide with the progress display.
 
+use std::sync::atomic::{AtomicU8, Ordering};
+
 use super::log;
+
+// ───────────────────────── process-global defaults ──────────────────────────
+//
+// nub accepts the output flags in TWO positions: after the verb (`nub install
+// --silent`, parsed by the per-verb `OutputFlags` below) and BEFORE it (`nub
+// --silent install`, `nub --reporter=silent add foo`). The pre-verb position is
+// parsed by the hand-rolled scan in `cli::dispatch`, never by clap — the PM
+// verbs are dispatched through their own clap `Command` (install/ci) or a
+// separately-built one (the registry verbs), neither of which sees the
+// top-level globals. So the pre-verb values are recorded here as process
+// defaults and merged UNDER the per-verb flags (per-verb always wins). This
+// mirrors the existing `cli::SILENT` atomic that already carries `--silent` to
+// `nub run`'s preamble — same seam, extended to the PM reporter/loglevel.
+//
+// `0` is "unset" for each enum; the encodings are private to this module.
+// Pre-verb `--silent`/`-s` folds into `PROC_REPORTER = Silent` (it's the
+// documented `--reporter=silent` alias) so all three pre-verb spellings merge
+// through the SAME `.or` path and a per-verb `--reporter` can override any of
+// them uniformly — there is no separate silent cell.
+static PROC_REPORTER: AtomicU8 = AtomicU8::new(0);
+static PROC_LOGLEVEL: AtomicU8 = AtomicU8::new(0);
+
+fn reporter_to_u8(r: Reporter) -> u8 {
+    match r {
+        Reporter::Default => 1,
+        Reporter::AppendOnly => 2,
+        Reporter::Silent => 3,
+    }
+}
+fn u8_to_reporter(v: u8) -> Option<Reporter> {
+    match v {
+        1 => Some(Reporter::Default),
+        2 => Some(Reporter::AppendOnly),
+        3 => Some(Reporter::Silent),
+        _ => None,
+    }
+}
+fn loglevel_to_u8(l: LogLevel) -> u8 {
+    match l {
+        LogLevel::Silent => 1,
+        LogLevel::Error => 2,
+        LogLevel::Warn => 3,
+        LogLevel::Info => 4,
+        LogLevel::Debug => 5,
+    }
+}
+fn u8_to_loglevel(v: u8) -> Option<LogLevel> {
+    match v {
+        1 => Some(LogLevel::Silent),
+        2 => Some(LogLevel::Error),
+        3 => Some(LogLevel::Warn),
+        4 => Some(LogLevel::Info),
+        5 => Some(LogLevel::Debug),
+        _ => None,
+    }
+}
+
+/// Record `nub --silent <verb>` as a process default — the `--reporter=silent`
+/// alias, so it merges through the same `.or` path as a pre-verb `--reporter`.
+/// Called by `cli::dispatch` when the global `--silent`/`-s` precedes a verb.
+pub fn set_global_silent() {
+    PROC_REPORTER.store(reporter_to_u8(Reporter::Silent), Ordering::Relaxed);
+}
+
+/// Parse + record a pre-verb `--reporter <value>` as a process default. Returns
+/// the invalid value (for a clean usage error) when the spelling isn't one of
+/// `default`/`append-only`/`silent`. Reuses clap's `ValueEnum` parse so the
+/// accepted set can't drift from the per-verb flag — `false` = case-sensitive,
+/// matching the per-verb clap surface (which has no `ignore_case`).
+pub fn set_global_reporter_str(value: &str) -> Result<(), String> {
+    use clap::ValueEnum as _;
+    let r = Reporter::from_str(value, false).map_err(|_| value.to_string())?;
+    PROC_REPORTER.store(reporter_to_u8(r), Ordering::Relaxed);
+    Ok(())
+}
+
+/// Parse + record a pre-verb `--loglevel <value>` as a process default. Returns
+/// the invalid value when the spelling isn't one of
+/// `silent`/`error`/`warn`/`info`/`debug`. Case-sensitive, matching per-verb.
+pub fn set_global_loglevel_str(value: &str) -> Result<(), String> {
+    use clap::ValueEnum as _;
+    let l = LogLevel::from_str(value, false).map_err(|_| value.to_string())?;
+    PROC_LOGLEVEL.store(loglevel_to_u8(l), Ordering::Relaxed);
+    Ok(())
+}
+
+fn proc_reporter() -> Option<Reporter> {
+    u8_to_reporter(PROC_REPORTER.load(Ordering::Relaxed))
+}
+fn proc_loglevel() -> Option<LogLevel> {
+    u8_to_loglevel(PROC_LOGLEVEL.load(Ordering::Relaxed))
+}
 
 /// `--reporter` values nub accepts, mirroring pnpm's. `ndjson` is deliberately
 /// absent: a machine-readable event stream is a separate feature from quieting
@@ -71,13 +165,25 @@ pub struct OutputFlags {
 }
 
 impl OutputFlags {
-    /// True when any spelling resolves to full silence (`pnpm --silent`).
-    /// Public so command impls that print their own (non-engine) summary —
-    /// e.g. `import` — can suppress it under `--silent`.
+    /// The reporter in effect: the per-verb flag, else the pre-verb process
+    /// default (`nub --reporter=… <verb>`). Per-verb always wins.
+    fn eff_reporter(&self) -> Option<Reporter> {
+        self.reporter.or_else(proc_reporter)
+    }
+
+    /// The loglevel in effect: per-verb flag, else the process default.
+    fn eff_loglevel(&self) -> Option<LogLevel> {
+        self.loglevel.or_else(proc_loglevel)
+    }
+
+    /// True when any spelling resolves to full silence (`pnpm --silent`),
+    /// including the pre-verb global forms (`nub --silent <verb>`,
+    /// `nub --reporter=silent <verb>`). Public so command impls that print
+    /// their own (non-engine) summary — e.g. `import` — can suppress it.
     pub fn is_silent(&self) -> bool {
         self.silent
-            || self.reporter == Some(Reporter::Silent)
-            || self.loglevel == Some(LogLevel::Silent)
+            || self.eff_reporter() == Some(Reporter::Silent)
+            || self.eff_loglevel() == Some(LogLevel::Silent)
     }
 
     /// True when the progress UI must drop to plain text — silent, the
@@ -86,8 +192,8 @@ impl OutputFlags {
     /// `force_text`.
     fn force_text(&self) -> bool {
         self.is_silent()
-            || self.reporter == Some(Reporter::AppendOnly)
-            || self.loglevel == Some(LogLevel::Debug)
+            || self.eff_reporter() == Some(Reporter::AppendOnly)
+            || self.eff_loglevel() == Some(LogLevel::Debug)
     }
 
     /// The engine log level to apply, as a tracing token, or `None` to leave
@@ -96,7 +202,7 @@ impl OutputFlags {
         if self.is_silent() {
             return Some("off");
         }
-        match self.loglevel {
+        match self.eff_loglevel() {
             Some(LogLevel::Error) => Some("error"),
             Some(LogLevel::Info) => Some("info"),
             Some(LogLevel::Debug) => Some("debug"),
