@@ -731,6 +731,9 @@ pub enum Command {
         /// Include the workspace root in recursive operations.
         #[arg(long)]
         include_workspace_root: bool,
+
+        #[command(flatten)]
+        output: crate::pm_engine::OutputFlags,
     },
 
     /// Clean install for CI: delete node_modules, install strictly from the
@@ -772,6 +775,9 @@ pub enum Command {
         /// Include the workspace root in recursive operations.
         #[arg(long)]
         include_workspace_root: bool,
+
+        #[command(flatten)]
+        output: crate::pm_engine::OutputFlags,
     },
 }
 
@@ -1957,6 +1963,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             recursive,
             fail_if_no_match,
             include_workspace_root,
+            output,
         }) => crate::pm_engine::run_install(crate::pm_engine::InstallFlags {
             frozen_lockfile,
             no_frozen_lockfile,
@@ -1979,6 +1986,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
                 fail_if_no_match,
                 include_workspace_root,
             },
+            output,
         }),
         Some(Command::Ci {
             ignore_scripts,
@@ -1990,6 +1998,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             recursive,
             fail_if_no_match,
             include_workspace_root,
+            output,
         }) => crate::pm_engine::run_ci(crate::pm_engine::CiFlags {
             ignore_scripts,
             no_optional,
@@ -2002,6 +2011,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
                 fail_if_no_match,
                 include_workspace_root,
             },
+            output,
         }),
         // `node` is intercepted at the top of `dispatch_subcommand` (manual
         // sub-verb match in `run_node`) and never reaches clap here.

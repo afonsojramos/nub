@@ -267,7 +267,14 @@ impl SilentStderrGuard {
             if saved < 0 {
                 return None;
             }
-            let devnull = libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY);
+            // The null device is `/dev/null` on Unix, `NUL` on Windows — open
+            // the right one so `--silent` actually redirects fd 2 on both (a
+            // hardcoded `/dev/null` silently no-ops the redirect on Windows).
+            #[cfg(windows)]
+            let devnull_path = c"NUL";
+            #[cfg(not(windows))]
+            let devnull_path = c"/dev/null";
+            let devnull = libc::open(devnull_path.as_ptr(), libc::O_WRONLY);
             if devnull < 0 {
                 libc::close(saved);
                 return None;
@@ -290,6 +297,36 @@ impl Drop for SilentStderrGuard {
             libc::close(self.saved);
         }
     }
+}
+
+/// Guard returned by [`silence_own_output`]; restores stderr on drop.
+pub struct OwnOutputSilencer {
+    // Held for its `Drop` (restores fd 2). `None` when the redirect could
+    // not be installed (non-Unix, or `/dev/null` unavailable) — the global
+    // output flag still suppresses the install summary in that case.
+    _stderr: Option<SilentStderrGuard>,
+}
+
+/// Embedder entry point that mirrors `--silent` / `--reporter=silent` for a
+/// host (e.g. nub) that dispatches the command impls directly and never runs
+/// aube's own `async_main`. It sets the process-global silent output flag
+/// (so the install summary and other [`global_output_flags`]-gated output is
+/// skipped) and, on Unix, redirects fd 2 to `/dev/null` until the returned
+/// guard drops — the saved fd is registered with `aube-scripts` so child
+/// lifecycle scripts keep writing to the real terminal, matching the standalone
+/// `--silent` path. Hold the guard across the command run and drop it before
+/// emitting a final error report so the error still reaches stderr.
+#[must_use]
+pub fn silence_own_output() -> OwnOutputSilencer {
+    commands::set_global_output_flags(commands::GlobalOutputFlags {
+        ndjson: false,
+        silent: true,
+    });
+    let stderr = SilentStderrGuard::install();
+    if let Some(ref guard) = stderr {
+        aube_scripts::set_saved_stderr_fd(guard.saved);
+    }
+    OwnOutputSilencer { _stderr: stderr }
 }
 
 // Commands are listed in alphabetical order; validated by

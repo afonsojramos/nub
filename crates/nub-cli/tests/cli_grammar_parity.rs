@@ -142,6 +142,26 @@ fn install_family_grammar_accepts_documented_forms() {
             (&["install", "-F", "foo"], "pnpm -F <pattern>"),
             (&["install", "--filter", "foo"], "pnpm --filter <pattern>"),
             (&["install", "-C", "/tmp"], "pnpm -C / --dir <dir>"),
+            // Output-verbosity flags (#179) — pnpm's reporter/silent/loglevel.
+            (&["install", "--silent"], "pnpm --silent"),
+            (&["install", "-s"], "pnpm -s (silent short)"),
+            (
+                &["install", "--reporter", "silent"],
+                "pnpm --reporter silent",
+            ),
+            (
+                &["install", "--reporter=append-only"],
+                "pnpm --reporter append-only",
+            ),
+            (
+                &["install", "--reporter=default"],
+                "pnpm --reporter default",
+            ),
+            (
+                &["install", "--loglevel", "error"],
+                "pnpm --loglevel <level>",
+            ),
+            (&["install", "--loglevel=debug"], "pnpm --loglevel=debug"),
             // A/B/C — pnpm install <pkg> routes through `add` (the P0 + save flags).
             (
                 &["install", "express"],
@@ -312,6 +332,10 @@ fn ci_grammar_accepts_documented_forms() {
             (&["ci", "--no-optional"], "pnpm --no-optional"),
             (&["ci", "-r"], "pnpm -r ci"),
             (&["ci", "-F", "foo"], "pnpm -F <pattern>"),
+            // Output-verbosity flags (#179).
+            (&["ci", "--silent"], "pnpm --silent"),
+            (&["ci", "--reporter=silent"], "pnpm --reporter silent"),
+            (&["ci", "--loglevel=error"], "pnpm --loglevel <level>"),
         ],
     );
 }
@@ -343,6 +367,17 @@ fn engine_add_grammar_accepts_documented_forms() {
             (&["add", "foo", "-r"], "pnpm -r"),
             (&["add", "foo", "-F", "bar"], "pnpm -F <pattern>"),
             (&["add", "foo", "--ignore-scripts"], "pnpm --ignore-scripts"),
+            // Output-verbosity flags (#179), forwarded via EngineGlobals.
+            (&["add", "foo", "--silent"], "pnpm --silent"),
+            (&["add", "foo", "-s"], "pnpm -s (silent short)"),
+            (
+                &["add", "foo", "--reporter=silent"],
+                "pnpm --reporter silent",
+            ),
+            (
+                &["add", "foo", "--loglevel=warn"],
+                "pnpm --loglevel <level>",
+            ),
         ],
     );
 }

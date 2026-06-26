@@ -57,6 +57,7 @@ pub mod identity;
 pub mod info_family;
 pub mod install_family;
 pub mod log;
+pub mod output;
 pub mod present;
 pub mod publish_family;
 mod resource_limits;
@@ -68,6 +69,7 @@ pub mod use_nub;
 pub use install_family::{
     CiFlags, InstallFlags, WorkspaceFilterFlags, run_ci, run_dlx_for_nubx, run_install,
 };
+pub use output::OutputFlags;
 
 use std::path::{Path, PathBuf};
 

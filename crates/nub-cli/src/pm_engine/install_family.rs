@@ -218,6 +218,11 @@ struct EngineGlobals {
     /// Include the workspace root in recursive operations
     #[arg(long, hide = true)]
     include_workspace_root: bool,
+
+    /// Output-verbosity flags (`--reporter`, `--silent`/`-s`, `--loglevel`),
+    /// forwarded to the engine's text-mode renderers.
+    #[command(flatten)]
+    output: super::output::OutputFlags,
 }
 
 impl EngineGlobals {
@@ -291,6 +296,38 @@ macro_rules! parse_or_return {
     };
 }
 
+/// Apply the forwarded output flags (`--reporter`/`--silent`/`--loglevel`) for
+/// the duration of `f`, then restore. The returned [`output::OutputGuard`] is
+/// held only across `f` (the engine run) and dropped before the caller's
+/// `finish`/`finish_code` — so under `--silent` the progress/summary written
+/// during the run is suppressed while a final error report still reaches the
+/// real stderr. The progress-mode and log-level side effects persist (harmless
+/// once the command is done).
+fn with_output<T>(output: &super::output::OutputFlags, f: impl FnOnce() -> T) -> T {
+    let _guard = output.apply();
+    f()
+}
+
+/// Run an engine future to completion under the forwarded output flags, then
+/// map its result to nub's exit contract via [`finish`]. The output guard is
+/// dropped before `finish`, so errors print even under `--silent`.
+fn finish_quieted(
+    output: &super::output::OutputFlags,
+    session: &EngineSession,
+    fut: impl std::future::Future<Output = miette::Result<()>>,
+) -> Result<i32> {
+    finish(with_output(output, || session.runtime.block_on(fut)))
+}
+
+/// [`finish_quieted`] for engine verbs that return an explicit exit code.
+fn finish_code_quieted(
+    output: &super::output::OutputFlags,
+    session: &EngineSession,
+    fut: impl std::future::Future<Output = miette::Result<Option<i32>>>,
+) -> Result<i32> {
+    finish_code(with_output(output, || session.runtime.block_on(fut)))
+}
+
 /// Map an engine result to nub's exit contract: success → 0, failure →
 /// rendered through the presentation layer + the engine's exit table.
 fn finish(result: miette::Result<()>) -> Result<i32> {
@@ -323,12 +360,11 @@ fn run_add(typed: &str, args: &[String]) -> Result<i32> {
             &yarn_remedy("add", &verb.packages),
         ));
     }
-    let code = finish(
-        session
-            .runtime
-            .block_on(aube::commands::add::run(verb, globals.effective_filter())),
-    )?;
-    Ok(code)
+    finish_quieted(
+        &globals.output,
+        &session,
+        aube::commands::add::run(verb, globals.effective_filter()),
+    )
 }
 
 fn run_remove(typed: &str, args: &[String]) -> Result<i32> {
@@ -341,10 +377,11 @@ fn run_remove(typed: &str, args: &[String]) -> Result<i32> {
             &yarn_remedy("remove", &verb.packages),
         ));
     }
-    finish(session.runtime.block_on(aube::commands::remove::run(
-        verb,
-        globals.effective_filter(),
-    )))
+    finish_quieted(
+        &globals.output,
+        &session,
+        aube::commands::remove::run(verb, globals.effective_filter()),
+    )
 }
 
 fn run_update(typed: &str, args: &[String]) -> Result<i32> {
@@ -367,11 +404,11 @@ fn run_update(typed: &str, args: &[String]) -> Result<i32> {
             &yarn_remedy("upgrade", &verb.packages),
         ));
     }
-    let code = finish_code(session.runtime.block_on(aube::commands::update::run(
-        verb,
-        globals.effective_filter(),
-    )))?;
-    Ok(code)
+    finish_code_quieted(
+        &globals.output,
+        &session,
+        aube::commands::update::run(verb, globals.effective_filter()),
+    )
 }
 
 fn run_dedupe(typed: &str, args: &[String]) -> Result<i32> {
@@ -386,7 +423,7 @@ fn run_dedupe(typed: &str, args: &[String]) -> Result<i32> {
             "yarn dedupe",
         ));
     }
-    finish(session.runtime.block_on(aube::commands::dedupe::run(verb)))
+    finish_quieted(&globals.output, &session, aube::commands::dedupe::run(verb))
 }
 
 fn run_prune(typed: &str, args: &[String]) -> Result<i32> {
@@ -395,46 +432,56 @@ fn run_prune(typed: &str, args: &[String]) -> Result<i32> {
     // prune prints its summary via raw eprintln with a hardcoded `.aube`
     // store label (the walked directory is the *resolved* virtualStoreDir —
     // node_modules/.nub here — only the label lies). Capture + neutralize.
-    let (result, captured) = super::with_fd_captured(2, || {
-        session.runtime.block_on(aube::commands::prune::run(verb))
+    // Under `--silent` the output guard redirects stderr, so the rebranded
+    // reprint is suppressed too; the guard drops before `finish`.
+    let result = with_output(&globals.output, || {
+        let (result, captured) = super::with_fd_captured(2, || {
+            session.runtime.block_on(aube::commands::prune::run(verb))
+        });
+        eprint!(
+            "{}",
+            present::rewrite(&captured).replace(" from .aube,", " from the virtual store,")
+        );
+        result
     });
-    eprint!(
-        "{}",
-        present::rewrite(&captured).replace(" from .aube,", " from the virtual store,")
-    );
     finish(result)
 }
 
 fn run_rebuild(typed: &str, args: &[String]) -> Result<i32> {
     let (globals, verb): (_, aube::commands::rebuild::RebuildArgs) = parse_or_return!(typed, args);
     let session = super::engine_session(globals.dir.as_deref())?;
-    finish(session.runtime.block_on(aube::commands::rebuild::run(
-        verb,
-        globals.effective_filter(),
-    )))
+    finish_quieted(
+        &globals.output,
+        &session,
+        aube::commands::rebuild::run(verb, globals.effective_filter()),
+    )
 }
 
 fn run_fetch(typed: &str, args: &[String]) -> Result<i32> {
     let (globals, verb): (_, aube::commands::fetch::FetchArgs) = parse_or_return!(typed, args);
     let session = super::engine_session(globals.dir.as_deref())?;
-    finish(session.runtime.block_on(aube::commands::fetch::run(verb)))
+    finish_quieted(&globals.output, &session, aube::commands::fetch::run(verb))
 }
 
 fn run_link(typed: &str, args: &[String]) -> Result<i32> {
     let (globals, verb): (_, aube::commands::link::LinkArgs) = parse_or_return!(typed, args);
     let session = super::engine_session(globals.dir.as_deref())?;
-    finish(session.runtime.block_on(aube::commands::link::run(verb)))
+    finish_quieted(&globals.output, &session, aube::commands::link::run(verb))
 }
 
 fn run_unlink(typed: &str, args: &[String]) -> Result<i32> {
     let (globals, verb): (_, aube::commands::unlink::UnlinkArgs) = parse_or_return!(typed, args);
     let session = super::engine_session(globals.dir.as_deref())?;
     // The unlink-all path ends with a raw `` Run `aube install` … `` hint
-    // on stderr; capture + rewrite (no children, no progress UI here).
-    let (result, captured) = super::with_fd_captured(2, || {
-        session.runtime.block_on(aube::commands::unlink::run(verb))
+    // on stderr; capture + rewrite (no children, no progress UI here). Under
+    // `--silent` the output guard redirects stderr, suppressing the reprint.
+    let result = with_output(&globals.output, || {
+        let (result, captured) = super::with_fd_captured(2, || {
+            session.runtime.block_on(aube::commands::unlink::run(verb))
+        });
+        eprint!("{}", present::rewrite(&captured));
+        result
     });
-    eprint!("{}", present::rewrite(&captured));
     finish(result)
 }
 
@@ -458,10 +505,10 @@ fn run_ignored_builds(typed: &str, args: &[String]) -> Result<i32> {
     let (globals, verb): (_, aube::commands::ignored_builds::IgnoredBuildsArgs) =
         parse_or_return!(typed, args);
     let session = super::engine_session(globals.dir.as_deref())?;
-    finish(
-        session
-            .runtime
-            .block_on(aube::commands::ignored_builds::run(verb)),
+    finish_quieted(
+        &globals.output,
+        &session,
+        aube::commands::ignored_builds::run(verb),
     )
 }
 
@@ -482,8 +529,10 @@ fn run_dlx(typed: &str, args: &[String]) -> Result<i32> {
     }
     let session = super::engine_session(globals.dir.as_deref())?;
     // NOTE: on child failure the engine propagates the child's exit code via
-    // std::process::exit — control does not return here on that path.
-    finish_code(session.runtime.block_on(aube::commands::dlx::run(verb)))
+    // std::process::exit — control does not return here on that path. Output
+    // flags quiet the fetch; the run tool's own output is preserved (the
+    // silencer registers the saved fd for child stderr).
+    finish_code_quieted(&globals.output, &session, aube::commands::dlx::run(verb))
 }
 
 /// DLX fallback for the `nubx <tool> [args]` entry point: the bin was absent
@@ -562,7 +611,7 @@ fn run_create(typed: &str, args: &[String]) -> Result<i32> {
     // The engine maps the template to its create-* package (foo → create-foo,
     // @scope/foo → @scope/create-foo) and chains into dlx; like dlx, on child
     // failure the engine propagates the exit code via std::process::exit.
-    finish_code(session.runtime.block_on(aube::commands::create::run(verb)))
+    finish_code_quieted(&globals.output, &session, aube::commands::create::run(verb))
 }
 
 // ───────────────────────── patch workflow ──────────────────────────
@@ -674,7 +723,11 @@ fn run_import(typed: &str, args: &[String]) -> Result<i32> {
     super::engine_brand_preflight();
     match import_to_pnpm_lock(verb.force) {
         Ok(summary) => {
-            present::info(&summary);
+            // import writes no progress UI; the only output is this summary,
+            // suppressed under `--silent` to match `pnpm import --silent`.
+            if !globals.output.is_silent() {
+                present::info(&summary);
+            }
             Ok(0)
         }
         Err(report) => Ok(present::emit_report(&report)),
@@ -821,6 +874,8 @@ pub struct InstallFlags {
     /// Workspace selectors (`--filter`/`-r`/…), routed through the same
     /// `EffectiveFilter` path the registry verbs (`add`/`remove`/`update`) use.
     pub filter: WorkspaceFilterFlags,
+    /// Output-verbosity flags (`--reporter`/`--silent`/`--loglevel`).
+    pub output: super::output::OutputFlags,
 }
 
 /// `nub ci` flags. `ci` is frozen + clean by definition, so only the script /
@@ -834,6 +889,8 @@ pub struct CiFlags {
     pub dir: Option<std::path::PathBuf>,
     /// Workspace selectors (`--filter`/`-r`/…) — same path as `install`.
     pub filter: WorkspaceFilterFlags,
+    /// Output-verbosity flags (`--reporter`/`--silent`/`--loglevel`).
+    pub output: super::output::OutputFlags,
 }
 
 /// The workspace-selection flags nub honors on `install`/`ci`, mirroring the
@@ -971,7 +1028,7 @@ pub fn run_install(flags: InstallFlags) -> Result<i32> {
         opts.mode = FrozenMode::Frozen;
     }
 
-    let code = run_engine(&session, opts, yarn)?;
+    let code = run_engine(&session, opts, yarn, &flags.output)?;
     // Truly-fresh install: the neutral `lock.yaml` was already written (the
     // `defaultLockfileFormat=aube` embedder default on this path), and that
     // lockfile is the quiet identity marker — the classifier treats a present
@@ -1097,7 +1154,7 @@ pub fn run_ci(flags: CiFlags) -> Result<i32> {
             ));
         }
     }
-    run_engine(&session, opts, yarn)
+    run_engine(&session, opts, yarn, &flags.output)
 }
 
 /// Yarn-kind drift pre-flight, at the nub layer.
@@ -1220,12 +1277,23 @@ fn pnpm_era_for_lockfile_version(version: &str) -> &'static str {
 /// Run the install on the session runtime, route failures through the
 /// presentation layer. `yarn_gated` switches the frozen-drift failure to the
 /// yarn write-gate message.
-fn run_engine(session: &EngineSession, opts: InstallOptions, yarn_gated: bool) -> Result<i32> {
-    let result = session.runtime.block_on(aube::commands::install::run(opts));
-    // Flush the diagnostics recorder (summary table, critical-path, etc.) so
-    // that AUBE_DIAG_* env vars work end-to-end via `nub install`. aube's own
-    // CLI entry flushes from lib.rs; the library path needs an explicit call.
-    aube_util::diag::flush();
+fn run_engine(
+    session: &EngineSession,
+    opts: InstallOptions,
+    yarn_gated: bool,
+    output: &super::output::OutputFlags,
+) -> Result<i32> {
+    // Hold the output guard only across the engine run (so `--silent` suppresses
+    // the progress/summary written during install) and drop it before the match
+    // below, so a final error report still reaches the real stderr.
+    let result = with_output(output, || {
+        let result = session.runtime.block_on(aube::commands::install::run(opts));
+        // Flush the diagnostics recorder (summary table, critical-path, etc.) so
+        // that AUBE_DIAG_* env vars work end-to-end via `nub install`. aube's own
+        // CLI entry flushes from lib.rs; the library path needs an explicit call.
+        aube_util::diag::flush();
+        result
+    });
     match result {
         Ok(()) => Ok(0),
         // Frozen-drift on a gated yarn project: the install *would* rewrite

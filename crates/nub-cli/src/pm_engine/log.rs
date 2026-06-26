@@ -25,29 +25,87 @@
 //! revisit if the fork ever exports the pausing writer.
 
 use super::present;
+use std::sync::OnceLock;
 use tracing::field::{Field, Visit};
 use tracing_subscriber::layer::SubscriberExt as _;
+use tracing_subscriber::reload;
 use tracing_subscriber::util::SubscriberInitExt as _;
+use tracing_subscriber::{EnvFilter, Registry};
 
-/// Default filter: the engine's crate targets at `warn`, nothing else.
-/// Mirrors the directive list in the engine's own `init_logging`
-/// (`vendor/aube/crates/aube/src/startup.rs`) so warnings surface from
-/// every engine crate, not just the command layer.
-const ENGINE_WARN_DIRECTIVES: &str = "aube=warn,aube_registry=warn,aube_resolver=warn,\
-     aube_lockfile=warn,aube_store=warn,aube_linker=warn,aube_manifest=warn,\
-     aube_scripts=warn,aube_workspace=warn,aube_settings=warn,aube_util=warn";
+/// Default engine log level: `warn`, so routine install output doesn't
+/// collide with the progress display while warnings still surface.
+const DEFAULT_ENGINE_LEVEL: &str = "warn";
+
+/// Per-engine-crate filter directives at `level`. Mirrors the directive
+/// list in the engine's own `init_logging`
+/// (`vendor/aube/crates/aube/src/startup.rs`) so warnings (and, when the
+/// user raises the level, info/debug) surface from every engine crate, not
+/// just the command layer. `level` is a tracing level token (`warn`,
+/// `error`, `info`, `debug`) or `off`.
+fn engine_directives(level: &str) -> String {
+    const CRATES: [&str; 11] = [
+        "aube",
+        "aube_registry",
+        "aube_resolver",
+        "aube_lockfile",
+        "aube_store",
+        "aube_linker",
+        "aube_manifest",
+        "aube_scripts",
+        "aube_workspace",
+        "aube_settings",
+        "aube_util",
+    ];
+    CRATES
+        .iter()
+        .map(|c| format!("{c}={level}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Reload handle for the engine filter, so a per-invocation `--loglevel` /
+/// `--reporter` / `--silent` flag can retune verbosity after the global
+/// subscriber is installed. `None` until [`init`] runs; absent when
+/// `RUST_LOG` owns the filter (see [`set_engine_loglevel`]).
+static FILTER_RELOAD: OnceLock<reload::Handle<EnvFilter, Registry>> = OnceLock::new();
+
+/// Whether `RUST_LOG` was set at [`init`] time. When it was, it owns the
+/// filter and a per-invocation flag must not override it (mirrors aube's
+/// `AUBE_LOG`-wins precedence).
+static RUST_LOG_OWNS_FILTER: OnceLock<bool> = OnceLock::new();
 
 /// Install the process-global subscriber. Call once, before any engine
 /// (or nub) code can emit tracing events.
 pub fn init() {
-    let filter = match std::env::var("RUST_LOG") {
-        Ok(spec) if !spec.is_empty() => tracing_subscriber::EnvFilter::new(spec),
-        _ => tracing_subscriber::EnvFilter::new(ENGINE_WARN_DIRECTIVES),
+    let rust_log = std::env::var("RUST_LOG").ok().filter(|s| !s.is_empty());
+    let _ = RUST_LOG_OWNS_FILTER.set(rust_log.is_some());
+    let filter = match rust_log {
+        Some(spec) => EnvFilter::new(spec),
+        None => EnvFilter::new(engine_directives(DEFAULT_ENGINE_LEVEL)),
     };
+    let (filter, handle) = reload::Layer::new(filter);
+    let _ = FILTER_RELOAD.set(handle);
     tracing_subscriber::registry()
         .with(filter)
         .with(RewriteLayer)
         .init();
+}
+
+/// Retune the engine log level for the rest of the process (a per-invocation
+/// `--loglevel` / `--reporter=silent` / `--silent`). `level` is a tracing
+/// level token (`error`, `warn`, `info`, `debug`) or `off`. A no-op when
+/// `RUST_LOG` was set at startup — an explicit `RUST_LOG` owns the filter,
+/// mirroring aube's `AUBE_LOG`-wins precedence.
+pub fn set_engine_loglevel(level: &str) {
+    if *RUST_LOG_OWNS_FILTER.get().unwrap_or(&false) {
+        return;
+    }
+    let Some(handle) = FILTER_RELOAD.get() else {
+        return;
+    };
+    if let Ok(filter) = EnvFilter::try_new(engine_directives(level)) {
+        let _ = handle.reload(filter);
+    }
 }
 
 /// Minimal event renderer: `LEVEL message [field=value …]`, no

@@ -143,6 +143,54 @@ fn install_truly_fresh_project_claims_nub_identity() {
     );
 }
 
+/// `--silent` (and its spellings) quiet the install: nothing on stderr but a
+/// fatal error, matching `pnpm install --silent` (#179). The default install,
+/// by contrast, prints the dependency summary + the `✓ installed` line. We
+/// assert the silent contract (empty stderr, success, deps actually linked) and
+/// that the default is NOT empty — so a regression that silences the default,
+/// or one that fails to silence `--silent`, both fail.
+#[test]
+#[ignore = "network: resolves + fetches is-positive@3.1.0 from the npm registry"]
+fn install_silent_flag_suppresses_all_nonerror_output() {
+    if !registry_reachable() {
+        eprintln!("skipping: registry.npmjs.org unreachable");
+        return;
+    }
+    let manifest = r#"{"name":"q","version":"1.0.0","dependencies":{"is-positive":"3.1.0"}}"#;
+
+    // Baseline: the default install writes a human summary to stderr.
+    let base = pm_tmpdir("silent-base");
+    std::fs::write(base.join("package.json"), manifest).unwrap();
+    let (_, default_stderr, default_code) = run_install(&base, &["install"]);
+    assert_eq!(default_code, 0, "default install failed: {default_stderr}");
+    assert!(
+        !default_stderr.trim().is_empty(),
+        "the default install should print a summary on stderr (guards against \
+         over-silencing): got empty output"
+    );
+
+    // Every silent spelling produces empty stderr while still linking the dep.
+    for form in [
+        &["install", "--silent"][..],
+        &["install", "-s"][..],
+        &["install", "--reporter=silent"][..],
+        &["install", "--loglevel=silent"][..],
+    ] {
+        let dir = pm_tmpdir(&format!("silent-{}", form.join("-").replace('=', "")));
+        std::fs::write(dir.join("package.json"), manifest).unwrap();
+        let (stdout, stderr, code) = run_install(&dir, form);
+        assert_eq!(code, 0, "nub {form:?} failed: {stdout}\n{stderr}");
+        assert!(
+            stderr.is_empty(),
+            "nub {form:?} must write nothing to stderr, got: {stderr:?}"
+        );
+        assert!(
+            dir.join("node_modules/is-positive/package.json").is_file(),
+            "nub {form:?} still installs the dependency"
+        );
+    }
+}
+
 /// A `pnpm-workspace.yaml` with no lockfile is a genuine pnpm signal, NOT a
 /// truly-fresh project: nub stays pnpm-shaped — writes `pnpm-lock.yaml` and
 /// does NOT stamp the manifest.
