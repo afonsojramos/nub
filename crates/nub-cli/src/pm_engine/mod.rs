@@ -603,7 +603,22 @@ pub(crate) struct EngineSession {
 /// land after it (they feed settings resolution, which no detection-path
 /// code consults).
 pub(crate) fn engine_session(dir: Option<&Path>) -> Result<EngineSession> {
-    engine_session_inner(dir, ConfigScopeNoise::Warn)
+    engine_session_inner(dir, ConfigScopeNoise::Warn, IdentityStrictness::Strict)
+}
+
+/// [`engine_session`] for the TRANSIENT-package families (`nubx`/`dlx`,
+/// plain `exec` dlx-fallback, `create`). These fetch-and-run a package into a
+/// throwaway store and never read or write the CWD project's lockfile, so the
+/// project's PM identity is irrelevant to them. Identity resolution therefore
+/// runs in LENIENT mode: a multi-lockfile / declaration-contradiction project
+/// degrades to no-identity (engine defaults) instead of hard-erroring with
+/// `ERR_NUB_LOCKFILE_AMBIGUOUS`. npm/pnpm/bun likewise run `npx`/`dlx`/`bunx`
+/// regardless of lockfile ambiguity — the ambiguity guard belongs only to the
+/// mutating install family that actually writes a lockfile. Config-scoping
+/// warnings are suppressed (Silent) for the same reason: the CWD project's
+/// config does not shape a transient run.
+pub(crate) fn engine_session_transient(dir: Option<&Path>) -> Result<EngineSession> {
+    engine_session_inner(dir, ConfigScopeNoise::Silent, IdentityStrictness::Lenient)
 }
 
 /// [`engine_session`] for the read-only / non-graph-mutating families
@@ -614,7 +629,20 @@ pub(crate) fn engine_session(dir: Option<&Path>) -> Result<EngineSession> {
 /// install-time UX, and surfacing them on a `nub why` would be noise. See
 /// the config-scoping policy ([`config_scope`]).
 pub(crate) fn engine_session_quiet(dir: Option<&Path>) -> Result<EngineSession> {
-    engine_session_inner(dir, ConfigScopeNoise::Silent)
+    engine_session_inner(dir, ConfigScopeNoise::Silent, IdentityStrictness::Strict)
+}
+
+/// Whether an identity-resolution failure (multi-lockfile ambiguity, declared
+/// PM contradicted by the on-disk lockfile) is a HARD ERROR or degrades to
+/// no-identity. `Strict` — the default for every project-reading/-writing
+/// family — surfaces the loud diagnostic with the `nub pm use` remedy.
+/// `Lenient` — the transient-package families (dlx/create) — swallows it and
+/// proceeds with no resolved identity, because those commands never touch the
+/// CWD project's lockfile (see [`engine_session_transient`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdentityStrictness {
+    Strict,
+    Lenient,
 }
 
 /// Whether [`engine_session_inner`] emits the config-scoping warnings and
@@ -626,7 +654,11 @@ enum ConfigScopeNoise {
     Silent,
 }
 
-fn engine_session_inner(dir: Option<&Path>, noise: ConfigScopeNoise) -> Result<EngineSession> {
+fn engine_session_inner(
+    dir: Option<&Path>,
+    noise: ConfigScopeNoise,
+    strictness: IdentityStrictness,
+) -> Result<EngineSession> {
     // Initialize the diagnostics recorder from AUBE_DIAG_* env vars so that
     // `AUBE_DIAG_SUMMARY=1 nub install` works the same as `AUBE_DIAG_SUMMARY=1
     // aube install`. The OnceLock inside diag::init() makes this idempotent.
@@ -640,7 +672,7 @@ fn engine_session_inner(dir: Option<&Path>, noise: ConfigScopeNoise) -> Result<E
     apply_dir(dir)?;
     engine_brand_preflight();
     let cwd = std::env::current_dir()?;
-    let detected = resolve_identity_walk_up(&cwd)?;
+    let detected = resolve_identity_walk_up(&cwd, strictness)?;
     // Role-first lifecycle UA (two-mode model, the maintainer 2026-06-10): in compat
     // mode nub plays the incumbent PM's role completely, so the UA dep
     // postinstalls sniff leads with that PM's token (`pnpm/<ver> nub/<ver>
@@ -1060,7 +1092,9 @@ fn lifecycle_ua_product(detected: Option<&DetectedLockfile>, cwd: &Path) -> Stri
 /// (a malformed/ambiguous lockfile is surfaced loudly elsewhere; the UA must
 /// never panic a script spawn).
 pub(crate) fn run_lifecycle_ua_product(cwd: &Path, node_version: &str) -> String {
-    let detected = resolve_identity_walk_up(cwd).ok().flatten();
+    let detected = resolve_identity_walk_up(cwd, IdentityStrictness::Lenient)
+        .ok()
+        .flatten();
     compose_lifecycle_ua(
         nub_core::pm::resolve::declared_pm_raw(cwd),
         detected.map(|d| d.kind),
@@ -1233,7 +1267,10 @@ pub(crate) struct DetectedLockfile {
 /// engine's declaration-aware policy applies — declaration first, lockfile
 /// inference second; contradiction/ambiguity are loud errors carrying the
 /// `nub pm use` remedy.
-fn resolve_identity_walk_up(cwd: &Path) -> Result<Option<DetectedLockfile>> {
+fn resolve_identity_walk_up(
+    cwd: &Path,
+    strictness: IdentityStrictness,
+) -> Result<Option<DetectedLockfile>> {
     use aube_lockfile::ResolvedLockfileKind;
     let mut dir = cwd.to_path_buf();
     for _ in 0..16 {
@@ -1254,6 +1291,12 @@ fn resolve_identity_walk_up(cwd: &Path) -> Result<Option<DetectedLockfile>> {
             }
             // Nothing at this level decides the identity — keep walking.
             Ok(ResolvedLockfileKind::Fresh) => {}
+            // An ambiguity / declaration-contradiction is a HARD error only
+            // for the project-touching families (Strict). The transient
+            // fetch-and-run families (Lenient) never read or write the CWD
+            // lockfile, so the ambiguity is irrelevant — degrade to
+            // no-identity and let the engine's fresh-project defaults stand.
+            Err(_) if strictness == IdentityStrictness::Lenient => return Ok(None),
             Err(err) => return Err(identity_error(err)),
         }
         if !dir.pop() {

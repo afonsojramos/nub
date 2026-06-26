@@ -527,7 +527,10 @@ fn run_dlx(typed: &str, args: &[String]) -> Result<i32> {
         println!("{}", present::rewrite_help(help.to_string().trim_end()));
         return Ok(0);
     }
-    let session = super::engine_session(globals.dir.as_deref())?;
+    // Transient fetch-and-run (see `engine_session_transient`): a dlx never
+    // touches the CWD project's lockfile, so a multi-lockfile project must not
+    // hard-error on identity ambiguity — it degrades to no-identity here.
+    let session = super::engine_session_transient(globals.dir.as_deref())?;
     // NOTE: on child failure the engine propagates the child's exit code via
     // std::process::exit — control does not return here on that path. Output
     // flags quiet the fetch; the run tool's own output is preserved (the
@@ -563,7 +566,11 @@ pub fn run_dlx_for_nubx(
         clx::progress::set_output(clx::progress::ProgressOutput::Text);
     }
     let verb = nubx_dlx_args(bin, args, flags);
-    let session = super::engine_session(None)?;
+    // Transient fetch-and-run (see `engine_session_transient`): `nubx <tool>`
+    // fetches a throwaway package and runs it; the CWD project's lockfile is
+    // irrelevant, so a multi-lockfile project must not raise
+    // ERR_NUB_LOCKFILE_AMBIGUOUS the way npm/pnpm/bun's npx/dlx/bunx don't.
+    let session = super::engine_session_transient(None)?;
     // NOTE: on child failure the engine propagates the child's exit code via
     // std::process::exit — control does not return here on that path.
     finish_code(session.runtime.block_on(aube::commands::dlx::run(verb)))
@@ -607,7 +614,10 @@ fn run_create(typed: &str, args: &[String]) -> Result<i32> {
         println!("{}", present::rewrite_help(help.to_string().trim_end()));
         return Ok(0);
     }
-    let session = super::engine_session(globals.dir.as_deref())?;
+    // Transient: `nub create` chains into dlx (fetch the create-* package and
+    // run it), so like dlx it must not hard-error on the CWD project's
+    // lockfile ambiguity (see `engine_session_transient`).
+    let session = super::engine_session_transient(globals.dir.as_deref())?;
     // The engine maps the template to its create-* package (foo → create-foo,
     // @scope/foo → @scope/create-foo) and chains into dlx; like dlx, on child
     // failure the engine propagates the exit code via std::process::exit.
