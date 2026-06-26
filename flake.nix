@@ -118,15 +118,19 @@
             inherit version;
             src = self;
             # crates/nub-native is a SELF-CONTAINED cargo workspace in a subdir (its
-            # own Cargo.toml + Cargo.lock), so it needs `cargoRoot` — NOT
-            # `buildAndTestSubdir`. buildAndTestSubdir keeps the cargo root at the
-            # source top, which makes the lock-consistency hook validate the ROOT
-            # workspace's Cargo.lock against the addon's vendor dir (built from the
-            # addon's lock) and fail. cargoRoot points the vendoring, the
-            # consistency check, and the build cwd at crates/nub-native, where the
-            # matching Cargo.lock lives. The cross-workspace `../nub-cache-key` path
-            # dep still resolves — src = self carries the whole tree.
+            # own Cargo.toml + Cargo.lock) living inside the larger repo, so it needs
+            # BOTH knobs, honored by different hooks:
+            #   - `cargoRoot` points the vendoring + the lock-consistency check at
+            #     crates/nub-native/Cargo.lock (without it, the check validates the
+            #     ROOT workspace lock against the addon's vendor dir and fails).
+            #   - `buildAndTestSubdir` cds the BUILD into crates/nub-native so cargo
+            #     resolves the nub-native workspace. Without it the build runs at the
+            #     source root and resolves the ROOT workspace (nub-cli) against the
+            #     addon vendor dir — which lacks nub-cli-only crates like anyhow.
+            # The cross-workspace `../nub-cache-key` path dep resolves either way —
+            # src = self carries the whole tree.
             cargoRoot = "crates/nub-native";
+            buildAndTestSubdir = "crates/nub-native";
             cargoLock.lockFile = ./crates/nub-native/Cargo.lock;
             doCheck = false;
 
