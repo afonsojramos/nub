@@ -201,10 +201,11 @@ jobs:
   # verify logic is pure-Rust (fs::read + blake3 + libc::geteuid / symlink_metadata),
   # identical on musl — and the musl RUNTIME is exercised by the `Docker smoke (musl,
   # node:22-alpine)` leg + release.yml's musl binary build. (A standalone `cargo test
-  # --target x86_64-unknown-linux-musl` leg was attempted but blocked by a PRE-EXISTING,
-  # unrelated musl-compile error in spawn.rs's PTY ioctl — `libc::TIOCSCTTY as c_ulong`,
-  # where libc's Ioctl request type is c_int on musl vs c_ulong on glibc — which is a
-  # separate fix outside this integrity change.) The addon is gitignored (built locally
+  # --target x86_64-unknown-linux-musl` leg was once blocked by a musl-compile error in
+  # spawn.rs's PTY ioctl — `libc::TIOCSCTTY as c_ulong`, where libc types the ioctl
+  # request as c_int on musl vs c_ulong on glibc; fixed to `as _` so inference picks the
+  # per-target type. It was test-only, so the released musl binary was never affected.)
+  # The addon is gitignored (built locally
   # / staged in release.yml), so a placeholder is staged so build.rs's three-entrypoint
   # hash set is complete; it is never dlopen'd here (the tests verify hash CONSISTENCY —
   # baked == extracted — not native loading).

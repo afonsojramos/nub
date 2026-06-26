@@ -2198,7 +2198,7 @@ mod tests {
             if libc::setsid() < 0 {
                 return 2;
             }
-            libc::ioctl(slave, libc::TIOCSCTTY as libc::c_ulong, 0);
+            libc::ioctl(slave, libc::TIOCSCTTY as _, 0);
             libc::dup2(slave, libc::STDIN_FILENO);
             if slave > 2 {
                 libc::close(slave);
@@ -2327,7 +2327,7 @@ mod tests {
             if libc::setsid() < 0 {
                 return 2;
             }
-            libc::ioctl(slave, libc::TIOCSCTTY as libc::c_ulong, 0);
+            libc::ioctl(slave, libc::TIOCSCTTY as _, 0);
             libc::dup2(slave, libc::STDIN_FILENO);
             if slave > 2 {
                 libc::close(slave);
