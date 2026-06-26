@@ -432,6 +432,19 @@ pub(crate) fn normalize_range(spec: &str) -> String {
 /// (nub-core has no aube dep, so the char-blocklist is restated here, the same
 /// way [`safe_bin_subpath`] mirrors aube's bin-path guard): reject path
 /// separators on any platform, NUL, control chars, and the `.`/`..` dir aliases.
+///
+/// nub-core is deliberately STRICTER than aube-store on one byte — it also rejects
+/// `:`. The two guards have different input domains. aube-store's `version` slot
+/// can carry non-semver specs (git URLs, npm aliases, file specs) that legitimately
+/// contain `:`, so blocking it there would break real installs. nub-core's
+/// `version` is always a CONCRETE PUBLISHED npm version: every branch of
+/// [`resolve_dist`] passes a `versions[..]` KEY (npm publishes are semver), which
+/// never contains `:`. Blocking it here costs nothing and closes a real escape — on
+/// Windows `Path::join` treats a drive-prefixed component (`C:foo`) as drive-relative
+/// and DISCARDS the base, so `<store>/pm/<pm>` joined with `C:foo` resolves to
+/// `C:foo` (CWD on drive C:), relocating the written + executed PM bin outside the
+/// store. `/` and `\` were already blocked, so `:` was the last Windows
+/// separator-equivalent the blocklist missed.
 /// A normal semver — `9.5.0`, `11.0.0-rc.1` — passes untouched.
 fn validate_version(version: &str) -> bool {
     if version.is_empty() || version.len() > 256 {
@@ -439,7 +452,7 @@ fn validate_version(version: &str) -> bool {
     }
     if version
         .bytes()
-        .any(|b| b.is_ascii_control() || matches!(b, b'/' | b'\\' | b'\0'))
+        .any(|b| b.is_ascii_control() || matches!(b, b'/' | b'\\' | b':' | b'\0'))
     {
         return false;
     }
@@ -908,6 +921,13 @@ mod tests {
             "x\u{0}y",
             "ctrl\u{7}x",
             "",
+            // F0c (Windows): a drive-prefixed version is drive-RELATIVE under
+            // `Path::join` (it discards the store base), so `:` must be rejected
+            // just like `/` and `\`.
+            "C:foo",
+            "C:",
+            "C:\\windows\\system32",
+            "npm:alias@1.0.0",
         ] {
             assert!(
                 !validate_version(bad),
