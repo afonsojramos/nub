@@ -3,18 +3,26 @@
 //! test can't live in the cdylib `nub-native`).
 //!
 //! The key preimage is NUL-separated and order-fixed (no trailing separator):
-//!   `nub_version \0 schema \0 build_id \0 source \0 ext \0 tsconfig_hash \0 pkg_type`
+//!   `nub_version \0 schema \0 build_id \0 source \0 ext \0 tsconfig_hash \0 pkg_type \0 filename`
 //! → blake3 → 64-hex lowercase → the cache FILENAME. Every component is hashed
 //! IN, so a change to ANY of them (a nub release, a CACHE_SCHEMA bump, a rebuild
 //! at a new build-id) yields a disjoint filename — old on-disk entries are
 //! silently ignored (a miss), never mis-read. `nub-native` calls `cache_key` with
 //! its `NUB_VERSION` / `CACHE_SCHEMA` / `BUILD_ID` consts.
+//!
+//! `filename` is in the preimage because the cached body carries a per-file
+//! `//# sourceURL=<absolute path>` magic comment: two byte-identical sources in
+//! the same directory would otherwise collide on one entry and the second file
+//! would be served the first's `sourceURL`, misattributing V8 stack frames and
+//! debugger source mapping (issue #171).
 
 /// blake3 of the NUL-separated key preimage → 64-hex lowercase.
 ///
 /// `nub_version` / `schema` / `build_id` are the cross-build invalidation
 /// components (compile-time consts on the production path); `source` / `ext` /
-/// `tsconfig_hash` / `pkg_type` are the per-file inputs.
+/// `tsconfig_hash` / `pkg_type` / `filename` are the per-file inputs. `filename`
+/// is keyed in because it is baked into the cached body as the `//# sourceURL`
+/// comment, so distinct files must not share an entry (issue #171).
 #[allow(clippy::too_many_arguments)]
 pub fn cache_key(
     nub_version: &str,
@@ -24,6 +32,7 @@ pub fn cache_key(
     ext: &str,
     tsconfig_hash: &str,
     pkg_type: &str,
+    filename: &str,
 ) -> String {
     let mut h = blake3::Hasher::new();
     h.update(nub_version.as_bytes());
@@ -39,6 +48,8 @@ pub fn cache_key(
     h.update(tsconfig_hash.as_bytes());
     h.update(b"\0");
     h.update(pkg_type.as_bytes());
+    h.update(b"\0");
+    h.update(filename.as_bytes());
     h.finalize().to_hex().to_string()
 }
 
@@ -51,9 +62,10 @@ mod tests {
     const EXT: &str = "ts";
     const TSCONFIG: &str = "tsconfig-hash";
     const PKG: &str = "module";
+    const FILENAME: &str = "/proj/src/x.ts";
 
     fn key(version: &str, schema: &str, build_id: &str) -> String {
-        cache_key(version, schema, build_id, SRC, EXT, TSCONFIG, PKG)
+        cache_key(version, schema, build_id, SRC, EXT, TSCONFIG, PKG, FILENAME)
     }
 
     /// A rebuilt binary (new build-id) must not serve a prior build's entries:
@@ -63,20 +75,20 @@ mod tests {
     #[test]
     fn cache_key_changes_when_build_id_changes() {
         assert_ne!(
-            key("0.0.1", "5", "abc1234"),
-            key("0.0.1", "5", "def5678"),
+            key("0.0.1", "6", "abc1234"),
+            key("0.0.1", "6", "def5678"),
             "a different build-id must yield a different cache key"
         );
     }
 
-    /// The schema is hashed into the key, so a schema bump (e.g. the 4→5 move)
-    /// makes the two eras' filenames disjoint — a "5" build can never read a
-    /// "4"-era entry, it simply misses.
+    /// The schema is hashed into the key, so a schema bump (e.g. the 5→6 move)
+    /// makes the two eras' filenames disjoint — a "6" build can never read a
+    /// "5"-era entry, it simply misses.
     #[test]
     fn cache_key_namespaced_by_schema() {
         assert_ne!(
-            key("0.0.1", "4", "abc1234"),
             key("0.0.1", "5", "abc1234"),
+            key("0.0.1", "6", "abc1234"),
             "a different schema must yield a different cache key"
         );
     }
@@ -85,6 +97,38 @@ mod tests {
     /// rebuilds reuse the cache — identical inputs must always map to one key.
     #[test]
     fn cache_key_is_stable_for_identical_inputs() {
-        assert_eq!(key("0.0.1", "5", "abc1234"), key("0.0.1", "5", "abc1234"));
+        assert_eq!(key("0.0.1", "6", "abc1234"), key("0.0.1", "6", "abc1234"));
+    }
+
+    /// Regression for #171: two byte-identical sources (same ext / tsconfig /
+    /// pkg_type) at DIFFERENT paths must map to DISTINCT cache keys. The cached
+    /// body bakes in a per-file `//# sourceURL`, so a shared entry would serve the
+    /// second file the first's `sourceURL` and misattribute stack frames.
+    #[test]
+    fn cache_key_distinguishes_identical_sources_by_filename() {
+        let alpha = cache_key(
+            "0.0.1",
+            "6",
+            "abc1234",
+            SRC,
+            EXT,
+            TSCONFIG,
+            PKG,
+            "/proj/alpha.ts",
+        );
+        let beta = cache_key(
+            "0.0.1",
+            "6",
+            "abc1234",
+            SRC,
+            EXT,
+            TSCONFIG,
+            PKG,
+            "/proj/beta.ts",
+        );
+        assert_ne!(
+            alpha, beta,
+            "identical content at different paths must yield distinct cache keys"
+        );
     }
 }

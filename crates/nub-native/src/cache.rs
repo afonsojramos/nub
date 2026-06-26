@@ -3,10 +3,12 @@
 //! the old JS cache, so warm caches survive the JS→Rust move (no global miss).
 //!
 //! Cache key preimage (no trailing separator):
-//!   `NUB_VERSION \0 CACHE_SCHEMA \0 build_id \0 source \0 ext \0 tsconfig_hash \0 (pkg_type||"")`
-//!   → blake3 → 64-hex lowercase → cache FILENAME. (SCHEMA "5" = compile-time
-//!   build-id era; SCHEMA "4" folded a runtime exe-hash here, SCHEMA "3" / the old
-//!   JS path used SHA-256 and a key without that component.)
+//!   `NUB_VERSION \0 CACHE_SCHEMA \0 build_id \0 source \0 ext \0 tsconfig_hash \0 (pkg_type||"") \0 filename`
+//!   → blake3 → 64-hex lowercase → cache FILENAME. `filename` is in the key
+//!   because the cached body carries a per-file `//# sourceURL` comment (issue
+//!   #171). (SCHEMA "6" added `filename`; SCHEMA "5" = compile-time build-id era;
+//!   SCHEMA "4" folded a runtime exe-hash here, SCHEMA "3" / the old JS path used
+//!   SHA-256 and a key without that component.)
 //! On-disk entry: `[16-hex integrity = blake3(body)[..16]][body]`, where
 //!   `body = format_byte('c'|'m') + post_processed_code`.
 //! Atomic write via a `*.tmp` sibling + rename (the `*.tmp` suffix is what
@@ -25,14 +27,15 @@ use oxc_napi::OxcError;
 
 use crate::transform::{TransformOptions, transform};
 
-/// On-disk entry format version. Bumped to "5" when the key's per-build
-/// component switched from a runtime exe-hash to the compile-time build-id const
-/// (see `BUILD_ID`): a "4"-era entry was named with a 64-hex exe-hash in the
-/// preimage and must never be read by a "5" build, and vice versa. This constant
-/// is hashed INTO the key, so the filenames are disjoint across schemas — old
-/// entries are silently ignored (a miss), never mis-read. (SCHEMA "4" was the
-/// blake3 + exe-hash era; "3" / the old JS path used SHA-256.)
-const CACHE_SCHEMA: &str = "5";
+/// On-disk entry format version. Bumped to "6" when `filename` was folded into
+/// the key (issue #171): a "5"-era entry was named without `filename` in the
+/// preimage, so two byte-identical sources in a directory collided on one entry
+/// and the second was served the first's `//# sourceURL`. "5" was the move from a
+/// runtime exe-hash to the compile-time build-id const (see `BUILD_ID`). This
+/// constant is hashed INTO the key, so the filenames are disjoint across schemas
+/// — old entries are silently ignored (a miss), never mis-read. (SCHEMA "4" was
+/// the blake3 + exe-hash era; "3" / the old JS path used SHA-256.)
+const CACHE_SCHEMA: &str = "6";
 const INTEGRITY_LEN: usize = 16;
 /// Lockstep with `runtime/version.mjs` via `make version`; the sole version
 /// component of the key (a new nub release ships any emit change + a rebuilt addon).
@@ -84,7 +87,7 @@ pub fn transform_cached(
         "module"
     };
 
-    let key = cache_key(&source, &ext, &tsconfig_hash, &pkg_type);
+    let key = cache_key(&source, &ext, &tsconfig_hash, &pkg_type, &filename);
 
     // Cache hit path.
     if let Some(dir) = cache_dir.as_deref() {
@@ -165,12 +168,21 @@ pub fn transform_cached(
 const BUILD_ID: &str = env!("NUB_NATIVE_BUILD_ID");
 
 /// blake3(NUB_VERSION \0 SCHEMA \0 BUILD_ID \0 source \0 ext \0 tsconfig_hash \0
-/// pkg_type) → 64-hex lowercase. blake3 (SIMD) replaces SHA-256 on the hot path;
-/// the compile-time `BUILD_ID` is folded in so a rebuilt binary auto-invalidates
-/// the cache without any runtime I/O. The derivation lives in the napi-free
-/// `nub-cache-key` crate so its invalidation contract is unit-testable (this
-/// cdylib has `test = false` — a test harness can't link the napi symbols).
-fn cache_key(source: &str, ext: &str, tsconfig_hash: &str, pkg_type: &str) -> String {
+/// pkg_type \0 filename) → 64-hex lowercase. blake3 (SIMD) replaces SHA-256 on the
+/// hot path; the compile-time `BUILD_ID` is folded in so a rebuilt binary
+/// auto-invalidates the cache without any runtime I/O. `filename` is keyed in
+/// because the cached body bakes in a per-file `//# sourceURL` (issue #171), so
+/// two byte-identical sources at different paths must not share an entry. The
+/// derivation lives in the napi-free `nub-cache-key` crate so its invalidation
+/// contract is unit-testable (this cdylib has `test = false` — a test harness
+/// can't link the napi symbols).
+fn cache_key(
+    source: &str,
+    ext: &str,
+    tsconfig_hash: &str,
+    pkg_type: &str,
+    filename: &str,
+) -> String {
     nub_cache_key::cache_key(
         NUB_VERSION,
         CACHE_SCHEMA,
@@ -179,6 +191,7 @@ fn cache_key(source: &str, ext: &str, tsconfig_hash: &str, pkg_type: &str) -> St
         ext,
         tsconfig_hash,
         pkg_type,
+        filename,
     )
 }
 
