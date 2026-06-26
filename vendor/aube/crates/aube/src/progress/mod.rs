@@ -43,17 +43,53 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
-/// Fixed denominator clx's `{{progress_bar}}` is held at in TTY mode.
-/// We don't drive clx's progress_current/progress_total with raw
-/// package counts because the unified-bar formula needs sub-package
-/// precision (resolving fills 20% of the bar, which on a 1230-package
-/// install is < 1 package per cell). Encoding the unified-progress
-/// fraction as `progress_current / TTY_BAR_SCALE` gives clx 10 000
-/// steps to interpolate over — more than enough for the flex-rendered
-/// bar to look smooth at any terminal width. The cur/total label is
-/// owned separately via the `count` prop so the scaled denominator
-/// never leaks into the user-facing text.
+/// Denominator the clx `progress_current`/`progress_total` pair is held at in
+/// TTY mode. The animated bar itself is rendered by `tty_bar_field` (via
+/// `render::bar_only`) directly from the unified-progress fraction, so this
+/// pair no longer drives a `{{progress_bar}}` template — it exists only to feed
+/// clx's OSC terminal progress indicator (the iTerm2 / VS Code taskbar
+/// percentage), which reads `overall_progress()`. Encoding the
+/// unified-progress fraction as `progress_current / TTY_BAR_SCALE` gives that
+/// indicator 10 000 smooth steps; the user-facing bar and counters are owned
+/// by the `bar`/`count` props.
 const TTY_BAR_SCALE: usize = 10_000;
+
+/// The phase verbs the install can emit, in their display spelling. The TTY
+/// renderer right-pads the active verb to the widest of these so the bar's `[`
+/// column is byte-identical across every phase. This is the single source of
+/// truth for the pad width — keep it in sync with `set_phase`'s verb→number
+/// map. (Verbs are ASCII, so byte length == display width.)
+const TTY_PHASE_VERBS: &[&str] = &["resolving", "fetching", "linking"];
+
+/// Display width every phase verb is right-padded to (the longest
+/// [`TTY_PHASE_VERBS`]). Computed at compile time so adding a verb to the list
+/// re-derives the pad automatically.
+const TTY_PHASE_W: usize = {
+    let mut max = 0;
+    let mut i = 0;
+    while i < TTY_PHASE_VERBS.len() {
+        let l = TTY_PHASE_VERBS[i].len();
+        if l > max {
+            max = l;
+        }
+        i += 1;
+    }
+    max
+};
+
+/// Fixed cell count of the animated bar (the `█`/`░` run inside the brackets).
+/// A CONSTANT width is what keeps the `]`, the counters, and the trailing
+/// segment from shifting between frames; the bar never reflows to the terminal
+/// width (a long line simply wraps in place on a narrow terminal). 20 matches
+/// the reference width and leaves room for the counters + trailer at ~80 cols.
+const TTY_BAR_CELLS: usize = 20;
+
+/// Digit-field width for the cur/total counters. The numerator is right-aligned
+/// and the total left-aligned to this width, so `   7/331 ` and ` 577/623 `
+/// occupy an identical column for installs up to 9999 packages; a 5-digit total
+/// (10k+ deps, rare) is the only case that nudges the trailing field, and it
+/// degrades gracefully (the field just grows by one column).
+const TTY_COUNT_DIGITS: usize = 4;
 
 /// Trim `reused` so `reused + downloaded <= total`. No-op when the
 /// counters already fit. Called from `set_total` after a downward
@@ -241,26 +277,41 @@ impl InstallProgress {
         // `product_banner`); an embedder drops it so the engine brand
         // never leaks into the host's install output.
         let header = product_banner("");
-        // Layout: header, animated bar, count segment, optional bytes
-        // segment (running download, with `/ ~estimated` when
-        // available), phase-gated rate, ETA. Mirrors the CI-mode
-        // label segment-for-segment so both modes show the same
-        // information. `{{count}}` is a custom prop populated by
-        // `refresh_tty_bar` (using the shared
-        // [`render::count_segment`] helper) so the cur/total shape
-        // matches CI exactly — phase-conditional, suppressed-slash
-        // during resolving-without-an-estimate, and so on. The clx
-        // built-in `{{cur}}/{{total}}` is bypassed because
-        // `progress_total` is held at `TTY_BAR_SCALE` to encode the
-        // unified-progress fraction in the bar, which would otherwise
-        // leak into the label as the scaled denominator.
+        // Layout — a single line of FIXED-WIDTH columns so nothing shifts
+        // horizontally between phases or frames:
+        //   <header> <phase-field>  <bar-field>  <count-field><bytes><rate><eta>
+        // `{{phase}}`, `{{bar}}`, and `{{count}}` are custom props rendered by
+        // `tty_phase_field` / `tty_bar_field` / `tty_count_field`, each a
+        // constant display width (the verb is padded to the longest verb, the
+        // bar is a constant cell count, the counters pad to a fixed digit
+        // field). The trailing `{{bytes}}{{rate}}{{eta}}` is the only variable
+        // part and it sits last, so its content can change without moving any
+        // column before it. No `flex` filter: the line renders verbatim and the
+        // terminal wraps it in place on a narrow width. clx's
+        // `progress_current`/`progress_total` are still set (below) to feed the
+        // OSC terminal-progress indicator, but no `{{progress_bar}}` template
+        // consumes them — the visible bar is `tty_bar_field`.
+        let phase0 = tty_phase_field("");
+        let bar0 = tty_bar_field(
+            ci::Snap {
+                phase: 0,
+                resolved: 0,
+                target_total: 0,
+                reused: 0,
+                downloaded: 0,
+                bytes: 0,
+                estimated: 0,
+                fetch_elapsed_ms: 0,
+                completed_at_fetch_start: None,
+            },
+            0,
+        );
         let root = ProgressJobBuilder::new()
-            .body(
-                "{{aube}}{{phase}}  {{progress_bar(flex=true)}} {{count}}{{bytes}}{{rate}}{{eta}}",
-            )
+            .body("{{aube}}{{phase}}  {{bar}}  {{count}}{{bytes}}{{rate}}{{eta}}")
             .body_text(Some("{{aube}}{{phase}} {{count}}{{bytes}}{{rate}}{{eta}}"))
             .prop("aube", &header)
-            .prop("phase", "")
+            .prop("phase", &phase0)
+            .prop("bar", &bar0)
             .prop("count", "")
             .prop("bytes", "")
             .prop("rate", "")
@@ -465,19 +516,9 @@ impl InstallProgress {
                 completed_at_fetch_start,
                 ..
             } => {
-                if phase.is_empty() {
-                    root.prop("phase", "");
-                } else {
-                    // Single cyan accent across phases so the phase
-                    // word reads as a status label, not a severity
-                    // signal. Yellow used to flag `resolving` which
-                    // reads like a warning in a terminal palette.
-                    let colored_phase = match phase {
-                        "resolving" | "linking" => style::ecyan(phase).to_string(),
-                        _ => style::edim(phase).to_string(),
-                    };
-                    root.prop("phase", &format!(" {} {}", style::edim("—"), colored_phase));
-                }
+                // Fixed-width phase field (verb right-padded to the longest
+                // possible verb), so the bar's `[` never shifts between phases.
+                root.prop("phase", &tty_phase_field(phase));
                 let n = match phase {
                     "resolving" => 1,
                     "fetching" => 2,
@@ -921,14 +962,75 @@ impl InstallProgress {
     }
 }
 
+/// The fixed-width phase field — ` — <verb>` with the verb right-padded to
+/// [`TTY_PHASE_W`], or an all-blank field of the SAME width when no phase is
+/// active. Its constant display width (`TTY_PHASE_W + 3`) is what pins the
+/// bar's `[` to one column regardless of which verb is showing. The verb takes
+/// a single cyan/dim accent so it reads as a status label, not a severity
+/// signal (yellow once flagged `resolving`, which reads like a warning).
+fn tty_phase_field(phase: &str) -> String {
+    if phase.is_empty() {
+        return " ".repeat(TTY_PHASE_W + 3);
+    }
+    let colored = match phase {
+        "resolving" | "linking" => style::ecyan(phase).to_string(),
+        _ => style::edim(phase).to_string(),
+    };
+    // Pad on the PLAIN verb width (ANSI codes carry zero display width), so the
+    // trailing spaces land outside the color span and the field's visible width
+    // is exactly `TTY_PHASE_W + 3`.
+    let pad = TTY_PHASE_W.saturating_sub(phase.len());
+    format!(" {} {}{}", style::edim("—"), colored, " ".repeat(pad))
+}
+
+/// The fixed-width animated bar field: `[<cells>]`, exactly [`TTY_BAR_CELLS`]
+/// cyan/dim cells inside dim brackets. Constant display width
+/// (`TTY_BAR_CELLS + 2`) so the counters and trailer after it never move.
+fn tty_bar_field(snap: ci::Snap, completed: usize) -> String {
+    format!(
+        "{}{}{}",
+        style::edim("["),
+        render::bar_only(snap, TTY_BAR_CELLS, completed),
+        style::edim("]"),
+    )
+}
+
+/// The fixed-width counter field, e.g. ` 577/623  pkgs` / `   7      pkgs`. The
+/// numerator is right-aligned and the total left-aligned to [`TTY_COUNT_DIGITS`]
+/// with ` pkgs` after, so the field — and therefore the trailing
+/// byte/rate/ETA segment — holds a constant column for installs up to 9999
+/// packages. When resolving has no estimate yet the `/total` slot is blank-
+/// filled (not dropped) so the numerator and ` pkgs` stay put. Phase 0 (before
+/// resolving) renders empty — nothing trails it, so there is no column to hold.
+/// TTY-specific (not the shared `render::count_segment`, which the append-only
+/// CI renderer uses and does not need fixed columns).
+fn tty_count_field(snap: ci::Snap, completed: usize) -> String {
+    let (cur, total) = match snap.phase {
+        0 => return String::new(),
+        1 if snap.target_total > snap.resolved => (snap.resolved, Some(snap.target_total)),
+        1 => (snap.resolved, None),
+        _ => (completed, Some(snap.resolved)),
+    };
+    let cur_s = style::ebold(format!("{cur:>w$}", w = TTY_COUNT_DIGITS)).to_string();
+    let mid = match total {
+        Some(t) => format!(
+            "{}{}",
+            style::edim("/"),
+            style::ebold(format!("{t:<w$}", w = TTY_COUNT_DIGITS)),
+        ),
+        None => " ".repeat(TTY_COUNT_DIGITS + 1),
+    };
+    format!("{cur_s}{mid} {}", style::edim("pkgs"))
+}
+
 /// TTY-only bar refresh primitive. Strongly-typed `&AtomicUsize` /
 /// `&ProgressJob` references so both the `InstallProgress`
 /// method (which holds Arcs) and `FetchRow::drop` (which holds
 /// Weaks and upgrades them) can share the math without duplicating
 /// the snapshot/scale/prop-set sequence. Reads the same field set
-/// as `Mode::Tty` and feeds it through `render::unified_progress` /
-/// `render::count_segment`, so a tweak to either lands in both
-/// renderers.
+/// as `Mode::Tty` and feeds it through the fixed-width
+/// [`tty_bar_field`] / [`tty_count_field`] builders, so a tweak to the
+/// column layout lands everywhere the bar refreshes.
 fn refresh_tty_bar_from_atomics(
     root: &Arc<ProgressJob>,
     total: &AtomicUsize,
@@ -962,9 +1064,13 @@ fn refresh_tty_bar_from_atomics(
     // catch-up reorders against `set_total`.
     let completed = (r + d).min(resolved);
     let progress = render::unified_progress(snap, completed);
+    // Feed clx's OSC terminal-progress indicator (not a visible template bar).
     let scaled = ((progress * TTY_BAR_SCALE as f64).round() as usize).min(TTY_BAR_SCALE);
     root.progress_current(scaled);
-    root.prop("count", &render::count_segment(snap, completed));
+    // The visible bar + counters are fixed-width fields we render ourselves, so
+    // every column is byte-stable across phases and frames.
+    root.prop("bar", &tty_bar_field(snap, completed));
+    root.prop("count", &tty_count_field(snap, completed));
 }
 
 impl Drop for InstallProgress {
@@ -1218,6 +1324,114 @@ impl Drop for PausingWriterGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Display width of a styled string: strip SGR escapes, then count chars
+    /// (every glyph the bar uses — ASCII, `—`, `█`, `░`, `·`, `/` — is one
+    /// display column).
+    fn vis_width(s: &str) -> usize {
+        let mut out = 0usize;
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' && chars.peek() == Some(&'[') {
+                chars.next();
+                for esc in chars.by_ref() {
+                    if esc.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+                continue;
+            }
+            out += 1;
+        }
+        out
+    }
+
+    fn snap_at(phase: usize, resolved: usize, target_total: usize, completed: usize) -> ci::Snap {
+        ci::Snap {
+            phase,
+            resolved,
+            target_total,
+            reused: completed,
+            downloaded: 0,
+            bytes: 0,
+            estimated: 0,
+            fetch_elapsed_ms: 0,
+            completed_at_fetch_start: None,
+        }
+    }
+
+    /// The whole point of the fixed-column layout: the bar's `[` must sit at a
+    /// byte-identical column in every phase. That column is `header +
+    /// phase-field`, and the header is constant per run, so it reduces to: the
+    /// phase field has the same display width for every verb (and when empty).
+    #[test]
+    fn phase_field_is_constant_width_across_verbs() {
+        let widths: Vec<usize> = TTY_PHASE_VERBS
+            .iter()
+            .copied()
+            .chain(["", "downloading-future-verb-not-in-set"]) // empty + an over-long verb
+            .map(|v| vis_width(&tty_phase_field(v)))
+            .collect();
+        // Every KNOWN verb + the empty field share one width = TTY_PHASE_W + 3
+        // (" — " plus the verb pad). The longest known verb sets the pad.
+        let expected = TTY_PHASE_W + 3;
+        for (v, w) in TTY_PHASE_VERBS.iter().chain(&[""]).zip(widths.iter()) {
+            assert_eq!(*w, expected, "phase field width drifted for {v:?}");
+        }
+    }
+
+    /// The bar field is a constant `TTY_BAR_CELLS + 2` columns at any fill, so
+    /// the counters/trailer after it never move.
+    #[test]
+    fn bar_field_is_constant_width_at_any_fill() {
+        let expected = TTY_BAR_CELLS + 2; // brackets
+        for (phase, resolved, completed) in [
+            (1, 0, 0),
+            (1, 500, 0),
+            (2, 800, 1),
+            (2, 800, 800),
+            (3, 800, 800),
+        ] {
+            let w = vis_width(&tty_bar_field(
+                snap_at(phase, resolved, resolved.max(1), completed),
+                completed,
+            ));
+            assert_eq!(
+                w, expected,
+                "bar width drifted at phase {phase} completed {completed}"
+            );
+        }
+    }
+
+    /// The counter field holds one column across phases and digit counts (up to
+    /// 9999), with the numerator right-aligned — `7/331` and `577/623` line up.
+    #[test]
+    fn count_field_is_constant_width_up_to_four_digits() {
+        let expected = 2 * TTY_COUNT_DIGITS + 6; // cur(D) + "/" + total(D) + " pkgs"
+        let cases = [
+            snap_at(1, 7, 331, 0),     // resolving with estimate: 7/331
+            snap_at(1, 84, 84, 0),     // resolving, no estimate yet (target == resolved): bare 84
+            snap_at(2, 623, 623, 7),   // fetching: 7/623
+            snap_at(2, 623, 623, 577), // fetching: 577/623
+            snap_at(3, 577, 577, 577), // linking: 577/577
+            snap_at(4, 9999, 9999, 1), // huge but still 4-digit
+        ];
+        for s in cases {
+            let completed = s.reused;
+            let w = vis_width(&tty_count_field(s, completed));
+            assert_eq!(
+                w, expected,
+                "count width drifted at phase {} cur {} total {}",
+                s.phase, completed, s.resolved
+            );
+        }
+        // Phase 0 renders nothing (no trailing field to hold).
+        assert_eq!(tty_count_field(snap_at(0, 0, 0, 0), 0), "");
+        // Numerator is right-aligned: a 1-digit count is space-padded so its
+        // right edge lines up with a 3-digit count.
+        let one = tty_count_field(snap_at(2, 331, 331, 7), 7);
+        assert!(vis_width(&one) == expected, "right-align padding lost");
+    }
 
     #[test]
     fn clamp_reused_trims_overshoot_after_downward_rebase() {
