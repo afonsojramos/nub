@@ -169,12 +169,18 @@ fn install_silent_flag_suppresses_all_nonerror_output() {
          over-silencing): got empty output"
     );
 
-    // Every silent spelling produces empty stderr while still linking the dep.
+    // Every silent spelling produces empty stderr while still linking the dep —
+    // both AFTER the verb (per-verb clap surface) and BEFORE it (the pre-verb
+    // global position, recorded as a process default in cli::dispatch).
     for form in [
         &["install", "--silent"][..],
         &["install", "-s"][..],
         &["install", "--reporter=silent"][..],
         &["install", "--loglevel=silent"][..],
+        &["--silent", "install"][..],
+        &["-s", "install"][..],
+        &["--reporter=silent", "install"][..],
+        &["--loglevel=silent", "install"][..],
     ] {
         let dir = pm_tmpdir(&format!("silent-{}", form.join("-").replace('=', "")));
         std::fs::write(dir.join("package.json"), manifest).unwrap();
@@ -187,6 +193,37 @@ fn install_silent_flag_suppresses_all_nonerror_output() {
         assert!(
             dir.join("node_modules/is-positive/package.json").is_file(),
             "nub {form:?} still installs the dependency"
+        );
+    }
+}
+
+/// Regression (non-network): a PRE-verb `--reporter`/`--loglevel`/`--silent`
+/// reaches the PM verb instead of falling through the dispatch scan to the file
+/// runner — which shipped it to Node as `node: bad option: --reporter=silent`
+/// before the fix. A no-dependency manifest installs fully offline, so the only
+/// thing under test is that the global form parses and dispatches to `install`.
+#[test]
+fn pre_verb_output_flags_reach_install_not_node() {
+    for form in [
+        &["--reporter=silent", "install"][..],
+        &["--loglevel=error", "install"][..],
+        &["--silent", "install"][..],
+    ] {
+        let dir = pm_tmpdir(&format!("preverb-{}", form.join("-").replace('=', "")));
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"name":"q","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        let (stdout, stderr, code) = run_install(&dir, form);
+        let combined = format!("{stdout}\n{stderr}");
+        assert!(
+            !combined.contains("bad option") && !combined.contains("is not a nub command"),
+            "nub {form:?} misrouted instead of dispatching to install: {combined}"
+        );
+        assert_eq!(
+            code, 0,
+            "nub {form:?} (no deps) should install cleanly offline: {combined}"
         );
     }
 }
