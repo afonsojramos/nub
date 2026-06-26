@@ -405,13 +405,19 @@ fn verify_or_heal(base: &Path, target: &Path, already_fresh: bool) -> Option<Pat
         );
         return None;
     }
-    eprintln!(
-        "nub: runtime integrity check failed at {} after re-extraction; proceeding \
-         anyway. Please report this at https://github.com/nubjs/nub/issues with your \
-         OS and `nub --version`.",
-        target.display()
-    );
-    Some(target.to_path_buf())
+    // Canary: only proceed if `target` is still a live dir on disk. A failed self-heal
+    // can leave it absent (the swap's stale-restore lost the race to gc_stale), and the
+    // canary contract is "always hand back a live dir or None" — never a ghost path the
+    // child `node` would brick on. A non-existent target degrades to un-augmented.
+    if target.is_dir() {
+        eprintln!(
+            "nub: runtime integrity check failed at {} after re-extraction; proceeding \
+             anyway. Please report this at https://github.com/nubjs/nub/issues with your \
+             OS and `nub --version`.",
+            target.display()
+        );
+    }
+    target.is_dir().then(|| target.to_path_buf())
 }
 
 /// Self-heal: re-extract the embedded blob into a fresh tmp and atomically swap it
@@ -537,6 +543,12 @@ fn rand_suffix() -> u64 {
 mod tests {
     use super::*;
     use std::io::Read;
+
+    /// Serializes the tests that mutate the shared `TEST_ENFORCE` static — libtest
+    /// runs tests in parallel, so without this lock one test's `store` could land
+    /// inside another's enforce/canary assertion window and flake it. Poison is
+    /// recovered (a panicking test must not cascade-fail its serialized sibling).
+    static ENFORCE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Build a tiny zstd-19 tar blob matching the real embedded layout, so the
     /// unpack/rename/idempotence/race/GC logic can be exercised without the
@@ -713,6 +725,7 @@ mod tests {
 
     #[test]
     fn persistent_mismatch_is_canary_by_default_and_refuses_under_enforce() {
+        let _guard = ENFORCE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // A dir whose entrypoints will NEVER match the baked hashes. `already_fresh`
         // skips the heal so we hit the terminal decision directly: canary proceeds
         // (never brick on a verify bug), enforce refuses (the flipped-on behavior).
@@ -735,6 +748,29 @@ mod tests {
         assert!(
             verify_or_heal(&base, &target, true).is_none(),
             "enforce mode refuses on a persistent mismatch"
+        );
+
+        TEST_ENFORCE.store(0, Ordering::Relaxed); // reset for other tests
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn canary_never_returns_a_nonexistent_dir() {
+        let _guard = ENFORCE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // The canary contract is "always hand back a live dir or None". A failed
+        // self-heal can leave `target` absent; the terminal canary branch must then
+        // degrade to None rather than a ghost path the child `node` would brick on.
+        // `target` is never created on disk, so verify_entrypoints fails and
+        // already_fresh=true skips the heal — hitting the terminal branch with no dir.
+        let base = tmp_base("nub-rtc-ghost");
+        fs::create_dir_all(&base).unwrap();
+        let target = base.join(CACHE_KEY);
+        assert!(!target.exists(), "target must not exist on disk");
+
+        TEST_ENFORCE.store(1, Ordering::Relaxed); // canary
+        assert!(
+            verify_or_heal(&base, &target, true).is_none(),
+            "canary must degrade to None when target is a ghost dir"
         );
 
         TEST_ENFORCE.store(0, Ordering::Relaxed); // reset for other tests
