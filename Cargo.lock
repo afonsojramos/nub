@@ -2597,7 +2597,7 @@ dependencies = [
 
 [[package]]
 name = "nub-cli"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "aube",
@@ -2635,7 +2635,7 @@ dependencies = [
 
 [[package]]
 name = "nub-core"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "blake3",
