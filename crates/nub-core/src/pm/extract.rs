@@ -17,7 +17,7 @@ use anyhow::{Context, Result, bail};
 use flate2::read::GzDecoder;
 
 use crate::version_management::extract::{
-    CappedReader, MAX_ARCHIVE_DECOMPRESSED_BYTES, single_top_dir,
+    CappedReader, MAX_ARCHIVE_DECOMPRESSED_BYTES, MAX_ARCHIVE_ENTRIES, single_top_dir,
 };
 
 /// Decode a `.tgz` (gzip + tar) and unpack it under `dest_parent`, returning the
@@ -30,19 +30,25 @@ use crate::version_management::extract::{
 /// decompression bomb errors instead of exhausting disk (N2). `Entry::unpack_in`
 /// keeps the `tar` crate's `..`/absolute path-traversal guard (an escaping entry
 /// is skipped, not written) and preserves the bin's executable mode;
-/// `single_top_dir` enforces the one-dir invariant.
+/// `single_top_dir` enforces the one-dir invariant. The entry COUNT is bounded
+/// too (N2 — the `tar` crate has no count guard), mirroring aube-store's caps.
 pub fn extract_tgz(archive: &Path, dest_parent: &Path) -> Result<PathBuf> {
-    extract_tgz_capped(archive, dest_parent, MAX_ARCHIVE_DECOMPRESSED_BYTES)
+    extract_tgz_capped(
+        archive,
+        dest_parent,
+        MAX_ARCHIVE_DECOMPRESSED_BYTES,
+        MAX_ARCHIVE_ENTRIES,
+    )
 }
 
-/// [`extract_tgz`] with the decompression cap as an explicit parameter — the seam
-/// a bomb test uses to inject a tiny cap (the public entry uses the 1 GiB prod
-/// [`MAX_ARCHIVE_DECOMPRESSED_BYTES`], which the real-tarball provisioning e2e
-/// relies on).
+/// [`extract_tgz`] with the decompression + entry-count caps as explicit
+/// parameters — the seam a bomb test uses to inject tiny caps (the public entry
+/// uses the prod constants, which the real-tarball provisioning e2e relies on).
 fn extract_tgz_capped(
     archive: &Path,
     dest_parent: &Path,
     decompressed_cap: u64,
+    max_entries: usize,
 ) -> Result<PathBuf> {
     let file =
         std::fs::File::open(archive).with_context(|| format!("open {}", archive.display()))?;
@@ -51,10 +57,18 @@ fn extract_tgz_capped(
     std::fs::create_dir_all(dest_parent)
         .with_context(|| format!("create {}", dest_parent.display()))?;
 
+    let mut count = 0usize;
     for entry in tar
         .entries()
         .with_context(|| format!("reading {}", archive.display()))?
     {
+        count += 1;
+        if count > max_entries {
+            bail!(
+                "{} exceeds the {max_entries}-entry archive cap",
+                archive.display()
+            );
+        }
         let mut entry = entry.with_context(|| format!("reading entry in {}", archive.display()))?;
         let entry_type = entry.header().entry_type();
         if matches!(entry_type, tar::EntryType::Symlink | tar::EntryType::Link) {
@@ -255,11 +269,38 @@ mod tests {
         let out = dir.join("extracted");
         let err = format!(
             "{:#}",
-            extract_tgz_capped(&archive, &out, 1 << 20).unwrap_err()
+            extract_tgz_capped(&archive, &out, 1 << 20, MAX_ARCHIVE_ENTRIES).unwrap_err()
         );
         assert!(
             err.to_lowercase().contains("cap") || err.to_lowercase().contains("decompress"),
             "a decompression bomb must be refused by the cap: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// N2 (entry-count): an archive of many tiny entries stays under the byte cap
+    /// but drives a `File::create` per entry. The entry-count cap must refuse it.
+    /// Drives the `_capped` seam with a 2-entry cap.
+    #[test]
+    fn extract_tgz_rejects_too_many_entries() {
+        let dir = tmpdir();
+        let archive = dir.join("manyentries.tgz");
+        write_tgz(
+            &archive,
+            &[
+                ("package/a", b"x"),
+                ("package/b", b"y"),
+                ("package/c", b"z"),
+            ],
+        );
+        let out = dir.join("extracted");
+        let err = format!(
+            "{:#}",
+            extract_tgz_capped(&archive, &out, 1 << 20, 2).unwrap_err()
+        );
+        assert!(
+            err.contains("entry archive cap"),
+            "an over-count archive must be refused: {err}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

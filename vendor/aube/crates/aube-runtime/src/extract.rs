@@ -27,6 +27,15 @@ const MAX_ARCHIVE_ENTRY_BYTES: u64 = 512 << 20;
 #[cfg(test)]
 const MAX_ARCHIVE_ENTRY_BYTES: u64 = 1 << 20;
 
+/// Maximum number of entries in a single archive — the third aube-store cap
+/// (`aube_store::MAX_TARBALL_ENTRIES`), bounding the per-entry syscall/inode cost
+/// so a crafted archive of millions of tiny entries can't pin the CPU even under
+/// the byte cap. A Node release ships a few thousand files; 200_000 is far above.
+#[cfg(not(test))]
+const MAX_ARCHIVE_ENTRIES: usize = 200_000;
+#[cfg(test)]
+const MAX_ARCHIVE_ENTRIES: usize = 4;
+
 /// A `Read` wrapper that refuses to deliver more than `remaining` bytes,
 /// surfacing exhaustion as an `io::Error` rather than a clean EOF — so a crafted
 /// archive can't silently truncate a tar stream into a partial tree at a block
@@ -95,9 +104,16 @@ fn extract_tar_gz(archive_path: &Path, dest: &Path, strip_first: bool) -> Result
         MAX_ARCHIVE_DECOMPRESSED_BYTES,
     );
     let mut archive = tar::Archive::new(decoder);
+    let mut count = 0usize;
     for entry in archive.entries().map_err(|e| Error::ExtractFailed {
         reason: e.to_string(),
     })? {
+        count += 1;
+        if count > MAX_ARCHIVE_ENTRIES {
+            return Err(Error::ExtractFailed {
+                reason: format!("archive exceeds the {MAX_ARCHIVE_ENTRIES}-entry cap"),
+            });
+        }
         let mut entry = entry.map_err(|e| Error::ExtractFailed {
             reason: e.to_string(),
         })?;
@@ -169,6 +185,14 @@ fn extract_zip(archive_path: &Path, dest: &Path, strip_first: bool) -> Result<()
     let mut zip = zip::ZipArchive::new(file).map_err(|e| Error::ExtractFailed {
         reason: e.to_string(),
     })?;
+    // Bound the declared entry count up front (mirrors aube-store's
+    // MAX_TARBALL_ENTRIES) so a many-tiny-entries archive can't drive
+    // `File::create` spam — 0-byte entries never trip the byte caps below.
+    if zip.len() > MAX_ARCHIVE_ENTRIES {
+        return Err(Error::ExtractFailed {
+            reason: format!("archive exceeds the {MAX_ARCHIVE_ENTRIES}-entry cap"),
+        });
+    }
     // Running decompressed total, capped per-entry and per-archive against a zip
     // bomb (defense-in-depth on top of the upstream checksum gate).
     let mut total: u64 = 0;
@@ -285,6 +309,32 @@ mod tests {
         extract_archive(&archive, &dest, false, true).unwrap();
         assert!(dest.join("bin/node").is_file());
         assert!(dest.join("LICENSE").is_file());
+    }
+
+    #[test]
+    fn tar_gz_entry_count_is_capped() {
+        // Many tiny entries stay under the byte cap but drive an unpack per
+        // entry; the entry-count cap (4 under cfg(test)) must refuse the archive.
+        let tmp = tempfile::tempdir().unwrap();
+        let bytes = make_tar_gz(&[
+            ("top/a", "1"),
+            ("top/b", "2"),
+            ("top/c", "3"),
+            ("top/d", "4"),
+            ("top/e", "5"),
+        ]);
+        let archive = tmp.path().join("many.tar.gz");
+        std::fs::write(&archive, bytes).unwrap();
+        let dest = tmp.path().join("out");
+        std::fs::create_dir_all(&dest).unwrap();
+        let err = format!(
+            "{:?}",
+            extract_archive(&archive, &dest, false, true).unwrap_err()
+        );
+        assert!(
+            err.contains("entry cap"),
+            "over-count archive must be refused: {err}"
+        );
     }
 
     #[cfg(unix)]

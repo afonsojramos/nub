@@ -24,6 +24,14 @@ pub(crate) const MAX_ARCHIVE_DECOMPRESSED_BYTES: u64 = 1 << 30;
 /// same shape as `aube_store::MAX_TARBALL_ENTRY_BYTES`.
 pub(crate) const MAX_ARCHIVE_ENTRY_BYTES: u64 = 512 << 20;
 
+/// Maximum number of entries in a single archive — the third aube-store cap
+/// (`aube_store::MAX_TARBALL_ENTRIES`), bounding the per-entry `File::create`
+/// syscall/inode cost so a crafted archive of millions of tiny (empty-header)
+/// entries can't pin the CPU or exhaust inodes even while staying under the byte
+/// cap. `next` (the largest top-1000 npm package) ships ~8k files and a Node dist
+/// a few thousand; 200_000 is ~25× above either, so no real artifact trips it.
+pub(crate) const MAX_ARCHIVE_ENTRIES: usize = 200_000;
+
 /// A `Read` wrapper that refuses to deliver more than `remaining` bytes,
 /// surfacing exhaustion as an `io::Error` rather than a clean EOF. Mirror of
 /// `aube_store`'s `CappedReader`: when it wraps a gzip/xz decoder feeding a tar
@@ -90,29 +98,54 @@ pub(crate) fn single_top_dir(dest_parent: &Path, archive: &Path) -> Result<PathB
 /// top-level directory it created (the `node-v<ver>-<plat>` dir). The `tar` crate
 /// guards against path-traversal (`..` / absolute entries) during `unpack`.
 pub fn extract_tar_xz(archive: &Path, dest_parent: &Path) -> Result<PathBuf> {
-    extract_tar_xz_capped(archive, dest_parent, MAX_ARCHIVE_DECOMPRESSED_BYTES)
+    extract_tar_xz_capped(
+        archive,
+        dest_parent,
+        MAX_ARCHIVE_DECOMPRESSED_BYTES,
+        MAX_ARCHIVE_ENTRIES,
+    )
 }
 
-/// [`extract_tar_xz`] with the decompression cap as an explicit parameter — the
-/// seam a bomb test uses to inject a tiny cap (the public entry uses the prod
-/// [`MAX_ARCHIVE_DECOMPRESSED_BYTES`]).
+/// [`extract_tar_xz`] with the decompression + entry-count caps as explicit
+/// parameters — the seam a bomb test uses to inject tiny caps (the public entry
+/// uses the prod constants).
 fn extract_tar_xz_capped(
     archive: &Path,
     dest_parent: &Path,
     decompressed_cap: u64,
+    max_entries: usize,
 ) -> Result<PathBuf> {
     let file =
         std::fs::File::open(archive).with_context(|| format!("open {}", archive.display()))?;
     // Cap the DECOMPRESSED stream against a decompression bomb (N2). Node
     // tarballs legitimately ship intra-tree symlinks (`bin/npm → ../lib/…`), so
-    // unlike the PM-tgz extractor this path keeps `tar::unpack` (which preserves
-    // them); the cap is the only hardening here.
+    // unlike the PM-tgz extractor this path allows them — `Entry::unpack_in`
+    // recreates a symlink entry the same way `Archive::unpack` did, while the
+    // manual walk lets us bound the entry COUNT (the `tar` crate has no
+    // entry-count guard) on top of the decompression cap.
     let decoder = CappedReader::new(liblzma::read::XzDecoder::new(file), decompressed_cap);
     let mut tar = tar::Archive::new(decoder);
     std::fs::create_dir_all(dest_parent)
         .with_context(|| format!("create {}", dest_parent.display()))?;
-    tar.unpack(dest_parent)
-        .with_context(|| format!("extracting {}", archive.display()))?;
+    let mut count = 0usize;
+    for entry in tar
+        .entries()
+        .with_context(|| format!("reading {}", archive.display()))?
+    {
+        count += 1;
+        if count > max_entries {
+            bail!(
+                "{} exceeds the {max_entries}-entry archive cap",
+                archive.display()
+            );
+        }
+        let mut entry = entry.with_context(|| format!("reading entry in {}", archive.display()))?;
+        // `unpack_in` keeps the `tar` crate's `..`/absolute traversal guard (an
+        // escaping entry returns Ok(false) and is skipped) and recreates symlinks.
+        entry
+            .unpack_in(dest_parent)
+            .with_context(|| format!("extracting {}", archive.display()))?;
+    }
     single_top_dir(dest_parent, archive)
 }
 
@@ -136,22 +169,33 @@ pub fn extract_zip(archive: &Path, dest_parent: &Path) -> Result<PathBuf> {
         dest_parent,
         MAX_ARCHIVE_ENTRY_BYTES,
         MAX_ARCHIVE_DECOMPRESSED_BYTES,
+        MAX_ARCHIVE_ENTRIES,
     )
 }
 
-/// [`extract_zip`] with the per-entry + archive-total caps as explicit
-/// parameters — the seam a zip-bomb test uses to inject tiny caps (the public
-/// entry uses the prod constants).
+/// [`extract_zip`] with the per-entry + archive-total + entry-count caps as
+/// explicit parameters — the seam a zip-bomb test uses to inject tiny caps (the
+/// public entry uses the prod constants).
 fn extract_zip_capped(
     archive: &Path,
     dest_parent: &Path,
     entry_cap: u64,
     total_cap: u64,
+    max_entries: usize,
 ) -> Result<PathBuf> {
     let file =
         std::fs::File::open(archive).with_context(|| format!("open {}", archive.display()))?;
     let mut zip =
         zip::ZipArchive::new(file).with_context(|| format!("reading zip {}", archive.display()))?;
+    // The central directory declares the entry count up front — bound it before
+    // the walk so a many-tiny-entries archive can't drive `File::create` spam
+    // (0-byte entries never trip the byte caps). Mirrors `MAX_TARBALL_ENTRIES`.
+    if zip.len() > max_entries {
+        bail!(
+            "zip {} exceeds the {max_entries}-entry archive cap",
+            archive.display()
+        );
+    }
     std::fs::create_dir_all(dest_parent)
         .with_context(|| format!("create {}", dest_parent.display()))?;
 
@@ -330,11 +374,43 @@ mod tests {
         let out = dir.join("extracted");
         let err = format!(
             "{:#}",
-            extract_tar_xz_capped(&archive, &out, 1 << 20).unwrap_err()
+            extract_tar_xz_capped(&archive, &out, 1 << 20, MAX_ARCHIVE_ENTRIES).unwrap_err()
         );
         assert!(
             err.to_lowercase().contains("cap") || err.to_lowercase().contains("decompress"),
             "a decompression bomb must be refused by the cap: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// N2 (entry-count): a `.tar.xz` of many tiny entries stays under the byte
+    /// cap but drives an unpack per entry. The entry-count cap must refuse it.
+    #[test]
+    fn extract_tar_xz_rejects_too_many_entries() {
+        let dir = std::env::temp_dir().join(format!("nub-xz-count-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let archive = dir.join("manyentries.tar.xz");
+        {
+            let file = std::fs::File::create(&archive).unwrap();
+            let enc = liblzma::write::XzEncoder::new(file, 6);
+            let mut builder = tar::Builder::new(enc);
+            for name in ["top/a", "top/b", "top/c"] {
+                let mut h = tar::Header::new_gnu();
+                h.set_size(1);
+                h.set_mode(0o644);
+                h.set_cksum();
+                builder.append_data(&mut h, name, &b"x"[..]).unwrap();
+            }
+            builder.into_inner().unwrap().finish().unwrap();
+        }
+        let out = dir.join("extracted");
+        let err = format!(
+            "{:#}",
+            extract_tar_xz_capped(&archive, &out, 1 << 20, 2).unwrap_err()
+        );
+        assert!(
+            err.contains("entry archive cap"),
+            "an over-count archive must be refused: {err}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -361,11 +437,41 @@ mod tests {
         let out = dir.join("extracted");
         let err = format!(
             "{:#}",
-            extract_zip_capped(&archive, &out, 1 << 20, 1 << 30).unwrap_err()
+            extract_zip_capped(&archive, &out, 1 << 20, 1 << 30, MAX_ARCHIVE_ENTRIES).unwrap_err()
         );
         assert!(
             err.to_lowercase().contains("cap"),
             "an oversized zip entry must be refused by the cap: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// N2 (entry-count): a `.zip` of many tiny entries must be refused up front by
+    /// the entry-count cap (0-byte entries never trip the byte caps).
+    #[test]
+    fn extract_zip_rejects_too_many_entries() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("nub-zip-count-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let archive = dir.join("manyentries.zip");
+        {
+            let file = std::fs::File::create(&archive).unwrap();
+            let mut writer = zip::ZipWriter::new(file);
+            let opts: zip::write::FileOptions<()> = zip::write::FileOptions::default();
+            for name in ["top/a", "top/b", "top/c"] {
+                writer.start_file(name, opts).unwrap();
+                writer.write_all(b"x").unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        let out = dir.join("extracted");
+        let err = format!(
+            "{:#}",
+            extract_zip_capped(&archive, &out, 1 << 20, 1 << 30, 2).unwrap_err()
+        );
+        assert!(
+            err.contains("entry archive cap"),
+            "an over-count zip must be refused: {err}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
