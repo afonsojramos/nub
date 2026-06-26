@@ -150,6 +150,16 @@
             cargoLock.lockFile = ./Cargo.lock;
             buildAndTestSubdir = "crates/nub-cli";
 
+            # The hermetic Nix sandbox ships no system tools, so the C-building
+            # crates in nub's graph need their build tools declared explicitly:
+            # aws-lc-sys (via aube → sigstore) and libz-ng-sys (via flate2's
+            # zlib-ng feature) both compile through cmake. Every existing CI runner
+            # ships cmake preinstalled, which is why this surfaces only under Nix.
+            nativeBuildInputs = [
+              pkgs.cmake
+              pkgs.perl
+            ];
+
             # Single self-contained binary: embed the staged runtime/ tree. nub-core's
             # build.rs (gated on this feature) tars+zstd-19s `<repo>/runtime` and
             # `include_bytes!`s it; ruzstd decodes at runtime, extracting once to
