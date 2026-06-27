@@ -710,23 +710,64 @@ pub(crate) fn read_workspace_yaml(root: &Path) -> Result<Option<Map<String, Valu
     Ok(Some(json.as_object().cloned().unwrap_or_default()))
 }
 
-/// The merged migration source: yaml keys ∪ `package.json#pnpm.*` keys, yaml
-/// winning duplicates (it was the live value under pnpm v11). Returns the
-/// source plus conflict notes for the summary.
+/// Which config home wins when `package.json#pnpm.*` and `pnpm-workspace.yaml`
+/// set the SAME resolution key — a per-major fact of pnpm, not a fixed rule:
+///
+/// - **pnpm 9 / 10** (`PnpmNsWins`): `package.json#pnpm.*` is authoritative,
+///   and a `pnpm.<key>` block REPLACES the yaml block WHOLESALE (empirically:
+///   a v10 `pnpm.overrides` drops the yaml `overrides` entirely, even for
+///   non-overlapping inner keys — the `recursive.ts:150` second-pass re-read).
+/// - **pnpm 11** (`YamlWins`): the `pnpm.*` namespace is deprecated
+///   (warn+ignore), so `pnpm-workspace.yaml` carries the live value.
+///
+/// `merged_source` merges at top-level-KEY granularity (a whole block wins or
+/// loses; never a deep inner-key merge), so "replaces wholesale" is the
+/// natural semantics on both sides — only the *winner* flips by major. Reading
+/// the wrong rule mis-migrates a project that sets the same resolution key in
+/// both homes (gap #6 in the pnpm migrate audit).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VocabPrecedence {
+    /// pnpm 9/10: `package.json#pnpm.*` wins, replacing the yaml block.
+    PnpmNsWins,
+    /// pnpm 11: `pnpm-workspace.yaml` wins.
+    YamlWins,
+}
+
+/// The merged migration source: `pnpm-workspace.yaml` keys ∪
+/// `package.json#pnpm.*` keys. On a DUPLICATE top-level key the winner is the
+/// incumbent pnpm major's real rule (`precedence` — see [`VocabPrecedence`]),
+/// and the winning block replaces the loser's wholesale; a key present in only
+/// one home always migrates. Returns the source plus conflict notes for the
+/// summary.
 pub(crate) fn merged_source(
     yaml: Option<&Map<String, Value>>,
     pnpm_ns: Option<&Map<String, Value>>,
+    precedence: VocabPrecedence,
 ) -> (Map<String, Value>, Vec<String>) {
     let mut merged = yaml.cloned().unwrap_or_default();
     let mut notes = Vec::new();
     if let Some(ns) = pnpm_ns {
         for (k, v) in ns {
             match merged.get(k) {
-                Some(existing) if existing != v => notes.push(format!(
-                    "package.json#pnpm.{k} differs from the pnpm-workspace.yaml value — \
-                     the yaml value migrated (it was authoritative under pnpm v11)"
-                )),
+                // Same key in both homes, differing values: the major decides.
+                Some(existing) if existing != v => match precedence {
+                    VocabPrecedence::YamlWins => notes.push(format!(
+                        "package.json#pnpm.{k} differs from the pnpm-workspace.yaml value — \
+                         the yaml value migrated (pnpm 11 deprecates the pnpm.* namespace; \
+                         the yaml is authoritative)"
+                    )),
+                    VocabPrecedence::PnpmNsWins => {
+                        merged.insert(k.clone(), v.clone());
+                        notes.push(format!(
+                            "package.json#pnpm.{k} differs from the pnpm-workspace.yaml value — \
+                             the package.json value migrated and the yaml block was dropped \
+                             wholesale (pnpm 9/10: package.json#pnpm.* wins)"
+                        ));
+                    }
+                },
+                // Identical in both homes: nothing to choose, no note.
                 Some(_) => {}
+                // Present only in pnpm.*: always migrated.
                 None => {
                     merged.insert(k.clone(), v.clone());
                 }
@@ -734,6 +775,26 @@ pub(crate) fn merged_source(
         }
     }
     (merged, notes)
+}
+
+/// Resolve the `pnpm.*` ↔ `pnpm-workspace.yaml` precedence for the incumbent
+/// pnpm at `root`. Provably-v11+ → `YamlWins`; everything else (v9/v10, or an
+/// undeclared / unparseable / non-pnpm pin) → `PnpmNsWins`, the dominant
+/// v9/v10 model. An undeclared major can't be recovered from the lockfile (the
+/// pnpm lock is `lockfileVersion: '9.0'` across all three majors), so the
+/// declared `packageManager`/`devEngines` pin is the only signal — mirrors
+/// `mod.rs::pnpm_incumbent_major_is_v11_plus`, keyed on the workspace `root`
+/// being migrated rather than cwd. Read before `apply_manifest_edits` flips
+/// the pin to `nub@`, while the incumbent `pnpm@x` is still present.
+fn pnpm_vocab_precedence(root: &Path) -> VocabPrecedence {
+    let major = nub_core::pm::resolve::declared_pm_raw(root)
+        .and_then(|(name, version)| (name == "pnpm").then_some(version).flatten())
+        .and_then(|v| super::parse_major_minor(&v).0);
+    if major.is_some_and(|m| m >= 11) {
+        VocabPrecedence::YamlWins
+    } else {
+        VocabPrecedence::PnpmNsWins
+    }
 }
 
 /// `nub pm use nub` — the full switch. `root` is the workspace root (where
@@ -753,9 +814,15 @@ pub(crate) fn run_use_nub(root: &Path) -> Result<i32> {
         .with_context(|| format!("parsing {}", root.join("package.json").display()))?;
     let pnpm_ns = manifest.get("pnpm").and_then(Value::as_object).cloned();
 
+    // The incumbent pnpm major decides pnpm.* ↔ pnpm-workspace.yaml precedence
+    // (gap #6): pnpm 9/10 = package.json#pnpm.* wins; pnpm 11 = yaml wins.
+    // Resolved from the still-present `pnpm@x` pin before the manifest edits
+    // below flip it to `nub@`.
+    let precedence = pnpm_vocab_precedence(root);
+
     let yaml = read_workspace_yaml(root)?;
     let had_yaml = yaml.is_some();
-    let (source, mut merge_notes) = merged_source(yaml.as_ref(), pnpm_ns.as_ref());
+    let (source, mut merge_notes) = merged_source(yaml.as_ref(), pnpm_ns.as_ref(), precedence);
     let mut migration = plan_migration(&source)?;
     migration.notes.append(&mut merge_notes);
 
@@ -1307,5 +1374,103 @@ mod tests {
 
         // Idempotent rerun: nothing left to move.
         assert!(regenerate_workspace_yaml(dir.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn merged_source_pnpm_ns_wins_wholesale_for_v9_v10() {
+        // pnpm 9/10: a `package.json#pnpm.overrides` block REPLACES the yaml
+        // `overrides` block wholesale — the yaml-only `is-even` key is dropped,
+        // matching real pnpm 10 (the second-pass re-read drops the yaml block).
+        let yaml = src(json!({ "overrides": { "is-even": "1.0.0" } }));
+        let ns = src(json!({ "overrides": { "is-odd": "2.0.0" } }));
+        let (merged, notes) = merged_source(Some(&yaml), Some(&ns), VocabPrecedence::PnpmNsWins);
+        assert_eq!(
+            merged.get("overrides"),
+            Some(&json!({ "is-odd": "2.0.0" })),
+            "pnpm 9/10: package.json#pnpm.overrides replaces the yaml block wholesale"
+        );
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.contains("package.json value migrated") && n.contains("overrides")),
+            "the wholesale replacement must be named in the summary: {notes:?}"
+        );
+    }
+
+    #[test]
+    fn merged_source_yaml_wins_for_v11() {
+        // pnpm 11 deprecated the pnpm.* namespace, so the yaml is the live value.
+        let yaml = src(json!({ "overrides": { "is-even": "1.0.0" } }));
+        let ns = src(json!({ "overrides": { "is-odd": "2.0.0" } }));
+        let (merged, notes) = merged_source(Some(&yaml), Some(&ns), VocabPrecedence::YamlWins);
+        assert_eq!(
+            merged.get("overrides"),
+            Some(&json!({ "is-even": "1.0.0" })),
+            "pnpm 11: the pnpm-workspace.yaml value wins"
+        );
+        assert!(
+            notes.iter().any(|n| n.contains("yaml value migrated")),
+            "{notes:?}"
+        );
+    }
+
+    #[test]
+    fn merged_source_unions_disjoint_keys_on_either_precedence() {
+        // The flip governs only DUPLICATE keys; a key in just one home migrates
+        // on both precedences, with no conflict note.
+        let yaml = src(json!({ "packages": ["pkg/*"] }));
+        let ns = src(json!({ "overrides": { "lodash": "4.17.21" } }));
+        for precedence in [VocabPrecedence::PnpmNsWins, VocabPrecedence::YamlWins] {
+            let (merged, notes) = merged_source(Some(&yaml), Some(&ns), precedence);
+            assert_eq!(merged.get("packages"), Some(&json!(["pkg/*"])));
+            assert_eq!(
+                merged.get("overrides"),
+                Some(&json!({ "lodash": "4.17.21" }))
+            );
+            assert!(notes.is_empty(), "disjoint keys produce no note: {notes:?}");
+        }
+    }
+
+    #[test]
+    fn vocab_precedence_keys_on_the_declared_pnpm_major() {
+        let dir = tempfile::tempdir().unwrap();
+        let write_pm = |pm: Value| {
+            let mut manifest = json!({ "name": "app" });
+            if let Some(pm) = pm.as_str() {
+                manifest["packageManager"] = json!(pm);
+            }
+            std::fs::write(
+                dir.path().join("package.json"),
+                serde_json::to_string(&manifest).unwrap(),
+            )
+            .unwrap();
+        };
+
+        write_pm(json!("pnpm@10.34.3"));
+        assert_eq!(
+            pnpm_vocab_precedence(dir.path()),
+            VocabPrecedence::PnpmNsWins,
+            "pnpm 10 → package.json#pnpm.* wins"
+        );
+        write_pm(json!("pnpm@11.9.0"));
+        assert_eq!(
+            pnpm_vocab_precedence(dir.path()),
+            VocabPrecedence::YamlWins,
+            "pnpm 11 → yaml wins"
+        );
+        write_pm(json!("pnpm@9.15.9"));
+        assert_eq!(
+            pnpm_vocab_precedence(dir.path()),
+            VocabPrecedence::PnpmNsWins,
+            "pnpm 9 → package.json#pnpm.* wins"
+        );
+        // No declaration: the pnpm lock is v9.0 across all majors and can't
+        // disambiguate, so default to the dominant v9/v10 model.
+        write_pm(json!(null));
+        assert_eq!(
+            pnpm_vocab_precedence(dir.path()),
+            VocabPrecedence::PnpmNsWins,
+            "undeclared major → v9/v10 default"
+        );
     }
 }
