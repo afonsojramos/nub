@@ -152,7 +152,7 @@ function CopyMarkdownButton({ markdownUrl }: { markdownUrl: string }) {
       onClick={onClick}
       onPointerEnter={() => prefetchMarkdown(markdownUrl)}
       onFocus={() => prefetchMarkdown(markdownUrl)}
-      className={`group ${pill}`}
+      className={`group ${pill} pr-4`}
     >
       <span className="inline-flex h-4 w-4 items-center justify-center text-fd-muted-foreground transition group-hover:text-ember">
         {checked ? <CheckIcon /> : <CopyIcon />}
@@ -249,7 +249,7 @@ function ViewOptions({
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
         aria-haspopup="menu"
-        className={`${pill} ${open ? 'border-ember/60' : ''}`}
+        className={`${pill} pl-4 ${open ? 'border-ember/60' : ''}`}
       >
         <span className={label}>Open</span>
         <span className="text-fd-muted-foreground">
