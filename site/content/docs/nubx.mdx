@@ -54,7 +54,7 @@ nubx prisma migrate dev --name init
 nubx vitest run --coverage
 ```
 
-## --node
+## `--node`
 
 Pass `--node` to run the tool with runtime augmentation disabled — see [the runtime overview](/docs/runtime#--node) for the full contract.
 
@@ -122,7 +122,7 @@ The window is resolved from the same `.npmrc` scopes that `npx` reads: the built
 
 ## Yarn Plug'n'Play
 
-Tools that only walk `node_modules/.bin/` — `npx`, `pnpm exec`, `bunx` — miss Yarn Berry's PnP bins. `nubx` resolves them: when the `.bin` walk-up misses in a PnP tree, it falls through to a PnP-aware runner that finds and executes the bin. See [module resolution](/docs/runtime/resolution#yarn-plugnplay) for how the shared PnP machinery works.
+Tools that only walk `node_modules/.bin/` — `npx`, `pnpm exec`, `bunx` — miss Yarn Berry's PnP bins. Nub handles them anyway: when the `.bin` walk-up misses in a PnP tree, `nubx` falls through to a PnP-aware runner that finds and executes the bin. See [module resolution](/docs/runtime/resolution#yarn-plugnplay) for how the shared PnP machinery works.
 
 ## Flag differences
 

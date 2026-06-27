@@ -207,7 +207,7 @@ Token for GitHub-API rate-limit relief when resolving Nub's version range (and N
 The drop-in is mechanical, so the differences are small and rarely surface:
 
 - The `cache` input is a boolean rather than a package-manager name. A package-manager name still works (it is treated as on), since Nub keeps a single store regardless of package manager.
-- The registry `.npmrc` is written fresh to `$RUNNER_TEMP` and pointed at via `NPM_CONFIG_USERCONFIG`, rather than merged into the user `.npmrc`. npm and Nub's package manager parse both identically.
+- The registry `.npmrc` is written fresh to `$RUNNER_TEMP` and pointed at via `NPM_CONFIG_USERCONFIG`, rather than merged into the user `.npmrc`. Both are parsed identically by npm and Nub's package manager.
 
 ## Related
 

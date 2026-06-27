@@ -3,7 +3,7 @@ title: Script runner
 description: A drop-in for pnpm run and npm run — every flag carries over with the same spelling and semantics, 24× faster on the cold path, with the full workspace and lifecycle-hook surface preserved.
 ---
 
-`nub run` is a drop-in for `pnpm run` and `npm run` — every flag carries over with the same spelling and semantics, down to the recursive and workspace-filter ones a real monorepo leans on. Existing invocations work unchanged:
+A drop-in for `pnpm run` and `npm run`, `nub run` carries every flag over with the same spelling and semantics, down to the recursive and workspace-filter ones a real monorepo leans on. Existing invocations work unchanged:
 
 ```bash
 nub run -r --resume-from @scope/pkg build      # resume an interrupted recursive run mid-graph
@@ -106,7 +106,7 @@ Nub runs `pre<script>` and `post<script>` hooks automatically, matching `npm run
 }
 ```
 
-a single `nub run build` runs all three in order:
+A single `nub run build` runs all three in order:
 
 ```bash
 nub run build                 # runs prebuild, then build, then postbuild

@@ -1,9 +1,9 @@
 ---
 title: Docker
-description: Official nub Docker images, and how to add nub to your own image. The images install nub onto an official node base, so Node is present and the runtime is augmented out of the box.
+description: Official Nub Docker images, and how to add Nub to your own image. The images install Nub onto an official Node base, so Node is present and the runtime is augmented out of the box.
 ---
 
-Nub augments the Node already in your image — it is not a separate runtime. The official images start from an official `node` base and layer nub on top, so `node`, `npm`, and `nub` are all present.
+Nub augments the Node already in your image — it is not a separate runtime. The official images start from an official `node` base and layer Nub on top, so `node`, `npm`, and `nub` are all present.
 
 ## Official images
 
@@ -31,9 +31,9 @@ docker run --rm -v "$PWD:/app" ghcr.io/nubjs/nub script.ts
 
 Signals reach the runtime: `docker stop` delivers `SIGTERM` to `nub`, which forwards it to the Node process for a clean shutdown. The container runs as the non-root `node` user (uid 1000); when you bind-mount a directory that `nub install` must write into, run with `--user "$(id -u)"` so the writes land with your host ownership.
 
-## Adding nub to your own image
+## Adding Nub to your own image
 
-If you already build on a `node` base, install nub with one line. npm selects the correct per-platform binary at install time — including the musl build on Alpine — and the package's postinstall sets the execute bit, so installing as root and then dropping to a non-root user works.
+If you already build on a `node` base, install Nub with one line. At install time, npm selects the correct per-platform binary — including the musl build on Alpine — and the package's postinstall sets the execute bit, so installing as root and then dropping to a non-root user works.
 
 ```dockerfile
 FROM node:26-slim
@@ -47,4 +47,4 @@ FROM node:26-alpine
 RUN apk add --no-cache libgcc libstdc++ && npm install -g @nubjs/nub
 ```
 
-To pin the floor Node version instead of the current line, use a `22` base (`node:22-slim` or `node:22-alpine`) — the lowest version nub's fast tier supports.
+To pin the floor Node version instead of the current line, use a `22` base (`node:22-slim` or `node:22-alpine`) — the lowest version Nub's fast tier supports.
