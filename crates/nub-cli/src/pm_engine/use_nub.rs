@@ -1433,10 +1433,18 @@ mod tests {
 
     #[test]
     fn vocab_precedence_keys_on_the_declared_pnpm_major() {
-        let dir = tempfile::tempdir().unwrap();
-        let write_pm = |pm: Value| {
+        // Each case gets its OWN temp dir. `pnpm_vocab_precedence` reads the root
+        // manifest through a per-process, `(mtime, size)`-keyed cache
+        // (`ROOT_MANIFEST_CACHE`); rewriting ONE shared path in rapid succession
+        // can serve a stale parse when two consecutive writes share a byte length
+        // AND land in the same mtime tick (the `pnpm@11.9.0`→`pnpm@9.15.9` pair is
+        // byte-identical in length, and Windows' coarse mtime resolution makes the
+        // same-tick collision real). A fresh path per case keys the cache
+        // distinctly, so this asserts the precedence logic, not cache freshness.
+        let precedence_for = |pm: Option<&str>| {
+            let dir = tempfile::tempdir().unwrap();
             let mut manifest = json!({ "name": "app" });
-            if let Some(pm) = pm.as_str() {
+            if let Some(pm) = pm {
                 manifest["packageManager"] = json!(pm);
             }
             std::fs::write(
@@ -1444,31 +1452,28 @@ mod tests {
                 serde_json::to_string(&manifest).unwrap(),
             )
             .unwrap();
+            pnpm_vocab_precedence(dir.path())
         };
 
-        write_pm(json!("pnpm@10.34.3"));
         assert_eq!(
-            pnpm_vocab_precedence(dir.path()),
+            precedence_for(Some("pnpm@10.34.3")),
             VocabPrecedence::PnpmNsWins,
             "pnpm 10 → package.json#pnpm.* wins"
         );
-        write_pm(json!("pnpm@11.9.0"));
         assert_eq!(
-            pnpm_vocab_precedence(dir.path()),
+            precedence_for(Some("pnpm@11.9.0")),
             VocabPrecedence::YamlWins,
             "pnpm 11 → yaml wins"
         );
-        write_pm(json!("pnpm@9.15.9"));
         assert_eq!(
-            pnpm_vocab_precedence(dir.path()),
+            precedence_for(Some("pnpm@9.15.9")),
             VocabPrecedence::PnpmNsWins,
             "pnpm 9 → package.json#pnpm.* wins"
         );
         // No declaration: the pnpm lock is v9.0 across all majors and can't
         // disambiguate, so default to the dominant v9/v10 model.
-        write_pm(json!(null));
         assert_eq!(
-            pnpm_vocab_precedence(dir.path()),
+            precedence_for(None),
             VocabPrecedence::PnpmNsWins,
             "undeclared major → v9/v10 default"
         );
