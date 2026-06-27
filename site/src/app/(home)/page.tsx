@@ -244,7 +244,12 @@ async function Hero() {
         <div className="grid w-full items-center gap-12 xl:grid-cols-[minmax(0,1fr)_minmax(640px,1fr)] xl:gap-12">
           <div className="min-w-0">
             <HeroPill />
-            <HeroH1 className="mt-6 text-4xl md:text-5xl" />
+            {/* Fluid in the 2-col zone: the xl grid squeezes the heading column to
+                ~528px at the 1280 boundary, where a flat 48px wraps to 4 lines.
+                clamp() scales the type with the viewport so it stays ≤3 lines through
+                the squeeze, then caps at 48px once there's room. Single-column (<xl)
+                keeps the flat 4xl/5xl — the heading is full-width there. */}
+            <HeroH1 className="mt-6 text-4xl md:text-5xl xl:text-[clamp(2.3rem,3vw,3rem)]" />
             <HeroSub className="mt-6" />
             <div className="mt-9">
               <InstallTabs />
