@@ -139,7 +139,12 @@ where
         Parsed::Ok(wrap) => wrap.args,
         Parsed::Exit(code) => return Ok(code),
     };
-    let session = super::engine_session_quiet(None)?;
+    // The shared wired-verb shape backs only GLOBAL-SCOPE verbs — store/cache
+    // forensics, package.json edits (`pkg`/`set-script`), and the registry/auth
+    // surface (`pack`/`version`/`deprecate`/`token`/…). None read or write the
+    // project lockfile, so identity resolution is lenient (see
+    // `engine_session_global`): a multi-lockfile project must not block them.
+    let session = super::engine_session_global(None)?;
     match session.runtime.block_on(run(parsed)) {
         Ok(()) => Ok(0),
         Err(report) => Ok(present::emit_report(&report)),
@@ -213,7 +218,10 @@ fn run_publish(typed: &str, args: &[String]) -> Result<i32> {
         Parsed::Exit(code) => return Ok(code),
     };
     let filter = wrap.filter.effective();
-    let session = super::engine_session_quiet(None)?;
+    // `publish` reads package.json + workspace catalogs and uploads to the
+    // registry; it never reads or writes the project lockfile, so identity
+    // resolution is lenient (see `engine_session_global`).
+    let session = super::engine_session_global(None)?;
     match session
         .runtime
         .block_on(aube::commands::publish::run(wrap.args, filter))

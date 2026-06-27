@@ -263,6 +263,65 @@ fn transient_runs_do_not_error_on_multi_lockfile_projects() {
     }
 }
 
+/// The follow-up over-scope class (maintainer report 2026-06-26, follow-up to
+/// #197): GLOBAL-SCOPE commands that operate on the global store/config or the
+/// registry — never the project lockfile — must not raise the ambiguity guard
+/// either. `store path`, `config get`, `bin`, `root` run leniently and succeed;
+/// the PROJECT-GRAPH readers (`why`) and the mutating install family (`add`)
+/// stay strict and keep the loud `ERR_NUB_LOCKFILE_AMBIGUOUS`.
+#[test]
+fn global_scope_commands_ignore_multi_lockfile_ambiguity() {
+    let dir = project("ambiguous-global", r#"{"name":"app","version":"1.0.0"}"#);
+    std::fs::write(
+        dir.join("package-lock.json"),
+        r#"{"name":"app","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{}}"#,
+    )
+    .unwrap();
+    std::fs::write(dir.join("yarn.lock"), "# yarn lockfile v1\n").unwrap();
+
+    // Global-scope reads succeed and print their datum — no ambiguity preflight.
+    for args in [
+        &["store", "path"][..],
+        &["config", "get", "registry"],
+        &["bin"],
+        &["root"],
+    ] {
+        let (stdout, stderr, code) = run(&dir, args);
+        assert_eq!(
+            code,
+            0,
+            "`nub {}` must succeed in a multi-lockfile project: {stderr}",
+            args.join(" ")
+        );
+        assert!(
+            !stderr.contains("ERR_NUB_LOCKFILE_AMBIGUOUS"),
+            "`nub {}` must not raise the ambiguity guard: {stderr}",
+            args.join(" ")
+        );
+        assert!(
+            !stdout.trim().is_empty(),
+            "`nub {}` should print its datum: stdout empty",
+            args.join(" ")
+        );
+    }
+
+    // Project-graph reader stays strict: `why` reads the lockfile, so ambiguity
+    // is a loud error (a silent degrade would yield a wrong/empty graph).
+    let (_, stderr, _) = run(&dir, &["why", "is-odd"]);
+    assert!(
+        stderr.contains("ERR_NUB_LOCKFILE_AMBIGUOUS"),
+        "`nub why` must keep the ambiguity guard (it reads the project lockfile): {stderr}"
+    );
+
+    // The mutating install family keeps the guard — it would WRITE a lockfile,
+    // and must never silently pick one under ambiguity.
+    let (_, stderr, _) = run(&dir, &["add", "left-pad"]);
+    assert!(
+        stderr.contains("ERR_NUB_LOCKFILE_AMBIGUOUS"),
+        "`nub add` must keep the ambiguity guard (it writes the project lockfile): {stderr}"
+    );
+}
+
 /// The declared-yarn corner of the fresh row: identity resolves to yarn with
 /// no yarn.lock on disk, and the first install would CREATE yarn.lock — the
 /// gated write. Refused with the gate message, nothing written.

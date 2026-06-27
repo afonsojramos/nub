@@ -484,8 +484,10 @@ fn run_view(typed: &str, args: &[String]) -> Result<i32> {
         Parsed::Args(c) => c,
         Parsed::Done(code) => return Ok(code),
     };
-    let session = super::engine_session_quiet(cli.dir.as_deref())?;
-    // Pure registry query: no lockfile involvement at all.
+    // Pure registry query: no lockfile involvement at all, so identity
+    // resolution is lenient (see `engine_session_global`) — a multi-lockfile
+    // project must not block `nub view <pkg>`.
+    let session = super::engine_session_global(cli.dir.as_deref())?;
     finish(
         session
             .runtime
@@ -524,9 +526,10 @@ fn run_bin(typed: &str, args: &[String]) -> Result<i32> {
         Parsed::Args(c) => c,
         Parsed::Done(code) => return Ok(code),
     };
-    let session = super::engine_session_quiet(cli.dir.as_deref())?;
     // Pure path print (`<modulesDir>/.bin`, or the global bin dir under
-    // `-g`); the directory need not exist.
+    // `-g`); the directory need not exist and no lockfile is read, so identity
+    // resolution is lenient (see `engine_session_global`).
+    let session = super::engine_session_global(cli.dir.as_deref())?;
     finish(session.runtime.block_on(aube::commands::bin::run(cli.args)))
 }
 
@@ -535,8 +538,10 @@ fn run_root(typed: &str, args: &[String]) -> Result<i32> {
         Parsed::Args(c) => c,
         Parsed::Done(code) => return Ok(code),
     };
-    let session = super::engine_session_quiet(cli.dir.as_deref())?;
-    // Pure path print (`<modulesDir>`, or the global package dir under `-g`).
+    // Pure path print (`<modulesDir>`, or the global package dir under `-g`);
+    // no lockfile is read, so identity resolution is lenient (see
+    // `engine_session_global`).
+    let session = super::engine_session_global(cli.dir.as_deref())?;
     finish(
         session
             .runtime

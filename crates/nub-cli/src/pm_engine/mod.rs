@@ -624,24 +624,49 @@ pub(crate) fn engine_session_transient(dir: Option<&Path>) -> Result<EngineSessi
     engine_session_inner(dir, ConfigScopeNoise::Silent, IdentityStrictness::Lenient)
 }
 
-/// [`engine_session`] for the read-only / non-graph-mutating families
-/// (info, publish, store-config). The config-scoping FILTER still applies —
-/// `why` / `outdated` should reflect the same effective override set a real
-/// install would — but the user-facing scoping *warnings* and the
-/// `catalog:`-under-the-wrong-PM hard error are suppressed: those are
-/// install-time UX, and surfacing them on a `nub why` would be noise. See
-/// the config-scoping policy ([`config_scope`]).
+/// [`engine_session`] for the read-only PROJECT-GRAPH families that resolve
+/// the project's dependency tree from its lockfile (`list`, `why`, `outdated`,
+/// `query`, `audit`, `licenses`, `deprecations`, `peers`, `check`). The
+/// config-scoping FILTER still applies — `why` / `outdated` should reflect the
+/// same effective override set a real install would — but the user-facing
+/// scoping *warnings* and the `catalog:`-under-the-wrong-PM hard error are
+/// suppressed: those are install-time UX, and surfacing them on a `nub why`
+/// would be noise. Identity resolution stays STRICT: these commands READ the
+/// project lockfile, so a multi-lockfile ambiguity must be a loud error — a
+/// silent degrade to no-identity would yield an empty/wrong graph. See the
+/// config-scoping policy ([`config_scope`]).
 pub(crate) fn engine_session_quiet(dir: Option<&Path>) -> Result<EngineSession> {
     engine_session_inner(dir, ConfigScopeNoise::Silent, IdentityStrictness::Strict)
+}
+
+/// [`engine_session_quiet`] for GLOBAL-SCOPE commands that never read or write
+/// the project's lockfile: the global store/cache forensics (`store`, `cache`,
+/// `cat-file`, `cat-index`, `find-hash`), config get/set, the registry/auth
+/// surface (`publish`, `pack`, `version`, `deprecate`/`undeprecate`,
+/// `dist-tag`, `unpublish`, `login`/`logout`, `whoami`, `owner`, `token`),
+/// package.json edits (`pkg`, `set-script`), and the pure registry-query /
+/// path-print verbs (`view`, `search`, `bin`, `root`). Because none of these
+/// consume the project's resolved PM identity, a multi-lockfile /
+/// declaration-contradiction project must NOT block them — identity resolution
+/// runs LENIENT (degrades to no-identity instead of hard-erroring
+/// `ERR_NUB_LOCKFILE_AMBIGUOUS`), exactly like the transient dlx path (#197).
+/// This is the same `IdentityStrictness` machinery, applied to the global-scope
+/// read class rather than the transient fetch-and-run class. The STRICT
+/// ambiguity guard remains for the mutating install family (writes the
+/// lockfile) and the project-graph readers above (see [`engine_session_quiet`]).
+pub(crate) fn engine_session_global(dir: Option<&Path>) -> Result<EngineSession> {
+    engine_session_inner(dir, ConfigScopeNoise::Silent, IdentityStrictness::Lenient)
 }
 
 /// Whether an identity-resolution failure (multi-lockfile ambiguity, declared
 /// PM contradicted by the on-disk lockfile) is a HARD ERROR or degrades to
 /// no-identity. `Strict` — the default for every project-reading/-writing
 /// family — surfaces the loud diagnostic with the `nub pm use` remedy.
-/// `Lenient` — the transient-package families (dlx/create) — swallows it and
-/// proceeds with no resolved identity, because those commands never touch the
-/// CWD project's lockfile (see [`engine_session_transient`]).
+/// `Lenient` — the transient-package families (dlx/create, see
+/// [`engine_session_transient`]) and the global-scope read class (store/cache/
+/// config/registry/path, see [`engine_session_global`]) — swallows it and
+/// proceeds with no resolved identity, because those commands never read or
+/// write the CWD project's lockfile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IdentityStrictness {
     Strict,

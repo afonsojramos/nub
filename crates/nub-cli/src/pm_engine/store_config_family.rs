@@ -324,7 +324,10 @@ fn dispatch_config(parsed: ConfigArgs, explicit_global: bool) -> Result<i32> {
         // `get` / `list` / `delete` / bare `config` delegate unchanged.
         _ => {}
     }
-    let session = super::engine_session_quiet(None)?;
+    // `config` reads/writes `.npmrc`-class settings; it never reads the project
+    // lockfile, so identity resolution is lenient (see `engine_session_global`):
+    // a multi-lockfile project must not block a `config get`/`set`/`list`.
+    let session = super::engine_session_global(None)?;
     match session
         .runtime
         .block_on(aube::commands::config::run(parsed))
@@ -342,7 +345,8 @@ fn dispatch_config(parsed: ConfigArgs, explicit_global: bool) -> Result<i32> {
 /// `NpmConfig` default (vendor/aube/crates/aube-registry/src/config/load.rs).
 fn run_config_get_registry(parsed: ConfigArgs, json: bool) -> Result<i32> {
     const DEFAULT_REGISTRY: &str = "https://registry.npmjs.org/";
-    let session = super::engine_session_quiet(None)?;
+    // Global-scope config read (see the sibling `config` dispatch): lenient.
+    let session = super::engine_session_global(None)?;
     let (result, captured) = super::with_fd_captured(1, || {
         session
             .runtime
