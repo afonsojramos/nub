@@ -96,16 +96,44 @@ gyp info ok
 So the write set a from-source native build needs: **pkg dir + private scratch (tmp anchors
 repointed) + the node-gyp devdir cache** (`~/Library/Caches/node-gyp/<ver>` on macOS by default).
 
-## §Catalog — cache-family holes (pending the empirical sweep)
+## §Darwin — the Apple-toolchain confstr scratch (a macOS-specific residual)
+
+Even with `TMPDIR`/`TMP`/`TEMP` repointed, a from-source compile emits:
+```
+make: error: couldn't create cache file '/var/folders/qg/.../T/xcrun_db-XXX' (errno=Operation not permitted)
+cc:  error: couldn't create cache file '/var/folders/qg/.../T/xcrun_db-XXX' (errno=Operation not permitted)
+```
+`xcrun`/cc/libtool write their `xcrun_db` to the per-user **DARWIN_USER_TEMP_DIR**
+(`/var/folders/<uid>/T`, canonical `/private/var/folders/<uid>/T`), resolved via confstr
+(`_CS_DARWIN_USER_TEMP_DIR`) — **NOT redirectable by the `TMPDIR` env var**. Here it is
+non-fatal (xcrun degrades), but it spams EPERM and could break a stricter toolchain. Granting
+the confstr pair (`DARWIN_USER_TEMP_DIR` + `DARWIN_USER_CACHE_DIR`) silences it completely
+(`gyp info ok`, zero xcrun noise). These are per-user OS scratch dirs (low risk). The generator
+grants them with `--darwin-temp` (jail-run passes it by default); paths queried from `getconf`
+so the `<uid>` hash is correct on any machine.
+
+## §Collapse — base-anchor HOME-repoint (the optimization verdict)
+
+**Repointing `HOME` at ONE granted cache root collapses the N per-tool caches to a single grant.**
+Proven: relaxed jail granting ONLY `$CACHEROOT` (one root), with `HOME=$CACHEROOT` and the
+DEFAULT node-gyp devdir (HOME-derived `$HOME/Library/Caches/node-gyp`):
+```
+gyp info ok
+=> better_sqlite3.node produced; cache landed at $CACHEROOT/Library/Caches/node-gyp/26.2.0
+```
+node-gyp's devdir followed `HOME` into the single granted root — one grant covered it. (A
+control with `--mode strict`, where `--write` is correctly ignored, denied `mkdir
+$CACHEROOT/Library` — confirming strict gates the cache allowlist out, AND that the cache *did*
+derive from HOME.) Per [`native-build-cache-paths`](../../wiki/research/native-build-cache-paths.md)
+the same `os.homedir()` anchor moves 9/9 cache-bearing tools on macOS (where `~/Library/Caches`
+has no env override), so the explicit N-dir cache enumeration collapses to: **pkg dir + private
+scratch + ONE base-anchor cache root (HOME-repointed) + the DARWIN confstr pair.**
+
+## §Catalog — cache-family holes (empirical sweep)
 
 <!-- Filled from the cache-family empirical sweep: per family — representative package, install
 command, exact denied out-of-package write path under strict, genuine-write-vs-prefetchable,
 HOME-repoint capture. -->
-
-## §Collapse — base-anchor HOME-repoint (pending the empirical sweep)
-
-<!-- Does repointing HOME at one granted cache root collapse the N per-tool caches to a single
-grant? Which tools comply, which are residual. -->
 
 ## Conclusion (so far)
 

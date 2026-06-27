@@ -71,7 +71,7 @@ if [[ "$MODE" == "control" ]]; then
   ( cd "$PKG" && "${CMD[@]}" ) >"$LOG" 2>&1
   CODE=$?
 else
-  GENARGS=(--pkg "$PKG" --project "$PROJECT" --mode "$MODE")
+  GENARGS=(--pkg "$PKG" --project "$PROJECT" --mode "$MODE" --darwin-temp)
   for w in "${WRITES[@]}"; do GENARGS+=(--write "$w"); done
   for t in "${TMPS[@]}"; do GENARGS+=(--tmp "$t"); done
   PROFILE="$(node "$GEN" "${GENARGS[@]}")" || { echo "profile-gen failed" >&2; exit 3; }

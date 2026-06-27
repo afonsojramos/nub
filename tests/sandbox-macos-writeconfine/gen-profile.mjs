@@ -32,11 +32,18 @@
 //   --mode relaxed    pkg + tmp + every --write root (the cache allowlist).
 //   --dev-subpath     grant write to all of /dev (subpath) instead of the tight
 //                     literal device set. Default is the tight literal set.
+//   --darwin-temp     also grant the per-user DARWIN_USER_TEMP_DIR +
+//                     DARWIN_USER_CACHE_DIR (`/private/var/folders/<uid>/{T,C}`).
+//                     The Apple toolchain (xcrun/cc/libtool) writes its `xcrun_db`
+//                     scratch there via confstr — NOT redirectable by TMPDIR — so a
+//                     from-source compile spews EPERM noise without it. Per-user OS
+//                     scratch, low risk. Granted in BOTH modes when set.
 //
 // Output: the SBPL profile text on stdout.
 
 import { realpathSync, existsSync } from "node:fs";
-import { resolve, dirname, relative, sep } from "node:path";
+import { resolve, dirname, sep } from "node:path";
+import { execFileSync } from "node:child_process";
 
 // The minimal char-device write set a Node/native build actually touches.
 // Proven sufficient empirically (results.md §Device): /dev/null is required
@@ -55,7 +62,7 @@ const DEVICE_LITERALS = [
 ];
 
 function parseArgs(argv) {
-  const out = { pkg: null, project: null, write: [], tmp: [], mode: "strict", devSubpath: false };
+  const out = { pkg: null, project: null, write: [], tmp: [], mode: "strict", devSubpath: false, darwinTemp: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--pkg") out.pkg = argv[++i];
@@ -64,6 +71,7 @@ function parseArgs(argv) {
     else if (a === "--tmp") out.tmp.push(argv[++i]);
     else if (a === "--mode") out.mode = argv[++i];
     else if (a === "--dev-subpath") out.devSubpath = true;
+    else if (a === "--darwin-temp") out.darwinTemp = true;
     else throw new Error(`unknown arg: ${a}`);
   }
   if (!out.pkg) throw new Error("--pkg is required");
@@ -99,6 +107,22 @@ function subpathRule(p) {
   return `(allow file-write* (subpath "${sbplEscape(p)}"))`;
 }
 
+// The per-user Apple-toolchain scratch dirs (`/var/folders/<uid>/{T,C}`), read by
+// `xcrun`/cc/libtool via confstr — NOT redirectable via TMPDIR. Queried from
+// `getconf` so the <uid> hash is correct on any machine. Returns canonical paths.
+function darwinTempDirs() {
+  const dirs = [];
+  for (const key of ["DARWIN_USER_TEMP_DIR", "DARWIN_USER_CACHE_DIR"]) {
+    try {
+      const d = execFileSync("getconf", [key], { encoding: "utf8" }).trim();
+      if (d) dirs.push(canonicalizeForAllow(d));
+    } catch {
+      /* non-macOS or getconf missing — skip */
+    }
+  }
+  return dirs;
+}
+
 function build(opts) {
   const rules = ["(version 1)", "(allow default)", "(deny file-write*)"];
 
@@ -120,6 +144,7 @@ function build(opts) {
 
   add(opts.pkg); // pkg dir: always writable
   for (const t of opts.tmp) add(t); // private scratch
+  if (opts.darwinTemp) for (const d of darwinTempDirs()) add(d); // Apple-toolchain confstr scratch
   if (opts.mode === "relaxed") {
     for (const w of opts.write) add(w); // the cache allowlist
   }

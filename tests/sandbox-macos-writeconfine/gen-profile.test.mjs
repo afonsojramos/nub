@@ -88,6 +88,18 @@ console.log("# devSubpath opt-out");
   ok(prof.includes('(allow file-write* (subpath "/dev"))'), "--dev-subpath emits /dev subpath");
 }
 
+console.log("# darwin-temp grant (Apple-toolchain confstr scratch)");
+{
+  const off = build({ pkg: realPkg, write: [], tmp: [], mode: "strict", devSubpath: false });
+  // the per-user darwin dirs end in /T" or /C"; the pkg path (also under
+  // /private/var/folders) does not — so anchor on the trailing-segment quote.
+  ok(!/\/T"\)\)$/m.test(off) && !/\/C"\)\)$/m.test(off), "no darwin-temp grant by default");
+  const on = build({ pkg: realPkg, write: [], tmp: [], mode: "strict", devSubpath: false, darwinTemp: true });
+  // getconf returns /var/folders/<uid>/{T,C}; canonical is /private/var/folders/...
+  ok(/private\/var\/folders\/[^"]+\/T/.test(on), "darwin-temp grants the per-user T dir (canonical)");
+  ok(/private\/var\/folders\/[^"]+\/C/.test(on), "darwin-temp grants the per-user C dir (canonical)");
+}
+
 rmSync(root, { recursive: true, force: true });
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURE(S)`);
 process.exit(failures === 0 ? 0 : 1);
