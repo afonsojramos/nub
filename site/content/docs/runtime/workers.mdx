@@ -63,7 +63,7 @@ The second argument is a `WorkerOptions` object:
 
 | Option | Values | Effect |
 | --- | --- | --- |
-| `type` | `"module"` (default), `"classic"` | Selects the worker's module system and which `importScripts` form its scope exposes |
+| `type` | `"module"` (default), `"classic"` | Selects which `importScripts` form the worker scope exposes — classic gets the synchronous loader, module gets the throwing form |
 | `name` | string | Readable as `self.name` inside the worker |
 | `execArgv` | string array | Node flags for the worker; merged onto the flags carrying Nub's preload |
 | `env` | object | Environment for the worker thread |
