@@ -75,8 +75,16 @@ fn install_aborts_on_unresolvable_yarn_lock_source() {
             out.contains("ERR_NUB_LOCKFILE_UNSUPPORTED_SOURCE"),
             "`nub {verb}` output should carry the rebranded code; got:\n{out}"
         );
-        // The refusal names the offending entry and protocol.
-        assert!(out.contains("foo@user/repo#abc123") && out.contains("git"));
+        // The refusal names the offending entry and protocol. miette wraps the
+        // rendered diagnostic at terminal width (CI's width differs from a dev
+        // box's), so match against a whitespace-flattened copy — the entry key
+        // and protocol token carry no internal whitespace, so a wrap can only
+        // have split them across a newline + indent.
+        let flat: String = out.split_whitespace().collect();
+        assert!(
+            flat.contains("foo@user/repo#abc123") && flat.contains("git"),
+            "`nub {verb}` should name the offending entry and protocol; got:\n{out}"
+        );
         // No brand leak — the engine's `aube` code must be rewritten.
         assert!(!out.contains("ERR_AUBE_LOCKFILE_UNSUPPORTED_SOURCE"));
         // Genuinely pre-mutation: no node_modules was created.
