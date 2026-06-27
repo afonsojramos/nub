@@ -9,10 +9,9 @@ import { Terminal } from './code';
    with the command pill as its accent header. No auto-cycling; the reader drives. */
 
 function Mono({ children }: { children: ReactNode }) {
-  // 1.03em matches Plex Mono's x-height to the Encode Sans body (see the Mono in
-  // page.tsx / the inline-`code` rule in global.css). The old 0.84em was tuned to
-  // the Newsreader serif's smaller x-height.
-  return <span className="font-mono text-[1.03em] tracking-[-0.005em] text-fd-foreground">{children}</span>;
+  // 0.95em — Geist Mono a tick under x-height parity with Encode Sans (see the Mono
+  // in page.tsx / the inline-`code` rule in global.css).
+  return <span className="font-mono text-[0.95em] tracking-[-0.005em] text-fd-foreground">{children}</span>;
 }
 
 function Chevron({ dir }: { dir: 'left' | 'right' }) {

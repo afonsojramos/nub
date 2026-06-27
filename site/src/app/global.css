@@ -21,7 +21,7 @@
   --font-display: var(--font-encode), ui-sans-serif, system-ui, sans-serif;
   --font-serif: var(--font-encode), ui-sans-serif, system-ui, sans-serif;
   --font-sans: var(--font-encode), ui-sans-serif, system-ui, sans-serif;
-  --font-mono: var(--font-plex-mono), ui-monospace, SFMono-Regular, monospace;
+  --font-mono: var(--font-geist-mono), ui-monospace, SFMono-Regular, monospace;
 
   /* color pops — used sparingly against the ink ground. These are the DARK-mode
      values (bright, tuned to read against the near-black ground). Light mode
@@ -395,21 +395,25 @@ pre .line[data-output] span {
   color: var(--nub-code-muted) !important;
 }
 
-/* IBM Plex Mono against the Encode Sans body. Prose is dominated by lowercase,
-   so an inline-code token's perceived size is governed by its x-height, not its
-   cap-height. Encode Sans has a LARGE x-height (0.543/em); Plex Mono's is smaller
-   (0.516/em). Matching x-heights therefore needs the mono set slightly LARGER
-   than the surrounding text: exact parity is 0.543/0.516 ≈ 1.05em. We use 1.03em
-   — x-height ratio ≈ 0.98, a hair below the body lowercase so Plex Mono's heavier
-   stroke sits *in* the sentence rather than bulging out of it (the same ratio the
-   old Newsreader pairing was tuned to). NOTE the jump from the old 0.84em: under
-   Newsreader's far smaller x-height the token had to SHRINK to match; under the
-   tall-x-height sans it has to GROW. em-relative so it tracks the surrounding
-   size in headings, tables, and body alike. Code blocks (`pre code`) excluded. */
+/* Geist Mono against the Encode Sans body. X-height parity with Encode Sans lands
+   near 1.0em, but even at parity the mono reads a touch large in a sentence, so we
+   set it a tick UNDER (0.95em ≈ x-height ratio 0.93) so the token sits *in* the
+   line rather than on top of it. Border removed — the soft background tint alone
+   marks a token as code without boxing it in. em-relative so it tracks the
+   surrounding size in headings, tables, and body. Code blocks (`pre code`) are
+   excluded and keep their own sizing. */
 :not(pre) > code {
-  font-size: 1.03em;
+  font-size: 0.95em;
   letter-spacing: -0.005em;
   font-variant-ligatures: none;
+  border: none;
+}
+
+/* The bg-only chip needs a visible step above the page to register. fumadocs'
+   --color-fd-muted (#1b1916) sits barely above the #100f0d dark ground, so lift
+   the inline-code tint a notch in dark mode. Light mode's tint already reads. */
+.dark :not(pre) > code {
+  background-color: #2a2620;
 }
 
 /* Constrain the home navbar's row to the content column so the search/theme/

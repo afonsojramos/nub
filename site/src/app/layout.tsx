@@ -2,7 +2,7 @@ import './global.css';
 import { RootProvider } from 'fumadocs-ui/provider/next';
 import {
   Newsreader,
-  IBM_Plex_Mono,
+  Geist_Mono,
   Caveat,
   Encode_Sans,
 } from 'next/font/google';
@@ -20,9 +20,14 @@ const newsreader = Newsreader({
   style: ['normal', 'italic'],
 });
 
-const plexMono = IBM_Plex_Mono({
+// Geist Mono — the site's monospace, paired with Encode Sans (switched from IBM
+// Plex Mono 2026-06-27). Plex Mono's wide, heavy glyphs read markedly LARGER than
+// Encode Sans at a matched x-height, so inline code and the docs TOC chips looked
+// oversized next to the prose. Geist Mono is narrower and lighter, so it sits in
+// scale with the humanist sans.
+const geistMono = Geist_Mono({
   subsets: ['latin'],
-  variable: '--font-plex-mono',
+  variable: '--font-geist-mono',
   display: 'swap',
   weight: ['400', '500', '600'],
 });
@@ -143,7 +148,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html
       lang="en"
-      className={`${newsreader.variable} ${plexMono.variable} ${caveat.variable} ${encodeSans.variable}`}
+      className={`${newsreader.variable} ${geistMono.variable} ${caveat.variable} ${encodeSans.variable}`}
       suppressHydrationWarning
     >
       <body className="flex min-h-screen flex-col antialiased">

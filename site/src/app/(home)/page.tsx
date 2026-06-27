@@ -47,11 +47,10 @@ function Container({ children, className = '' }: { children: ReactNode; classNam
 }
 
 function Mono({ children }: { children: ReactNode }) {
-  // 1.03em matches Plex Mono's x-height to the Encode Sans body (ratio ≈0.98) —
-  // the same calibration as inline `code` in global.css. Under the old Newsreader
-  // serif this was 0.84em; the sans's larger x-height needs the mono GROWN, not
-  // shrunk, to read at the same size.
-  return <span className="font-mono text-[1.03em] tracking-[-0.005em] text-fd-foreground">{children}</span>;
+  // 0.95em — Geist Mono set a tick under x-height parity with Encode Sans so the
+  // token reads in-scale with the sentence rather than a hair large (same value as
+  // inline `code` in global.css).
+  return <span className="font-mono text-[0.95em] tracking-[-0.005em] text-fd-foreground">{children}</span>;
 }
 
 /* An external link to upstream docs (Node, oxc). Neutral underline that brightens
