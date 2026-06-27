@@ -67,6 +67,9 @@ brew install nubjs/tap/nub
 # Nix (flakes)
 nix run github:nubjs/nub
 
+# mise (installs nub + nubx from GitHub releases)
+mise use -g github:nubjs/nub
+
 # Or via npm (pnpm / yarn global add work too)
 npm install -g --ignore-scripts=false @nubjs/nub
 ```
