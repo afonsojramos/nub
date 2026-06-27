@@ -509,7 +509,7 @@ fn parse_one(
         // caller keeps the kind label it resolved from
         // `refine_yarn_kind` for downstream write-back.
         LockfileKind::Yarn | LockfileKind::YarnBerry => yarn::parse(path, manifest),
-        LockfileKind::Npm | LockfileKind::NpmShrinkwrap => npm::parse(path),
+        LockfileKind::Npm | LockfileKind::NpmShrinkwrap => npm::parse(path, manifest),
         LockfileKind::Bun => bun::parse(path),
     }?;
     validate_resolution_shapes(path, &graph)?;

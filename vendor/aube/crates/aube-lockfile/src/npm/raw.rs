@@ -9,10 +9,69 @@ pub(super) struct InstallPathInfo {
 
 #[derive(Debug, Deserialize)]
 pub(super) struct RawNpmLockfile {
-    #[serde(rename = "lockfileVersion")]
-    pub(super) lockfile_version: u32,
+    /// `Option` (not `u32`) because pre-2017 `npm-shrinkwrap.json` omits
+    /// the field entirely — npm 3/4 wrote no `lockfileVersion`. The
+    /// reader treats `None` as the legacy (nested-`dependencies`) format,
+    /// the same as an explicit `lockfileVersion: 1`. A required `u32`
+    /// here is what made an old shrinkwrap hard-fail at serde with
+    /// `missing field lockfileVersion` before it could reach the
+    /// version branch.
+    #[serde(rename = "lockfileVersion", default)]
+    pub(super) lockfile_version: Option<u32>,
     #[serde(default)]
     pub(super) packages: BTreeMap<String, RawNpmPackage>,
+}
+
+/// Pre-npm-7 lockfile shape: `package-lock.json` `lockfileVersion 1`
+/// (npm 5/6) and pre-2017 `npm-shrinkwrap.json` (no `lockfileVersion`).
+/// Both encode the resolution as a recursively-nested `dependencies`
+/// tree instead of the flat install-path-keyed `packages` map the
+/// v2/v3 reader consumes — `read::lift_legacy_to_packages` walks this
+/// into that flat form so the rest of the reader is unchanged.
+#[derive(Debug, Deserialize)]
+pub(super) struct RawNpmLegacyLockfile {
+    #[serde(default)]
+    pub(super) dependencies: BTreeMap<String, RawNpmLegacyDep>,
+}
+
+/// One entry in the legacy nested `dependencies` tree. npm hoists the
+/// shared version to the top level and nests only the conflicting one,
+/// so nesting depth here is the package's install path
+/// (`node_modules/<a>/node_modules/<b>/…`).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct RawNpmLegacyDep {
+    #[serde(default)]
+    pub(super) version: Option<String>,
+    #[serde(default)]
+    pub(super) resolved: Option<String>,
+    /// sha512 (npm 5.1+/6), sha1 (npm 5.0), or ABSENT (npm ≤4 / npm 3).
+    /// aube's store verifies sha512, so a missing/sha1 hash is recovered
+    /// at install time: a `None` integrity is filled from the streaming
+    /// fetch's computed sha512 (`apply_computed_integrities`), and a
+    /// sha1 is verified directly by the store (sha1 is in the SRI set
+    /// `aube-store::integrity` accepts). Either way the install succeeds.
+    #[serde(default)]
+    pub(super) integrity: Option<String>,
+    /// v1's single edge list (declared name → range). v1 predates the
+    /// per-entry `optionalDependencies` split, so this lumps regular and
+    /// optional deps; it maps onto `RawNpmPackage.dependencies`, which
+    /// the reader uses to seed forward-refs and preserve declared ranges.
+    #[serde(default)]
+    pub(super) requires: BTreeMap<String, String>,
+    /// npm marks an entry shipped inside a parent tarball's
+    /// `bundleDependencies`. Maps to `in_bundle`; fidelity-only.
+    #[serde(default)]
+    pub(super) bundled: bool,
+    /// Nested (non-hoisted) deps. Their install path is this entry's
+    /// path plus `/node_modules/<name>`.
+    #[serde(default)]
+    pub(super) dependencies: BTreeMap<String, RawNpmLegacyDep>,
+    // `from` (npm-internal spec string), `dev`, and `optional` are
+    // intentionally not captured: `from` is recoverable from name+version,
+    // and the v2/v3 pipeline classifies dev/optional from the root
+    // manifest sections — not from per-entry flags — so capturing them
+    // here would have no place to flow. See `lift_legacy_to_packages`.
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

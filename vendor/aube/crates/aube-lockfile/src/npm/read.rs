@@ -2,20 +2,32 @@ use crate::{DepType, DirectDep, Error, LocalSource, LockedPackage, LockfileGraph
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use super::raw::{InstallPathInfo, RawNpmLockfile};
+use super::raw::{InstallPathInfo, RawNpmLegacyLockfile, RawNpmLegacyDep, RawNpmLockfile, RawNpmPackage};
 /// Parse a package-lock.json or npm-shrinkwrap.json file into a LockfileGraph.
-pub fn parse(path: &Path) -> Result<LockfileGraph, Error> {
+///
+/// `manifest` is consulted only on the legacy (`lockfileVersion < 2` or
+/// absent) path, where the lockfile carries no `""` root entry marking
+/// which packages are direct deps — those come from package.json, the
+/// same way the yarn-classic reader recovers importers. The v2/v3 path
+/// ignores it.
+pub fn parse(path: &Path, manifest: &aube_manifest::PackageJson) -> Result<LockfileGraph, Error> {
     let content = crate::read_lockfile(path)?;
     let mut raw: RawNpmLockfile = crate::parse_json(path, content)?;
 
-    if raw.lockfile_version < 2 {
-        return Err(Error::parse(
-            path,
-            format!(
-                "package-lock.json lockfileVersion {} is not supported (need v2 or v3)",
-                raw.lockfile_version
-            ),
-        ));
+    // Pre-npm-7 lockfiles — `package-lock.json` `lockfileVersion 1`
+    // (npm 5/6) and pre-2017 `npm-shrinkwrap.json` (no `lockfileVersion`,
+    // hence the `unwrap_or(1)` default) — use a nested `dependencies`
+    // tree and have no flat `packages` map. Lift either into the same
+    // flat install-path-keyed representation the v2/v3 reader below
+    // consumes, then fall through unchanged. This is the whole legacy
+    // story: one pre-pass, the battle-tested nested-resolution / hoist /
+    // importer pipeline reused verbatim. Re-reading the file on this
+    // rare path keeps the common v2/v3 path a single allocation-free
+    // parse.
+    if raw.lockfile_version.unwrap_or(1) < 2 {
+        let content = crate::read_lockfile(path)?;
+        let legacy: RawNpmLegacyLockfile = crate::parse_json(path, content)?;
+        raw = lift_legacy_to_packages(&legacy, manifest);
     }
 
     // `npm install --prefix <proj>` (run from a different cwd than the
@@ -451,6 +463,98 @@ pub fn parse(path: &Path) -> Result<LockfileGraph, Error> {
         graph.importers.insert(target.clone(), direct);
     }
     Ok(graph)
+}
+
+/// Lift a pre-npm-7 nested-`dependencies` tree into the flat,
+/// install-path-keyed `RawNpmLockfile.packages` representation the
+/// v2/v3 reader consumes. npm's nesting encodes the install path
+/// exactly as the v2/v3 `packages` keys do — a top-level
+/// `dependencies.foo` lives at `node_modules/foo`; a nested
+/// `dependencies.foo.dependencies.bar` (npm nests only the conflicting
+/// version, hoisting the shared one to the top) lives at
+/// `node_modules/foo/node_modules/bar` — so the synthesized paths feed
+/// `resolve_nested` and the hoist walk with no special-casing.
+///
+/// v1 lockfiles list every resolved package (direct + hoisted
+/// transitive) flat at the top level and carry no `""` root entry
+/// marking which are direct, so the root importer's deps are taken from
+/// the manifest (the yarn-classic precedent). Reading the manifest is
+/// the *correct* source, not a shortcut: mislabeling a hoisted
+/// transitive as a root direct dep would over-hoist it into aube's
+/// isolated root `node_modules/` and break the phantom-dep guarantee.
+fn lift_legacy_to_packages(
+    legacy: &RawNpmLegacyLockfile,
+    manifest: &aube_manifest::PackageJson,
+) -> RawNpmLockfile {
+    let mut packages: BTreeMap<String, RawNpmPackage> = BTreeMap::new();
+
+    // The `""` root entry: the v2/v3 reader reads the project's direct
+    // deps (and their declared ranges, used as importer specifiers) from
+    // its `dependencies`/`devDependencies`/`optionalDependencies`
+    // sections. Synthesize them from the manifest. name/version are
+    // unused by the reader for the root entry, so they stay defaulted.
+    packages.insert(
+        String::new(),
+        RawNpmPackage {
+            dependencies: manifest.dependencies.clone(),
+            dev_dependencies: manifest.dev_dependencies.clone(),
+            optional_dependencies: manifest.optional_dependencies.clone(),
+            ..Default::default()
+        },
+    );
+
+    lift_legacy_tree(&legacy.dependencies, "node_modules", &mut packages);
+
+    RawNpmLockfile {
+        lockfile_version: Some(1),
+        packages,
+    }
+}
+
+/// Recursively flatten one level of the legacy `dependencies` tree at
+/// install-path `prefix` (`node_modules` for the top level), pushing one
+/// `RawNpmPackage` per entry and recursing into nested `dependencies`
+/// one `node_modules` level deeper.
+fn lift_legacy_tree(
+    deps: &BTreeMap<String, RawNpmLegacyDep>,
+    prefix: &str,
+    out: &mut BTreeMap<String, RawNpmPackage>,
+) {
+    for (name, dep) in deps {
+        let install_path = format!("{prefix}/{name}");
+        // Edges come from `requires` (declared name → range), which the
+        // reader uses to seed forward-refs and preserve declared ranges;
+        // the second pass resolves the actual target via the nested-tree
+        // walk. Pre-npm-5 shrinkwraps omit `requires` entirely and
+        // express edges ONLY through nesting, so a nested child IS a
+        // declared dependency of its parent — fold those names in (a `*`
+        // range stands in for the unrecorded specifier; the resolved
+        // target still comes from the nested-tree walk). A hoisted-to-root
+        // transitive of a no-`requires` shrinkwrap has no edge anywhere in
+        // the file and stays unrecoverable — a flat-layout limitation
+        // documented in the PR.
+        let mut dependencies = dep.requires.clone();
+        for child_name in dep.dependencies.keys() {
+            dependencies
+                .entry(child_name.clone())
+                .or_insert_with(|| "*".to_string());
+        }
+        out.insert(
+            install_path.clone(),
+            RawNpmPackage {
+                version: dep.version.clone(),
+                resolved: dep.resolved.clone(),
+                integrity: dep.integrity.clone(),
+                dependencies,
+                in_bundle: dep.bundled,
+                ..Default::default()
+            },
+        );
+        if !dep.dependencies.is_empty() {
+            let child_prefix = format!("{install_path}/node_modules");
+            lift_legacy_tree(&dep.dependencies, &child_prefix, out);
+        }
+    }
 }
 
 /// Canonical project-relative form of an npm `packages` install path

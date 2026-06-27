@@ -287,7 +287,9 @@ fn parse_source_graph(
 ) -> Result<aube_lockfile::LockfileGraph> {
     match from_kind {
         LockfileKind::Pnpm | LockfileKind::Aube => aube_lockfile::pnpm::parse(from),
-        LockfileKind::Npm | LockfileKind::NpmShrinkwrap => aube_lockfile::npm::parse(from),
+        LockfileKind::Npm | LockfileKind::NpmShrinkwrap => {
+            aube_lockfile::npm::parse(from, manifest)
+        }
         LockfileKind::Yarn | LockfileKind::YarnBerry => aube_lockfile::yarn::parse(from, manifest),
         LockfileKind::Bun => aube_lockfile::bun::parse(from),
     }
