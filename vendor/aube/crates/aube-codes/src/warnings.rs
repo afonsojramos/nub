@@ -95,6 +95,8 @@ pub const WARN_AUBE_YARN_BERRY_UNSUPPORTED: &str = "WARN_AUBE_YARN_BERRY_UNSUPPO
 pub const WARN_AUBE_LOCKFILE_MALFORMED_PEER_SUFFIX: &str =
     "WARN_AUBE_LOCKFILE_MALFORMED_PEER_SUFFIX";
 pub const WARN_AUBE_GLOBAL_OUTDATED_NO_LOCKFILE: &str = "WARN_AUBE_GLOBAL_OUTDATED_NO_LOCKFILE";
+pub const WARN_AUBE_LOCKFILE_LEGACY_INCOMPLETE_GRAPH: &str =
+    "WARN_AUBE_LOCKFILE_LEGACY_INCOMPLETE_GRAPH";
 
 // ── progress UI ─────────────────────────────────────────────────────
 pub const WARN_AUBE_PROGRESS_OVERFLOW: &str = "WARN_AUBE_PROGRESS_OVERFLOW";
@@ -525,6 +527,12 @@ pub const ALL: &[CodeMeta] = &[
         name: WARN_AUBE_GLOBAL_OUTDATED_NO_LOCKFILE,
         category: category::LOCKFILE,
         description: "`aube outdated -g` found a global install without a lockfile and skipped that install.",
+        exit_code: None,
+    },
+    CodeMeta {
+        name: WARN_AUBE_LOCKFILE_LEGACY_INCOMPLETE_GRAPH,
+        category: category::LOCKFILE,
+        description: "A legacy npm lockfile (lockfileVersion 1 / pre-2017 npm-shrinkwrap.json) hoists a package to the top level with no recorded dependency edge — pre-npm-5 shrinkwraps omit the `requires` links that record which package depends on it. The package is unreachable from the project's dependencies and will not be installed. Re-lock with npm 7+ (or `nub install` then commit the regenerated lockfile) for a complete graph.",
         exit_code: None,
     },
     // Progress UI

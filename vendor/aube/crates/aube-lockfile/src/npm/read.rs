@@ -2,7 +2,9 @@ use crate::{DepType, DirectDep, Error, LocalSource, LockedPackage, LockfileGraph
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use super::raw::{InstallPathInfo, RawNpmLegacyLockfile, RawNpmLegacyDep, RawNpmLockfile, RawNpmPackage};
+use super::raw::{
+    InstallPathInfo, RawNpmLegacyDep, RawNpmLegacyLockfile, RawNpmLockfile, RawNpmPackage,
+};
 /// Parse a package-lock.json or npm-shrinkwrap.json file into a LockfileGraph.
 ///
 /// `manifest` is consulted only on the legacy (`lockfileVersion < 2` or
@@ -482,7 +484,7 @@ pub fn parse(path: &Path, manifest: &aube_manifest::PackageJson) -> Result<Lockf
 /// the *correct* source, not a shortcut: mislabeling a hoisted
 /// transitive as a root direct dep would over-hoist it into aube's
 /// isolated root `node_modules/` and break the phantom-dep guarantee.
-fn lift_legacy_to_packages(
+pub(super) fn lift_legacy_to_packages(
     legacy: &RawNpmLegacyLockfile,
     manifest: &aube_manifest::PackageJson,
 ) -> RawNpmLockfile {
@@ -505,10 +507,66 @@ fn lift_legacy_to_packages(
 
     lift_legacy_tree(&legacy.dependencies, "node_modules", &mut packages);
 
+    // Honesty diagnostic for the pre-npm-5 flat-shrinkwrap limitation
+    // (see `legacy_unreferenced_top_level`): a fully-hoisted npm 3/4
+    // shrinkwrap omits `requires`, so a top-level transitive whose incoming
+    // edge is recorded nowhere is unreachable and the writer's reachability
+    // walk drops it — it will not install. Surface it rather than silently
+    // shipping a broken tree. Legacy-path-only: never runs for v2/v3.
+    let orphans = legacy_unreferenced_top_level(legacy, &packages, manifest);
+    if !orphans.is_empty() {
+        let list = orphans.join(", ");
+        tracing::warn!(
+            code = aube_codes::warnings::WARN_AUBE_LOCKFILE_LEGACY_INCOMPLETE_GRAPH,
+            "legacy lockfile omits dependency edges for {} hoisted package(s) ({list}); they are unreachable from the project's dependencies and will not be installed. Re-lock with a modern npm for a complete graph.",
+            orphans.len(),
+        );
+    }
+
     RawNpmLockfile {
         lockfile_version: Some(1),
         packages,
     }
+}
+
+/// Top-level legacy packages with NO incoming edge — referenced by neither
+/// the project manifest nor any lifted package's recorded dependencies
+/// (`requires` plus nesting-derived edges). Such a package is unreachable
+/// from the project's dependencies, so the reachability-pruning writer drops
+/// it and it never installs. The cause is structural: a fully-hoisted npm
+/// 3/4 `npm-shrinkwrap.json` records transitives at the top level but omits
+/// the `requires` links that say which package needs them, so the edge
+/// exists nowhere in the file and is unrecoverable from the lockfile alone
+/// (npm 3 rebuilt it by reading each fetched package.json — a thing a
+/// lockfile reader cannot do). Returning the list lets the caller warn.
+pub(super) fn legacy_unreferenced_top_level(
+    legacy: &RawNpmLegacyLockfile,
+    packages: &BTreeMap<String, RawNpmPackage>,
+    manifest: &aube_manifest::PackageJson,
+) -> Vec<String> {
+    let mut referenced: BTreeSet<&str> = BTreeSet::new();
+    for k in manifest
+        .dependencies
+        .keys()
+        .chain(manifest.dev_dependencies.keys())
+        .chain(manifest.optional_dependencies.keys())
+    {
+        referenced.insert(k.as_str());
+    }
+    for (install_path, pkg) in packages {
+        if install_path.is_empty() {
+            continue;
+        }
+        for dep_name in pkg.dependencies.keys() {
+            referenced.insert(dep_name.as_str());
+        }
+    }
+    legacy
+        .dependencies
+        .keys()
+        .filter(|name| !referenced.contains(name.as_str()))
+        .cloned()
+        .collect()
 }
 
 /// Recursively flatten one level of the legacy `dependencies` tree at

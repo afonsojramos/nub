@@ -3006,3 +3006,41 @@ fn legacy_nested_no_requires_recovers_edge_from_nesting() {
         Some("2.0.0")
     );
 }
+
+/// The pre-npm-5 flat-shrinkwrap limitation, surfaced: when a transitive is
+/// hoisted to the top level with its incoming edge recorded NOWHERE (no
+/// `requires`, no nesting — the shape npm 3/4 produced), it is unreachable
+/// and would silently drop. The lift must flag it
+/// (drives WARN_AUBE_LOCKFILE_LEGACY_INCOMPLETE_GRAPH). The counter-case —
+/// the same graph carrying `requires` — must flag nothing.
+#[test]
+fn legacy_flat_hoisted_transitive_flagged_as_unreferenced() {
+    let manifest = manifest_with_deps(&[("is-odd", "^3.0.0")]);
+
+    let flat: super::raw::RawNpmLegacyLockfile = serde_json::from_str(
+        r#"{ "dependencies": {
+            "is-odd": { "version": "3.0.1", "resolved": "https://registry.npmjs.org/is-odd/-/is-odd-3.0.1.tgz" },
+            "is-number": { "version": "6.0.0", "resolved": "https://registry.npmjs.org/is-number/-/is-number-6.0.0.tgz" }
+        } }"#,
+    )
+    .unwrap();
+    let lifted = read::lift_legacy_to_packages(&flat, &manifest);
+    assert_eq!(
+        read::legacy_unreferenced_top_level(&flat, &lifted.packages, &manifest),
+        vec!["is-number".to_string()],
+        "the edgeless hoisted transitive must be flagged"
+    );
+
+    let with_requires: super::raw::RawNpmLegacyLockfile = serde_json::from_str(
+        r#"{ "dependencies": {
+            "is-odd": { "version": "3.0.1", "requires": { "is-number": "^6.0.0" } },
+            "is-number": { "version": "6.0.0" }
+        } }"#,
+    )
+    .unwrap();
+    let lifted = read::lift_legacy_to_packages(&with_requires, &manifest);
+    assert!(
+        read::legacy_unreferenced_top_level(&with_requires, &lifted.packages, &manifest).is_empty(),
+        "a recorded `requires` edge means nothing is orphaned"
+    );
+}
