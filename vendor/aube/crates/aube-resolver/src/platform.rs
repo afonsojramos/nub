@@ -812,7 +812,8 @@ mod tests {
         }"#;
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), content).unwrap();
-        let mut graph = aube_lockfile::npm::parse(tmp.path()).unwrap();
+        let mut graph =
+            aube_lockfile::npm::parse(tmp.path(), &aube_manifest::PackageJson::default()).unwrap();
 
         let host_dep_path = graph.importers["."][0].dep_path.clone();
         assert!(

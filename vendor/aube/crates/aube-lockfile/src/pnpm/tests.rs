@@ -4820,7 +4820,7 @@ fn npm_to_pnpm_conversion_omits_phantom_member_links_on_empty_root() {
     let npm_path = root.join("package-lock.json");
     std::fs::write(&npm_path, npm_lock).unwrap();
 
-    let graph = crate::npm::parse(&npm_path).unwrap();
+    let graph = crate::npm::parse(&npm_path, &aube_manifest::PackageJson::default()).unwrap();
 
     // Root manifest declares NO deps (empty root importer).
     let manifest = PackageJson {

@@ -5,6 +5,16 @@ use crate::{DepType, DirectDep, Error, GitSource, LocalSource, LockedPackage, Lo
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+/// Test shim shadowing the manifest-taking `read::parse`. Every v2/v3
+/// reader test predates the manifest param (consulted only on the
+/// legacy `<v2` path), so default it. Legacy-path tests below call
+/// `super::read::parse` with an explicit manifest. A local item beats
+/// the `use super::*` glob import, so this requires no churn at the 30+
+/// existing call sites.
+fn parse(path: &Path) -> Result<LockfileGraph, Error> {
+    super::read::parse(path, &aube_manifest::PackageJson::default())
+}
+
 #[test]
 fn test_package_name_from_install_path() {
     assert_eq!(
@@ -1408,8 +1418,12 @@ fn test_write_dev_optional_flags() {
     assert!(packages["node_modules/foo"].get("dev").is_none());
 }
 
+/// `lockfileVersion 1` is now SUPPORTED (was rejected before the legacy
+/// reader landed). An empty v1 lockfile lifts to an empty graph rather
+/// than erroring — the legacy branch fires and the manifest (empty here)
+/// drives the importer.
 #[test]
-fn test_reject_v1() {
+fn legacy_v1_empty_lockfile_parses() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     let content = r#"{
             "name": "test",
@@ -1418,8 +1432,9 @@ fn test_reject_v1() {
         }"#;
     std::fs::write(tmp.path(), content).unwrap();
 
-    let err = parse(tmp.path()).unwrap_err();
-    assert!(matches!(err, Error::Parse(_, msg) if msg.contains("lockfileVersion 1")));
+    let graph = read::parse(tmp.path(), &aube_manifest::PackageJson::default()).unwrap();
+    assert!(graph.packages.is_empty());
+    assert!(graph.importers["."].is_empty());
 }
 
 /// Pre-npm-2.x packages (e.g. `ansi-html-community@0.0.8`) ship
@@ -2610,4 +2625,422 @@ fn test_roundtrip_preserves_npm_verbatim_meta_fields() {
     assert_eq!(addon2.deprecated.as_deref(), Some("use native-addon@2 instead"));
     assert_eq!(addon2.bundled_dependencies, vec!["inner".to_string()]);
     assert!(reparsed.packages["inner@2.0.0"].in_bundle);
+}
+
+// ---------------------------------------------------------------------
+// Legacy (pre-npm-7) lockfile reader: `package-lock.json`
+// `lockfileVersion 1` (npm 5/6) and pre-2017 `npm-shrinkwrap.json` (no
+// `lockfileVersion`). Both use a nested `dependencies` tree the reader
+// lifts into the v2/v3 flat representation before the shared pipeline
+// runs. Differential oracle: the v1 and v2 fixtures below are the SAME
+// dependency set (authentic npm 6 vs npm 8 output for `is-odd@^3.0.0`),
+// so the lifted v1 graph must equal the v2 graph modulo fields v1
+// doesn't carry.
+// ---------------------------------------------------------------------
+
+/// Build a root manifest with the given production deps (legacy
+/// lockfiles carry no `""` root entry, so direct deps come from here).
+fn manifest_with_deps(deps: &[(&str, &str)]) -> aube_manifest::PackageJson {
+    aube_manifest::PackageJson {
+        dependencies: deps
+            .iter()
+            .map(|(n, r)| ((*n).to_string(), (*r).to_string()))
+            .collect(),
+        ..Default::default()
+    }
+}
+
+fn write_lockfile(content: &str) -> tempfile::NamedTempFile {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(tmp.path(), content).unwrap();
+    tmp
+}
+
+/// Authentic npm 6 (`node:14`) v1 `package-lock.json` for `is-odd@^3.0.0`
+/// (pulls transitive `is-number`). Carries sha512 integrity.
+const V1_PACKAGE_LOCK: &str = r#"{
+  "name": "legacy-test",
+  "version": "1.0.0",
+  "lockfileVersion": 1,
+  "requires": true,
+  "dependencies": {
+    "is-number": {
+      "version": "6.0.0",
+      "resolved": "https://registry.npmjs.org/is-number/-/is-number-6.0.0.tgz",
+      "integrity": "sha512-Wu1VHeILBK8KAWJUAiSZQX94GmOE45Rg6/538fKwiloUu21KncEkYGPqob2oSZ5mUT73vLGrHQjKw3KMPwfDzg=="
+    },
+    "is-odd": {
+      "version": "3.0.1",
+      "resolved": "https://registry.npmjs.org/is-odd/-/is-odd-3.0.1.tgz",
+      "integrity": "sha512-CQpnWPrDwmP1+SMHXZhtLtJv90yiyVfluGsX5iNCVkrhQtU3TQHsUWPG9wkdk9Lgd5yNpAg9jQEo90CBaXgWMA==",
+      "requires": {
+        "is-number": "^6.0.0"
+      }
+    }
+  }
+}"#;
+
+/// Authentic npm 3 (`node:6`) pre-2017 `npm-shrinkwrap.json` for the
+/// same dep set: NO `lockfileVersion`, NO `integrity`, uses `from`.
+const OLD_SHRINKWRAP: &str = r#"{
+  "name": "legacy-test",
+  "version": "1.0.0",
+  "dependencies": {
+    "is-number": {
+      "version": "6.0.0",
+      "from": "is-number@>=6.0.0 <7.0.0",
+      "resolved": "https://registry.npmjs.org/is-number/-/is-number-6.0.0.tgz"
+    },
+    "is-odd": {
+      "version": "3.0.1",
+      "from": "is-odd@>=3.0.0 <4.0.0",
+      "resolved": "https://registry.npmjs.org/is-odd/-/is-odd-3.0.1.tgz"
+    }
+  }
+}"#;
+
+/// v1 `package-lock.json` lifts into the same graph the v2/v3 reader
+/// builds: package set, versions, integrity, tarball URL, the
+/// `is-odd → is-number` edge, and the manifest-driven root importer.
+#[test]
+fn legacy_v1_package_lock_lifts_to_graph() {
+    let tmp = write_lockfile(V1_PACKAGE_LOCK);
+    let manifest = manifest_with_deps(&[("is-odd", "^3.0.0")]);
+    let graph = read::parse(tmp.path(), &manifest).unwrap();
+
+    assert_eq!(graph.packages.len(), 2);
+    let is_odd = &graph.packages["is-odd@3.0.1"];
+    assert_eq!(is_odd.version, "3.0.1");
+    assert_eq!(
+        is_odd.integrity.as_deref(),
+        Some("sha512-CQpnWPrDwmP1+SMHXZhtLtJv90yiyVfluGsX5iNCVkrhQtU3TQHsUWPG9wkdk9Lgd5yNpAg9jQEo90CBaXgWMA==")
+    );
+    assert_eq!(
+        is_odd.tarball_url.as_deref(),
+        Some("https://registry.npmjs.org/is-odd/-/is-odd-3.0.1.tgz")
+    );
+    // `requires` resolves through the nested-tree walk to the hoisted
+    // is-number; the edge value is the dep_path tail (just the version).
+    assert_eq!(
+        is_odd.dependencies.get("is-number").map(String::as_str),
+        Some("6.0.0")
+    );
+
+    let is_number = &graph.packages["is-number@6.0.0"];
+    assert_eq!(
+        is_number.integrity.as_deref(),
+        Some("sha512-Wu1VHeILBK8KAWJUAiSZQX94GmOE45Rg6/538fKwiloUu21KncEkYGPqob2oSZ5mUT73vLGrHQjKw3KMPwfDzg==")
+    );
+
+    // Direct deps come from the manifest, NOT the lockfile (v1 has no
+    // root entry): is-odd is direct, is-number is hoisted-transitive.
+    let root = graph.importers.get(".").unwrap();
+    assert_eq!(root.len(), 1);
+    assert_eq!(root[0].name, "is-odd");
+    assert_eq!(root[0].dep_type, DepType::Production);
+    assert_eq!(root[0].specifier.as_deref(), Some("^3.0.0"));
+}
+
+/// The differential oracle: the lifted v1 graph equals the v2 graph for
+/// the same dependency set, comparing every field v1 carries.
+#[test]
+fn legacy_v1_matches_v2_reader_differentially() {
+    // The v2 fixture for the same `is-odd@^3.0.0` dep set (authentic
+    // npm 8 output). Root entry present, flat `packages` map.
+    const V2_PACKAGE_LOCK: &str = r#"{
+      "name": "legacy-test",
+      "version": "1.0.0",
+      "lockfileVersion": 2,
+      "requires": true,
+      "packages": {
+        "": {
+          "name": "legacy-test",
+          "version": "1.0.0",
+          "dependencies": { "is-odd": "^3.0.0" }
+        },
+        "node_modules/is-number": {
+          "version": "6.0.0",
+          "resolved": "https://registry.npmjs.org/is-number/-/is-number-6.0.0.tgz",
+          "integrity": "sha512-Wu1VHeILBK8KAWJUAiSZQX94GmOE45Rg6/538fKwiloUu21KncEkYGPqob2oSZ5mUT73vLGrHQjKw3KMPwfDzg==",
+          "engines": { "node": ">=0.10.0" }
+        },
+        "node_modules/is-odd": {
+          "version": "3.0.1",
+          "resolved": "https://registry.npmjs.org/is-odd/-/is-odd-3.0.1.tgz",
+          "integrity": "sha512-CQpnWPrDwmP1+SMHXZhtLtJv90yiyVfluGsX5iNCVkrhQtU3TQHsUWPG9wkdk9Lgd5yNpAg9jQEo90CBaXgWMA==",
+          "dependencies": { "is-number": "^6.0.0" },
+          "engines": { "node": ">=4" }
+        }
+      }
+    }"#;
+
+    let v1 = read::parse(
+        write_lockfile(V1_PACKAGE_LOCK).path(),
+        &manifest_with_deps(&[("is-odd", "^3.0.0")]),
+    )
+    .unwrap();
+    // v2 has a root entry, so the manifest is ignored — default is fine.
+    let v2 = parse(write_lockfile(V2_PACKAGE_LOCK).path()).unwrap();
+
+    // Same package set, versions, integrity, tarball URL, dep edges.
+    assert_eq!(
+        v1.packages.keys().collect::<Vec<_>>(),
+        v2.packages.keys().collect::<Vec<_>>()
+    );
+    for (dep_path, v1_pkg) in &v1.packages {
+        let v2_pkg = &v2.packages[dep_path];
+        assert_eq!(v1_pkg.version, v2_pkg.version, "version {dep_path}");
+        assert_eq!(v1_pkg.integrity, v2_pkg.integrity, "integrity {dep_path}");
+        assert_eq!(
+            v1_pkg.tarball_url, v2_pkg.tarball_url,
+            "tarball_url {dep_path}"
+        );
+        assert_eq!(
+            v1_pkg.dependencies, v2_pkg.dependencies,
+            "dep edges {dep_path}"
+        );
+    }
+    // Same root importer (name, dep_path, type, specifier). DirectDep
+    // has no PartialEq, so compare the load-bearing fields explicitly.
+    let project = |d: &DirectDep| {
+        (
+            d.name.clone(),
+            d.dep_path.clone(),
+            d.dep_type,
+            d.specifier.clone(),
+        )
+    };
+    let v1_root: Vec<_> = v1.importers["."].iter().map(project).collect();
+    let v2_root: Vec<_> = v2.importers["."].iter().map(project).collect();
+    assert_eq!(v1_root, v2_root);
+}
+
+/// pre-2017 `npm-shrinkwrap.json`: no `lockfileVersion` (→ legacy path
+/// via the `unwrap_or(1)` default), no `integrity`. The reader must
+/// produce a graph with `integrity: None` and the `resolved` URL
+/// preserved — the install path recovers sha512 from the fetch (proven
+/// by the e2e test in the PR). Before this change it hard-failed at
+/// serde with `missing field lockfileVersion`.
+#[test]
+fn legacy_old_shrinkwrap_no_version_no_integrity() {
+    let tmp = write_lockfile(OLD_SHRINKWRAP);
+    let manifest = manifest_with_deps(&[("is-odd", "^3.0.0")]);
+    let graph = read::parse(tmp.path(), &manifest).unwrap();
+
+    assert_eq!(graph.packages.len(), 2);
+    let is_odd = &graph.packages["is-odd@3.0.1"];
+    assert_eq!(is_odd.integrity, None);
+    assert_eq!(
+        is_odd.tarball_url.as_deref(),
+        Some("https://registry.npmjs.org/is-odd/-/is-odd-3.0.1.tgz")
+    );
+    assert_eq!(graph.packages["is-number@6.0.0"].integrity, None);
+
+    let root = graph.importers.get(".").unwrap();
+    assert_eq!(root.len(), 1);
+    assert_eq!(root[0].name, "is-odd");
+    assert_eq!(root[0].specifier.as_deref(), Some("^3.0.0"));
+}
+
+/// Nested/deduped hoisting: npm hoists the shared version to the top and
+/// nests only the conflicting one. The tree walk must synthesize the
+/// nested install path so `resolve_nested` routes each parent to the
+/// right version — `a → shared@1` (hoisted), `b → shared@2` (nested
+/// under b).
+#[test]
+fn legacy_v1_nested_dedupe_hoisting() {
+    const NESTED: &str = r#"{
+      "name": "nest-test",
+      "version": "1.0.0",
+      "lockfileVersion": 1,
+      "requires": true,
+      "dependencies": {
+        "a": {
+          "version": "1.0.0",
+          "resolved": "https://registry.npmjs.org/a/-/a-1.0.0.tgz",
+          "integrity": "sha512-aaa",
+          "requires": { "shared": "^1.0.0" }
+        },
+        "shared": {
+          "version": "1.0.0",
+          "resolved": "https://registry.npmjs.org/shared/-/shared-1.0.0.tgz",
+          "integrity": "sha512-s1"
+        },
+        "b": {
+          "version": "1.0.0",
+          "resolved": "https://registry.npmjs.org/b/-/b-1.0.0.tgz",
+          "integrity": "sha512-bbb",
+          "requires": { "shared": "^2.0.0" },
+          "dependencies": {
+            "shared": {
+              "version": "2.0.0",
+              "resolved": "https://registry.npmjs.org/shared/-/shared-2.0.0.tgz",
+              "integrity": "sha512-s2"
+            }
+          }
+        }
+      }
+    }"#;
+    let tmp = write_lockfile(NESTED);
+    let manifest = manifest_with_deps(&[("a", "^1.0.0"), ("b", "^1.0.0")]);
+    let graph = read::parse(tmp.path(), &manifest).unwrap();
+
+    // Both versions of the conflicting dep are present.
+    assert!(graph.packages.contains_key("shared@1.0.0"));
+    assert!(graph.packages.contains_key("shared@2.0.0"));
+    // a resolves to the hoisted shared@1; b to its nested shared@2.
+    assert_eq!(
+        graph.packages["a@1.0.0"]
+            .dependencies
+            .get("shared")
+            .map(String::as_str),
+        Some("1.0.0")
+    );
+    assert_eq!(
+        graph.packages["b@1.0.0"]
+            .dependencies
+            .get("shared")
+            .map(String::as_str),
+        Some("2.0.0")
+    );
+
+    let mut root: Vec<&str> = graph.importers["."].iter().map(|d| d.name.as_str()).collect();
+    root.sort_unstable();
+    assert_eq!(root, vec!["a", "b"]);
+}
+
+/// Scoped package install path (`node_modules/@scope/pkg`) plus
+/// manifest-driven dev/optional classification — v1 carries no per-entry
+/// section split, so dep_type comes entirely from the manifest sections.
+#[test]
+fn legacy_v1_scoped_and_dev_optional() {
+    const SCOPED: &str = r#"{
+      "name": "s",
+      "version": "1.0.0",
+      "lockfileVersion": 1,
+      "requires": true,
+      "dependencies": {
+        "@scope/pkg": {
+          "version": "1.0.0",
+          "resolved": "https://registry.npmjs.org/@scope/pkg/-/pkg-1.0.0.tgz",
+          "integrity": "sha512-sc"
+        },
+        "devdep": {
+          "version": "2.0.0",
+          "resolved": "https://registry.npmjs.org/devdep/-/devdep-2.0.0.tgz",
+          "integrity": "sha512-dd",
+          "dev": true
+        },
+        "optdep": {
+          "version": "3.0.0",
+          "resolved": "https://registry.npmjs.org/optdep/-/optdep-3.0.0.tgz",
+          "integrity": "sha512-od",
+          "optional": true
+        }
+      }
+    }"#;
+    let tmp = write_lockfile(SCOPED);
+    let manifest = aube_manifest::PackageJson {
+        dependencies: [("@scope/pkg".to_string(), "^1.0.0".to_string())]
+            .into_iter()
+            .collect(),
+        dev_dependencies: [("devdep".to_string(), "^2.0.0".to_string())]
+            .into_iter()
+            .collect(),
+        optional_dependencies: [("optdep".to_string(), "^3.0.0".to_string())]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+    let graph = read::parse(tmp.path(), &manifest).unwrap();
+
+    // Scoped name is recovered from the `node_modules/@scope/pkg` path.
+    assert_eq!(graph.packages["@scope/pkg@1.0.0"].name, "@scope/pkg");
+
+    let root = graph.importers.get(".").unwrap();
+    let by_name = |n: &str| root.iter().find(|d| d.name == n).unwrap();
+    assert_eq!(by_name("@scope/pkg").dep_type, DepType::Production);
+    assert_eq!(by_name("devdep").dep_type, DepType::Dev);
+    assert_eq!(by_name("optdep").dep_type, DepType::Optional);
+}
+
+/// Pre-npm-5 shrinkwraps (npm 3/4) omit `requires` and express the
+/// dependency edge ONLY through nesting: a child under a parent's
+/// `dependencies` IS a dep of that parent. The lift must recover that
+/// edge from the nesting so the transitive resolves and installs —
+/// otherwise a no-`requires` nested shrinkwrap would parse but drop the
+/// child. (The hoisted-to-root variant, where the transitive is a flat
+/// top-level sibling with no edge anywhere in the file, is the one
+/// documented limitation — that edge is unrecoverable from the lockfile.)
+#[test]
+fn legacy_nested_no_requires_recovers_edge_from_nesting() {
+    const NESTED_NO_REQUIRES: &str = r#"{
+      "name": "nest-noreq",
+      "version": "1.0.0",
+      "dependencies": {
+        "parent": {
+          "version": "1.0.0",
+          "resolved": "https://registry.npmjs.org/parent/-/parent-1.0.0.tgz",
+          "dependencies": {
+            "child": {
+              "version": "2.0.0",
+              "resolved": "https://registry.npmjs.org/child/-/child-2.0.0.tgz"
+            }
+          }
+        }
+      }
+    }"#;
+    let tmp = write_lockfile(NESTED_NO_REQUIRES);
+    let manifest = manifest_with_deps(&[("parent", "^1.0.0")]);
+    let graph = read::parse(tmp.path(), &manifest).unwrap();
+
+    assert!(graph.packages.contains_key("parent@1.0.0"));
+    assert!(graph.packages.contains_key("child@2.0.0"));
+    // The edge is recovered from nesting (no `requires` present) and
+    // resolves to the nested child@2.0.0.
+    assert_eq!(
+        graph.packages["parent@1.0.0"]
+            .dependencies
+            .get("child")
+            .map(String::as_str),
+        Some("2.0.0")
+    );
+}
+
+/// The pre-npm-5 flat-shrinkwrap limitation, surfaced: when a transitive is
+/// hoisted to the top level with its incoming edge recorded NOWHERE (no
+/// `requires`, no nesting — the shape npm 3/4 produced), it is unreachable
+/// and would silently drop. The lift must flag it
+/// (drives WARN_AUBE_LOCKFILE_LEGACY_INCOMPLETE_GRAPH). The counter-case —
+/// the same graph carrying `requires` — must flag nothing.
+#[test]
+fn legacy_flat_hoisted_transitive_flagged_as_unreferenced() {
+    let manifest = manifest_with_deps(&[("is-odd", "^3.0.0")]);
+
+    let flat: super::raw::RawNpmLegacyLockfile = serde_json::from_str(
+        r#"{ "dependencies": {
+            "is-odd": { "version": "3.0.1", "resolved": "https://registry.npmjs.org/is-odd/-/is-odd-3.0.1.tgz" },
+            "is-number": { "version": "6.0.0", "resolved": "https://registry.npmjs.org/is-number/-/is-number-6.0.0.tgz" }
+        } }"#,
+    )
+    .unwrap();
+    let lifted = read::lift_legacy_to_packages(&flat, &manifest);
+    assert_eq!(
+        read::legacy_unreferenced_top_level(&flat, &lifted.packages, &manifest),
+        vec!["is-number".to_string()],
+        "the edgeless hoisted transitive must be flagged"
+    );
+
+    let with_requires: super::raw::RawNpmLegacyLockfile = serde_json::from_str(
+        r#"{ "dependencies": {
+            "is-odd": { "version": "3.0.1", "requires": { "is-number": "^6.0.0" } },
+            "is-number": { "version": "6.0.0" }
+        } }"#,
+    )
+    .unwrap();
+    let lifted = read::lift_legacy_to_packages(&with_requires, &manifest);
+    assert!(
+        read::legacy_unreferenced_top_level(&with_requires, &lifted.packages, &manifest).is_empty(),
+        "a recorded `requires` edge means nothing is orphaned"
+    );
 }
