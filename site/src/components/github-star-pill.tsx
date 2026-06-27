@@ -8,10 +8,10 @@
    GitHub API; falls back gracefully so a fetch failure can't break the build).
 
    The "you haven't starred this yet" cue is deliberately subtle + on-brand:
-   the star is the SOLE ember accent — it sits in muted foreground at rest and
-   warms to the site's ember on hover. Everything else (pill border, GitHub-mark
-   ring) shifts only with the neutral accent background, so the hover reads as
-   one tasteful nudge, not three competing oranges. */
+   the pill's BORDER is the SOLE ember accent — it warms to the site's ember on
+   hover, alongside a slight neutral background lift. The star and GitHub-mark
+   ring stay neutral (the star just brightens with the text), so the hover reads
+   as one tasteful nudge, not competing oranges. */
 
 /* GitHub mark (official Invertocat, mono path) — same path used elsewhere on
    the site for brand consistency. */
@@ -84,7 +84,7 @@ export async function GitHubStarPill({ repo }: { repo: string }) {
           ? `Star ${repo} on GitHub — ${formatStars(stars)} stars`
           : `Star ${repo} on GitHub`
       }
-      className="group inline-flex items-center gap-2 rounded-full border border-fd-border bg-fd-card/60 py-1 pe-2.5 ps-1 text-sm font-medium text-fd-muted-foreground shadow-sm transition-colors hover:bg-fd-accent hover:text-fd-foreground"
+      className="group inline-flex items-center gap-2 rounded-full border border-fd-border bg-fd-card/60 py-1 pe-2.5 ps-1 text-sm font-medium text-fd-muted-foreground shadow-sm transition-colors hover:border-ember hover:bg-fd-accent hover:text-fd-foreground"
     >
       {/* Circular GitHub mark — its own ring keeps the "logo on the left of a
           pill" read crisp against the surrounding border. */}
@@ -94,7 +94,7 @@ export async function GitHubStarPill({ repo }: { repo: string }) {
       {/* Star + count read as one tight unit (the site is otherwise serif, so
           the count is forced to a system sans-serif — what a star count wants). */}
       <span className="flex items-center gap-1 font-[system-ui,-apple-system,'Segoe_UI',sans-serif]">
-        <StarIcon className="size-3.5 shrink-0 text-fd-muted-foreground transition-colors group-hover:text-ember" />
+        <StarIcon className="size-3.5 shrink-0 text-fd-muted-foreground transition-colors group-hover:text-fd-foreground" />
         {stars !== null && (
           <span className="leading-none">{formatStars(stars)}</span>
         )}
