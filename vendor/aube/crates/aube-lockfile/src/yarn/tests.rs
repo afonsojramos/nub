@@ -1889,3 +1889,83 @@ ms@^2.1.3:
     assert_eq!(pkg_b[0].name, "kleur");
     assert_eq!(pkg_b[0].dep_path, "kleur@4.1.5");
 }
+
+// ── strict_unsupported_source: gating + classifier ──────────────────────────
+//
+// These run under the DEFAULT (standalone-aube) embedder — `strict_unsupported_source`
+// is false — so they assert the historical lenient behavior is byte-identical
+// (the strict/fatal path is exercised in `tests/unsupported_source.rs`, which
+// registers a strict profile in its own process).
+
+#[test]
+fn lenient_berry_jsr_dep_is_warn_dropped_not_fatal() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let content = "__metadata:\n  version: 8\n  cacheKey: 10c0\n\n\"foo@jsr:^1.0.0\":\n  version: 1.0.0\n  resolution: \"foo@jsr:1.0.0\"\n  languageName: node\n  linkType: hard\n";
+    std::fs::write(tmp.path(), content).unwrap();
+    let manifest = make_manifest(&[("foo", "jsr:^1.0.0")], &[]);
+    let graph = parse(tmp.path(), &manifest).expect("default embedder must not fatal");
+    // Historical behavior: the jsr block is dropped, so `foo` never lands.
+    assert!(!graph.importers["."].iter().any(|d| d.name == "foo"));
+}
+
+#[test]
+fn lenient_classic_git_dep_reclassifies_not_fatal() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let content = "# yarn lockfile v1\n\n\"foo@git+https://github.com/u/r.git#abc123\":\n  version \"1.0.0\"\n  resolved \"git+https://github.com/u/r.git#abc123\"\n";
+    std::fs::write(tmp.path(), content).unwrap();
+    let manifest = make_manifest(&[("foo", "git+https://github.com/u/r.git#abc123")], &[]);
+    let graph = parse(tmp.path(), &manifest).expect("default embedder must not fatal");
+    // Historical behavior: the git block reclassifies to a registry name@version
+    // and stays in the graph (it would 404 at fetch, but parse is lenient).
+    assert!(graph.importers["."].iter().any(|d| d.name == "foo"));
+}
+
+#[test]
+fn classic_local_source_classification() {
+    use super::classic::{ClassicSource, classic_local_source};
+    let is = |spec: &str| classic_local_source(spec, "foo");
+    // Registry-resolvable: semver ranges, dist-tags, and npm-aliases.
+    assert!(matches!(is("foo@^1.0.0"), ClassicSource::Registry));
+    assert!(matches!(is("foo@latest"), ClassicSource::Registry));
+    assert!(matches!(is("foo@>=1.0.0 <2.0.0"), ClassicSource::Registry));
+    assert!(matches!(
+        is("foo@npm:@scope/real@1.2.3"),
+        ClassicSource::Registry
+    ));
+    // Local on-disk sources.
+    assert!(matches!(is("foo@link:./x"), ClassicSource::Local(_)));
+    assert!(matches!(is("foo@file:./x.tgz"), ClassicSource::Local(_)));
+    assert!(matches!(is("foo@portal:./x"), ClassicSource::Local(_)));
+    // Unsupported: explicit git protocols + the github `user/repo#ref` shorthand.
+    assert!(matches!(
+        is("foo@git+https://h/r.git#c"),
+        ClassicSource::Unsupported(_)
+    ));
+    assert!(matches!(
+        is("foo@user/repo#ref"),
+        ClassicSource::Unsupported(_)
+    ));
+    // A `user/repo#semver:<range>` shorthand splits on the `#semver:` colon;
+    // the protocol token must be the clean `git`, not `user/repo#semver`.
+    assert_eq!(
+        is("foo@user/repo#semver:^1.2.3"),
+        ClassicSource::Unsupported("git".to_string())
+    );
+}
+
+proptest::proptest! {
+    /// A registry-shaped range (semver, no protocol `:` and no `/`) must
+    /// ALWAYS classify as `Registry` — never a false-positive `Unsupported`
+    /// that would turn a valid yarn.lock into an eager fatal under nub.
+    #[test]
+    fn registry_ranges_never_classify_unsupported(
+        range in r"[\^~]?[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}",
+    ) {
+        use super::classic::{ClassicSource, classic_local_source};
+        let spec = format!("foo@{range}");
+        proptest::prop_assert!(matches!(
+            classic_local_source(&spec, "foo"),
+            ClassicSource::Registry
+        ));
+    }
+}

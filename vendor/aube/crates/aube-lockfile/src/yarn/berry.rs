@@ -46,6 +46,15 @@ pub(super) fn parse_berry_str(
     let mut spec_to_dep_path: BTreeMap<String, String> = BTreeMap::new();
     let mut packages: BTreeMap<String, LockedPackage> = BTreeMap::new();
     let mut patched_dependencies: BTreeMap<String, String> = BTreeMap::new();
+    // Under `strict_unsupported_source` (nub), a block whose protocol the
+    // reader can't resolve is RECORDED here (keyed by every header spec that
+    // resolves to it) instead of being silently dropped, so the edge sites
+    // below can raise an eager fatal for a non-optional consumer / warn+skip
+    // an optional one. Empty (and inert) for standalone aube, which keeps the
+    // warn+drop default.
+    let strict = aube_util::embedder().strict_unsupported_source;
+    let mut unsupported: BTreeMap<String, crate::UnsupportedSpec> = BTreeMap::new();
+    let mut skipped_optional: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     // Transitive dep values written into each `LockedPackage` in this
     // pass are the raw header specs (e.g. `"foo@npm:^2.0.0"`); the
     // second pass collapses them down to dep_paths.
@@ -162,6 +171,23 @@ pub(super) fn parse_berry_str(
                 }))
             }
             _ => {
+                if strict {
+                    // Record the unresolvable block under each of its header
+                    // specs so a non-optional consumer raises a fatal (and an
+                    // optional one a warn) at the edge sites below, rather than
+                    // silently vanishing from the graph.
+                    for spec in &specs {
+                        unsupported.insert(
+                            spec.clone(),
+                            crate::UnsupportedSpec {
+                                name: res_name.to_string(),
+                                key: resolution.to_string(),
+                                protocol: res_protocol.to_string(),
+                            },
+                        );
+                    }
+                    continue;
+                }
                 tracing::warn!(
                     code = aube_codes::warnings::WARN_AUBE_YARN_BERRY_UNSUPPORTED,
                     "yarn berry unrecognized protocol '{}' in block '{}' — entry skipped",
@@ -242,17 +268,25 @@ pub(super) fn parse_berry_str(
     let mut resolved_deps: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     let mut resolved_opts: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     for (dep_path, pkg) in &packages {
-        let resolve = |raw: &BTreeMap<String, String>| {
+        let resolve = |raw: &BTreeMap<String, String>,
+                       optional: bool|
+         -> Result<BTreeMap<String, String>, Error> {
             let mut out = BTreeMap::new();
             for (name, raw_spec) in raw {
-                if let Some(target) = spec_to_dep_path.get(raw_spec) {
-                    out.insert(name.clone(), target.clone());
+                if let Some(target) = crate::resolve_dep_spec(
+                    raw_spec,
+                    optional,
+                    &spec_to_dep_path,
+                    &unsupported,
+                    path,
+                )? {
+                    out.insert(name.clone(), target);
                 }
             }
-            out
+            Ok(out)
         };
-        resolved_deps.insert(dep_path.clone(), resolve(&pkg.dependencies));
-        resolved_opts.insert(dep_path.clone(), resolve(&pkg.optional_dependencies));
+        resolved_deps.insert(dep_path.clone(), resolve(&pkg.dependencies, false)?);
+        resolved_opts.insert(dep_path.clone(), resolve(&pkg.optional_dependencies, true)?);
     }
     for (dep_path, deps) in resolved_deps {
         if let Some(pkg) = packages.get_mut(&dep_path) {
@@ -284,29 +318,71 @@ pub(super) fn parse_berry_str(
     // protocol prefix (`workspace:*`, `file:./pkgs/foo`, ...), it's
     // already a valid spec suffix and we try it verbatim first.
     let mut direct: Vec<DirectDep> = Vec::new();
-    let push_direct = |name: &str, range: &str, dep_type: DepType, direct: &mut Vec<DirectDep>| {
+    let push_direct = |name: &str,
+                       range: &str,
+                       dep_type: DepType,
+                       direct: &mut Vec<DirectDep>,
+                       skipped: &mut BTreeMap<String, BTreeMap<String, String>>|
+     -> Result<(), Error> {
         let resolved = crate::override_match::apply(&resolution_rules, name, range);
         let candidates = berry_spec_candidates(name, range, resolved);
-        for candidate in candidates {
-            if let Some(dep_path) = spec_to_dep_path.get(&candidate) {
+        let optional = matches!(dep_type, DepType::Optional);
+        for candidate in &candidates {
+            // `resolve_dep_spec`: `Some(dep_path)` when the candidate resolves;
+            // `Err` for a NON-optional unsupported source (the eager fatal);
+            // `None` for a genuine miss OR an optional unsupported source
+            // (already warned inside the helper).
+            if let Some(dep_path) =
+                crate::resolve_dep_spec(candidate, optional, &spec_to_dep_path, &unsupported, path)?
+            {
                 direct.push(DirectDep {
                     name: name.to_string(),
-                    dep_path: dep_path.clone(),
+                    dep_path,
                     dep_type,
                     specifier: None,
                 });
-                return;
+                return Ok(());
+            }
+            // An optional unsupported candidate was warned + skipped by the
+            // helper; record it as a consciously-skipped optional so a frozen
+            // install's drift check tolerates the absent dep, exactly like a
+            // platform-filtered optional (drift.rs `skipped_optional_dependencies`).
+            if optional && unsupported.contains_key(candidate) {
+                skipped
+                    .entry(".".to_string())
+                    .or_default()
+                    .insert(name.to_string(), range.to_string());
+                return Ok(());
             }
         }
+        Ok(())
     };
     for (name, range) in &manifest.dependencies {
-        push_direct(name, range, DepType::Production, &mut direct);
+        push_direct(
+            name,
+            range,
+            DepType::Production,
+            &mut direct,
+            &mut skipped_optional,
+        )?;
     }
     for (name, range) in &manifest.dev_dependencies {
-        push_direct(name, range, DepType::Dev, &mut direct);
+        push_direct(
+            name,
+            range,
+            DepType::Dev,
+            &mut direct,
+            &mut skipped_optional,
+        )?;
     }
     for (name, range) in &manifest.optional_dependencies {
-        push_direct(name, range, DepType::Optional, &mut direct);
+        push_direct(
+            name,
+            range,
+            DepType::Optional,
+            &mut direct,
+            &mut skipped_optional,
+        )?;
     }
 
     let mut importers = BTreeMap::new();
@@ -316,6 +392,7 @@ pub(super) fn parse_berry_str(
         importers,
         packages,
         patched_dependencies,
+        skipped_optional_dependencies: skipped_optional,
         ..Default::default()
     })
 }

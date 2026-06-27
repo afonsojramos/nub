@@ -263,9 +263,9 @@ pub(crate) enum ScanResult {
 /// npm `legacy-peer-deps` (different peer graph) and npm
 /// `install-strategy=nested` (different resolution/layout). yarn
 /// `supportedArchitectures` is NOT here — the engine honors it via the
-/// arch-filter resolver. PnP stays a WARN+downgrade (handled separately in
-/// `warn_if_pnp_requested`), not
-/// promoted. `checksumBehavior`/`enableHardenedMode` are NOT here: aube verifies
+/// arch-filter resolver. yarn `nodeLinker: pnp` is a plan-time FATAL handled
+/// separately in `pnp_fatal_if_requested` (it needs `.yarnrc.yml` reading, not
+/// the role-keyed scan here). `checksumBehavior`/`enableHardenedMode` are NOT here: aube verifies
 /// every tarball's SHA-512 by default (`verifyStoreIntegrity=true`), satisfying
 /// the `throw` posture.
 pub(crate) fn scan_unsupported_config(

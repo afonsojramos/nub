@@ -892,6 +892,33 @@ pub enum Error {
         )
     )]
     ResolutionShapeMismatch(std::path::PathBuf, String, &'static str),
+    /// A lockfile entry names a dependency source (protocol) the reader
+    /// can't resolve from that lockfile — a `git`/`jsr`/unknown source in
+    /// a yarn.lock or bun.lock that a registry fetch can't satisfy.
+    /// Reclassifying it to a registry `name@version` would 404 at fetch
+    /// time (a confusing mid-install error past the abort window) or, for
+    /// berry, silently drop the dependency — either way the installed tree
+    /// diverges from the incumbent's. Raised at PLAN time (before any
+    /// `node_modules` write) so the refusal is eager and precise. Fields
+    /// stay machine-readable so embedders can render their own surface,
+    /// matching [`Error::DeclarationMismatch`]. Only emitted under an
+    /// embedder whose profile sets `strict_unsupported_source` (nub);
+    /// standalone aube keeps its prior reclassify/drop default.
+    #[error("lockfile {path} entry `{key}` uses the unsupported `{protocol}` source")]
+    #[diagnostic(
+        code(ERR_AUBE_LOCKFILE_UNSUPPORTED_SOURCE),
+        help(
+            "aube can't resolve this source from the lockfile — install with the package manager that wrote it, or remove the dependency"
+        )
+    )]
+    UnsupportedSource {
+        /// The lockfile path (also identifies the reader kind for remedy wording).
+        path: std::path::PathBuf,
+        /// The offending lockfile block key / spec (e.g. `foo@user/repo#abc`).
+        key: String,
+        /// The unsupported protocol token (`git`, `jsr`, `exec`, …).
+        protocol: String,
+    },
     /// Deserialization failure with a byte offset into the source
     /// content, so miette's `fancy` handler can draw a pointer at the
     /// offending byte of the lockfile. Reuses `aube_manifest`'s
@@ -927,6 +954,20 @@ pub fn parse_json<T: serde::de::DeserializeOwned>(
 impl Error {
     pub fn parse(path: &std::path::Path, msg: impl Into<String>) -> Self {
         Error::Parse(path.to_path_buf(), msg.into())
+    }
+
+    /// Build an [`Error::UnsupportedSource`] for a lockfile entry whose
+    /// dependency source the reader can't resolve from that lockfile.
+    pub fn unsupported_source(
+        path: &std::path::Path,
+        key: impl Into<String>,
+        protocol: impl Into<String>,
+    ) -> Self {
+        Error::UnsupportedSource {
+            path: path.to_path_buf(),
+            key: key.into(),
+            protocol: protocol.into(),
+        }
     }
 
     pub fn parse_json_err(
