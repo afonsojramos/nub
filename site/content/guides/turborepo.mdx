@@ -11,7 +11,7 @@ Everything below is grounded in how the two tools actually behave together today
 
 - Keep your `package.json` `packageManager` field and your existing lockfile exactly as they are.
 - Install with `nub install` instead of your old package manager.
-- Run Turborepo under nub — `nub run <script>` where the script is `turbo run …`, or `nubx turbo run …`.
+- Run Turborepo under Nub — `nub run <script>` where the script is `turbo run …`, or `nubx turbo run …`.
 
 That is the whole integration. The rest of this page explains why it works and what to watch for.
 
@@ -59,7 +59,7 @@ nub run build         # root script: "turbo run build"
  Tasks:    1 successful, 1 total
 ```
 
-The one thing that matters is that **Turborepo runs under nub**. Launch it with `nub run <script>` (where the script's command is `turbo run …`) or with `nubx turbo run …`. If you invoke the `turbo` binary directly from a plain shell, the tasks run on whatever Node is on your path with no augmentation, and a `.ts` entry will fail to parse.
+The one thing that matters is that **Turborepo runs under Nub**. Launch it with `nub run <script>` (where the script's command is `turbo run …`) or with `nubx turbo run …`. If you invoke the `turbo` binary directly from a plain shell, the tasks run on whatever Node is on your path with no augmentation, and a `.ts` entry will fail to parse.
 
 You do not need to rewrite your package scripts to say `nub` anywhere. A script of `node ./build.ts` is enough — Nub's augmentation is what turns that into a TypeScript-aware run.
 

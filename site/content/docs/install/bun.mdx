@@ -104,7 +104,7 @@ dependencies:
 nub 0.0.44 · ✓ installed 2 packages in 35ms
 ```
 
-Nub's curated default-trust floor is on, but inert over a `bun.lock`: its cooling-window gate needs per-package publish-time data, and `bun.lock` carries none, so it fails closed. `trustedDependencies` is the only allowlist that builds anything — exactly Bun's model.
+Nub's curated default-trust floor is on, but inert over a `bun.lock`: its cooling-window gate needs per-package publish-time data, and `bun.lock` carries none, so it fails closed. Only `trustedDependencies` builds anything — exactly Bun's model.
 
 ## `bunfig.toml`
 
