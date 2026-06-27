@@ -456,3 +456,53 @@ a[href] {
 #nd-page {
   max-width: 720px;
 }
+
+/* No horizontal scroll in docs code blocks — EVER. The 720px prose column can't
+   fit every example command + aligned comment (or a long warning line) on one
+   line, so wrap instead of showing a horizontal scrollbar. `pre-wrap` wraps at
+   whitespace (so a command stays intact and its trailing `# comment` drops to
+   the next line); `overflow-wrap: anywhere` breaks an unbreakable token (an
+   integrity hash, a URL) only as a last resort. Covers EVERY code-block flavor
+   in the docs: fumadocs fenced blocks (figure.shiki > pre.w-max) AND the custom
+   <pre>s (Source / Terminal / ShimDemo / TypesSetup), each `overflow-x-auto`. */
+#nd-page pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  /* fumadocs sizes its <pre> to `w-max` (width: max-content), so it grows to the
+     longest line and `pre-wrap` never triggers. Pin to the container width so
+     lines actually wrap; harmless for the custom pres (already full width). */
+  width: 100%;
+  min-width: 0;
+}
+/* The hand-built terminals (Terminal / ShimDemo) put each line in a
+   `whitespace-pre` div; let those wrap too. */
+#nd-page pre .whitespace-pre {
+  white-space: pre-wrap;
+}
+/* Hanging indent so a wrapped continuation sits indented under the line it
+   belongs to — applies to shiki `.line` spans (fumadocs + Source) and the
+   terminal line divs. */
+#nd-page pre .line,
+#nd-page pre .whitespace-pre {
+  display: block;
+  text-indent: -2ch;
+  padding-inline-start: 2ch;
+}
+
+/* EXPLORATORY (disabled — docs render the default Newsreader serif): switch the
+   entire docs subtree (sidebar, prose body, headings, TOC) to a sans. To resume
+   the font run-through, UNCOMMENT this block and set --font-docs-sans to any
+   candidate var registered in layout.tsx (--font-c-bricolage | --font-c-darker
+   | --font-c-schibsted | --font-c-familjen | --font-c-epilogue | --font-c-hanken
+   | --font-c-bevietnam | --font-c-instrument | --font-c-encode). Top scorers
+   (2026-06-26): Epilogue, Hanken Grotesk, Encode Sans — all 8/10. */
+/*
+#nd-docs-layout {
+  --font-docs-sans: var(--font-c-encode);
+
+  --font-serif: var(--font-docs-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-display: var(--font-docs-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-sans: var(--font-docs-sans), ui-sans-serif, system-ui, sans-serif;
+  font-family: var(--font-serif);
+}
+*/
