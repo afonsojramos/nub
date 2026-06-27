@@ -39,11 +39,18 @@ const geistMono = Geist_Mono({
 // above-the-fold text — preloading it (and NOT preheating any unused face) is the
 // core FOUC mitigation. The metric-matched fallback next/font generates keeps the
 // pre-swap layout near-identical, so the swap is barely perceptible.
+//
+// Loaded as the VARIABLE face (no pinned `weight`) with the `wdth` axis exposed,
+// so `font-stretch` is live — the docs sidebar dials a subtle widening (Encode
+// Sans's normal width reads a touch thin at 14px nav size). A single variable
+// face typically costs no more than the four static weights it replaces, and
+// default rendering (no font-stretch) is unchanged width, so only the sidebar
+// shifts; everything else paints identically.
 const encodeSans = Encode_Sans({
   subsets: ['latin'],
   variable: '--font-encode',
   display: 'swap',
-  weight: ['400', '500', '600', '700'],
+  axes: ['wdth'],
   preload: true,
 });
 

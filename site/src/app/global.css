@@ -439,6 +439,16 @@ pre .line[data-output] span {
   }
 }
 
+/* Nav labels are Encode Sans at 14px, where its normal width reads a touch thin.
+   The variable face exposes the `wdth` axis (see the Encode Sans load in
+   layout.tsx), so a subtle font-stretch widens the letterforms via the real
+   designed axis — sturdier, no distortion, no weight bump. Sidebar-only; the rest
+   of the site keeps normal width. (Command chips are Geist Mono — no width axis —
+   so they're unaffected.) */
+#nd-sidebar a {
+  font-stretch: 110%;
+}
+
 /* Prev/next pager — the fumadocs FooterItem link is text-sm (14px) and the page-name
    title <p> inherits it, which reads too small. Target the title paragraph inside
    .font-medium (the wrapper div that holds the chevron icon + page name) to bring it
