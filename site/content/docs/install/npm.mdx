@@ -30,8 +30,8 @@ The CLI you type is pnpm-shaped; the files Nub reads and writes are npm's. When 
     { feature: <><code>npm_config_*</code></>, status: 'yes' },
     { feature: <><code>NPM_CONFIG_*</code> / <code>NPM_TOKEN</code></>, status: 'yes' },
     // ── Lockfiles ─────────────────────────────────────────────────────
-    { feature: <><code>package-lock.json</code> v2 / v3</>, status: 'yes', note: 'lockfileVersion 1 refused — re-lock under npm 7+.' },
-    { feature: <><code>npm-shrinkwrap.json</code></>, status: 'yes' },
+    { feature: <><code>package-lock.json</code> v1 / v2 / v3</>, status: 'yes', note: 'v1 (npm 5/6) read; rewritten as v3 on the first mutating install.' },
+    { feature: <><code>npm-shrinkwrap.json</code></>, status: 'yes', note: 'Includes pre-2017 (nested, no lockfileVersion).' },
   ]}
 />
 
@@ -62,19 +62,9 @@ Nub reads `lockfileVersion` 2 and 3, resolves against it, and writes it back in 
 
 A no-op rewrite keeps the incoming `lockfileVersion` — a v2 lock stays v2. The first **mutating** operation (`nub add`, `nub remove`) rewrites it as v3 (npm's default since npm 9), so the version field is an expected diff. An `npm-shrinkwrap.json` is read and preserved as-is.
 
-Older formats stop at v1. A `lockfileVersion: 1` lock (npm 5–6) is refused before install rather than silently misread:
+Older formats are read too. A `lockfileVersion: 1` lock (npm 5/6) and a pre-2017 `npm-shrinkwrap.json` — a nested `dependencies` tree with no `lockfileVersion` field at all — both resolve and install: Nub lifts the legacy nested tree into the same install-path scheme it uses for v2/v3. Registry dependencies install fully. The first mutating operation (`nub add`, `nub remove`) rewrites the lock as v3, the same in-place upgrade npm 7+ performs.
 
-```console
-# captured: nub 0.0.44 on a lockfileVersion 1 package-lock.json
-$ nub install
-ERR_NUB_LOCKFILE_PARSE
-
-  × failed to parse lockfile          # ❌ v1 is unsupported — install refused
-  ╰─▶ failed to parse lockfile /path/to/package-lock.json:
-      package-lock.json lockfileVersion 1 is not supported (need v2 or v3)
-```
-
-Run `npm install` once under npm 7+ to upgrade the lock to v2/v3, then `nub install`.
+Two legacy edges remain out of scope. Git and `file:` dependencies, which a v1 lock encodes in the `version` field rather than `resolved`, are not yet read. And a fully-hoisted pre-npm-5 shrinkwrap that records no `requires` edges cannot place every transitive — Nub installs what it can and warns about the rest (`WARN_NUB_LOCKFILE_LEGACY_INCOMPLETE_GRAPH`). For either, re-lock once under npm 7+, then `nub install`.
 
 ## `.npmrc`
 
@@ -129,6 +119,6 @@ Lifecycle scripts run under Nub's deny-by-default trust posture plus a gated def
 
 ## Gaps
 
-- **lockfileVersion 1** (npm ≤ 6) errors, not migrated — run `npm install` once to upgrade first.
-- **A v2 lock becomes v3** on the first mutating install (preserved on no-op installs only).
+- **Legacy git / `file:` deps** in a v1 lock (source encoded in `version`, not `resolved`) are not yet read — re-lock under npm 7+ first.
+- **A v1 or v2 lock becomes v3** on the first mutating install — no-op installs preserve the incoming version.
 - **No drop-in `npm` CLI grammar.** npm-specific subcommand spellings and flags are not emulated; the CLI is pnpm-shaped.
