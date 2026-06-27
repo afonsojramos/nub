@@ -66,8 +66,12 @@ using System; using System.Runtime.InteropServices; using System.ComponentModel;
 public static class AC {
     [DllImport("userenv.dll", CharSet=CharSet.Unicode)] public static extern int CreateAppContainerProfile(string n,string d,string desc,IntPtr c,int cc,out IntPtr sid);
     [DllImport("userenv.dll", CharSet=CharSet.Unicode)] public static extern int DeleteAppContainerProfile(string n);
-    [DllImport("advapi32.dll", SetLastError=true)] public static extern bool ConvertStringSidToSid(string s, out IntPtr sid);
-    [DllImport("advapi32.dll", SetLastError=true)] public static extern bool ConvertSidToStringSid(IntPtr Sid, out IntPtr s);
+    // CharSet=Unicode is LOAD-BEARING: without it these bind to the ANSI *A variants. The
+    // *A ConvertSidToStringSid writes an ANSI buffer that SidToString then mis-reads with
+    // PtrToStringUni (UTF-16) -> a garbled SID string -> SecurityIdentifier(..) "Value was
+    // invalid". Force the *W variants so the SID round-trips as Unicode.
+    [DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)] public static extern bool ConvertStringSidToSid(string s, out IntPtr sid);
+    [DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)] public static extern bool ConvertSidToStringSid(IntPtr Sid, out IntPtr s);
     [DllImport("kernel32.dll")] public static extern IntPtr LocalFree(IntPtr h);
 
     [StructLayout(LayoutKind.Sequential)] public struct SID_AND_ATTRIBUTES { public IntPtr Sid; public uint Attributes; }
