@@ -1,0 +1,37 @@
+# TEMPORARY branch-scoped probe (NOT for main): proves the
+# `fifty_concurrent_child_processes` fix holds on a real windows-latest runner by
+# running the test many times in a row. Triggers on push to its own branch — no PR
+# required (see the ci-adhoc-test skill). Delete the branch once verified.
+name: flake-fifty-windows-probe
+
+on:
+  push:
+    branches: [flake-fifty-windows]
+    paths:
+      - 'tests/fixtures/nested-spawn/concurrent-50.ts'
+      - '.github/workflows/flake-fifty-windows-probe.yml'
+  workflow_dispatch:
+
+jobs:
+  loop:
+    name: fifty_concurrent loop (windows-latest, node 24)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      # Build the test binary once, then run only the target test repeatedly.
+      - name: Build the integration test (no-run)
+        run: cargo test -p nub-cli --test integration --no-run
+      - name: Run fifty_concurrent_child_processes 25x
+        shell: pwsh
+        run: |
+          for ($i = 1; $i -le 25; $i++) {
+            Write-Host "=== iteration $i / 25 ==="
+            cargo test -p nub-cli --test integration fifty_concurrent_child_processes -- --nocapture
+            if ($LASTEXITCODE -ne 0) { throw "FAILED on iteration $i" }
+          }
+          Write-Host "all 25 iterations passed"
