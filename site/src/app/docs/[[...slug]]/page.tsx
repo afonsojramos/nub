@@ -46,39 +46,39 @@ function TocStarNudge({ href }: { href: string }) {
           <span>nubjs/nub</span>
         </a>
         {/* Handwritten nudge BELOW the link. The arrow sits ENTIRELY below the
-            link box — its tip is ~6px under the link's bottom edge and points UP
-            at it (never into the icon), an elongated swoosh descending toward the
-            label below. The link box is ~32px tall, so in this overlay's coords
-            (origin = the link's top-left) the link bottom is at y≈32 and the tip
-            at y≈38. The arrow stays in the icon's column (x<24), clear of the
-            link text; a thin stroke + slim head keep it from reading stubby. */}
+            link box and points UP at the link's BOTTOM-MIDDLE. The overlay's
+            top-left coincides with the link's top-left; the visible content
+            (icon + "nubjs/nub") spans x 0→80, so its bottom-middle is (40,32).
+            The tip sits at (40,38) — a ~6px gap under the link — with the shaft
+            rising from above the handwriting. A thin stroke + slim head and a
+            gentle leftward bow keep it from reading stubby. */}
         <div
           aria-hidden="true"
-          className="pointer-events-none absolute left-3 top-0 select-none text-ember/85"
+          className="pointer-events-none absolute left-3 top-0 select-none text-ember/45"
         >
           <svg
             viewBox="0 0 120 100"
             fill="none"
             className="absolute left-0 top-0 h-[100px] w-[120px]"
           >
-            {/* shaft: a long, gently-curved swoosh from above the label up to the
-                tip just below the link's bottom edge */}
+            {/* shaft: a gently bowed swoosh from above the label up to the tip
+                just below the link's bottom-middle */}
             <path
-              d="M23 74 C 10 64, 13 47, 7 39"
+              d="M52 72 C 40 62, 34 50, 40 38"
               stroke="currentColor"
               strokeWidth="1.7"
               strokeLinecap="round"
             />
-            {/* arrowhead, tip at (~7,38) — ~6px below the link bottom — pointing UP */}
+            {/* arrowhead, tip at (40,38) — ~6px below the link's bottom-middle — pointing UP */}
             <path
-              d="M2 47 L 7 38 L 13 45"
+              d="M34 46 L 40 38 L 47 45"
               stroke="currentColor"
               strokeWidth="1.7"
               strokeLinecap="round"
               strokeLinejoin="round"
             />
           </svg>
-          <span className="absolute left-0 top-[80px] block w-fit -rotate-3 whitespace-nowrap font-[family-name:var(--font-caveat)] text-lg leading-none">
+          <span className="absolute left-[56px] top-[80px] block w-fit -rotate-3 whitespace-nowrap font-[family-name:var(--font-caveat)] text-lg leading-none">
             Leave a star!
           </span>
         </div>
