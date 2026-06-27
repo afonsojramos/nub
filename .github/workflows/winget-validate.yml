@@ -1,0 +1,103 @@
+name: winget manifest
+
+# High-confidence test that the committed winget manifest actually installs nub,
+# WITHOUT needing the manifest to be published to microsoft/winget-pkgs. It runs
+# the exact operation the winget-pkgs validation bot runs — download the release
+# zip, verify its SHA256, extract, and register the portable binaries — so a green
+# run here means the same manifest will pass the bot's gate when submitted.
+#
+# Path-filtered to manifest/workflow changes (a static manifest only needs
+# re-testing when it changes) plus manual dispatch — it does not run a Windows
+# runner on every unrelated PR. Broaden the paths/triggers if you want it on all PRs.
+
+on:
+  pull_request:
+    paths:
+      - "winget/**"
+      - ".github/workflows/winget-validate.yml"
+  push:
+    branches: [main]
+    paths:
+      - "winget/**"
+      - ".github/workflows/winget-validate.yml"
+  workflow_dispatch:
+
+jobs:
+  install-from-manifest:
+    name: winget install --manifest (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      # GitHub-hosted Windows runners do not reliably ship the winget CLI (it is a
+      # desktop App Installer component, not a Server feature). Install it if it's
+      # absent so the job is deterministic regardless of image drift.
+      - name: Ensure winget is available
+        shell: pwsh
+        run: |
+          if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+            Write-Host "winget not found; installing via Cyberboss/install-winget below."
+            echo "NEED_WINGET=1" >> $env:GITHUB_ENV
+          } else {
+            winget --version
+          }
+      - name: Install winget (if missing)
+        if: env.NEED_WINGET == '1'
+        uses: Cyberboss/install-winget@1c6f189175e9f015bf1aa113cd1cc6c73efb9d47 # v1
+
+      - name: Validate + install nub from the local manifest, then smoke
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          # Resolve the single committed version directory (survives version bumps).
+          $verDir = Get-ChildItem -Directory winget/manifests/n/Nubjs/Nub |
+            Sort-Object Name | Select-Object -Last 1
+          if (-not $verDir) { Write-Error "no manifest version directory found"; exit 1 }
+          $manifest = $verDir.FullName
+          Write-Host "Testing manifest: $manifest"
+
+          # Schema lint. Informational: a schema ERROR also fails the install below
+          # (the authoritative gate), and winget validate returns a non-zero code for
+          # benign warnings too — so surface its output without hard-failing on it.
+          Write-Host "=== winget validate ==="
+          winget validate --manifest $manifest
+          Write-Host "validate exit code: $LASTEXITCODE"
+
+          # Two admin-gated winget settings must be enabled for an unattended install
+          # FROM A LOCAL MANIFEST of an ARCHIVE (zip) package — both default OFF and
+          # both surface as "This feature needs to be enabled by administrators ...".
+          # GitHub-hosted Windows runners are elevated, so enabling them here works.
+          #   LocalManifestFiles            — permits `winget install --manifest`.
+          #   LocalArchiveMalwareScanOverride — permits --ignore-local-archive-malware-scan,
+          #     which skips the archive malware scan that otherwise blocks unattended.
+          Write-Host "=== enable admin settings ==="
+          winget settings --enable LocalManifestFiles
+          winget settings --enable LocalArchiveMalwareScanOverride
+
+          # The authoritative gate — the same download + hash-verify + sandbox-style
+          # install the winget-pkgs bot performs. A bad URL, a wrong SHA256, or a
+          # broken nested-installer path fails HERE. (The malware-scan override is
+          # irrelevant to the published package, which installs from the source, not
+          # a local manifest.)
+          Write-Host "=== winget install --manifest ==="
+          winget install --manifest $manifest `
+            --accept-package-agreements --accept-source-agreements `
+            --disable-interactivity --ignore-local-archive-malware-scan
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "winget install --manifest failed with exit code $LASTEXITCODE"
+            exit 1
+          }
+
+          # winget registers portable command aliases under the user Links dir and
+          # appends it to PATH, but that PATH change is not reflected in this running
+          # session — prepend it so the smoke can find the freshly-installed verbs.
+          $links = Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Links'
+          $env:PATH = "$links;$env:PATH"
+
+          Write-Host "=== smoke: nub --version / nubx --version ==="
+          nub --version
+          if ($LASTEXITCODE -ne 0) { Write-Error "nub --version failed"; exit 1 }
+          nubx --version
+          if ($LASTEXITCODE -ne 0) { Write-Error "nubx --version failed"; exit 1 }
+          Write-Host "OK: nub installed from the local winget manifest and both verbs run."
