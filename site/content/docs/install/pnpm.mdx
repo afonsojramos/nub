@@ -128,7 +128,9 @@ Under a non-pnpm incumbent — npm, Yarn, Bun, or a Nub-identity project — non
 
 ```console
 $ nub install
-nub: `.pnpmfile.cjs` ignored — this project uses npm, which doesn't apply pnpmfile hooks. Remove it, name it explicitly with `--pnpmfile`, or switch to pnpm (`nub pm use pnpm`).
+nub: `.pnpmfile.cjs` ignored — this project uses npm, which doesn't
+     apply pnpmfile hooks. Remove it, name it explicitly with
+     `--pnpmfile`, or switch to pnpm (`nub pm use pnpm`).
 ```
 
 Under Nub identity, pnpm-named files are outside the supported config surface and default `.pnpmfile.cjs` / `.pnpmfile.mjs` files are ignored silently. An explicit `--pnpmfile <path>` always loads.

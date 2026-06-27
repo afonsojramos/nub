@@ -7,11 +7,12 @@ Run a command-line tool by name with `nubx`: a local bin from `node_modules/.bin
 
 ```bash
 nubx eslint .                          # resolve from node_modules/.bin and run
-nub dlx eslint .                       # the same fetch-and-run, as a nub subcommand
+nub dlx eslint .                       # same fetch-and-run, as a nub subcommand
 nub x eslint .                         # short alias of nub dlx
 nub exec eslint .                      # local bin only — never fetches
-nubx --filter @org/api tsc --build     # run a local bin across a filtered workspace
-nub dlx -p cowsay -c 'cowsay hi | tr a-z A-Z'  # one-off tool, no install, shell pipeline
+nubx --filter @org/api tsc --build     # run a local bin in a filtered workspace
+# one-off tool, no install, shell pipeline
+nub dlx -p cowsay -c 'cowsay hi | tr a-z A-Z'
 ```
 
 Three spellings fetch-and-run — a local bin first, a registry fetch on a miss: the `nubx` standalone binary, and the `nub dlx` / `nub x` subcommands (`nub x` is the short alias of `nub dlx`, mirroring `bunx` / `bun x`). They share the fetch behaviour and the `-p`/`--package` flag; `nubx` additionally carries the workspace flags below, while `nub dlx`/`nub x` carry `-c`/`--shell-mode` and `--allow-build`. Separate from all three is [`nub exec`](#download-and-execute), which runs a local bin and never reaches the registry.
@@ -110,11 +111,13 @@ dependencies:
 The DLX fetch runs through Nub's normal install resolver, so the same `minimumReleaseAge` cooling window that protects `nub install` also protects `nubx` — a fetched tool's resolved version must be older than the window before it's used. The default is **24 hours**, the same as `install`; set `minimumReleaseAge=0` to disable it.
 
 ```console
-# .npmrc: minimumReleaseAge tightened past every release, minimumReleaseAgeStrict=true
+# .npmrc: minimumReleaseAge tightened past every release,
+# minimumReleaseAgeStrict=true
 $ nubx cowsay "hi"
 ERR_NUB_NO_MATURE_MATCHING_VERSION
   × dlx install failed
-  ╰─▶ no version of cowsay matching latest is older than … minute(s) (minimumReleaseAgeStrict=true)
+  ╰─▶ no version of cowsay matching latest is older than … minute(s)
+      (minimumReleaseAgeStrict=true)
   help: blocked by age gate: 1.6.0
 ```
 

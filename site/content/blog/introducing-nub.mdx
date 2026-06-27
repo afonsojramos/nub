@@ -41,7 +41,7 @@ $ nub run build            # script runner — 24× faster than pnpm run
 $ nubx prisma generate     # bin runner — 19× faster than npx
 $ nub watch src/server.ts  # watcher — driven by the dependency graph
 $ nub install              # package manager — pnpm-compatible, your lockfile
-$ nub node install {{NODE_MAJOR}}      # version manager — installs Node on demand
+$ nub node install {{NODE_MAJOR}}    # version manager — installs Node on demand
 ```
 
 ## `nub <file>`: a TypeScript-first Node.js
@@ -241,7 +241,8 @@ The TC39 date/time API. Native in Node 26+; older Nodes get the reference [`@js-
 ```ts
 const now = Temporal.Now.plainDateTimeISO();
 const tomorrow = now.add({ days: 1 });
-const meeting = Temporal.ZonedDateTime.from("2026-06-01T09:00[America/New_York]");
+const tz = "2026-06-01T09:00[America/New_York]";
+const meeting = Temporal.ZonedDateTime.from(tz);
 ```
 
 ### `URLPattern`

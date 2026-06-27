@@ -6,11 +6,14 @@ description: A drop-in for pnpm run and npm run — every flag carries over with
 `nub run` is a drop-in for `pnpm run` and `npm run` — every flag carries over with the same spelling and semantics, down to the recursive and workspace-filter ones a real monorepo leans on. Existing invocations work unchanged:
 
 ```bash
-nub run -r --resume-from @scope/pkg build      # resume an interrupted recursive run mid-graph
-nub run -r --reporter=ndjson build             # machine-readable per-package results for CI
+# resume an interrupted recursive run mid-graph
+nub run -r --resume-from @scope/pkg build
+# machine-readable per-package results for CI
+nub run -r --reporter=ndjson build
 nub run -r --stream --reporter-hide-prefix build
 nub run -r --workspace-concurrency 4 build
-nub run -r --if-present test                   # skip members without the script
+# skip members without the script
+nub run -r --if-present test
 ```
 
 It reads your `package.json` directly — 24× faster on the cold path — and package management stays with whatever you already use (`pnpm`, `npm`, `yarn`, `bun`). This page is a cookbook: each section is a task with the exact command to run.
@@ -55,7 +58,8 @@ nub run "/^build:/"     # runs build:js, build:css, build:types — concurrently
 Matching scripts run concurrently by default, capped at `min(4, CPU count)`, with each line prefixed by its script name. To run them one at a time instead (the `run-s` behavior), cap the concurrency at one:
 
 ```bash
-nub run --workspace-concurrency 1 "/^build:/"   # one at a time, in package.json order
+# one at a time, in package.json order
+nub run --workspace-concurrency 1 "/^build:/"
 ```
 
 The selector must be a slash-delimited regular expression literal (`/^build:/`); a plain `build:*` is treated as a literal script name, not a glob. Regex flags are not supported. An exact script name (no slashes) always runs that single script unchanged.
@@ -131,7 +135,7 @@ Nub populates the child process with the full npm-compatible environment, so scr
 ```
 
 ```bash
-nub run build                 # tsc resolves from node_modules/.bin; npm_* vars are set
+nub run build   # tsc resolves from node_modules/.bin; npm_* vars are set
 ```
 
 The injected set includes:
@@ -202,8 +206,8 @@ nub run --filter @org/api --filter @org/web build
 **`--filter "@org/web..."` — graph selectors:** the dependency-graph filter forms walk the workspace package graph. Use the `...` syntax to pull in related packages.
 
 ```bash
-nub run --filter "@org/web..." build   # @org/web AND its dependencies (downstream)
-nub run --filter "...@org/web" build   # @org/web AND everything that depends on it (upstream)
+nub run --filter "@org/web..." build   # @org/web + dependencies (downstream)
+nub run --filter "...@org/web" build   # @org/web + dependents (upstream)
 nub run --filter "@org/web^..." build  # @org/web's dependencies only
 nub run --filter "...^@org/web" build  # @org/web's dependents only
 ```
@@ -215,7 +219,8 @@ These are exactly the forms `pnpm --filter` supports, so existing monorepo muscl
 ```bash
 nub run --filter "[main]" test         # packages changed since main
 nub run --filter "[HEAD~1]" build      # packages changed since the last commit
-nub run --filter "...[origin/main]" test  # changed packages AND their dependents
+# changed packages AND their dependents
+nub run --filter "...[origin/main]" test
 ```
 
 ## `--parallel`, `--sequential`
@@ -224,8 +229,8 @@ Across a workspace, Nub runs packages concurrently up to a cap (CPU count by def
 
 ```bash
 nub run -r --workspace-concurrency 4 build   # cap at 4 concurrent scripts
-nub run -r --parallel dev                     # all at once, no topo ordering or cap
-nub run -r --sequential migrate               # one at a time, ignore topology
+nub run -r --parallel dev                    # all at once, no topo order or cap
+nub run -r --sequential migrate              # one at a time, ignore topology
 ```
 
 Use `--parallel` for long-running dev servers where there is nothing to order, and `--sequential` for scripts that must not overlap.

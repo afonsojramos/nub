@@ -7,7 +7,8 @@ Yarn is supported **read-only**. Install and run work; any command that would re
 
 ```console
 $ nub add lodash
-Error: nub add: refusing to modify yarn.lock — adding a dependency re-resolves and rewrites yarn.lock
+Error: nub add: refusing to modify yarn.lock —
+       adding a dependency re-resolves and rewrites yarn.lock
   Run it with yarn directly:
     yarn add lodash
 ```
@@ -151,7 +152,9 @@ Yarn Berry defaults to PnP when `nodeLinker` is absent. On install, Nub prints o
 ```console
 # captured: nub 0.1.1, Yarn Berry lockfile with no nodeLinker
 $ nub install
-nub: this Yarn project uses Plug'n'Play (nodeLinker: pnp or Yarn Berry's default), which nub does not implement — installing a node_modules tree instead. [WARN_NUB_PNP_LINKER_DOWNGRADE]
+nub: this Yarn project uses Plug'n'Play (nodeLinker: pnp or Yarn
+     Berry's default), which nub does not implement — installing a
+     node_modules tree instead. [WARN_NUB_PNP_LINKER_DOWNGRADE]
 nub 0.1.1 · ✓ Already up to date
 ```
 

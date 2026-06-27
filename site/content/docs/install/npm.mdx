@@ -40,18 +40,22 @@ The CLI you type is pnpm-shaped; the files Nub reads and writes are npm's. When 
 Nub reads `lockfileVersion` 2 and 3, resolves against it, and writes it back in npm's exact format. On a no-op install the writer reproduces npm's output byte-for-byte — key ordering, the `devOptional` collapse, `peerDependenciesMeta.optional`, and platform fields all preserved — so the file doesn't churn and `npm ci` accepts it unchanged.
 
 ```jsonc
-// package-lock.json written by `nub install` — accepted by `npm ci` byte-for-byte
+// package-lock.json from `nub install` — accepted by `npm ci` byte-for-byte
 {
   "name": "app",
   "version": "1.0.0",
   "lockfileVersion": 3,
   "requires": true,
   "packages": {
-    "": { "name": "app", "version": "1.0.0", "dependencies": { "is-odd": "3.0.1" } },
+    "": {
+      "name": "app",
+      "version": "1.0.0",
+      "dependencies": { "is-odd": "3.0.1" }
+    },
     "node_modules/is-odd": {
       "version": "3.0.1",
       "resolved": "https://registry.npmjs.org/is-odd/-/is-odd-3.0.1.tgz",
-      "integrity": "sha512-CQpnWPrDwmP1+SMHXZhtLtJv90yiyVfluGsX5iNCVkrhQtU3TQHsUWPG9wkdk9Lgd5yNpAg9jQEo90CBaXgWMA==",
+      "integrity": "sha512-CQpnWPrD…CBaXgWMA==",
       "license": "MIT",
       "dependencies": { "is-number": "^6.0.0" },
       "engines": { "node": ">=4" }
@@ -86,9 +90,11 @@ Corporate or self-signed certificate authorities are configured through the stan
 ```ini
 # .npmrc
 cafile=./corp-ca.pem                          # PEM bundle, all registries
-ca="-----BEGIN CERTIFICATE-----..."           # inline PEM (repeat ca[]= to stack)
 //registry.example.com/:cafile=./corp-ca.pem  # per-registry override
-strict-ssl=false                              # disable verification (user/global scope only)
+# inline PEM (repeat ca[]= to stack)
+ca="-----BEGIN CERTIFICATE-----..."
+# disable verification (user/global scope only)
+strict-ssl=false
 ```
 
 The certificates are added to the trust store of the install client. A committed project `.npmrc` cannot turn off `strict-ssl` — only the user or global scope can.

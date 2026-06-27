@@ -2,15 +2,17 @@
    Shared Open Graph / Twitter-card renderer.
 
    Builds 1200×630 social cards that look like they were lifted off the
-   homepage: the `#100f0d` ink ground, a top ember glow, the Newsreader display
-   serif (with the italic "augments" accent), an IBM Plex Mono eyebrow, and the
-   `nub.` wordmark with the ember full-stop.
+   homepage: the `#100f0d` ink ground, a top ember glow, the Encode Sans
+   display sans (with the ember "all-in-one" accent), an IBM Plex Mono eyebrow,
+   and the `nub.` wordmark with the ember full-stop.
 
    `next/og` rasterizes a React tree with Satori, which cannot read CSS
-   `next/font` faces — it needs raw font buffers. We ship the exact Newsreader
-   and IBM Plex Mono weights the site uses under `src/lib/og-fonts/` and load
-   them at module scope (cached across renders). Everything here is pure
-   layout + inline styles, the only shape Satori supports.
+   `next/font` faces — it needs raw font buffers. We ship the exact Encode Sans
+   weights the site uses in `public/` and the IBM Plex Mono weights under
+   `src/lib/og-fonts/`, and load them at module scope (cached across renders).
+   Everything here is pure layout + inline styles, the only shape Satori
+   supports. (Encode Sans has no italic; the homepage accent is carried by the
+   ember colour plus a heavier weight rather than a slant.)
 ---------------------------------------------------------------------------- */
 import { ImageResponse } from 'next/og';
 import { readFileSync } from 'node:fs';
@@ -29,25 +31,28 @@ const EMBER = '#ff5d3b';
 const BORDER = '#2a2620';
 
 const FONT_DIR = join(process.cwd(), 'src', 'lib', 'og-fonts');
+const PUBLIC_DIR = join(process.cwd(), 'public');
 const font = (file: string) => readFileSync(join(FONT_DIR, file));
+const publicFont = (file: string) => readFileSync(join(PUBLIC_DIR, file));
 
-/* Loaded once per server process, reused for every card. */
+/* Loaded once per server process, reused for every card. Encode Sans rides in
+   `public/`; IBM Plex Mono stays under og-fonts. */
 const fonts = [
-  { name: 'Newsreader', data: font('newsreader-regular.ttf'), weight: 400 as const, style: 'normal' as const },
-  { name: 'Newsreader', data: font('newsreader-medium.ttf'), weight: 500 as const, style: 'normal' as const },
-  { name: 'Newsreader', data: font('newsreader-italic.ttf'), weight: 400 as const, style: 'italic' as const },
+  { name: 'Encode Sans', data: publicFont('encode-sans-regular.ttf'), weight: 400 as const, style: 'normal' as const },
+  { name: 'Encode Sans', data: publicFont('encode-sans-medium.ttf'), weight: 500 as const, style: 'normal' as const },
+  { name: 'Encode Sans', data: publicFont('encode-sans-semibold.ttf'), weight: 600 as const, style: 'normal' as const },
   { name: 'IBM Plex Mono', data: font('plexmono-regular.ttf'), weight: 400 as const, style: 'normal' as const },
   { name: 'IBM Plex Mono', data: font('plexmono-medium.ttf'), weight: 500 as const, style: 'normal' as const },
 ];
 
-/* The `nub.` wordmark — Newsreader display serif, ember full-stop. Matches the
+/* The `nub.` wordmark — Encode Sans display sans, ember full-stop. Matches the
    footer treatment on the homepage. */
 function Wordmark({ size }: { size: number }) {
   return (
     <div
       style={{
         display: 'flex',
-        fontFamily: 'Newsreader',
+        fontFamily: 'Encode Sans',
         fontWeight: 500,
         fontSize: size,
         letterSpacing: '-0.015em',
@@ -80,7 +85,7 @@ function titleFontSize(title: ReactElement | string): string {
 }
 
 /* The card body, shared by the home and per-page cards. The ember glow, ink
-   ground, eyebrow, and serif headline are pinned top-left (the title sits
+   ground, eyebrow, and sans headline are pinned top-left (the title sits
    directly under the eyebrow); the footer wordmark anchors the bottom. All
    positioned with the absolute-size geometry Satori needs. */
 function Card({ eyebrow, title }: CardProps) {
@@ -95,7 +100,7 @@ function Card({ eyebrow, title }: CardProps) {
         position: 'relative',
         backgroundColor: INK,
         padding: '80px',
-        fontFamily: 'Newsreader',
+        fontFamily: 'Encode Sans',
       }}
     >
       {/* Top ember glow — mirrors the hero's radial-gradient wash. */}
@@ -154,7 +159,7 @@ function Card({ eyebrow, title }: CardProps) {
           style={{
             display: 'flex',
             flexWrap: 'wrap',
-            fontFamily: 'Newsreader',
+            fontFamily: 'Encode Sans',
             fontWeight: 500,
             fontSize: titleFontSize(title),
             lineHeight: 1.02,
@@ -199,15 +204,16 @@ export function renderOgImage(props: CardProps) {
   return new ImageResponse(<Card {...props} />, { ...OG_SIZE, fonts });
 }
 
-/* The homepage card: the punchy tagline, "all-in-one" set in ember italic to
-   match the homepage accent treatment. No eyebrow (it just restated the
-   tagline) — the tagline carries it. */
+/* The homepage card: the punchy tagline, "all-in-one" set in ember + a heavier
+   weight to match the homepage accent treatment (Encode Sans has no italic, so
+   the slant the homepage once used is carried by colour + weight here). No
+   eyebrow (it just restated the tagline) — the tagline carries it. */
 export function renderHomeOgImage() {
   return renderOgImage({
     title: (
       <div style={{ display: 'flex', flexWrap: 'wrap' }}>
         <span style={{ display: 'flex' }}>The&nbsp;</span>
-        <span style={{ display: 'flex', fontStyle: 'italic', color: EMBER }}>all-in-one</span>
+        <span style={{ display: 'flex', fontWeight: 600, color: EMBER }}>all-in-one</span>
         <span style={{ display: 'flex' }}>&nbsp;Node.js toolkit</span>
       </div>
     ),

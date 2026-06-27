@@ -10,7 +10,9 @@ The browser-shape `Worker` global is typed by Nub's own types package — `@type
 Browsers expose a `Worker` global; Node ships only `node:worker_threads.Worker`, a different class with a different API, and never a browser-shape global. Nub closes that gap with a polyfill preloaded on every supported Node (18.19+), so the browser constructor and messaging shape work unchanged.
 
 ```ts
-const worker = new Worker(import.meta.resolve("./worker.ts"), { type: "module" });
+const worker = new Worker(import.meta.resolve("./worker.ts"), {
+  type: "module",
+});
 
 worker.onmessage = (ev) => {
   console.log(ev.data); // → 42
@@ -72,7 +74,9 @@ The `type` option is honored only to choose which `importScripts` surface the wo
 `importScripts()` in a classic worker fetches and evaluates local files and `data:` URLs synchronously, in order. Remote (`http:`/`https:`) URLs are not supported — there is no synchronous network on Node.
 
 ```ts
-const worker = new Worker(new URL("./worker.js", import.meta.url), { type: "classic" });
+const worker = new Worker(new URL("./worker.js", import.meta.url), {
+  type: "classic",
+});
 
 worker.onmessage = (ev) => {
   console.log(ev.data); // → 42

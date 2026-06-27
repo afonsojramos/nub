@@ -30,13 +30,16 @@ A shim sits in front of every command, so what matters is the time it adds. A co
 In a pinned project, a shim refuses to run a *different* package manager — a competing lockfile and `node_modules` are exactly what you don't want. Bare `yarn add react` in a pnpm-pinned project exits nonzero and names what to run instead:
 
 ```console
-$ yarn add react
-nub: the nub package-manager shims on your PATH (installed via `nub pm shim`) intercepted this.
-This project pins pnpm (via package.json#packageManager) — refusing to run yarn.   # ❌ wrong package manager for this project
-A different package manager here would write a competing lockfile and node_modules.
+$ yarn add react   # ❌ wrong package manager for this project
+nub: the nub package-manager shims on your PATH (installed via
+     `nub pm shim`) intercepted this.
+This project pins pnpm (via package.json#packageManager) — refusing to run yarn.
+A different package manager here would write a competing lockfile
+and node_modules.
 
   run instead:  pnpm add react
-  to bypass:    invoke the system yarn by absolute path, or remove the shims: nub pm unshim
+  to bypass:    invoke the system yarn by absolute path,
+                or remove the shims: nub pm unshim
 ```
 
 Runner commands stay transparent. The `npx` and `pnpx` tools and the `init` / `create` / `dlx` / `exec` verbs fall through to the system tool whatever the pin, so `npm create vite` works in a pnpm project. A package manager spawned by a running install — a lifecycle script shelling out to a different one — also falls through, so an install you never typed directly isn't broken.

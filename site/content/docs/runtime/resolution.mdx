@@ -74,7 +74,8 @@ In TypeScript-family files, extensionless imports resolve the way `tsc` resolves
 ```ts
 // from a .ts / .tsx / .mts / .cts file:
 import { config } from "./config";   // resolves ./config.ts
-import data from "./fixtures";       // resolves ./fixtures/index.ts (or its package.json "main")
+// resolves ./fixtures/index.ts (or its package.json "main")
+import data from "./fixtures";
 ```
 
 The probe order is extension-aware — it depends on the parent file's extension:
@@ -95,7 +96,8 @@ This probing is scoped to TypeScript-family parent files (`.ts` / `.tsx` / `.mts
 With `moduleResolution: "nodenext"`, `tsc` wants a `.js` extension on relative imports even though the file on disk is `.ts`. Nub reverses that at runtime, so the same source runs before and after a build.
 
 ```ts
-import { handler } from "./handler.js";  // resolves ./handler.ts when no ./handler.js exists
+// resolves ./handler.ts when no ./handler.js exists
+import { handler } from "./handler.js";
 ```
 
 The literal extension always wins first: a real on-disk `./handler.js` is used as-is, and the swap only fires when the written extension points at a file that doesn't exist. The same rewrite covers `.jsx → .tsx`, `.mjs → .mts`, and `.cjs → .cts` — and likewise, a real `.cjs` beats a sibling `.cts`. This is the `tsc`/`tsx` emit convention, not a guess at the file's type.

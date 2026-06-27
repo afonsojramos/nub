@@ -73,7 +73,7 @@ In CI, swap `actions/setup-node` for the [setup-nub action](/docs/setup-nub):
 The installer is pnpm-compatible at the CLI surface and lockfile-compatible with whatever your project already uses. It infers the incumbent package manager and mirrors it — npm, pnpm, and bun lockfiles round-trip cleanly; yarn is read-only.
 
 ```bash
-nub install              # resolve + link node_modules into the existing lockfile
+nub install              # resolve + link node_modules into existing lockfile
 nub add -E -D react      # exact pin, devDeps — pnpm flag spelling
 nub remove lodash
 nub update

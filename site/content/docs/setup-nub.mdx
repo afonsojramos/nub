@@ -25,14 +25,12 @@ Everything that follows resolves to the project's pinned Node — the same contr
 
 ## How it works
 
-The action installs the `nub` CLI, then eagerly provisions the project's pinned Node into Nub's cache during the setup step — downloaded and ready before any of your steps run, never lazily mid-build. The pin is resolved from the project files on disk, in this order:
+The action installs the `nub` CLI, then eagerly provisions the project's pinned Node into Nub's cache during the setup step — downloaded and ready before any of your steps run, never lazily mid-build. The pin is resolved from the project's Node-version sources, in this order:
 
-```
-devEngines.runtime
-.node-version
-.nvmrc
-engines.node
-```
+1. `package.json#/devEngines/runtime`
+2. `.node-version`
+3. `.nvmrc`
+4. `package.json#/engines/node`
 
 That resolved Node's bin directory is added to the global PATH, so bare `node`/`npm`/`npx` and every subsequent step see the pinned version — the same PATH guarantee setup-node gives. A project with no pin is fine: the eager step skips cleanly and Nub provisions at runtime instead.
 
@@ -105,13 +103,11 @@ A package-manager name (`npm`/`pnpm`/`yarn`/`bun`) is accepted for setup-node co
 
 The cache key is derived from the project's lockfile and the Node pin, with the lockfile auto-detected in this order:
 
-```
-pnpm-lock.yaml
-package-lock.json
-bun.lock
-bun.lockb
-yarn.lock
-```
+1. `pnpm-lock.yaml`
+2. `package-lock.json`
+3. `bun.lock`
+4. `bun.lockb`
+5. `yarn.lock`
 
 ### `package-manager-cache`
 

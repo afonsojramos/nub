@@ -7,6 +7,7 @@ import {
 import { z } from 'zod';
 import { rehypeCodeDefaultOptions } from 'fumadocs-core/mdx-plugins';
 import { transformerConsole } from './src/lib/shiki-console';
+import { transformerDiff } from './src/lib/shiki-diff';
 import { remarkNodeVersion } from './src/lib/remark-node-version';
 
 export const docs = defineDocs({
@@ -57,6 +58,7 @@ export default defineConfig({
       transformers: [
         ...(rehypeCodeDefaultOptions.transformers ?? []),
         transformerConsole(),
+        transformerDiff(),
       ],
     },
   },

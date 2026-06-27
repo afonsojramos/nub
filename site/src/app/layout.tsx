@@ -1,21 +1,18 @@
 import './global.css';
 import { RootProvider } from 'fumadocs-ui/provider/next';
-import { Fraunces, Newsreader, IBM_Plex_Mono, Caveat } from 'next/font/google';
+import {
+  Newsreader,
+  IBM_Plex_Mono,
+  Caveat,
+  Encode_Sans,
+} from 'next/font/google';
 import type { ReactNode } from 'react';
 import type { Metadata, Viewport } from 'next';
 
-const fraunces = Fraunces({
-  subsets: ['latin'],
-  variable: '--font-fraunces',
-  display: 'swap',
-  // `opsz` drives the optical-size response used by the display headings; the
-  // `SOFT`/`WONK` axes were configured but never read by any class or
-  // font-variation-settings rule, so they only inflated the variable-font
-  // download (render-blocking + LCP). Dropping them is a no-visual-change win.
-  axes: ['opsz'],
-  preload: true,
-});
-
+// Newsreader — the PREVIOUS site serif, kept registered ONLY so reverting the
+// Encode-Sans switch is a CSS-only change (point the @theme font vars back at
+// --font-newsreader). It is referenced by nothing in the rendered CSS, so the
+// browser never actually downloads it — a zero-cost revert hook, not a FOUC tax.
 const newsreader = Newsreader({
   subsets: ['latin'],
   variable: '--font-newsreader',
@@ -28,6 +25,21 @@ const plexMono = IBM_Plex_Mono({
   variable: '--font-plex-mono',
   display: 'swap',
   weight: ['400', '500', '600'],
+});
+
+// Encode Sans — the site's primary text + display face, body and headings alike
+// (switched site-wide from the Newsreader serif, 2026-06-27). Newsreader's small
+// x-height made lowercase read too small; Encode Sans's larger x-height matches
+// the mono and reads at a sturdier size. `preload` because it paints the first,
+// above-the-fold text — preloading it (and NOT preheating any unused face) is the
+// core FOUC mitigation. The metric-matched fallback next/font generates keeps the
+// pre-swap layout near-identical, so the swap is barely perceptible.
+const encodeSans = Encode_Sans({
+  subsets: ['latin'],
+  variable: '--font-encode',
+  display: 'swap',
+  weight: ['400', '500', '600', '700'],
+  preload: true,
 });
 
 // Handwriting face — used ONLY by the optional "Leave a Star" nudge near the
@@ -131,7 +143,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html
       lang="en"
-      className={`${fraunces.variable} ${newsreader.variable} ${plexMono.variable} ${caveat.variable}`}
+      className={`${newsreader.variable} ${plexMono.variable} ${caveat.variable} ${encodeSans.variable}`}
       suppressHydrationWarning
     >
       <body className="flex min-h-screen flex-col antialiased">

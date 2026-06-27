@@ -47,7 +47,11 @@ function Container({ children, className = '' }: { children: ReactNode; classNam
 }
 
 function Mono({ children }: { children: ReactNode }) {
-  return <span className="font-mono text-[0.84em] text-fd-foreground">{children}</span>;
+  // 1.03em matches Plex Mono's x-height to the Encode Sans body (ratio ≈0.98) —
+  // the same calibration as inline `code` in global.css. Under the old Newsreader
+  // serif this was 0.84em; the sans's larger x-height needs the mono GROWN, not
+  // shrunk, to read at the same size.
+  return <span className="font-mono text-[1.03em] tracking-[-0.005em] text-fd-foreground">{children}</span>;
 }
 
 /* An external link to upstream docs (Node, oxc). Neutral underline that brightens
@@ -173,11 +177,18 @@ function HeroPill() {
       href="/blog/introducing-nub"
       className="group inline-flex items-center gap-2 rounded-full border border-fd-border bg-fd-card/50 py-1 pl-1 pr-3 text-sm leading-none text-fd-muted-foreground hover:border-ember/50"
     >
-      <span className="rounded-full bg-ember px-2.5 py-0.5 font-mono text-[0.7rem] font-medium uppercase tracking-wider text-[#fffdf8] dark:text-[#160c08]">
+      {/* Per-element optical nudges to a common center: with the pill's leading-none
+          line box + Encode Sans metrics, the mono caps badge rides ~1.9px HIGH while
+          the sans text + arrow sit ~1.5–2px LOW. Measured against the pill center and
+          corrected so all three share one optical baseline. */}
+      <span className="translate-y-[1.9px] rounded-full bg-ember px-2.5 py-0.5 font-mono text-[0.7rem] font-medium uppercase tracking-wider text-[#fffdf8] dark:text-[#160c08]">
         New
       </span>
-      <span className="translate-y-px text-fd-foreground">Introducing Nub</span>
-      <span aria-hidden className="translate-y-px text-fd-muted-foreground group-hover:translate-x-0.5">
+      <span className="-translate-y-[1.5px] text-fd-foreground">Introducing Nub</span>
+      <span
+        aria-hidden
+        className="-translate-y-[2px] text-fd-muted-foreground transition-transform group-hover:translate-x-0.5"
+      >
         →
       </span>
     </Link>

@@ -29,10 +29,10 @@ Two questions decide which Node runs: *which version is pinned*, then *where tha
 Like Corepack's shims, `nub` itself auto-installs Node versions as needed. When you run a file with `nub`, it infers the version of Node your project expects, then provisions and caches it. Nub walks up from your working directory to the nearest pin, highest precedence first:
 
 1. **`NODE_EXECUTABLE`** — an absolute path to a Node binary. A hard override: it bypasses pin-file reading, the cache, `nvm`, and any download, and uses that binary directly. Its version is still detected, so the Node floor check and tier dispatch still apply. This is the only version-management override.
-2. **`package.json` → `devEngines.runtime`** — the `node` entry (exact or range). A `devEngines.runtime` that declares a non-Node runtime refuses by default; `onFail: "warn"` prints a notice and falls through, `onFail: "ignore"` falls through silently.
+2. **`package.json#/devEngines/runtime`** — the `node` entry (exact or range). A `devEngines.runtime` that declares a non-Node runtime refuses by default; `onFail: "warn"` prints a notice and falls through, `onFail: "ignore"` falls through silently.
 3. **`.node-version`**
 4. **`.nvmrc`**
-5. **`package.json` → `engines.node`** — interpreted as a resolution range, not an exact pin: Nub resolves to the newest available version satisfying it.
+5. **`package.json#/engines/node`** — interpreted as a resolution range, not an exact pin: Nub resolves to the newest available version satisfying it.
 6. **Nothing pinned anywhere up the tree** — whatever `node` is already on your `PATH`.
 
 This resolved Node version is auto-installed and cached for future runs.
@@ -70,7 +70,8 @@ nub node install 20 22       # several at once
 Aliases and ranges resolve the same way pins do — `lts`, `latest`, `lts/<codename>`, a bare major (`{{NODE_MAJOR}}`) or `major.minor` (`22.13`), or an exact version. With no argument, `nub node install` reads your project's pin and provisions that:
 
 ```bash
-nub node install             # installs whatever .node-version / .nvmrc / engines.node names
+# installs whatever .node-version / .nvmrc / engines.node names
+nub node install
 ```
 
 A version already in the cache is a no-op; a version already available on your `PATH` (a system install, `nvm`, `fnm`, …) is reported and **skipped** rather than re-downloaded.

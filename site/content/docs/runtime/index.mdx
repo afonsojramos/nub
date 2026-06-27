@@ -115,10 +115,10 @@ A dash means the API works across the full supported range, 18.19 and up. The fl
 Like Corepack's shims, `nub` itself auto-installs Node versions as needed. When you run a file with `nub`, it infers the version of Node your project expects and provisions it — downloading and caching the matching stock build if it isn't already on your machine. The inference walks up from the working directory to the nearest pin, taking the first source that yields a version. Highest precedence first:
 
 - `NODE_EXECUTABLE` — an explicit path to a Node binary (a hard override)
-- `package.json` → `devEngines.runtime`
+- `package.json#/devEngines/runtime`
 - `.node-version`
 - `.nvmrc`
-- `package.json` → `engines.node` (a range)
+- `package.json#/engines/node` (a range)
 - the `node` on your `PATH`, when nothing is pinned
 
 This resolved Node version is auto-installed and cached for future runs.
@@ -159,7 +159,8 @@ Reading a program from stdin works the same way `node -` does.
 ```bash
 nub --max-old-space-size=4096 build.ts
 nub --import ./instrument.js server.ts
-nub script.ts --port 3000 --verbose   # everything after the file is your script's argv
+# everything after the file is your script's argv
+nub script.ts --port 3000 --verbose
 echo 'console.log(1 + 1)' | nub -
 ```
 
