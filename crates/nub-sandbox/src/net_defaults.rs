@@ -1,37 +1,45 @@
 //! The default egress allowlist — DATA, overridable as data (never a boolean
-//! per host). From `.fray/script-sandbox-design.md` §3 + §8.5 refinement #4.
+//! per host). From `.fray/script-sandbox-design.md` §3 + §8.5 refinement #4,
+//! reshaped 2026-06-26 by the prefetch-primary decision (`.fray/build-jail-default-on.md`).
 //!
-//! The list is deliberately TIGHT: every allowed host is an exfil channel.
-//! Crucially it does NOT include the `github.com` apex or `*.github.io`
-//! (TrapDoor exfils to `*.github.io` Gists specifically to ride a loose GitHub
-//! allowlist) — only the SPECIFIC release-asset hosts.
+//! The default net posture is **deny-all** (the engine already enforces coarse
+//! net-deny; this list is the graceful-degradation fallback for a prefetch miss,
+//! kept DOWNLOAD-ONLY). Two distinctions drive what may live here:
+//!   - a **writable** host (an attacker can PUT/POST to it) is an EXFIL SINK and
+//!     is NEVER a default — removed 2026-06-26: `api.github.com` (attacker PAT →
+//!     `POST /gists`) and `*.s3.amazonaws.com` (attacker's own creds → token
+//!     scrub gives zero protection). These move to per-package grants only.
+//!   - a **download-only** host can serve attacker content but can't be an exfil
+//!     sink; any second stage it serves still runs INSIDE the jail. Tolerable as
+//!     a fallback — but under prefetch-primary nub fetches the artifact OUTSIDE
+//!     the jail, so even these (the github-releases block below) are slated to
+//!     drop once prefetch coverage lands. See `.fray/build-jail-default-on.md`.
+//!
+//! Still excludes the `github.com` apex / `*.github.io` (TrapDoor exfils to
+//! `*.github.io` Gists) and `raw.githubusercontent.com` (arbitrary repo content).
 
 /// Hosts native/prebuilt builds need with zero per-package configuration. The
 /// registry host(s) are added by the caller from `.npmrc` (so a corporate
 /// Artifactory works), not hard-coded here.
+///
+/// DOWNLOAD-ONLY fallback only — no writable/exfil-sink host appears here (see
+/// the module doc). Slated to shrink toward empty as prefetch coverage lands.
 pub fn default_allow_hosts() -> Vec<String> {
     [
-        // node-gyp Node headers / SHASUMS / win node.lib (default disturl)
+        // node-gyp Node headers / SHASUMS / win node.lib (default disturl).
+        // Vendor single-tenant, download-only.
         "nodejs.org",
         "*.nodejs.org",
-        // GitHub release ASSETS only. Deliberately NOT `*.githubusercontent.com`
-        // — that wildcard admits `raw.githubusercontent.com`, which serves
-        // arbitrary user-controlled repo content (an exfil-read / payload-fetch
-        // channel; the TrapDoor lesson generalizes past `*.github.io`). Release
-        // assets 302 to `objects.githubusercontent.com` specifically, so name it
-        // exactly. NOT the github.com apex, NOT *.github.io.
+        // GitHub release ASSETS only — download-only (GET; cannot be an exfil
+        // sink). Deliberately NOT `*.githubusercontent.com` (admits
+        // `raw.githubusercontent.com` = arbitrary repo content), NOT the
+        // github.com apex, NOT *.github.io. Multi-tenant, so an attacker CAN
+        // serve a release asset here — tolerated only because it's download-only
+        // and prefetch-primary will remove the need for it entirely.
         "objects.githubusercontent.com",
-        // prebuild-install --token resolves the asset id first
-        "api.github.com",
-        // git-archive / tarball fetches for github: deps (separate host)
+        // git-archive / tarball fetches for github: deps (separate host).
+        // Download-only, same prefetch-removal note as above.
         "codeload.github.com",
-        // node-pre-gyp's common (not universal) binary.host region buckets.
-        // `*.` matches only one wildcard segment, so the regional form
-        // (`mapbox-node-binary.s3.us-east-1.amazonaws.com`) needs its own
-        // entry — a `*.s3.*.amazonaws.com` double-wildcard matches NOTHING in
-        // this matcher (fail-closed). Region buckets that don't fit either
-        // global form go through the `sandbox-allow-hosts` per-project override.
-        "*.s3.amazonaws.com",
     ]
     .iter()
     .map(|s| s.to_string())
