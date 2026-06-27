@@ -54,7 +54,7 @@ function TocStarNudge({ href }: { href: string }) {
             gentle leftward bow keep it from reading stubby. */}
         <div
           aria-hidden="true"
-          className="pointer-events-none absolute left-3 top-0 select-none text-ember/45"
+          className="pointer-events-none absolute left-3 top-0 select-none text-ember/60"
         >
           <svg
             viewBox="0 0 120 100"
