@@ -746,6 +746,55 @@ pub(crate) async fn run_dep_lifecycle_scripts(
     Ok(ran)
 }
 
+/// Persist a freshly imported package index under the store key(s) a
+/// later warm install will read it back by. Shared between the buffered
+/// and streaming import paths so both key the cache identically.
+///
+/// `lockfile_integrity` is the SRI the resolver carried from the
+/// lockfile (`None` for a v1/legacy entry or an integrity-stripping
+/// proxy); `computed_integrity` is the sha512 the streaming path
+/// derived from the tarball bytes when the lockfile carried none. The
+/// index is always saved under the effective key
+/// (`lockfile_integrity.or(computed_integrity)`).
+///
+/// The legacy-cache fix: when there is no lockfile integrity but the
+/// effective key is a *computed* sha512, the index lands in a hex
+/// subdirectory. A frozen warm install's classifier, however, reads
+/// with `integrity = None` (the root key) for those same entries, so it
+/// would never look in the hex subdir — a permanent cache miss that
+/// re-fetches the tarball every install. Persisting *also* under the
+/// root key makes the warm read hit, while keeping the hex write for
+/// the self-heal case (the lockfile is later upgraded to v3 carrying
+/// the computed integrity). When `lockfile_integrity` is `Some`, the
+/// effective key already equals it and no root-key write happens — an
+/// integrity-bearing entry must stay discriminated by source.
+fn persist_pkg_index(
+    store: &aube_store::Store,
+    registry_name: &str,
+    version: &str,
+    lockfile_integrity: Option<&str>,
+    computed_integrity: Option<&str>,
+    index: &aube_store::PackageIndex,
+    display_name: &str,
+) {
+    let effective = lockfile_integrity.or(computed_integrity);
+    if let Err(e) = store.save_index(registry_name, version, effective, index) {
+        tracing::warn!(
+            code = aube_codes::warnings::WARN_AUBE_CACHE_WRITE_FAILED,
+            "Failed to cache index for {display_name}@{version}: {e}"
+        );
+    }
+    if lockfile_integrity.is_none()
+        && effective.is_some()
+        && let Err(e) = store.save_index(registry_name, version, None, index)
+    {
+        tracing::warn!(
+            code = aube_codes::warnings::WARN_AUBE_CACHE_WRITE_FAILED,
+            "Failed to cache root-key index for {display_name}@{version}: {e}"
+        );
+    }
+}
+
 /// Verify + import + validate + save-index for a freshly fetched
 /// tarball. Shared between the lockfile-driven fetch path and the
 /// no-lockfile streaming fetch path so both honor the same integrity
@@ -814,13 +863,17 @@ pub(super) fn import_verified_tarball(
     // `+<hex>` suffix that discriminates same-(name, version)
     // tarballs from different sources; when `None` falls back to the
     // plain name@version key so warm installs still find the cache
-    // on integrity-stripping proxies.
-    if let Err(e) = store.save_index(registry_name, version, integrity, &index) {
-        tracing::warn!(
-            code = aube_codes::warnings::WARN_AUBE_CACHE_WRITE_FAILED,
-            "Failed to cache index for {display_name}@{version}: {e}"
-        );
-    }
+    // on integrity-stripping proxies. The buffered path derives no
+    // computed integrity, so it keys solely by the lockfile SRI.
+    persist_pkg_index(
+        store,
+        registry_name,
+        version,
+        integrity,
+        None,
+        &index,
+        display_name,
+    );
     Ok(index)
 }
 
@@ -1110,13 +1163,15 @@ pub(super) async fn fetch_and_import_tarball_streaming(
         })?;
     }
 
-    let cache_integrity = integrity.or(computed_integrity.as_deref());
-    if let Err(e) = store.save_index(registry_name, version, cache_integrity, &index) {
-        tracing::warn!(
-            code = aube_codes::warnings::WARN_AUBE_CACHE_WRITE_FAILED,
-            "Failed to cache index for {display_name}@{version}: {e}"
-        );
-    }
+    persist_pkg_index(
+        store,
+        registry_name,
+        version,
+        integrity,
+        computed_integrity.as_deref(),
+        &index,
+        display_name,
+    );
 
     Ok((index, total, computed_integrity))
 }
@@ -1299,6 +1354,84 @@ mod tests {
         assert_eq!(
             policy.decide("native-dep", "1.0.0"),
             aube_scripts::AllowDecision::Deny
+        );
+    }
+
+    #[test]
+    fn no_integrity_import_is_retrievable_by_warm_none_key() {
+        use flate2::write::GzEncoder;
+        use std::io::Write;
+
+        // A minimal gzipped tarball, so the imported index round-trips
+        // through save/load exactly like a real package's would.
+        let build_tgz = || {
+            let mut builder = tar::Builder::new(Vec::new());
+            let manifest = br#"{"name":"legacy-pkg","version":"1.0.0"}"#;
+            let mut header = tar::Header::new_gnu();
+            header.set_size(manifest.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "package/package.json", &manifest[..])
+                .unwrap();
+            let tar_bytes = builder.into_inner().unwrap();
+            let mut encoder = GzEncoder::new(Vec::new(), flate2::Compression::fast());
+            encoder.write_all(&tar_bytes).unwrap();
+            encoder.finish().unwrap()
+        };
+
+        let name = "legacy-pkg";
+        let version = "1.0.0";
+        // Two distinct, valid SRIs — keys, not verified against bytes;
+        // save/load only routes by them.
+        let computed = aube_store::sha512_integrity_from_digest(&[0xAB; 64]);
+        let lockfile_sri = aube_store::sha512_integrity_from_digest(&[0xCD; 64]);
+
+        // Legacy/v1 entry: no lockfile integrity, only a computed sha512.
+        let dir = tempfile::tempdir().unwrap();
+        let store = aube_store::Store::at(dir.path().join("files"));
+        let index = store.import_tarball(&build_tgz()).unwrap();
+        persist_pkg_index(&store, name, version, None, Some(&computed), &index, name);
+
+        // THE REGRESSION: a frozen warm install's classifier reads with
+        // integrity=None, so the no-integrity import must be retrievable
+        // by that root key or it re-fetches every install.
+        assert!(
+            store.load_index(name, version, None).is_some(),
+            "no-integrity import must be retrievable by the warm None key"
+        );
+        // The computed-sha512 key still resolves — the self-heal path
+        // when the lockfile is later upgraded to carry that integrity.
+        assert!(
+            store.load_index(name, version, Some(&computed)).is_some(),
+            "computed-sha512 key must still resolve (self-heal path)"
+        );
+
+        // CONTROL: an integrity-bearing entry is keyed solely by its SRI
+        // and must NOT be dual-saved under the root key — otherwise two
+        // sources for the same (name, version) would alias on disk. A
+        // fresh store isolates it from the legacy entry's root-key write.
+        let dir2 = tempfile::tempdir().unwrap();
+        let store2 = aube_store::Store::at(dir2.path().join("files"));
+        let index2 = store2.import_tarball(&build_tgz()).unwrap();
+        persist_pkg_index(
+            &store2,
+            name,
+            version,
+            Some(&lockfile_sri),
+            Some(&computed),
+            &index2,
+            name,
+        );
+        assert!(
+            store2.load_index(name, version, None).is_none(),
+            "integrity-bearing entry must not be dual-saved under the root key"
+        );
+        assert!(
+            store2
+                .load_index(name, version, Some(&lockfile_sri))
+                .is_some(),
+            "integrity-bearing entry must resolve by its lockfile SRI"
         );
     }
 
