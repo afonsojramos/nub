@@ -934,8 +934,12 @@ impl Linker {
     /// 2. Ensure the tree source exists (lazily build it once from the
     ///    CAS, reflinking each file — the per-package amortized cost).
     /// 3. One `clonefile(2)` of the whole tree into `pkg_nm_dir`.
+    ///
+    /// `pub(crate)` so the hoisted linker reuses the identical whole-dir
+    /// clone — its per-placement fill is otherwise bound by APFS
+    /// serializing file creation, which the one-syscall clone sidesteps.
     #[allow(clippy::too_many_arguments)]
-    fn try_clonedir_fill(
+    pub(crate) fn try_clonedir_fill(
         &self,
         pkg_nm_dir: &Path,
         pkg_nm_parent: &Path,

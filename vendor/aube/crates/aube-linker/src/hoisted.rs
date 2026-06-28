@@ -41,8 +41,9 @@
 //! dependency lifecycle scripts can locate a package's on-disk
 //! directory without recomputing the tree.
 
+use crate::pool::with_link_pool;
 use crate::{Error, HoistingLimits, LinkStats, Linker, apply_multi_file_patch};
-use aube_lockfile::{DirectDep, LocalSource, LockfileGraph};
+use aube_lockfile::{DirectDep, LocalSource, LockedPackage, LockfileGraph};
 use aube_store::PackageIndex;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -354,6 +355,151 @@ pub(crate) struct HoistedImporterDirs<'a> {
     pub(crate) importer: &'a Path,
 }
 
+/// What one placement node contributed to the importer-wide totals.
+/// Returned by the parallel per-node materializer so the serial caller
+/// can fold stats and placement sites in deterministic node order —
+/// `placements` is a single `(dep_path, pkg_dir)` for a materialized or
+/// `link:` node, empty only on the can't-happen skip paths.
+struct NodeOutcome {
+    stats: LinkStats,
+    placement: Option<(String, PathBuf)>,
+}
+
+/// Materialize ONE placement node onto disk. Pure per-node work — it
+/// writes only inside `pkg_dir` (or the symlink at `pkg_dir` for a
+/// `link:` dep), so nodes at the same placement depth run concurrently
+/// without touching each other's directories. Destructive ordering
+/// across depths (a parent that ships a bundled `node_modules/<dep>` is
+/// wiped + replaced by the deeper real placement) is the caller's
+/// responsibility, enforced by a barrier between depth levels.
+fn materialize_hoisted_node(
+    linker: &Linker,
+    dep_path: &str,
+    pkg_dir: PathBuf,
+    pkg: &LockedPackage,
+    package_indices: &BTreeMap<String, PackageIndex>,
+    root_dir: &Path,
+    nm: &Path,
+) -> Result<NodeOutcome, Error> {
+    let mut stats = LinkStats::default();
+
+    // `link:` dep: symlink the package dir straight at the target.
+    // `link:` packages were excluded from the dependency plan (their
+    // target owns its deps); `portal:` stays on the materialized path.
+    // Counting toward `top_level_linked` is the caller's job (it adds
+    // the root's child count once), so no stat bump here.
+    if let Some(LocalSource::Link(rel)) = pkg.local_source.as_ref() {
+        if let Some(parent) = pkg_dir.parent() {
+            crate::mkdirp(parent)?;
+        }
+        crate::try_remove_entry(&pkg_dir);
+        let abs_target = root_dir.join(rel);
+        let link_parent = pkg_dir.parent().unwrap_or(nm);
+        let rel_target = pathdiff::diff_paths(&abs_target, link_parent).unwrap_or(abs_target);
+        crate::sys::create_dir_link(&rel_target, &pkg_dir)
+            .map_err(|e| Error::Io(pkg_dir.clone(), e))?;
+        return Ok(NodeOutcome {
+            stats,
+            placement: Some((dep_path.to_string(), pkg_dir)),
+        });
+    }
+
+    // Registry (or `file:`) package — needs a PackageIndex to find the
+    // store-backed file set. `package_indices` is sparse on warm
+    // installs, so lazy-load from the store on miss. `registry_name()`
+    // is the lookup key for npm-aliased packages, and integrity is part
+    // of the cache key so a same-name dep from a different source can't
+    // pick up a registry entry's file list.
+    let owned_index;
+    let index = match package_indices.get(dep_path) {
+        Some(i) => i,
+        None => {
+            owned_index = linker
+                .store
+                .load_index(pkg.registry_name(), &pkg.version, pkg.integrity.as_deref())
+                .ok_or_else(|| Error::MissingPackageIndex(dep_path.to_string()))?;
+            &owned_index
+        }
+    };
+
+    // Wipe any previous contents (a version change, or a bundled copy
+    // a shallower package shipped at this path) so stale files don't
+    // survive. Must precede the clone: `clonefile(2)` requires its
+    // destination not pre-exist, and the per-file fallback wants a clean
+    // dir too.
+    crate::try_remove_entry(&pkg_dir);
+
+    // Whole-dir `clonefile(2)` fast path (macOS+APFS, same volume) —
+    // the identical primitive the isolated linker uses. The hoisted
+    // per-file fill is bound by APFS serializing file creation, so
+    // parallelizing it barely moves the needle on macOS; cloning the
+    // package's extracted-tree tier in ONE syscall replaces the entire
+    // per-file loop and is what makes this layout fast. The tree holds
+    // exactly the package's own files (no transitive symlinks — hoisted
+    // nests real dirs instead), so the clone reproduces the per-file
+    // result byte-for-byte, +x bits included. Any miss (tier unbuilt,
+    // non-APFS, cross-volume, non-macOS, or a clone error) returns false
+    // and falls through to the unchanged per-file path below.
+    let tree_key = linker.virtual_store_subdir(dep_path);
+    let tree_src = linker.store.tree_path(&tree_key);
+    let pkg_nm_parent = pkg_dir.parent().unwrap_or(&pkg_dir).to_path_buf();
+    let used_clonedir = linker.try_clonedir_fill(
+        &pkg_dir,
+        &pkg_nm_parent,
+        &tree_src,
+        dep_path,
+        pkg,
+        index,
+        &mut stats,
+    )?;
+
+    if !used_clonedir {
+        // Per-file fallback: batch-create every intermediate parent
+        // directory in one pass, then link each file.
+        let mut parents: BTreeSet<PathBuf> = BTreeSet::new();
+        parents.insert(pkg_dir.clone());
+        for rel_path in index.keys() {
+            crate::validate_index_key(rel_path)?;
+            let target = pkg_dir.join(rel_path);
+            if let Some(parent) = target.parent() {
+                parents.insert(parent.to_path_buf());
+            }
+        }
+        for parent in &parents {
+            std::fs::create_dir_all(parent).map_err(|e| Error::Io(parent.clone(), e))?;
+        }
+
+        for (rel_path, stored) in index {
+            // Key already validated in the parent-collection loop above;
+            // the index is immutable between the two.
+            let target = pkg_dir.join(rel_path);
+            if let Err(e) = linker.link_file_fresh(stored, rel_path, &target) {
+                if let Error::MissingStoreFile { .. } = &e {
+                    crate::invalidate_stale_index_for_package(&linker.store, pkg);
+                }
+                return Err(e);
+            }
+            stats.files_linked += 1;
+            if stored.executable {
+                #[cfg(unix)]
+                xx::file::make_executable(&target).map_err(|e| Error::Xx(e.to_string()))?;
+            }
+        }
+    }
+
+    let patch_key = pkg.spec_key();
+    if let Some(patch_text) = linker.patches.get(&patch_key) {
+        apply_multi_file_patch(&pkg_dir, patch_text)
+            .map_err(|msg| Error::Patch(patch_key.clone(), msg))?;
+    }
+
+    stats.packages_linked += 1;
+    Ok(NodeOutcome {
+        stats,
+        placement: Some((dep_path.to_string(), pkg_dir)),
+    })
+}
+
 pub(crate) fn link_hoisted_importer(
     linker: &Linker,
     dirs: HoistedImporterDirs<'_>,
@@ -378,123 +524,78 @@ pub(crate) fn link_hoisted_importer(
     let keep_root: std::collections::HashSet<&str> = plan.root_names().collect();
     crate::sweep_stale_top_level_entries(&nm, &keep_root, None);
 
-    // Materialize every non-root node. Order doesn't matter for
-    // correctness (each package's files are written into its own
-    // directory) but we iterate by index so the BFS order surfaces
-    // in progress/debug logs.
+    // Materialize every non-root node, parallelized across packages.
+    //
+    // Correctness hinges on ONE ordering rule: a package may ship a
+    // bundled `node_modules/<dep>` inside its own tarball, and the real
+    // deeper placement of `<dep>` then wipes + replaces it (child wins).
+    // So a node must be fully materialized before any DESCENDANT's
+    // destructive wipe + fill runs. We get that for free by processing
+    // the placement tree one depth level at a time: BFS gives every
+    // child a higher arena index than its parent, so `depth[idx]` folds
+    // in a single forward pass, and within a level every node owns a
+    // disjoint directory subtree (no two same-depth nodes are
+    // ancestor/descendant), so their fills never collide. The
+    // `collect()` after each level is the barrier between depths.
+    //
+    // Placements are folded back in level-then-index order — identical
+    // to the old serial BFS order — so `package_dir()` still returns the
+    // shallowest site for a dep duplicated across nested `node_modules`.
+    let mut depth = vec![0usize; plan.nodes.len()];
+    let mut max_depth = 0usize;
     for idx in 0..plan.nodes.len() {
-        if idx == plan.root_idx {
-            continue;
+        if let Some(parent) = plan.nodes[idx].parent {
+            depth[idx] = depth[parent] + 1;
+            max_depth = max_depth.max(depth[idx]);
         }
-        // Borrow scoping: take a clone of the fields we need out of
-        // the node before calling methods that re-borrow `linker`
-        // with `&mut stats`. The arena is read-only from here on.
-        let (dep_path, pkg_dir) = {
-            let node = &plan.nodes[idx];
-            (
-                node.dep_path.clone().expect("non-root node has dep_path"),
-                node.pkg_dir.clone().expect("non-root node has pkg_dir"),
-            )
-        };
-        let Some(pkg) = graph.packages.get(&dep_path) else {
-            continue;
-        };
+    }
 
-        // `link:` deps: symlink the package dir straight at the
-        // target. `link:` packages were excluded from the dependency
-        // plan above because their target owns its deps. `portal:`
-        // packages stay on the materialized-package path so their
-        // graph-visible deps are linked like Yarn expects.
-        // `rebase_local` in the resolver (and preserved-lockfile
-        // import) stores local paths relative to the project root.
-        if let Some(LocalSource::Link(rel)) = pkg.local_source.as_ref() {
-            if let Some(parent) = pkg_dir.parent() {
-                crate::mkdirp(parent)?;
-            }
-            crate::try_remove_entry(&pkg_dir);
-            let abs_target = root_dir.join(rel);
-            let link_parent = pkg_dir.parent().unwrap_or(&nm);
-            let rel_target = pathdiff::diff_paths(&abs_target, link_parent).unwrap_or(abs_target);
-            crate::sys::create_dir_link(&rel_target, &pkg_dir)
-                .map_err(|e| Error::Io(pkg_dir.clone(), e))?;
-            placements.record(&dep_path, pkg_dir);
-            // Don't bump `top_level_linked` here: the post-loop
-            // `children.len()` add below already counts every root
-            // child including `link:` direct deps. Incrementing in
-            // both places would double-count.
+    let parallelism = linker.link_parallelism();
+    for level in 1..=max_depth {
+        // Serial prep: clone the (dep_path, pkg_dir) each node needs and
+        // resolve its `LockedPackage`. Cheap; the expensive file I/O runs
+        // in the par_iter below.
+        let tasks: Vec<(String, PathBuf, &LockedPackage)> = (0..plan.nodes.len())
+            .filter(|&idx| depth[idx] == level)
+            .filter_map(|idx| {
+                let node = &plan.nodes[idx];
+                let (Some(dep_path), Some(pkg_dir)) = (&node.dep_path, &node.pkg_dir) else {
+                    return None;
+                };
+                let pkg = graph.packages.get(dep_path)?;
+                Some((dep_path.clone(), pkg_dir.clone(), pkg))
+            })
+            .collect();
+        if tasks.is_empty() {
             continue;
         }
 
-        // Registry (or `file:`) package — needs a PackageIndex to
-        // find the store-backed file set. `package_indices` is sparse
-        // on warm installs, so lazy-load from the store on miss.
-        let owned_index;
-        let index = match package_indices.get(&dep_path) {
-            Some(i) => i,
-            None => {
-                // `registry_name()` is the lookup key for npm-aliased
-                // packages (`"h3-v2": "npm:h3@..."`), which saved the
-                // index under the real package name at fetch time.
-                // Integrity is part of the cache key so a same-name
-                // dep resolved from a non-registry source (git, remote
-                // tarball, file:) can't pick up a registry-sourced
-                // cache entry and get a different file list than its
-                // own tarball actually contains.
-                let loaded = linker
-                    .store
-                    .load_index(pkg.registry_name(), &pkg.version, pkg.integrity.as_deref())
-                    .ok_or_else(|| Error::MissingPackageIndex(dep_path.clone()))?;
-                owned_index = loaded;
-                &owned_index
-            }
-        };
+        let results: Vec<Result<NodeOutcome, Error>> = with_link_pool(parallelism, || {
+            use rayon::prelude::*;
+            tasks
+                .par_iter()
+                .map(|(dep_path, pkg_dir, pkg)| {
+                    materialize_hoisted_node(
+                        linker,
+                        dep_path,
+                        pkg_dir.clone(),
+                        pkg,
+                        package_indices,
+                        root_dir,
+                        &nm,
+                    )
+                })
+                .collect()
+        });
 
-        // Wipe any previous contents at this path so a re-run after
-        // changing versions doesn't leave stale files behind, then
-        // batch-create every intermediate parent directory the index
-        // will write into.
-        crate::try_remove_entry(&pkg_dir);
-        let mut parents: BTreeSet<PathBuf> = BTreeSet::new();
-        parents.insert(pkg_dir.clone());
-        // Validate every key once here. The file-linking loop below
-        // walks the same immutable index, so skipping the check
-        // there is safe.
-        for rel_path in index.keys() {
-            crate::validate_index_key(rel_path)?;
-            let target = pkg_dir.join(rel_path);
-            if let Some(parent) = target.parent() {
-                parents.insert(parent.to_path_buf());
+        for result in results {
+            let outcome = result?;
+            stats.files_linked += outcome.stats.files_linked;
+            stats.packages_linked += outcome.stats.packages_linked;
+            if let Some((dep_path, pkg_dir)) = outcome.placement {
+                placements.record(&dep_path, pkg_dir);
             }
         }
-        for parent in &parents {
-            std::fs::create_dir_all(parent).map_err(|e| Error::Io(parent.clone(), e))?;
-        }
-
-        for (rel_path, stored) in index {
-            // Key already validated in the parent-collection loop
-            // above. The index is immutable between the two loops.
-            let target = pkg_dir.join(rel_path);
-            if let Err(e) = linker.link_file_fresh(stored, rel_path, &target) {
-                if let Error::MissingStoreFile { .. } = &e {
-                    crate::invalidate_stale_index_for_package(&linker.store, pkg);
-                }
-                return Err(e);
-            }
-            stats.files_linked += 1;
-            if stored.executable {
-                #[cfg(unix)]
-                xx::file::make_executable(&target).map_err(|e| Error::Xx(e.to_string()))?;
-            }
-        }
-
-        let patch_key = pkg.spec_key();
-        if let Some(patch_text) = linker.patches.get(&patch_key) {
-            apply_multi_file_patch(&pkg_dir, patch_text)
-                .map_err(|msg| Error::Patch(patch_key.clone(), msg))?;
-        }
-
-        stats.packages_linked += 1;
-        placements.record(&dep_path, pkg_dir);
     }
 
     stats.top_level_linked += plan.nodes[plan.root_idx].children.len();
