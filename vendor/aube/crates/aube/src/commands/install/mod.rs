@@ -262,7 +262,7 @@ fn persist_no_integrity_index(
     let resolved: BTreeMap<String, String> = graph
         .packages
         .values()
-        .filter(|pkg| pkg.local_source.is_none())
+        .filter(|pkg| pkg.local_source.is_none() && pkg.integrity.is_none())
         .filter_map(|pkg| {
             let canonical = strip_peer_context_suffix(&pkg.dep_path);
             computed
@@ -1498,6 +1498,12 @@ pub async fn run(opts: InstallOptions) -> miette::Result<()> {
                 // single shared atomic.
                 let mut resolved_received: usize = 0;
 
+                // Per-project content-address bindings for no-integrity
+                // packages, so the streaming-resolve warm read hits the
+                // hex index instead of missing on the (removed) root key.
+                let fetch_no_integrity_index =
+                    crate::state::read_no_integrity_index(&fetch_project_root);
+
                 while let Some(pkg) = resolved_rx.recv().await {
                     if let Some(ref msg) = pkg.deprecated {
                         fetch_deprecations_tx.lock().unwrap().push(
@@ -1626,12 +1632,23 @@ pub async fn run(opts: InstallOptions) -> miette::Result<()> {
                     // `ERR_AUBE_MISSING_STORE_FILE`. Independent of
                     // import-time SRI / `verifyStoreIntegrity`.
                     let pkg_registry_name = pkg.registry_name().to_string();
-                    if let Some(index) = warm_load_index(
-                        &fetch_store,
-                        &pkg_registry_name,
-                        &pkg.version,
-                        pkg.integrity.as_deref(),
-                    ) {
+                    // Content-address the lookup; a no-integrity package
+                    // with no per-project binding yet has no read key and
+                    // falls through to fetch rather than reading the
+                    // content-free root selector.
+                    let read_key = pkg.integrity.as_deref().or_else(|| {
+                        fetch_no_integrity_index
+                            .get(&format!("{pkg_registry_name}@{}", pkg.version))
+                            .map(String::as_str)
+                    });
+                    if let Some(read_key) = read_key
+                        && let Some(index) = warm_load_index(
+                            &fetch_store,
+                            &pkg_registry_name,
+                            &pkg.version,
+                            Some(read_key),
+                        )
+                    {
                         materialize_tx
                             .send((pkg.dep_path.clone(), index.clone()))
                             .await

@@ -609,7 +609,7 @@ impl Linker {
 
             if let Err(e) = self.link_file_fresh(stored, rel_path, &target) {
                 if let Error::MissingStoreFile { .. } = &e {
-                    invalidate_stale_index_for_package(&self.store, pkg);
+                    invalidate_stale_index_for_package(&self.store, pkg, self.index_read_key(pkg));
                 }
                 return Err(e);
             }
@@ -1131,7 +1131,7 @@ impl Linker {
             if let Err(e) = self.link_file_fresh(stored, rel_path, &target) {
                 let _ = std::fs::remove_dir_all(&tmp);
                 if let Error::MissingStoreFile { .. } = &e {
-                    invalidate_stale_index_for_package(&self.store, pkg);
+                    invalidate_stale_index_for_package(&self.store, pkg, self.index_read_key(pkg));
                 }
                 return Err(e);
             }
@@ -1185,9 +1185,17 @@ fn classify_link_error(
 /// reference. If the cache write fails (e.g. permission error), warn
 /// loudly so the user knows the auto-recovery didn't take and they need
 /// to wipe the index dir by hand (run `aube store path` to find it).
-pub(crate) fn invalidate_stale_index_for_package(store: &aube_store::Store, pkg: &LockedPackage) {
-    match store.invalidate_cached_index(pkg.registry_name(), &pkg.version, pkg.integrity.as_deref())
-    {
+pub(crate) fn invalidate_stale_index_for_package(
+    store: &aube_store::Store,
+    pkg: &LockedPackage,
+    // The same key the warm read uses (`Linker::index_read_key`): the
+    // lockfile SRI, or the per-project computed-sha512 binding for a
+    // no-integrity package. Invalidating by `pkg.integrity` (`None`)
+    // would clear a key the read never uses and leave the stale hex
+    // index in place — the exact dead-reference loop this guards against.
+    read_key: Option<&str>,
+) {
+    match store.invalidate_cached_index(pkg.registry_name(), &pkg.version, read_key) {
         Ok(true) => debug!("invalidated stale index for {}", pkg.spec_key()),
         Ok(false) => {}
         Err(e) => warn!(
