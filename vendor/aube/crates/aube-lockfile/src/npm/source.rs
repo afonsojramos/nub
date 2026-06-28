@@ -68,7 +68,7 @@ fn hosted_git_from_codeload(url: &str) -> Option<(HostedGit, String)> {
     None
 }
 
-pub(super) fn local_git_source_from_resolved(resolved: &str) -> Option<LocalSource> {
+pub(crate) fn local_git_source_from_resolved(resolved: &str) -> Option<LocalSource> {
     let (url, committish, subpath) = crate::parse_git_spec(resolved)?;
     let resolved = committish.clone()?;
     Some(LocalSource::Git(GitSource {

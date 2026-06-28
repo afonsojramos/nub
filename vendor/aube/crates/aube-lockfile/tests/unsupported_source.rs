@@ -108,17 +108,37 @@ fn berry_git_dep_still_resolves() {
 }
 
 #[test]
-fn classic_git_protocol_dep_is_a_fatal() {
+fn classic_git_protocol_dep_resolves() {
+    // #217 regression fix: classic HANDLES git sources (like berry above), so a
+    // git dep pinned by its `resolved` URL is NOT unsupported — it resolves to a
+    // `LocalSource::Git`. Pre-fix it was mis-classified `Unsupported` and
+    // aborted the frozen install npm/pnpm/bun all accept (the lockfile-roundtrip
+    // nightly `git-dep × yarn` regression). Only a git source with NO pinned
+    // commit is still a fatal (see `classic_github_shorthand_dep_is_a_fatal`).
     aube_util::set_embedder(&STRICT);
     let lock = "# yarn lockfile v1\n\n\"foo@git+https://github.com/u/r.git#abc123\":\n  version \"1.0.0\"\n  resolved \"git+https://github.com/u/r.git#abc123\"\n";
-    let r = parse(&[
+    let graph = parse(&[
         (
             "package.json",
             r#"{"name":"t","dependencies":{"foo":"git+https://github.com/u/r.git#abc123"}}"#,
         ),
         ("yarn.lock", lock),
-    ]);
-    assert_unsupported(r, "git+https");
+    ])
+    .expect("a classic git dep pinned by `resolved` must resolve, not fatal");
+    assert!(graph.importers["."].iter().any(|d| d.name == "foo"));
+    let pkg = graph
+        .packages
+        .values()
+        .find(|p| p.name == "foo")
+        .expect("foo must be in the graph");
+    assert!(
+        matches!(
+            &pkg.local_source,
+            Some(aube_lockfile::LocalSource::Git(_))
+        ),
+        "expected git LocalSource, got {:?}",
+        pkg.local_source
+    );
 }
 
 #[test]

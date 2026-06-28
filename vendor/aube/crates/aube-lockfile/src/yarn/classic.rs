@@ -1,5 +1,7 @@
 use super::berry::{file_protocol_source, strip_hash_fragment};
-use crate::{DepType, DirectDep, Error, LocalSource, LockedPackage, LockfileGraph};
+use crate::{
+    DepType, DirectDep, Error, LocalSource, LockedPackage, LockfileGraph, RemoteTarballSource,
+};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -73,9 +75,14 @@ pub(super) fn parse_classic_str(
         // Classify the block's source. All specs in a yarn.lock v1 block share
         // one resolution, so they classify identically; scan for the first
         // non-Registry signal (a `Local` source, or an `Unsupported` protocol).
+        // The block's `resolved` URL carries the pinned commit for a git
+        // source — yarn records the SHA there, not on the spec range (a
+        // `github:owner/repo#7.0.0` spec resolves to a `…/tar.gz/<sha>`
+        // archive) — so the classifier needs it to build a `LocalSource::Git`.
+        let resolved = block.fields.get("resolved").map(String::as_str);
         let mut classic_src = ClassicSource::Registry;
         for s in &block.specs {
-            match classic_local_source(s, &name) {
+            match classic_local_source(s, &name, resolved) {
                 ClassicSource::Registry => {}
                 other => {
                     classic_src = other;
@@ -583,23 +590,56 @@ pub(super) enum ClassicSource {
     /// A local on-disk source (`link:`/`file:`/`portal:`) the linker
     /// materializes directly.
     Local(LocalSource),
-    /// A source the classic reader cannot resolve from a yarn.lock — a git
-    /// dep (`git+https`/`git+ssh`/`git`/`ssh`, or a `user/repo#ref` github
-    /// shorthand), an `http(s)` tarball, `jsr:`, or any unknown protocol.
-    /// Reclassifying it to `name@version` would 404 at fetch. Carries the
-    /// protocol token for the diagnostic.
+    /// A source the classic reader cannot resolve from a yarn.lock — an
+    /// `http(s)` (non-git) tarball, `jsr:`, an unknown protocol, or a git
+    /// dep whose `resolved` URL carries no pinned commit. Reclassifying it to
+    /// `name@version` would 404 at fetch. Carries the protocol token for the
+    /// diagnostic. Git deps with a pinned `resolved` are NOT here — they
+    /// classify as [`ClassicSource::Local`] via [`classic_git_source`].
     Unsupported(String),
+}
+
+/// Build the git [`LocalSource`] for a classic block from its `resolved`
+/// field. yarn 1.22 records the pinned commit on `resolved`, not the spec
+/// range, in two shapes: a `git+<transport>://…#<sha>` URL → a plain
+/// `LocalSource::Git` (cloned + checked out at the SHA); and a hosted-
+/// shorthand's flat codeload archive (`https://codeload.<host>/…/<sha>`) →
+/// `RemoteTarball { git_hosted: true }`, the same stand-in the pnpm v9 reader
+/// produces and the yarn/npm writers re-derive a git form from. Returns
+/// `None` when `resolved` is absent or holds no pinned commit, so the caller
+/// keeps the block `Unsupported` (a frozen install can't reproduce an
+/// unpinned git source).
+fn classic_git_source(resolved: Option<&str>) -> Option<LocalSource> {
+    let resolved = resolved?;
+    if let Some(git) = crate::npm::local_git_source_from_resolved(resolved) {
+        return Some(git);
+    }
+    crate::parse_hosted_git_tarball(resolved).map(|_| {
+        LocalSource::RemoteTarball(RemoteTarballSource {
+            url: resolved.to_string(),
+            integrity: String::new(),
+            git_hosted: true,
+        })
+    })
 }
 
 /// Classify a yarn-classic spec's source. Classic encodes the protocol in
 /// the spec *range* (`name@link:./path`, `name@user/repo#ref`,
 /// `name@git+https://…`) rather than a separate `resolution:` field the way
-/// berry does.
-pub(super) fn classic_local_source(spec: &str, name: &str) -> ClassicSource {
+/// berry does. `resolved` is the block's `resolved` URL — the only place the
+/// pinned git commit lives — passed through so a git range resolves to a
+/// proper `LocalSource::Git` instead of an abort.
+pub(super) fn classic_local_source(spec: &str, name: &str, resolved: Option<&str>) -> ClassicSource {
     let Some(range) = spec.strip_prefix(name).and_then(|r| r.strip_prefix('@')) else {
         // Not a `name@…` spec (malformed block); keep the historical
         // registry default rather than inventing an unsupported source.
         return ClassicSource::Registry;
+    };
+    // A git range is resolvable: pin it from the block's `resolved` URL.
+    // Falls back to `Unsupported("git")` only when no commit is recorded.
+    let git = || {
+        classic_git_source(resolved)
+            .map_or_else(|| ClassicSource::Unsupported("git".to_string()), ClassicSource::Local)
     };
     match range.split_once(':') {
         Some(("link", body)) => {
@@ -614,18 +654,19 @@ pub(super) fn classic_local_source(spec: &str, name: &str) -> ClassicSource {
         // rule below, since an alias body can contain `/` (`npm:@scope/x@1`).
         Some(("npm", _)) => ClassicSource::Registry,
         // A `user/repo#semver:<range>` github shorthand splits on the
-        // `#semver:` colon, so its "protocol" carries the `/` — it's the same
-        // unsupportable git source as the no-colon `user/repo#ref` form below.
-        Some((protocol, _)) if protocol.contains('/') => {
-            ClassicSource::Unsupported("git".to_string())
-        }
-        // Any other explicit protocol is a source the classic reader can't
-        // resolve from yarn.lock (git+https/git+ssh/git/ssh/http/https/jsr/…).
+        // `#semver:` colon, so its "protocol" carries the `/` — same git
+        // source as the no-colon `user/repo#ref` form below.
+        Some((protocol, _)) if protocol.contains('/') => git(),
+        // An explicit protocol that maps to a git spec (git+https/git+ssh/
+        // git/ssh/github:/gitlab:/bitbucket:/`.git` http) is a resolvable git
+        // source; anything else (jsr/http-non-git/unknown) the classic reader
+        // genuinely can't resolve from yarn.lock.
+        Some((_, _)) if crate::parse_git_spec(range).is_some() => git(),
         Some((protocol, _)) => ClassicSource::Unsupported(protocol.to_string()),
         // No protocol colon: a bare semver/dist-tag is registry-resolvable, but
         // a `/`-bearing range is a github shorthand (`user/repo#ref`) — a git
-        // source classic can't resolve. A registry range never contains `/`.
-        None if range.contains('/') => ClassicSource::Unsupported("git".to_string()),
+        // source. A registry range never contains `/`.
+        None if range.contains('/') => git(),
         None => ClassicSource::Registry,
     }
 }
