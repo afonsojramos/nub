@@ -458,8 +458,6 @@ When adding a new doc under `wiki/runtime/` or `wiki/commands/`, include the fro
 
 ## Releasing
 
-**Reading CI — `Pullfrog` is NOT a CI gate (HIGH PRIORITY; do not repeat this mistake).** The `Pullfrog` workflow (`.github/workflows/pullfrog.yml`, the `pullfrog/pullfrog@v0` agent-runner action) is **`workflow_dispatch`-only** — it never runs on push or pull_request, so it is NOT part of any branch's CI rollup and gates NOTHING. `Pullfrog` runs in `gh run list` are MANUAL agent invocations (the maintainer's own product), unrelated to merge/release readiness. When assessing whether a branch or PR is green, IGNORE `Pullfrog` entirely and judge only the real push/PR-triggered gates (the `CI` matrix, `Node matrix`, `Aube parity`, `Docker install smoke`, `Native-dep floor`, `WPT`, lockfile/conformance, etc.). Never fold a `workflow_dispatch`-only workflow into a CI interaction/readiness check.
-
 Nub is published to npm as `@nubjs/nub` with 8 platform-specific binary packages. The release is fully automated via GitHub Actions.
 
 ```bash
