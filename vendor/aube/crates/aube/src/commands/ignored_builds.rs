@@ -146,12 +146,13 @@ pub(super) fn collect_ignored(project_dir: &std::path::Path) -> miette::Result<V
         super::install::build_policy_from_sources(&manifest, &workspace, false);
 
     let store = super::open_store(project_dir)?;
-    // Resolve a no-integrity package's index by the per-project
+    // Resolve a no-integrity package's index by its URL-keyed
     // computed-sha512 binding (matching the install warm read), so a
     // v1/legacy-lock package with a suspicious lifecycle script still
     // surfaces here — keying by `None` would miss now that the
     // content-free root index is no longer written.
-    let no_integrity_index = crate::state::read_no_integrity_index(project_dir);
+    let no_integrity_index =
+        crate::state::read_no_integrity_index_for(project_dir, graph.packages.values());
 
     let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
     let mut out: Vec<IgnoredEntry> = Vec::new();

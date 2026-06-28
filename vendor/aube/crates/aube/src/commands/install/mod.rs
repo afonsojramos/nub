@@ -239,14 +239,20 @@ impl InstallPhaseTimings {
     }
 }
 
-/// Persist the per-project no-integrity content-address index from a
-/// run's freshly `computed` sha512s. Keys by the coordinate the warm
-/// classifier looks up (`<registry-name>@<version>`) so the next frozen
-/// warm install content-addresses the store lookup instead of relying on
-/// a content-free shared selector. `computed` holds only no-integrity
-/// packages (the fetch derives a sha512 solely when the lockfile carried
-/// none); registry name + version are read off the graph, where the
-/// canonical (peer-suffix-stripped) dep_path matches `computed`'s keys.
+/// Persist the global no-integrity content-address bindings from a run's
+/// freshly `computed` sha512s. Each no-integrity package is bound by the
+/// registry tarball URL it resolves to (derived from THIS project's
+/// `.npmrc` registry config via `client.tarball_url`), so the next frozen
+/// warm install — including one whose `node_modules` was wiped, and any
+/// other project resolving the same coordinate from the same registry —
+/// content-addresses the store lookup instead of relying on a content-free
+/// shared selector. Keying by the configured-registry URL (not the
+/// lockfile's baked `resolved`) is the #212/#220 closure: a different
+/// registry yields a different key, so cross-registry substitution can't
+/// happen. `computed` holds only no-integrity packages (the fetch derives a
+/// sha512 solely when the lockfile carried none); the canonical
+/// (peer-suffix-stripped) dep_path matches `computed`'s keys, and peer
+/// variants of one package collapse to a single URL binding.
 ///
 /// The lockfile/frozen fetch path persists this inside
 /// `fetch::fetch_packages_with_root`; this covers the streaming-resolve
@@ -259,18 +265,24 @@ fn persist_no_integrity_index(
     if computed.is_empty() {
         return;
     }
-    let resolved: BTreeMap<String, String> = graph
+    let client = crate::commands::make_client(cwd);
+    let bindings: BTreeMap<String, String> = graph
         .packages
         .values()
         .filter(|pkg| pkg.local_source.is_none() && pkg.integrity.is_none())
         .filter_map(|pkg| {
             let canonical = strip_peer_context_suffix(&pkg.dep_path);
-            computed
-                .get(canonical)
-                .map(|sri| (format!("{}@{}", pkg.registry_name(), pkg.version), sri.clone()))
+            computed.get(canonical).map(|sri| {
+                (
+                    client.tarball_url(pkg.registry_name(), &pkg.version),
+                    sri.clone(),
+                )
+            })
         })
         .collect();
-    if let Err(e) = crate::state::merge_no_integrity_index(cwd, &resolved) {
+    if let Err(e) =
+        crate::state::write_no_integrity_bindings(&crate::state::no_integrity_dir(cwd), &bindings)
+    {
         tracing::debug!("failed to persist no-integrity content-address index: {e}");
     }
 }
@@ -1498,11 +1510,14 @@ pub async fn run(opts: InstallOptions) -> miette::Result<()> {
                 // single shared atomic.
                 let mut resolved_received: usize = 0;
 
-                // Per-project content-address bindings for no-integrity
-                // packages, so the streaming-resolve warm read hits the
-                // hex index instead of missing on the (removed) root key.
-                let fetch_no_integrity_index =
-                    crate::state::read_no_integrity_index(&fetch_project_root);
+                // Global URL-keyed no-integrity binding dir, so the
+                // streaming-resolve warm read hits the hex index instead of
+                // missing on the (removed) root key. The streaming path
+                // resolves packages one at a time, so it reads each binding
+                // by its tarball URL on the fly rather than projecting a
+                // batch map (the frozen/warm batch path does the latter).
+                let fetch_no_integrity_dir = crate::state::no_integrity_dir(&fetch_project_root);
+                let fetch_no_integrity_present = fetch_no_integrity_dir.exists();
 
                 while let Some(pkg) = resolved_rx.recv().await {
                     if let Some(ref msg) = pkg.deprecated {
@@ -1633,14 +1648,20 @@ pub async fn run(opts: InstallOptions) -> miette::Result<()> {
                     // import-time SRI / `verifyStoreIntegrity`.
                     let pkg_registry_name = pkg.registry_name().to_string();
                     // Content-address the lookup; a no-integrity package
-                    // with no per-project binding yet has no read key and
-                    // falls through to fetch rather than reading the
-                    // content-free root selector.
-                    let read_key = pkg.integrity.as_deref().or_else(|| {
-                        fetch_no_integrity_index
-                            .get(&format!("{pkg_registry_name}@{}", pkg.version))
-                            .map(String::as_str)
-                    });
+                    // with no binding yet has no read key and falls through
+                    // to fetch rather than reading the content-free root
+                    // selector. The binding is keyed by the configured
+                    // registry's tarball URL (the #212/#220 closure), read
+                    // on demand for this one coordinate.
+                    let no_integrity_key = (pkg.integrity.is_none() && fetch_no_integrity_present)
+                        .then(|| {
+                            crate::state::read_no_integrity_binding(
+                                &fetch_no_integrity_dir,
+                                &fetch_local_client.tarball_url(&pkg_registry_name, &pkg.version),
+                            )
+                        })
+                        .flatten();
+                    let read_key = pkg.integrity.as_deref().or(no_integrity_key.as_deref());
                     if let Some(read_key) = read_key
                         && let Some(index) = warm_load_index(
                             &fetch_store,

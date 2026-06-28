@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 const DEFAULT_STATE_DIR: &str = "node_modules";
 const INSTALL_STATE_FILE_NAME: &str = "state.json";
 const FRESH_STATE_FILE_NAME: &str = "fresh.json";
-const NO_INTEGRITY_INDEX_FILE_NAME: &str = "no-integrity-index.json";
 
 /// The install-state directory name, `.<name>-state`. Standalone aube:
 /// `.aube-state`.
@@ -833,63 +832,119 @@ fn install_state_file(state_path: &Path) -> PathBuf {
     state_path.join(INSTALL_STATE_FILE_NAME)
 }
 
-fn no_integrity_index_file(state_path: &Path) -> PathBuf {
-    state_path.join(NO_INTEGRITY_INDEX_FILE_NAME)
+/// The no-integrity content-address binding: the sha512 some install
+/// computed for a registry tarball URL, recorded alongside the URL it
+/// addresses so the content-addressed file is self-describing and a
+/// (vanishingly unlikely) blake3 key collision is caught on read.
+#[derive(Serialize, Deserialize)]
+struct NoIntegrityBinding {
+    url: String,
+    sha512: String,
 }
 
-/// Read the project's no-integrity content-address index — the binding
-/// `<registry-name>@<version>` → computed sha512 that lets a frozen warm
-/// install content-address the store-index lookup for a package whose
-/// lockfile carries no integrity (a v1/legacy lock, or an
-/// integrity-stripping proxy).
+/// The GLOBAL directory holding no-integrity bindings, one
+/// content-addressed file per resolved tarball URL, under the store's `v1/`
+/// dir next to the CAS `files/` and `index/`.
 ///
-/// WHY this exists: the store index can also be keyed by a content-FREE
-/// `<name>@<version>` selector. In the per-user store shared across all
-/// of a user's projects, that selector lets the first project to import
-/// `foo@1.0.0` (from any registry) decide what every other project's
-/// warm install of the same coordinate links — even one scoped to a
-/// different, locked-down registry — with no registry contact and no
-/// verification. Binding the lookup to the sha512 THIS project computed
-/// from its OWN download closes that substitution surface: the key is
-/// per-project and self-established, so a different registry's bytes
-/// (different hash) can never be substituted. It lives outside the
-/// lockfile so a frozen install reads it without a download and without
-/// rewriting the lock. Missing/corrupt file → empty map (re-fetch
-/// re-establishes it).
-pub fn read_no_integrity_index(project_dir: &Path) -> BTreeMap<String, String> {
-    let state_path = state_dir(project_dir);
-    std::fs::read_to_string(no_integrity_index_file(&state_path))
-        .ok()
-        .and_then(|c| serde_json::from_str(&c).ok())
-        .unwrap_or_default()
+/// WHY it lives in the store and not in `node_modules`: the binding indexes
+/// store bytes, so it shares the store's lifetime. The dominant CI warm
+/// pattern restores the store cache but `rm -rf node_modules`; a binding
+/// inside `node_modules` was wiped with it, forcing a network re-fetch of
+/// the ~hundreds of no-integrity packages the store already held. In the
+/// store it survives the wipe, so the warm/offline relink content-addresses
+/// them straight from the store. Tracks a `storeDir` override so the binding
+/// moves with the store it indexes.
+pub fn no_integrity_dir(project_dir: &Path) -> PathBuf {
+    let store_v1 = match crate::commands::resolved_store_dir(project_dir) {
+        Some(custom) => custom.join("v1"),
+        None => aube_store::dirs::store_dir()
+            .and_then(|files| files.parent().map(Path::to_path_buf))
+            .unwrap_or_else(|| std::env::temp_dir().join("aube").join("store").join("v1")),
+    };
+    store_v1.join("no-integrity")
 }
 
-/// Merge freshly-resolved `<registry-name>@<version>` → sha512 bindings
-/// into the project's no-integrity index, preserving entries from prior
-/// installs (a `--prod` / `--filter` / partial install must not drop
-/// coordinates it didn't fetch this run). No-op when nothing new.
-pub fn merge_no_integrity_index(
-    project_dir: &Path,
-    resolved: &BTreeMap<String, String>,
+fn no_integrity_binding_file(dir: &Path, url: &str) -> PathBuf {
+    dir.join(format!(
+        "{}.json",
+        hex::encode(blake3::hash(url.as_bytes()).as_bytes())
+    ))
+}
+
+/// Read the global no-integrity binding for one resolved tarball `url`: the
+/// sha512 some install computed for it, or `None` if nothing is bound. Used
+/// directly by the streaming-resolve path (which resolves packages one at a
+/// time and so can't pre-build a projection map); the batch warm path goes
+/// through [`read_no_integrity_index_for`].
+pub fn read_no_integrity_binding(dir: &Path, url: &str) -> Option<String> {
+    let content = std::fs::read_to_string(no_integrity_binding_file(dir, url)).ok()?;
+    let binding: NoIntegrityBinding = serde_json::from_str(&content).ok()?;
+    // The URL is hashed into the filename; re-check it to reject a key
+    // collision rather than serve a different URL's bytes.
+    (binding.url == url).then_some(binding.sha512)
+}
+
+/// Project the GLOBAL URL-keyed no-integrity bindings down to the
+/// `<registry-name>@<version>` → sha512 map the warm classifier, the linker
+/// `load_index` fallback, and `ignored-builds` consume — so those readers
+/// keep their existing coordinate lookup and never need a registry client.
+///
+/// A no-integrity package's binding is keyed by the registry tarball URL it
+/// resolves to, derived from THIS project's configured registry (`.npmrc`)
+/// via `client.tarball_url` — NOT the lockfile's baked `resolved` field. The
+/// user's registry config, never a copied or hostile lockfile, defines the
+/// trust domain. The same coordinate resolved from a different registry
+/// hashes to a different key, so a project scoped to a locked-down registry
+/// can never link bytes another project bound from a different registry
+/// (the #212/#220 closure). A globally-shared binding for the SAME URL is
+/// intentional: it matches npm's and pnpm's per-URL global caches and is
+/// what lets a second project — and a `node_modules`-wiped relink — reuse
+/// the bytes without a re-fetch.
+pub fn read_no_integrity_index_for<'a, I>(project_dir: &Path, pkgs: I) -> BTreeMap<String, String>
+where
+    I: IntoIterator<Item = &'a aube_lockfile::LockedPackage>,
+{
+    let dir = no_integrity_dir(project_dir);
+    // Nothing bound yet (fresh store) → skip building a registry client.
+    if !dir.exists() {
+        return BTreeMap::new();
+    }
+    let client = crate::commands::make_client(project_dir);
+    pkgs.into_iter()
+        .filter(|pkg| pkg.integrity.is_none() && pkg.local_source.is_none())
+        .filter_map(|pkg| {
+            let url = client.tarball_url(pkg.registry_name(), &pkg.version);
+            read_no_integrity_binding(&dir, &url)
+                .map(|sri| (format!("{}@{}", pkg.registry_name(), pkg.version), sri))
+        })
+        .collect()
+}
+
+/// Persist `url` → `sha512` bindings into the global store, one
+/// content-addressed file per URL. Idempotent: a URL already bound to the
+/// same sha512 is skipped; a changed value (a re-publish under the same URL)
+/// overwrites atomically. One file per URL means concurrent installs binding
+/// different URLs never contend on a shared file.
+pub fn write_no_integrity_bindings(
+    dir: &Path,
+    bindings: &BTreeMap<String, String>,
 ) -> Result<(), std::io::Error> {
-    if resolved.is_empty() {
+    if bindings.is_empty() {
         return Ok(());
     }
-    let mut current = read_no_integrity_index(project_dir);
-    let mut changed = false;
-    for (coord, sri) in resolved {
-        if current.get(coord).map(String::as_str) != Some(sri.as_str()) {
-            current.insert(coord.clone(), sri.clone());
-            changed = true;
+    std::fs::create_dir_all(dir)?;
+    for (url, sri) in bindings {
+        let path = no_integrity_binding_file(dir, url);
+        if read_no_integrity_binding(dir, url).as_deref() == Some(sri.as_str()) {
+            continue;
         }
+        let json = serde_json::to_string(&NoIntegrityBinding {
+            url: url.clone(),
+            sha512: sri.clone(),
+        })?;
+        aube_util::fs_atomic::atomic_write(&path, json.as_bytes())?;
     }
-    if !changed {
-        return Ok(());
-    }
-    let state_path = state_dir(project_dir);
-    std::fs::create_dir_all(&state_path)?;
-    let json = serde_json::to_string_pretty(&current)?;
-    aube_util::fs_atomic::atomic_write(&no_integrity_index_file(&state_path), json.as_bytes())
+    Ok(())
 }
 
 fn fresh_state_file(state_path: &Path) -> PathBuf {
@@ -1685,6 +1740,138 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp dir should be creatable");
         dir
+    }
+
+    // --- no-integrity URL-keyed global binding ---
+    //
+    // The binding lives in the GLOBAL store keyed by the registry tarball
+    // URL a no-integrity coordinate resolves to. These exercise the two
+    // properties the relocation must hold simultaneously: (1) it survives a
+    // `node_modules` wipe and is shared across projects on the same registry
+    // (the perf win — no re-fetch), and (2) a different registry produces a
+    // different key so one project can never read another's binding (the
+    // #212/#220 cross-registry closure). All hermetic: `store-dir` pins the
+    // store and `registry` pins the URL via `.npmrc`; no network.
+
+    fn no_integrity_project(name: &str, registry: &str, store: &Path) -> PathBuf {
+        let dir = temp_project_dir(name);
+        std::fs::write(
+            dir.join(".npmrc"),
+            format!("store-dir={}\nregistry={registry}\n", store.display()),
+        )
+        .expect(".npmrc should write");
+        dir
+    }
+
+    fn no_integrity_pkg() -> aube_lockfile::LockedPackage {
+        aube_lockfile::LockedPackage {
+            name: "foo".into(),
+            version: "1.0.0".into(),
+            dep_path: "foo@1.0.0".into(),
+            ..Default::default()
+        }
+    }
+
+    fn bind(project: &Path, sha512: &str) {
+        let pkg = no_integrity_pkg();
+        let url =
+            crate::commands::make_client(project).tarball_url(pkg.registry_name(), &pkg.version);
+        super::write_no_integrity_bindings(
+            &super::no_integrity_dir(project),
+            &BTreeMap::from([(url, sha512.to_string())]),
+        )
+        .expect("binding should persist");
+    }
+
+    fn resolved_sha512(project: &Path) -> Option<String> {
+        super::read_no_integrity_index_for(project, std::slice::from_ref(&no_integrity_pkg()))
+            .get("foo@1.0.0")
+            .cloned()
+    }
+
+    #[test]
+    fn no_integrity_binding_is_global_and_survives_node_modules_wipe() {
+        let store = temp_project_dir("ni-wipe-store");
+        let proj = no_integrity_project("ni-wipe-proj", "https://reg.test/", &store);
+        bind(&proj, "sha512-AAA");
+
+        // The binding sits under the store, not node_modules, so the
+        // dominant CI warm pattern (`rm -rf node_modules`) can't touch it.
+        let dir = super::no_integrity_dir(&proj);
+        let nm = proj.join("node_modules");
+        std::fs::create_dir_all(nm.join(".aube/foo@1.0.0")).unwrap();
+        std::fs::remove_dir_all(&nm).unwrap();
+
+        assert!(dir.starts_with(&store), "binding must live under the store");
+        assert!(
+            !dir.starts_with(&nm),
+            "binding must be outside node_modules"
+        );
+        assert_eq!(resolved_sha512(&proj).as_deref(), Some("sha512-AAA"));
+    }
+
+    #[test]
+    fn same_registry_projects_share_one_binding() {
+        let store = temp_project_dir("ni-share-store");
+        let a = no_integrity_project("ni-share-a", "https://reg.test/", &store);
+        let b = no_integrity_project("ni-share-b", "https://reg.test/", &store);
+
+        bind(&a, "sha512-shared");
+        // B never wrote a binding but resolves the same coordinate from the
+        // same registry, so it reuses A's from the shared store — no refetch.
+        assert_eq!(resolved_sha512(&b).as_deref(), Some("sha512-shared"));
+    }
+
+    #[test]
+    fn different_registries_do_not_share_binding() {
+        let store = temp_project_dir("ni-xreg-store");
+        let a = no_integrity_project("ni-xreg-a", "https://reg-a.test/", &store);
+        let b = no_integrity_project("ni-xreg-b", "https://reg-b.test/", &store);
+
+        bind(&a, "sha512-from-a");
+        // The #212/#220 closure: B resolves the SAME coordinate from a
+        // DIFFERENT registry, so its URL key differs and it must NOT read
+        // A's binding out of the shared store.
+        assert!(
+            resolved_sha512(&b).is_none(),
+            "a different registry must not read another project's binding"
+        );
+
+        // Each project keeps its own independent binding.
+        bind(&b, "sha512-from-b");
+        assert_eq!(resolved_sha512(&a).as_deref(), Some("sha512-from-a"));
+        assert_eq!(resolved_sha512(&b).as_deref(), Some("sha512-from-b"));
+    }
+
+    #[test]
+    fn stale_in_node_modules_binding_is_ignored() {
+        let store = temp_project_dir("ni-migrate-store");
+        let proj = no_integrity_project("ni-migrate-proj", "https://reg.test/", &store);
+
+        // A pre-relocation binding left inside node_modules must never be
+        // read. Bind an UNRELATED coordinate globally so the read builds a
+        // client and actually consults the store — proving the stale file is
+        // ignored, not merely short-circuited by an absent store dir.
+        super::write_no_integrity_bindings(
+            &super::no_integrity_dir(&proj),
+            &BTreeMap::from([(
+                "https://reg.test/other/-/other-9.9.9.tgz".to_string(),
+                "sha512-other".to_string(),
+            )]),
+        )
+        .unwrap();
+        let legacy = proj.join("node_modules/.aube-state");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(
+            legacy.join("no-integrity-index.json"),
+            r#"{"foo@1.0.0":"sha512-stale"}"#,
+        )
+        .unwrap();
+
+        assert!(
+            resolved_sha512(&proj).is_none(),
+            "stale in-node_modules binding must not be read"
+        );
     }
 
     #[test]

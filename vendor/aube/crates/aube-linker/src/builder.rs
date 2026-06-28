@@ -45,12 +45,13 @@ impl Linker {
         }
     }
 
-    /// Supply per-project `<registry-name>@<version>` → computed-sha512
-    /// bindings so the `load_index` fallback can content-address the
-    /// index read for a no-integrity package instead of keying by `None`
-    /// (see the field docs on [`Linker`]). The install driver populates
-    /// this from `state::read_no_integrity_index`; standalone callers
-    /// and tests omit it and get unchanged behavior.
+    /// Supply `<registry-name>@<version>` → computed-sha512 bindings so the
+    /// `load_index` fallback can content-address the index read for a
+    /// no-integrity package instead of keying by `None` (see the field docs
+    /// on [`Linker`]). The install driver populates this by projecting the
+    /// global URL-keyed bindings down to `<name>@<version>` keys
+    /// (`state::read_no_integrity_index_for`); standalone callers and tests
+    /// omit it and get unchanged behavior.
     pub fn with_no_integrity_read_keys(
         mut self,
         keys: std::collections::BTreeMap<String, String>,

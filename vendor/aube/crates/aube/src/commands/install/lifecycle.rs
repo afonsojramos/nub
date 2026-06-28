@@ -760,8 +760,8 @@ pub(crate) async fn run_dep_lifecycle_scripts(
 /// No content-FREE root-key (`None`) write happens here — ever. The
 /// index is cached ONLY when there's an integrity to key it by; a
 /// no-integrity package lands under its computed-sha512 hex key, and the
-/// warm classifier reaches it by content-addressing through the
-/// per-project no-integrity index (`state::read_no_integrity_index`) —
+/// warm classifier reaches it by content-addressing through the global
+/// URL-keyed no-integrity binding (`state::read_no_integrity_index_for`) —
 /// not a bare `<name>@<version>` selector that, in a per-user shared
 /// store, would let one project's bytes be served to another for the
 /// same coordinate. (A predecessor wrote both keys; that root-key write
