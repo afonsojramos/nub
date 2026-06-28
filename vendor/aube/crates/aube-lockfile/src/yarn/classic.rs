@@ -16,6 +16,15 @@ pub(super) fn parse_classic_str(
     // from package.json ranges and transitive dep references.
     let mut spec_to_dep_path: BTreeMap<String, String> = BTreeMap::new();
     let mut packages: BTreeMap<String, LockedPackage> = BTreeMap::new();
+    // Under `strict_unsupported_source` (nub), a block whose source the
+    // classic reader can't resolve (git, github shorthand, jsr, http
+    // tarball, …) is RECORDED here (keyed by each of its specs) instead of
+    // being reclassified to a registry `name@version` that 404s at fetch, so
+    // the edge sites below can raise an eager fatal / warn+skip. Empty (and
+    // inert) for standalone aube, which keeps the reclassify default.
+    let strict = aube_util::embedder().strict_unsupported_source;
+    let mut unsupported: BTreeMap<String, crate::UnsupportedSpec> = BTreeMap::new();
+    let mut skipped_optional: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
 
     for block in &blocks {
         let version = block
@@ -61,10 +70,43 @@ pub(super) fn parse_classic_str(
         // install. The dep_path is keyed by `LocalSource::dep_path` (the
         // FS-safe hashed form) exactly like the berry parser keys its
         // local packages.
-        let local_source = block
-            .specs
-            .iter()
-            .find_map(|s| classic_local_source(s, &name));
+        // Classify the block's source. All specs in a yarn.lock v1 block share
+        // one resolution, so they classify identically; scan for the first
+        // non-Registry signal (a `Local` source, or an `Unsupported` protocol).
+        let mut classic_src = ClassicSource::Registry;
+        for s in &block.specs {
+            match classic_local_source(s, &name) {
+                ClassicSource::Registry => {}
+                other => {
+                    classic_src = other;
+                    break;
+                }
+            }
+        }
+        let local_source = match classic_src {
+            ClassicSource::Registry => None,
+            ClassicSource::Local(src) => Some(src),
+            ClassicSource::Unsupported(protocol) => {
+                if strict {
+                    // Record under each spec and skip the block entirely (no
+                    // registry package, no `spec_to_dep_path` entry), so a
+                    // consumer raises a fatal / warn at the edge sites instead
+                    // of resolving to a `name@version` that 404s at fetch.
+                    for s in &block.specs {
+                        unsupported.insert(
+                            s.clone(),
+                            crate::UnsupportedSpec {
+                                name: name.clone(),
+                                key: s.clone(),
+                                protocol: protocol.clone(),
+                            },
+                        );
+                    }
+                    continue;
+                }
+                None
+            }
+        };
         let dep_path = match &local_source {
             Some(src) => src.dep_path(&name),
             None => format!("{name}@{version}"),
@@ -108,15 +150,20 @@ pub(super) fn parse_classic_str(
         }
     }
 
-    // Second pass: resolve transitive dep references to dep_paths.
+    // Second pass: resolve transitive dep references to dep_paths. Classic
+    // tracks only `dependencies:` sections (the tokenizer drops
+    // `optionalDependencies:`), so every transitive edge here is non-optional
+    // — an unsupported one is therefore an eager fatal, never a warn.
     let mut resolved: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     for (dep_path, pkg) in &packages {
         let mut deps: BTreeMap<String, String> = BTreeMap::new();
         for (name, raw_spec) in &pkg.dependencies {
-            if let Some(resolved_path) = spec_to_dep_path.get(raw_spec) {
+            if let Some(resolved_path) =
+                crate::resolve_dep_spec(raw_spec, false, &spec_to_dep_path, &unsupported, path)?
+            {
                 deps.insert(
                     name.clone(),
-                    crate::npm::dep_path_tail(name, resolved_path).to_string(),
+                    crate::npm::dep_path_tail(name, &resolved_path).to_string(),
                 );
             }
         }
@@ -188,16 +235,40 @@ pub(super) fn parse_classic_str(
     // Build direct deps from the manifest, cross-referencing against
     // spec_to_dep_path; falling back to a workspace-sibling link.
     let mut direct: Vec<DirectDep> = Vec::new();
-    let push_dep = |name: &str, range: &str, dep_type: DepType, into: &mut Vec<DirectDep>| {
+    let push_dep = |name: &str,
+                    range: &str,
+                    dep_type: DepType,
+                    importer: &str,
+                    into: &mut Vec<DirectDep>,
+                    skipped: &mut BTreeMap<String, BTreeMap<String, String>>|
+     -> Result<(), Error> {
         let spec = format!("{name}@{range}");
-        if let Some(dep_path) = spec_to_dep_path.get(&spec) {
+        let optional = matches!(dep_type, DepType::Optional);
+        // `resolve_dep_spec`: `Some` when the spec resolves; `Err` for a
+        // non-optional unsupported source (the eager fatal); `None` for a
+        // genuine miss OR an optional unsupported source (warned inside).
+        if let Some(dep_path) =
+            crate::resolve_dep_spec(&spec, optional, &spec_to_dep_path, &unsupported, path)?
+        {
             into.push(DirectDep {
                 name: name.to_string(),
-                dep_path: dep_path.clone(),
+                dep_path,
                 dep_type,
                 specifier: Some(range.to_string()),
             });
-        } else if let Some(dep_path) = workspace_link(name, range) {
+            return Ok(());
+        }
+        // An optional unsupported dep was warned + skipped; record it as a
+        // consciously-skipped optional so a frozen install's drift check
+        // tolerates the absent dep (same as a platform-filtered optional).
+        if optional && unsupported.contains_key(&spec) {
+            skipped
+                .entry(importer.to_string())
+                .or_default()
+                .insert(name.to_string(), range.to_string());
+            return Ok(());
+        }
+        if let Some(dep_path) = workspace_link(name, range) {
             into.push(DirectDep {
                 name: name.to_string(),
                 dep_path,
@@ -205,15 +276,37 @@ pub(super) fn parse_classic_str(
                 specifier: Some(range.to_string()),
             });
         }
+        Ok(())
     };
     for (name, range) in &manifest.dependencies {
-        push_dep(name, range, DepType::Production, &mut direct);
+        push_dep(
+            name,
+            range,
+            DepType::Production,
+            ".",
+            &mut direct,
+            &mut skipped_optional,
+        )?;
     }
     for (name, range) in &manifest.dev_dependencies {
-        push_dep(name, range, DepType::Dev, &mut direct);
+        push_dep(
+            name,
+            range,
+            DepType::Dev,
+            ".",
+            &mut direct,
+            &mut skipped_optional,
+        )?;
     }
     for (name, range) in &manifest.optional_dependencies {
-        push_dep(name, range, DepType::Optional, &mut direct);
+        push_dep(
+            name,
+            range,
+            DepType::Optional,
+            ".",
+            &mut direct,
+            &mut skipped_optional,
+        )?;
     }
 
     let mut importers = BTreeMap::new();
@@ -233,13 +326,34 @@ pub(super) fn parse_classic_str(
     for (member_dir, member_pj) in &member_manifests {
         let mut member_direct: Vec<DirectDep> = Vec::new();
         for (name, range) in &member_pj.dependencies {
-            push_dep(name, range, DepType::Production, &mut member_direct);
+            push_dep(
+                name,
+                range,
+                DepType::Production,
+                member_dir,
+                &mut member_direct,
+                &mut skipped_optional,
+            )?;
         }
         for (name, range) in &member_pj.dev_dependencies {
-            push_dep(name, range, DepType::Dev, &mut member_direct);
+            push_dep(
+                name,
+                range,
+                DepType::Dev,
+                member_dir,
+                &mut member_direct,
+                &mut skipped_optional,
+            )?;
         }
         for (name, range) in &member_pj.optional_dependencies {
-            push_dep(name, range, DepType::Optional, &mut member_direct);
+            push_dep(
+                name,
+                range,
+                DepType::Optional,
+                member_dir,
+                &mut member_direct,
+                &mut skipped_optional,
+            )?;
         }
         importers.insert(member_dir.clone(), member_direct);
     }
@@ -247,6 +361,7 @@ pub(super) fn parse_classic_str(
     Ok(LockfileGraph {
         importers,
         packages,
+        skipped_optional_dependencies: skipped_optional,
         ..Default::default()
     })
 }
@@ -459,22 +574,59 @@ pub(super) fn parse_spec_name(spec: &str) -> Option<String> {
     }
 }
 
-/// Detect a yarn-classic local-package protocol on a spec key and map
-/// it to a [`LocalSource`]. Classic encodes the protocol in the spec
-/// *range* (`name@link:./path`, `name@file:./path`, `name@portal:./path`)
-/// rather than in a separate `resolution:` field the way berry does.
-/// Registry and remote (`http(s):`, git) specs return `None` — they
-/// resolve through the normal `name@version` path.
-fn classic_local_source(spec: &str, name: &str) -> Option<LocalSource> {
-    let range = spec.strip_prefix(name)?.strip_prefix('@')?;
-    let (protocol, body) = range.split_once(':')?;
-    match protocol {
-        "link" => Some(LocalSource::Link(PathBuf::from(strip_hash_fragment(body)))),
-        "file" => Some(file_protocol_source(body)),
-        "portal" => Some(LocalSource::Portal(PathBuf::from(strip_hash_fragment(
-            body,
-        )))),
-        _ => None,
+/// How the classic reader classifies a spec's source.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum ClassicSource {
+    /// A registry-resolvable spec: a semver range, a dist-tag, or an `npm:`
+    /// alias (the real name rides on `alias_of`). Resolves via `name@version`.
+    Registry,
+    /// A local on-disk source (`link:`/`file:`/`portal:`) the linker
+    /// materializes directly.
+    Local(LocalSource),
+    /// A source the classic reader cannot resolve from a yarn.lock — a git
+    /// dep (`git+https`/`git+ssh`/`git`/`ssh`, or a `user/repo#ref` github
+    /// shorthand), an `http(s)` tarball, `jsr:`, or any unknown protocol.
+    /// Reclassifying it to `name@version` would 404 at fetch. Carries the
+    /// protocol token for the diagnostic.
+    Unsupported(String),
+}
+
+/// Classify a yarn-classic spec's source. Classic encodes the protocol in
+/// the spec *range* (`name@link:./path`, `name@user/repo#ref`,
+/// `name@git+https://…`) rather than a separate `resolution:` field the way
+/// berry does.
+pub(super) fn classic_local_source(spec: &str, name: &str) -> ClassicSource {
+    let Some(range) = spec.strip_prefix(name).and_then(|r| r.strip_prefix('@')) else {
+        // Not a `name@…` spec (malformed block); keep the historical
+        // registry default rather than inventing an unsupported source.
+        return ClassicSource::Registry;
+    };
+    match range.split_once(':') {
+        Some(("link", body)) => {
+            ClassicSource::Local(LocalSource::Link(PathBuf::from(strip_hash_fragment(body))))
+        }
+        Some(("file", body)) => ClassicSource::Local(file_protocol_source(body)),
+        Some(("portal", body)) => ClassicSource::Local(LocalSource::Portal(PathBuf::from(
+            strip_hash_fragment(body),
+        ))),
+        // `npm:` is a registry alias (resolves via `alias_of`) — NOT a local
+        // or unsupported source. Must be matched before the github-shorthand
+        // rule below, since an alias body can contain `/` (`npm:@scope/x@1`).
+        Some(("npm", _)) => ClassicSource::Registry,
+        // A `user/repo#semver:<range>` github shorthand splits on the
+        // `#semver:` colon, so its "protocol" carries the `/` — it's the same
+        // unsupportable git source as the no-colon `user/repo#ref` form below.
+        Some((protocol, _)) if protocol.contains('/') => {
+            ClassicSource::Unsupported("git".to_string())
+        }
+        // Any other explicit protocol is a source the classic reader can't
+        // resolve from yarn.lock (git+https/git+ssh/git/ssh/http/https/jsr/…).
+        Some((protocol, _)) => ClassicSource::Unsupported(protocol.to_string()),
+        // No protocol colon: a bare semver/dist-tag is registry-resolvable, but
+        // a `/`-bearing range is a github shorthand (`user/repo#ref`) — a git
+        // source classic can't resolve. A registry range never contains `/`.
+        None if range.contains('/') => ClassicSource::Unsupported("git".to_string()),
+        None => ClassicSource::Registry,
     }
 }
 

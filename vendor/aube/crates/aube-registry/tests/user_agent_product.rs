@@ -40,6 +40,7 @@ static MYTOOL: Embedder = Embedder {
     primer_ttl: None,
     cpu_budget: None,
     tty_progress: false,
+    strict_unsupported_source: false,
 };
 
 #[tokio::test]

@@ -15,6 +15,7 @@ use crate::CodeMeta;
 pub const ERR_AUBE_NO_LOCKFILE: &str = "ERR_AUBE_NO_LOCKFILE";
 pub const ERR_AUBE_LOCKFILE_PARSE: &str = "ERR_AUBE_LOCKFILE_PARSE";
 pub const ERR_AUBE_LOCKFILE_UNSUPPORTED_FORMAT: &str = "ERR_AUBE_LOCKFILE_UNSUPPORTED_FORMAT";
+#[rustfmt::skip] pub const ERR_AUBE_LOCKFILE_UNSUPPORTED_SOURCE: &str = "ERR_AUBE_LOCKFILE_UNSUPPORTED_SOURCE";
 pub const ERR_AUBE_RESOLUTION_SHAPE_MISMATCH: &str = "ERR_AUBE_RESOLUTION_SHAPE_MISMATCH";
 pub const ERR_AUBE_OUTDATED_LOCKFILE: &str = "ERR_AUBE_OUTDATED_LOCKFILE";
 #[rustfmt::skip] pub const ERR_AUBE_LOCKFILE_DECLARATION_MISMATCH: &str = "ERR_AUBE_LOCKFILE_DECLARATION_MISMATCH";
@@ -150,6 +151,12 @@ pub const ALL: &[CodeMeta] = &[
         category: category::LOCKFILE,
         description: "Lockfile filename was recognized but its format isn't supported on this aube version.",
         exit_code: Some(12),
+    },
+    CodeMeta {
+        name: ERR_AUBE_LOCKFILE_UNSUPPORTED_SOURCE,
+        category: category::LOCKFILE,
+        description: "A lockfile entry's dependency source (protocol) can't be resolved from that lockfile — e.g. a git or jsr source in a yarn.lock — so the installed tree would silently diverge from the incumbent's. Install with the original package manager, or remove the dependency.",
+        exit_code: Some(14),
     },
     CodeMeta {
         name: ERR_AUBE_RESOLUTION_SHAPE_MISMATCH,

@@ -319,6 +319,60 @@ pub fn dep_type_label(dt: DepType) -> &'static str {
     }
 }
 
+/// A lockfile entry whose dependency source the reader can't resolve,
+/// recorded by a format reader's classifier under the `strict_unsupported_source`
+/// embedder profile instead of silently dropping it (yarn-berry) or
+/// reclassifying it to a registry `name@version` that 404s at fetch
+/// (yarn-classic / bun). Resolved to a fatal or a warn at the edge sites
+/// (where dep-type is known) by [`resolve_dep_spec`].
+#[derive(Debug, Clone)]
+pub(crate) struct UnsupportedSpec {
+    /// The dependency name (for the optional-skip warning).
+    pub name: String,
+    /// A human-readable entry identifier (for the fatal message), e.g. the
+    /// resolution/spec string `foo@user/repo#abc`.
+    pub key: String,
+    /// The unsupported protocol token (`git`, `jsr`, `exec`, …).
+    pub protocol: String,
+}
+
+/// Resolve a dependency `spec` against the lockfile's `spec → dep_path`
+/// index, applying the abort-eagerly policy for specs a classifier
+/// recorded as an [`UnsupportedSpec`]. Returns the resolved dep_path,
+/// `None` when the spec is genuinely absent OR an OPTIONAL unsupported
+/// source (warned + skipped, matching the incumbent's tolerance of a
+/// missing optional), or `Err(UnsupportedSource)` for a NON-optional
+/// unsupported source — the eager, pre-mutation plan-time refusal. The
+/// `unsupported` map is empty unless the active embedder set
+/// `strict_unsupported_source`, so for standalone aube this is a plain
+/// index lookup with the historical drop/reclassify behavior preserved
+/// upstream of it.
+pub(crate) fn resolve_dep_spec(
+    spec: &str,
+    optional: bool,
+    spec_to_dep_path: &BTreeMap<String, String>,
+    unsupported: &BTreeMap<String, UnsupportedSpec>,
+    path: &std::path::Path,
+) -> Result<Option<String>, Error> {
+    if let Some(dep_path) = spec_to_dep_path.get(spec) {
+        return Ok(Some(dep_path.clone()));
+    }
+    let Some(u) = unsupported.get(spec) else {
+        return Ok(None);
+    };
+    if optional {
+        tracing::warn!(
+            code = aube_codes::warnings::WARN_AUBE_LOCKFILE_UNSUPPORTED_SOURCE,
+            "optional dependency `{}` uses the unsupported `{}` source — skipping it (the install continues)",
+            u.name,
+            u.protocol,
+        );
+        Ok(None)
+    } else {
+        Err(Error::unsupported_source(path, &u.key, &u.protocol))
+    }
+}
+
 /// A single resolved package in the lockfile.
 ///
 /// The `dependencies` map keys are dep names and values are the dependency's

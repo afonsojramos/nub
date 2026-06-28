@@ -1188,8 +1188,22 @@ pub fn run_ci(flags: CiFlags) -> Result<i32> {
 fn yarn_drift_reason(dir: &Path) -> Option<String> {
     let manifest = aube_manifest::PackageJson::from_path(&dir.join("package.json")).ok()?;
     let graph = aube_lockfile::parse_lockfile(dir, &manifest).ok()?;
-    let satisfied: std::collections::HashSet<&str> =
+    let mut satisfied: std::collections::HashSet<&str> =
         graph.root_deps().iter().map(|d| d.name.as_str()).collect();
+    // An optional dependency the reader consciously skipped (e.g. an
+    // unresolvable `git`/`jsr` source under the strict-unsupported-source
+    // policy) is not drift — it's deliberately absent and needs no yarn.lock
+    // rewrite, exactly like a platform-filtered optional. Without this, an
+    // optional unsupported dep would trip the read-only yarn write-gate even
+    // though the policy is to warn + proceed.
+    // Root importer only, matching `root_deps()` above: this function checks
+    // only the root manifest, so folding a workspace member's skipped optional
+    // into `satisfied` could mask real root drift on a same-named dep. Both
+    // yarn readers key the root's skipped optionals under "." (classic keys
+    // members under their dir), so this lookup is exact.
+    if let Some(root_skipped) = graph.skipped_optional_dependencies.get(".") {
+        satisfied.extend(root_skipped.keys().map(String::as_str));
+    }
     let manifest_deps = manifest
         .dependencies
         .iter()

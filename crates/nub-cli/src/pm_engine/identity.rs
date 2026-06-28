@@ -158,6 +158,11 @@ pub(crate) const NUB: aube_util::Embedder = aube_util::Embedder {
     // The animated single-line install bar is nub's first-class TTY UX; the
     // engine still falls back to append-only for CI / piped / non-TTY output.
     tty_progress: true,
+    // nub's guarantee is "the installed tree equals the incumbent PM's, or an
+    // eager precise refusal" — so a lockfile source nub can't resolve (a
+    // git/jsr/unknown protocol in a yarn.lock or bun.lock) aborts at plan time
+    // for a non-optional dep, instead of reclassify→404 / silent drop.
+    strict_unsupported_source: true,
 };
 
 /// Register [`NUB`] as the active embedder profile. Idempotent (the engine's

@@ -92,6 +92,7 @@ pub const WARN_AUBE_LOCKFILE_MERGE_CONFLICT: &str = "WARN_AUBE_LOCKFILE_MERGE_CO
 pub const WARN_AUBE_LOCKFILE_MERGE_CLEANUP_FAILED: &str = "WARN_AUBE_LOCKFILE_MERGE_CLEANUP_FAILED";
 pub const WARN_AUBE_LOCKFILE_CONFLICT_MARKERS: &str = "WARN_AUBE_LOCKFILE_CONFLICT_MARKERS";
 pub const WARN_AUBE_YARN_BERRY_UNSUPPORTED: &str = "WARN_AUBE_YARN_BERRY_UNSUPPORTED";
+#[rustfmt::skip] pub const WARN_AUBE_LOCKFILE_UNSUPPORTED_SOURCE: &str = "WARN_AUBE_LOCKFILE_UNSUPPORTED_SOURCE";
 pub const WARN_AUBE_LOCKFILE_MALFORMED_PEER_SUFFIX: &str =
     "WARN_AUBE_LOCKFILE_MALFORMED_PEER_SUFFIX";
 pub const WARN_AUBE_GLOBAL_OUTDATED_NO_LOCKFILE: &str = "WARN_AUBE_GLOBAL_OUTDATED_NO_LOCKFILE";
@@ -515,6 +516,12 @@ pub const ALL: &[CodeMeta] = &[
         name: WARN_AUBE_YARN_BERRY_UNSUPPORTED,
         category: category::LOCKFILE,
         description: "A Yarn Berry `patch:` / `portal:` / `exec:` protocol — or any unrecognized protocol — was found in `yarn.lock`. Entry was skipped.",
+        exit_code: None,
+    },
+    CodeMeta {
+        name: WARN_AUBE_LOCKFILE_UNSUPPORTED_SOURCE,
+        category: category::LOCKFILE,
+        description: "An OPTIONAL dependency's source (protocol) can't be resolved from the lockfile (e.g. a git or jsr source). It was skipped; the install continues. A non-optional such dependency is a hard error (ERR_AUBE_LOCKFILE_UNSUPPORTED_SOURCE) instead.",
         exit_code: None,
     },
     CodeMeta {

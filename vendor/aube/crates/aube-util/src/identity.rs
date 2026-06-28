@@ -258,6 +258,20 @@ pub struct Embedder {
     /// repaint, no leftover frame, no flash) is unconditional — only *whether
     /// the animated renderer is the default* is gated here.
     pub tty_progress: bool,
+    /// When `false` (aube's default), a lockfile entry whose dependency
+    /// source the reader can't resolve (a `git`/`jsr`/unknown protocol in a
+    /// yarn.lock or bun.lock) keeps aube's prior best-effort behavior:
+    /// yarn-berry `warn!`s and drops the block; yarn-classic / bun reclassify
+    /// it to a registry `name@version` (which 404s at fetch). When `true`,
+    /// the reader instead raises [`crate`-external `Error::UnsupportedSource`]
+    /// at parse time for a NON-optional such entry (so the install aborts
+    /// eagerly, before any `node_modules` write, instead of producing a tree
+    /// that silently diverges from the incumbent's), and `warn!`s + drops an
+    /// OPTIONAL one (recording it as a skipped optional so a frozen install
+    /// still verifies). An embedder that guarantees "the installed tree
+    /// equals the incumbent PM's, or an eager precise refusal" (nub) sets
+    /// this `true`. Embedder-fixed: it's the host's call, not the user's.
+    pub strict_unsupported_source: bool,
 }
 
 /// Standalone aube's embedder profile. Reproduces every hardcoded branding
@@ -293,6 +307,10 @@ pub const AUBE: Embedder = Embedder {
     // `AUBE_TTY_PROGRESS` opt-in for standalone aube, so default output is
     // unchanged.
     tty_progress: false,
+    // Standalone aube keeps its prior best-effort source handling
+    // (warn+drop for berry, reclassify-to-registry for classic/bun) so its
+    // default install behavior is byte-identical.
+    strict_unsupported_source: false,
 };
 
 static ACTIVE: OnceLock<&'static Embedder> = OnceLock::new();

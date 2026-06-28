@@ -717,13 +717,13 @@ fn engine_session_inner(
     // when the resolver reads them. Filter applies in every family; warnings
     // + the catalog hard-error are install-family only (see `noise`).
     apply_config_scope(detected.as_ref(), &cwd, noise)?;
-    // Warn once at install time when the project requests Plug'n'Play
-    // (nodeLinker: pnp in .yarnrc.yml) but nub will install a node_modules
-    // tree instead — the embedder default below forces `hoisted` and the
-    // .yarnrc.yml is not re-read anywhere in the install path, so without this
-    // the divergence is entirely silent.
+    // Abort the install when the project requests Plug'n'Play (nodeLinker: pnp
+    // in .yarnrc.yml, or Yarn Berry's default): nub installs a node_modules
+    // tree, so honoring the lockfile under PnP would silently produce a
+    // materially different on-disk layout than yarn's. Install-family only
+    // (`noise == Warn`); read-only PM commands don't reach here.
     if noise == ConfigScopeNoise::Warn {
-        warn_if_pnp_requested(detected.as_ref(), &cwd);
+        pnp_fatal_if_requested(detected.as_ref(), &cwd)?;
     }
     // Truly-fresh = no PM-preference signal anywhere (no lockfile, no
     // declaration, no pnpm-named file). On this path nub claims identity via the
@@ -1813,24 +1813,34 @@ fn read_file_head(path: &Path, max_bytes: usize) -> std::io::Result<String> {
 /// linker is PnP but nub will install a `node_modules` tree instead. Yarn
 /// Berry defaults to PnP when no `nodeLinker` is configured, so absence is
 /// warning-worthy for Berry but not for Yarn Classic.
-fn warn_if_pnp_requested(detected: Option<&DetectedLockfile>, cwd: &Path) {
+/// Abort a mutating install when the Yarn project requests Plug'n'Play
+/// (`nodeLinker: pnp` in `.yarnrc.yml`, or Yarn Berry's default). nub installs
+/// a `node_modules` tree, so honoring the lockfile under PnP would silently
+/// produce a materially different on-disk layout than the incumbent's —
+/// exactly the silent partial the abort-eagerly policy refuses. Fatal at plan
+/// time (before any `node_modules` write); gated to the install family via the
+/// `noise == Warn` call site, so read-only PM commands are unaffected.
+fn pnp_fatal_if_requested(detected: Option<&DetectedLockfile>, cwd: &Path) -> Result<()> {
     let Some(kind @ (LockfileKind::Yarn | LockfileKind::YarnBerry)) = detected.map(|d| d.kind)
     else {
-        return;
+        return Ok(());
     };
     let root = detected.map(|d| d.dir.as_path()).unwrap_or(cwd);
     if effective_yarn_node_linker(root, cwd, kind == LockfileKind::YarnBerry).as_deref()
         == Some("pnp")
     {
-        let line = "nub: this Yarn project uses Plug'n'Play (nodeLinker: pnp or Yarn Berry's default), \
-                    which nub does not implement — installing a node_modules tree instead. \
-                    [WARN_NUB_PNP_LINKER_DOWNGRADE]";
-        if scope_warning_uses_dim() {
-            eprintln!("\x1b[2m{line}\x1b[0m");
-        } else {
-            eprintln!("{line}");
-        }
+        return Err(pnp_unsupported_error());
     }
+    Ok(())
+}
+
+fn pnp_unsupported_error() -> anyhow::Error {
+    anyhow::anyhow!(
+        "nub: this project is configured for Yarn Plug'n'Play (nodeLinker: pnp, or Yarn Berry's \
+         default) — nub installs a node_modules tree and doesn't support PnP yet, so the result \
+         would diverge from yarn's. Install with yarn, or set `nodeLinker: node-modules` in \
+         .yarnrc.yml. [ERR_NUB_PNP_UNSUPPORTED]"
+    )
 }
 
 fn effective_yarn_node_linker(root: &Path, cwd: &Path, berry_default_pnp: bool) -> Option<String> {
@@ -2640,14 +2650,14 @@ mod tests {
     }
 
     #[test]
-    fn warn_if_pnp_requested_fires_only_for_yarn_with_pnp_linker() {
+    fn pnp_fatal_fires_only_for_yarn_with_pnp_linker() {
         let dir = tempfile::tempdir().unwrap();
         let yarnrc = dir.path().join(".yarnrc.yml");
         static YARN_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-        // Helper that mirrors the gating logic without actually calling
-        // eprintln! — we check the predicate, not the output channel.
-        let would_warn = |kind: Option<LockfileKind>, content: Option<&str>| {
+        // Helper that mirrors the gating predicate without constructing the
+        // error — we check when the fatal fires, not its rendering.
+        let would_abort = |kind: Option<LockfileKind>, content: Option<&str>| {
             let _ = std::fs::remove_file(&yarnrc);
             if let Some(c) = content {
                 std::fs::write(&yarnrc, c).unwrap();
@@ -2677,25 +2687,25 @@ mod tests {
                     == Some("pnp")
         };
 
-        // Yarn + pnp → warn.
-        assert!(would_warn(
+        // Yarn + pnp → abort.
+        assert!(would_abort(
             Some(LockfileKind::Yarn),
             Some("nodeLinker: pnp\n")
         ));
-        assert!(would_warn(
+        assert!(would_abort(
             Some(LockfileKind::YarnBerry),
             Some("nodeLinker: pnp\n")
         ));
 
-        // Yarn + hoisted → no warn.
-        assert!(!would_warn(
+        // Yarn + hoisted → no abort.
+        assert!(!would_abort(
             Some(LockfileKind::Yarn),
             Some("nodeLinker: hoisted\n")
         ));
 
-        // Yarn Classic + no .yarnrc.yml → no warn; Yarn Berry defaults to PnP.
-        assert!(!would_warn(Some(LockfileKind::Yarn), None));
-        assert!(would_warn(Some(LockfileKind::YarnBerry), None));
+        // Yarn Classic + no .yarnrc.yml → no abort; Yarn Berry defaults to PnP.
+        assert!(!would_abort(Some(LockfileKind::Yarn), None));
+        assert!(would_abort(Some(LockfileKind::YarnBerry), None));
 
         // A nearer rc file overrides an ancestor rc file.
         std::fs::write(&yarnrc, "nodeLinker: pnp\n").unwrap();
@@ -2729,21 +2739,21 @@ mod tests {
         unsafe { std::env::remove_var("YARN_NODE_LINKER") };
 
         // Non-yarn kinds + pnp → no warn (npm/bun projects can't have .yarnrc.yml pnp).
-        assert!(!would_warn(
+        assert!(!would_abort(
             Some(LockfileKind::Npm),
             Some("nodeLinker: pnp\n")
         ));
-        assert!(!would_warn(
+        assert!(!would_abort(
             Some(LockfileKind::Bun),
             Some("nodeLinker: pnp\n")
         ));
-        assert!(!would_warn(
+        assert!(!would_abort(
             Some(LockfileKind::Pnpm),
             Some("nodeLinker: pnp\n")
         ));
 
         // No lockfile → no warn.
-        assert!(!would_warn(None, Some("nodeLinker: pnp\n")));
+        assert!(!would_abort(None, Some("nodeLinker: pnp\n")));
     }
 
     // The brand-surface toggles (workspace-yaml list, manifest config
