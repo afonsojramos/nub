@@ -1098,8 +1098,13 @@ fn node_compile_cache_zero_disables_the_transpile_cache() {
 
 #[test]
 fn polyfills_available() {
-    let fixture_path = fixtures_dir().join("vanilla-ts");
-    let test_file = fixture_path.join("_polyfill_check.ts");
+    // Pure-runtime polyfill availability (no fixture project config involved), so
+    // the script lives in its OWN tmpdir — never written into the checked-in
+    // fixture tree — with an isolated cache. A panic can't strand a temp file in
+    // the repo, and concurrent runs never share the real `~/.cache/nub`.
+    let work = unique_test_cache();
+    std::fs::create_dir_all(&work).unwrap();
+    let test_file = work.join("_polyfill_check.ts");
     std::fs::write(
         &test_file,
         "console.log(typeof RegExp.escape, typeof Error.isError, typeof Promise.try)\n",
@@ -1108,11 +1113,12 @@ fn polyfills_available() {
 
     let output = Command::new(nub_binary())
         .arg(test_file.to_str().unwrap())
-        .current_dir(&fixture_path)
+        .current_dir(&work)
+        .env("XDG_CACHE_HOME", unique_test_cache())
         .output()
         .expect("failed to spawn nub");
 
-    let _ = std::fs::remove_file(&test_file);
+    let _ = std::fs::remove_dir_all(&work);
 
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1128,8 +1134,12 @@ fn base64_and_resource_management_polyfills() {
     // polyfills are verified byte-for-byte against Node native in the runtime
     // batteries; this asserts the feature is reachable + correct through nub's real
     // preload chain (round-trip, LIFO disposal, SuppressedError aggregation).
-    let fixture_path = fixtures_dir().join("vanilla-ts");
-    let test_file = fixture_path.join("_erm_check.mjs");
+    // Pure-runtime polyfill checks — written to an isolated tmpdir (not the
+    // checked-in fixture tree) with an isolated cache, for the same hermeticity
+    // reasons as `polyfills_available`.
+    let work = unique_test_cache();
+    std::fs::create_dir_all(&work).unwrap();
+    let test_file = work.join("_erm_check.mjs");
     std::fs::write(
         &test_file,
         r#"
@@ -1166,11 +1176,12 @@ console.log(JSON.stringify({ okB64, okUrl, okHex, order: order.join(","), agg, a
 
     let output = Command::new(nub_binary())
         .arg(test_file.to_str().unwrap())
-        .current_dir(&fixture_path)
+        .current_dir(&work)
+        .env("XDG_CACHE_HOME", unique_test_cache())
         .output()
         .expect("failed to spawn nub");
 
-    let _ = std::fs::remove_file(&test_file);
+    let _ = std::fs::remove_dir_all(&work);
 
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -2024,13 +2035,18 @@ fn workspace_parallel_timing() {
     use std::fs;
 
     let fixture = fixtures_dir().join("monorepo-deps");
+    // Qualify the stamp dir by PID as well as nanos: two CI matrix jobs sharing
+    // /tmp that sampled the same nanosecond would otherwise collide. Pre-clean so
+    // a stale dir from a prior run can't poison a stamp read.
     let stamp_dir = std::env::temp_dir().join(format!(
-        "nub-parallel-timing-{}",
+        "nub-parallel-timing-{}-{}",
+        std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .subsec_nanos()
     ));
+    let _ = fs::remove_dir_all(&stamp_dir);
     fs::create_dir_all(&stamp_dir).expect("failed to create stamp dir");
 
     // Helper: read a u64 millisecond timestamp from a stamp file.

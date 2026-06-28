@@ -658,6 +658,14 @@ mod tests {
         tempfile::tempdir().unwrap()
     }
 
+    /// Serializes the two tests that mutate the process-global `$HOME`. This lib
+    /// test binary runs MULTI-THREADED (nothing pins `--test-threads=1`), so the
+    /// set→use→restore window must be held under a lock or it races sibling tests
+    /// (and each other) — every `scan_unsupported_config` call reads
+    /// `dirs_next::home_dir()`. Poison-recovering, matching the crate's other
+    /// process-global seams (`RELEASE_ENV_LOCK`, `CWD_LOCK`).
+    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn npm_omit_dev_selects_prod() {
         let d = tmp();
@@ -896,11 +904,13 @@ mod tests {
     /// project walk-up never reaches the fake home.
     #[test]
     fn global_npmrc_legacy_peer_deps_does_not_trip_fatal() {
+        // Held for the whole set→use→restore window: the lib binary is
+        // multi-threaded, and HOME_LOCK serializes the two HOME-mutating tests.
+        let _home_guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = tmp();
         let project = tmp();
         fs::write(home.path().join(".npmrc"), "legacy-peer-deps=true\n").unwrap();
 
-        // SAFETY: single-threaded test; restored before returning.
         let prev_home = std::env::var_os("HOME");
         unsafe {
             std::env::set_var("HOME", home.path());
@@ -936,6 +946,9 @@ mod tests {
     /// not project-fatal, while the project spelling is.
     #[test]
     fn global_npmrc_install_strategy_does_not_trip_fatal() {
+        // Held for the whole set→use→restore window: the lib binary is
+        // multi-threaded, and HOME_LOCK serializes the two HOME-mutating tests.
+        let _home_guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = tmp();
         let project = tmp();
         fs::write(home.path().join(".npmrc"), "install-strategy=nested\n").unwrap();

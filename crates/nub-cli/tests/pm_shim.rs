@@ -636,7 +636,12 @@ fn empty_path_entry_with_cwd_at_the_shim_does_not_loop() {
             ("PATH", path_var.as_str()),
             ("HOME", work.to_str().unwrap()),
         ],
-        10,
+        // Generous ceiling for CPU starvation at high --test-threads, NOT a perf
+        // bound: the watchdog exists only to turn a genuine infinite exec-loop
+        // (recursion-guard hole) into a failure instead of an eternal hang. A real
+        // loop is unbounded, so 60s still trips it; a slow-but-finite run no longer
+        // false-fails under load.
+        60,
     );
     assert_eq!(code, 0, "stderr:\n{stderr}");
     assert_eq!(
