@@ -249,6 +249,31 @@ impl PlacementPlan {
         })
     }
 
+    /// Pre-claim the root `node_modules/` slot for `name` with `dep_path`,
+    /// returning the (possibly pre-existing) node index. Seats the
+    /// most-referenced version of a multi-version name at root before the
+    /// BFS so it wins the slot deterministically instead of by arrival order.
+    fn preplace_root_child(&mut self, name: &str, dep_path: &str) -> usize {
+        if let Some(&existing) = self.nodes[self.root_idx].children.get(name) {
+            return existing;
+        }
+        let parent_nm = self.nodes[self.root_idx].nm_dir.clone();
+        let pkg_dir = parent_nm.join(name);
+        let nm_dir = pkg_dir.join("node_modules");
+        let new_idx = self.nodes.len();
+        self.nodes.push(TreeNode {
+            pkg_dir: Some(pkg_dir),
+            nm_dir,
+            parent: Some(self.root_idx),
+            children: BTreeMap::new(),
+            dep_path: Some(dep_path.to_string()),
+        });
+        self.nodes[self.root_idx]
+            .children
+            .insert(name.to_string(), new_idx);
+        new_idx
+    }
+
     /// Names placed directly in the importer root's `node_modules/`.
     /// Drives the stale-entry sweep in `link_hoisted_importer`.
     pub(crate) fn root_names(&self) -> impl Iterator<Item = &str> {
@@ -271,6 +296,83 @@ fn is_ancestor_or_self(nodes: &[TreeNode], ancestor: usize, mut node: usize) -> 
     }
 }
 
+/// In full-hoist mode (`HoistingLimits::None`/`Workspaces`), the root slot
+/// for a package name is claimed by whichever version the BFS reaches first.
+/// When a name has multiple versions in the graph, an arbitrary arrival-order
+/// winner forces every other version to nest under each of ITS consumers — so
+/// a low-use version winning root duplicates the widely-used version across
+/// dozens of `node_modules/` (the legacy npm-v1-lock blowup: babel-runtime@6.26.0
+/// — used once — takes root, and babel-runtime@6.23.0, used by ~40 packages,
+/// nests 40 times, each copy dragging its own transitive closure). npm /
+/// yarn-classic avoid this by hoisting the MOST-REFERENCED version. Return,
+/// for each name with MORE THAN ONE version reachable from the importer, the
+/// dep_path with the most consumer edges (direct deps weighted so they always
+/// own their name's slot; ties broken by dep_path for determinism).
+/// Single-version names are omitted — the plain BFS already hoists them right.
+fn preferred_root_versions(
+    root_deps: &[DirectDep],
+    graph: &LockfileGraph,
+) -> Vec<(String, String)> {
+    // name -> dep_path -> consumer-edge count over the reachable graph.
+    let mut counts: BTreeMap<String, BTreeMap<String, u64>> = BTreeMap::new();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut queue: VecDeque<String> = VecDeque::new();
+
+    // A direct dep must own the root slot for its name regardless of how many
+    // transitive consumers a rival version has — the importer resolves it from
+    // root. Weight direct edges so they always win the argmax.
+    const DIRECT_WEIGHT: u64 = 1 << 40;
+    for dep in root_deps {
+        if !graph.packages.contains_key(&dep.dep_path) {
+            continue;
+        }
+        *counts
+            .entry(dep.name.clone())
+            .or_default()
+            .entry(dep.dep_path.clone())
+            .or_default() += DIRECT_WEIGHT;
+        if seen.insert(dep.dep_path.clone()) {
+            queue.push_back(dep.dep_path.clone());
+        }
+    }
+    while let Some(dep_path) = queue.pop_front() {
+        let Some(pkg) = graph.packages.get(&dep_path) else {
+            continue;
+        };
+        // `link:` targets own their own node_modules; their edges don't
+        // materialize into this importer's hoisted tree.
+        if matches!(pkg.local_source.as_ref(), Some(LocalSource::Link(_))) {
+            continue;
+        }
+        for (dep_name, dep_tail) in &pkg.dependencies {
+            let child = aube_lockfile::shared_local_dep_path(dep_name, dep_tail)
+                .unwrap_or_else(|| format!("{dep_name}@{dep_tail}"));
+            if !graph.packages.contains_key(&child) {
+                continue;
+            }
+            *counts
+                .entry(dep_name.clone())
+                .or_default()
+                .entry(child.clone())
+                .or_default() += 1;
+            if seen.insert(child.clone()) {
+                queue.push_back(child);
+            }
+        }
+    }
+
+    counts
+        .into_iter()
+        .filter(|(_, versions)| versions.len() > 1)
+        .filter_map(|(name, versions)| {
+            versions
+                .into_iter()
+                .max_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)))
+                .map(|(dep_path, _)| (name, dep_path))
+        })
+        .collect()
+}
+
 /// Build a placement plan for a single importer.
 pub(crate) fn plan_importer(
     importer_nm: &Path,
@@ -280,6 +382,35 @@ pub(crate) fn plan_importer(
 ) -> Result<PlacementPlan, Error> {
     let mut plan = PlacementPlan::new(importer_nm.to_path_buf());
     let mut queue: VecDeque<(usize, usize, String, String)> = VecDeque::new();
+
+    // Full-hoist deterministic root selection: seat the most-referenced
+    // version of every multi-version name at root up front and enqueue its
+    // transitives, so the majority version wins the slot and only minority
+    // versions nest. Without this the BFS arrival-order winner can be a
+    // low-use version, exploding the widely-used one into dozens of nested
+    // copies (see `preferred_root_versions`). No-op when nothing conflicts.
+    if matches!(
+        hoisting_limits,
+        HoistingLimits::None | HoistingLimits::Workspaces
+    ) {
+        for (name, dep_path) in preferred_root_versions(root_deps, graph) {
+            let node_idx = plan.preplace_root_child(&name, &dep_path);
+            let Some(pkg) = graph.packages.get(&dep_path) else {
+                continue;
+            };
+            if matches!(pkg.local_source.as_ref(), Some(LocalSource::Link(_))) {
+                continue;
+            }
+            for (dep_name, dep_tail) in &pkg.dependencies {
+                let child_dep_path = aube_lockfile::shared_local_dep_path(dep_name, dep_tail)
+                    .unwrap_or_else(|| format!("{dep_name}@{dep_tail}"));
+                if !graph.packages.contains_key(&child_dep_path) {
+                    continue;
+                }
+                queue.push_back((node_idx, plan.root_idx, dep_name.clone(), child_dep_path));
+            }
+        }
+    }
 
     // Seed the queue with the importer's direct deps in declaration
     // order. BFS makes shallower deps win placement ties over
@@ -639,6 +770,198 @@ mod tests {
             .find(|node| node.dep_path.as_deref() == Some(dep_path))
             .and_then(|node| node.pkg_dir.clone())
             .unwrap_or_else(|| panic!("{dep_path} was not placed"))
+    }
+
+    /// Like `pkg`, but with an explicit `dep_path` so a single name can carry
+    /// peer-context-suffixed variants (`router@6(react@18)` vs `…(react@17)`).
+    fn pkg_dp(name: &str, dep_path: &str, deps: &[(&str, &str)]) -> LockedPackage {
+        LockedPackage {
+            name: name.to_string(),
+            version: dep_path
+                .rsplit_once('@')
+                .map_or(dep_path, |(_, v)| v)
+                .to_string(),
+            dep_path: dep_path.to_string(),
+            dependencies: deps
+                .iter()
+                .map(|(dep_name, tail)| ((*dep_name).to_string(), (*tail).to_string()))
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn full_hoist_seats_majority_version_at_root_over_arrival_order() {
+        // `bad` (one consumer of shared@2.0.0) is declared first, so a plain
+        // arrival-order BFS would seat shared@2.0.0 at root and force the
+        // three shared@1.0.0 consumers to each nest a copy. The majority
+        // (shared@1.0.0, three consumers) must win the root slot instead,
+        // leaving a single nested shared@2.0.0 under `bad`.
+        let nm = PathBuf::from("/project/node_modules");
+        let mut graph = LockfileGraph::default();
+        graph.packages.insert(
+            "bad@1.0.0".into(),
+            pkg("bad", "1.0.0", &[("shared", "2.0.0")]),
+        );
+        for c in ["a", "b", "c"] {
+            graph
+                .packages
+                .insert(format!("{c}@1.0.0"), pkg(c, "1.0.0", &[("shared", "1.0.0")]));
+        }
+        graph
+            .packages
+            .insert("shared@1.0.0".into(), pkg("shared", "1.0.0", &[]));
+        graph
+            .packages
+            .insert("shared@2.0.0".into(), pkg("shared", "2.0.0", &[]));
+        let root_deps = vec![
+            dep("bad", "bad@1.0.0"),
+            dep("a", "a@1.0.0"),
+            dep("b", "b@1.0.0"),
+            dep("c", "c@1.0.0"),
+        ];
+
+        let plan = plan_importer(&nm, &root_deps, &graph, HoistingLimits::None).unwrap();
+
+        assert_eq!(package_dir(&plan, "shared@1.0.0"), nm.join("shared"));
+        assert_eq!(
+            package_dir(&plan, "shared@2.0.0"),
+            nm.join("bad/node_modules/shared")
+        );
+        // Exactly one copy of the majority version, at root.
+        assert_eq!(
+            plan.nodes
+                .iter()
+                .filter(|n| n.dep_path.as_deref() == Some("shared@1.0.0"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn full_hoist_three_way_conflict_promotes_the_most_used() {
+        // Three versions of `shared`: 1.0.0 has two consumers, 2.0.0 and 3.0.0
+        // one each. The two-consumer version wins root; the other two nest.
+        let nm = PathBuf::from("/project/node_modules");
+        let mut graph = LockfileGraph::default();
+        graph
+            .packages
+            .insert("a@1.0.0".into(), pkg("a", "1.0.0", &[("shared", "1.0.0")]));
+        graph
+            .packages
+            .insert("b@1.0.0".into(), pkg("b", "1.0.0", &[("shared", "1.0.0")]));
+        graph
+            .packages
+            .insert("d@1.0.0".into(), pkg("d", "1.0.0", &[("shared", "2.0.0")]));
+        graph
+            .packages
+            .insert("e@1.0.0".into(), pkg("e", "1.0.0", &[("shared", "3.0.0")]));
+        for v in ["1.0.0", "2.0.0", "3.0.0"] {
+            graph
+                .packages
+                .insert(format!("shared@{v}"), pkg("shared", v, &[]));
+        }
+        // Minorities declared first — arrival order must NOT decide root.
+        let root_deps = vec![
+            dep("d", "d@1.0.0"),
+            dep("e", "e@1.0.0"),
+            dep("a", "a@1.0.0"),
+            dep("b", "b@1.0.0"),
+        ];
+
+        let plan = plan_importer(&nm, &root_deps, &graph, HoistingLimits::None).unwrap();
+
+        assert_eq!(package_dir(&plan, "shared@1.0.0"), nm.join("shared"));
+        assert_eq!(
+            package_dir(&plan, "shared@2.0.0"),
+            nm.join("d/node_modules/shared")
+        );
+        assert_eq!(
+            package_dir(&plan, "shared@3.0.0"),
+            nm.join("e/node_modules/shared")
+        );
+    }
+
+    #[test]
+    fn full_hoist_materializes_single_version_dep_reachable_only_through_a_winner() {
+        // `deep` has a single version whose ONLY consumer is the promoted
+        // majority version of `shared`. Pre-placing the winner must still
+        // pull `deep` into the tree — the regression this guards is dropping
+        // a package reachable solely through a pre-placed winner.
+        let nm = PathBuf::from("/project/node_modules");
+        let mut graph = LockfileGraph::default();
+        graph
+            .packages
+            .insert("a@1.0.0".into(), pkg("a", "1.0.0", &[("shared", "1.0.0")]));
+        graph
+            .packages
+            .insert("b@1.0.0".into(), pkg("b", "1.0.0", &[("shared", "1.0.0")]));
+        graph.packages.insert(
+            "bad@1.0.0".into(),
+            pkg("bad", "1.0.0", &[("shared", "2.0.0")]),
+        );
+        graph.packages.insert(
+            "shared@1.0.0".into(),
+            pkg("shared", "1.0.0", &[("deep", "1.0.0")]),
+        );
+        graph
+            .packages
+            .insert("shared@2.0.0".into(), pkg("shared", "2.0.0", &[]));
+        graph
+            .packages
+            .insert("deep@1.0.0".into(), pkg("deep", "1.0.0", &[]));
+        let root_deps = vec![
+            dep("bad", "bad@1.0.0"),
+            dep("a", "a@1.0.0"),
+            dep("b", "b@1.0.0"),
+        ];
+
+        let plan = plan_importer(&nm, &root_deps, &graph, HoistingLimits::None).unwrap();
+
+        // Winner at root, its sole-consumer transitive hoisted alongside it.
+        assert_eq!(package_dir(&plan, "shared@1.0.0"), nm.join("shared"));
+        assert_eq!(package_dir(&plan, "deep@1.0.0"), nm.join("deep"));
+        // The minority still nests.
+        assert_eq!(
+            package_dir(&plan, "shared@2.0.0"),
+            nm.join("bad/node_modules/shared")
+        );
+    }
+
+    #[test]
+    fn full_hoist_promotes_majority_peer_variant() {
+        // Two peer-context variants of one name are distinct dep_paths. The
+        // variant with more consumers wins root; the minority peer variant
+        // nests — promotion keys on the full dep_path, not the bare name.
+        let nm = PathBuf::from("/project/node_modules");
+        let major = "router@6.0.0(react@18.0.0)";
+        let minor = "router@6.0.0(react@17.0.0)";
+        let mut graph = LockfileGraph::default();
+        for app in ["app1", "app2"] {
+            graph.packages.insert(
+                format!("{app}@1.0.0"),
+                pkg(app, "1.0.0", &[("router", "6.0.0(react@18.0.0)")]),
+            );
+        }
+        graph.packages.insert(
+            "app3@1.0.0".into(),
+            pkg("app3", "1.0.0", &[("router", "6.0.0(react@17.0.0)")]),
+        );
+        graph.packages.insert(major.into(), pkg_dp("router", major, &[]));
+        graph.packages.insert(minor.into(), pkg_dp("router", minor, &[]));
+        let root_deps = vec![
+            dep("app3", "app3@1.0.0"),
+            dep("app1", "app1@1.0.0"),
+            dep("app2", "app2@1.0.0"),
+        ];
+
+        let plan = plan_importer(&nm, &root_deps, &graph, HoistingLimits::None).unwrap();
+
+        assert_eq!(package_dir(&plan, major), nm.join("router"));
+        assert_eq!(
+            package_dir(&plan, minor),
+            nm.join("app3/node_modules/router")
+        );
     }
 
     #[test]
