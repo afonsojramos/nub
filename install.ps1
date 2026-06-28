@@ -33,10 +33,11 @@ $Exe = "$BinDir\nub.exe"
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 
-# Download the per-platform archive and extract it into the install dir. The
-# archive ships ONLY bin\ — nub is a single self-contained binary that embeds its
-# runtime (preload + vendored node_modules + native addon) and JIT-extracts it to
-# the user cache on first run, so there is no sidecar runtime\ to ship.
+# Download the per-platform archive and extract it into the install dir. nub is a
+# single self-contained binary that embeds its runtime (preload + vendored
+# node_modules + native addon) and JIT-extracts it to the user cache on first run.
+# The archive ships bin\ plus a vestigial empty runtime\ (kept only to satisfy the
+# sidecar-era `nub upgrade`; the binary ignores it — see release.yml).
 $Url = "https://github.com/nubjs/nub/releases/download/v$Version/nub-$Target.zip"
 Write-Host "Downloading from $Url..."
 

@@ -5016,8 +5016,9 @@ fn perform_selfowned_upgrade(install_dir: &Path, version_spec: &str) -> Result<(
         );
     }
 
-    // Extract into a fresh `staged/` subdir (the single-binary archive contains
-    // bin/ only), matching install.sh's `tar -xzf … -C $install_dir`.
+    // Extract into a fresh `staged/` subdir (the archive carries bin/ plus a
+    // vestigial empty runtime/ that this path ignores — see the swap below),
+    // matching install.sh's `tar -xzf … -C $install_dir`.
     let staged_root = staging.path().join("staged");
     std::fs::create_dir_all(&staged_root)?;
     let tar_status = std::process::Command::new("tar")
@@ -5035,12 +5036,19 @@ fn perform_selfowned_upgrade(install_dir: &Path, version_spec: &str) -> Result<(
         bail!("nub upgrade: downloaded archive did not contain bin/nub");
     }
 
-    // Swap bin/ into place (move the old aside, rename the new in, GC the old).
-    // The single-binary release ships ONLY bin/ — the runtime is embedded in the
-    // binary and JIT-extracted to ~/.cache/nub on first run — so there is no
-    // runtime/ to swap. A stale runtime/ left by a pre-single-binary install is
-    // dead weight the new binary ignores; remove it best-effort for hygiene
-    // (mirrors install.sh / install.ps1's fresh-extract cleanup).
+    // RESILIENCE CONTRACT: `bin/nub` is the ONLY component an upgrade hard-requires.
+    // Everything else the archive ships or the prior install left behind (a
+    // runtime/ sidecar, the nubx alias) is OPTIONAL and handled best-effort —
+    // verify the download fully (checksum above), swap the binary, then never let a
+    // missing/extra/shape-changed optional component abort an otherwise-successful
+    // upgrade. This is the lesson of the sidecar→bin-only transition: the v0.1.x
+    // upgrader hard-bailed when the runtime/ it expected was absent and stranded
+    // every user, so the new upgrader must tolerate artifact-shape evolution in
+    // BOTH directions (an absent optional, an unexpected extra). The archive may or
+    // may not carry runtime/ (current releases ship a vestigial empty one only to
+    // satisfy old upgraders — see release.yml); either way the embedded-runtime
+    // binary ignores ~/.nub/runtime, so any prior runtime/ is dead weight removed
+    // best-effort for hygiene (mirrors install.sh / install.ps1).
     swap_dir(install_dir, "bin", &new_bin)?;
     let _ = std::fs::remove_dir_all(install_dir.join("runtime"));
 
@@ -5053,21 +5061,24 @@ fn perform_selfowned_upgrade(install_dir: &Path, version_spec: &str) -> Result<(
     // Set +x on the freshly-swapped-in binary before it can be invoked.
     ensure_bin_executable(&install_dir.join("bin").join("nub"))?;
 
-    // The release tarball ships only `bin/nub`; recreate the `nubx` alias that
-    // install.sh creates (relative symlink → nub; the CLI dispatches on argv[0],
-    // so the alias name is what matters — see Argv0::detect). Without this, every
-    // self-owned upgrade would silently drop nubx. POSIX-only: Windows self-owned
-    // upgrades already bailed at the top of this fn.
+    // Recreate the `nubx` alias install.sh creates (relative symlink → nub; the CLI
+    // dispatches on argv[0], so only the alias NAME matters — see Argv0::detect).
+    // BEST-EFFORT per the resilience contract above: the binary is already swapped
+    // and executable, so `nub` works regardless. nubx is a derived convenience —
+    // its recreation failing (an exotic FS, a permissions quirk) must NOT abort an
+    // otherwise-successful upgrade; warn and continue rather than bail. POSIX-only:
+    // Windows self-owned upgrades already bailed at the top of this fn.
     #[cfg(unix)]
     {
         let nubx = install_dir.join("bin").join("nubx");
         let _ = std::fs::remove_file(&nubx);
-        std::os::unix::fs::symlink("nub", &nubx).with_context(|| {
-            format!(
-                "nub upgrade: failed to create nubx symlink at {}",
+        if let Err(e) = std::os::unix::fs::symlink("nub", &nubx) {
+            eprintln!(
+                "nub upgrade: warning: could not recreate the nubx alias at {} ({e}); \
+                 `nub` is upgraded and usable. Re-run the installer to restore nubx.",
                 nubx.display()
-            )
-        })?;
+            );
+        }
     }
 
     println!("installed v{version} to {}", install_dir.display());
@@ -8102,6 +8113,87 @@ mod tests {
             std::fs::read(bad_install.join("bin").join("nub")).unwrap(),
             b"OLD\n",
             "a rejected upgrade must leave the existing install untouched"
+        );
+    }
+
+    // ARTIFACT-SHAPE RESILIENCE: the new upgrader must succeed against the
+    // back-compat archive shape that ships a (vestigial, empty) runtime/ ALONGSIDE
+    // bin/ — the shape release.yml now publishes to rescue sidecar-era v0.1.x
+    // upgraders. The new upgrader ignores the archive's runtime/, swaps bin/, and
+    // removes any ~/.nub/runtime; this proves re-adding runtime/ to the artifact
+    // causes NO regression for the current bin-only upgrader (the no-regression leg
+    // of the upgrade-compat fix). Pairs with `…_against_a_local_fake_release`, which
+    // covers the bin-ONLY shape; together they pin tolerance of BOTH shapes.
+    #[cfg(unix)]
+    #[test]
+    fn new_upgrader_tolerates_a_compat_runtime_dir_in_the_archive() {
+        let Some(target) = platform_target() else {
+            eprintln!("skipping: no published tarball target for this platform");
+            return;
+        };
+        let _g = RELEASE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        const FAKE_VERSION: &str = "9.9.9";
+        const NEW_NUB_BYTES: &[u8] = b"#!/bin/sh\necho fake-upgraded-nub\n";
+        let fixture = tempfile::tempdir().expect("fixture root");
+
+        // Build a bin/ + EMPTY runtime/ archive — exactly what release.yml's
+        // `tar -czf … bin runtime` produces with the transitional empty runtime/.
+        let build = fixture.path().join("build");
+        std::fs::create_dir_all(build.join("bin")).unwrap();
+        std::fs::create_dir_all(build.join("runtime")).unwrap();
+        std::fs::write(build.join("bin").join("nub"), NEW_NUB_BYTES).unwrap();
+
+        let asset_dir = fixture
+            .path()
+            .join("releases")
+            .join("download")
+            .join(format!("v{FAKE_VERSION}"));
+        std::fs::create_dir_all(&asset_dir).unwrap();
+        let archive = asset_dir.join(format!("nub-{target}.tar.gz"));
+        assert!(
+            std::process::Command::new("tar")
+                .arg("-czf")
+                .arg(&archive)
+                .arg("-C")
+                .arg(&build)
+                .args(["bin", "runtime"])
+                .status()
+                .expect("tar the fixture archive")
+                .success(),
+            "fixture archive must tar cleanly"
+        );
+        let digest = sha256_hex(&std::fs::read(&archive).unwrap());
+        std::fs::write(
+            asset_dir.join(format!("nub-{target}.tar.gz.sha256")),
+            format!("{digest}  nub-{target}.tar.gz\n"),
+        )
+        .unwrap();
+
+        // A self-owned install whose prior runtime/ is the dead-weight sidecar.
+        let install = fixture.path().join(".nub");
+        std::fs::create_dir_all(install.join("bin")).unwrap();
+        std::fs::write(install.join("bin").join("nub"), b"#!/bin/sh\necho OLD\n").unwrap();
+        std::fs::create_dir_all(install.join("runtime")).unwrap();
+
+        let base_url = format!("file://{}/releases/download", fixture.path().display());
+        unsafe {
+            std::env::set_var(RELEASE_DOWNLOAD_BASE_ENV, &base_url);
+        }
+        let result = perform_selfowned_upgrade(&install, FAKE_VERSION);
+        unsafe {
+            std::env::remove_var(RELEASE_DOWNLOAD_BASE_ENV);
+        }
+
+        result.expect("upgrade against a bin+runtime archive must succeed");
+        assert_eq!(
+            std::fs::read(install.join("bin").join("nub")).unwrap(),
+            NEW_NUB_BYTES,
+            "the new binary must be swapped in regardless of the archive's runtime/"
+        );
+        assert!(
+            !install.join("runtime").exists(),
+            "the new upgrader removes ~/.nub/runtime; the archive's runtime/ is ignored"
         );
     }
 

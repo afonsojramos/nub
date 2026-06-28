@@ -794,21 +794,35 @@ jobs:
 
       - name: Package release archives (single binary)
         run: |
-          # Per-platform archives containing ONLY bin/ — nub is a single self-
-          # contained binary that embeds its runtime and JIT-extracts it on first
-          # run, so the archive needs no runtime/ sidecar. Distinct names per
-          # platform avoid the GitHub-Release asset collision of uploading bare `nub`
-          # for every target (A31). A `.sha256` sidecar is published next to each
-          # archive so the self-owned `~/.nub` upgrade channel (`nub upgrade`) can
-          # verify the download before swapping it into place. Format is `sha256sum`'s
-          # `<hex>  <name>`; `nub upgrade` reads the first field.
+          # Per-platform archives containing bin/ plus a VESTIGIAL EMPTY runtime/.
+          # nub is a single self-contained binary that embeds its runtime and
+          # JIT-extracts it on first run, so the new binary needs no runtime/ sidecar.
+          # The empty runtime/ exists SOLELY for transitional back-compat with the
+          # sidecar-era (v0.1.x) self-owned upgrader: that already-released, immutable
+          # upgrader swaps BOTH ~/.nub/bin AND ~/.nub/runtime by blindly renaming the
+          # archive's runtime/ dir into place (no content validation — verified
+          # against v0.1.0→v0.1.14). Against a bin-only artifact that rename aborts
+          # ("could not install new …/.nub/runtime"), stranding EVERY v0.1.x user on
+          # `nub upgrade`. Shipping an empty runtime/ lets their swap complete; the
+          # current embed-runtime binary resolves its runtime from the embedded blob
+          # (~/.cache/nub) and never reads ~/.nub/runtime, so the empty dir is inert.
+          # DO NOT "clean this up" until the sidecar-era upgraders are confirmed
+          # extinct in the wild. Distinct names per platform avoid the GitHub-Release
+          # asset collision of uploading bare `nub` for every target (A31). A `.sha256`
+          # sidecar is published next to each archive so the self-owned `~/.nub`
+          # upgrade channel (`nub upgrade`) can verify the download before swapping it
+          # into place. Format is `sha256sum`'s `<hex>  <name>`; `nub upgrade` reads
+          # the first field.
           mkdir -p release-archives
           for platform in darwin-arm64 darwin-x64 linux-x64 linux-x64-musl linux-arm64 linux-arm64-musl win32-x64 win32-arm64; do
             PKG="artifacts/nub-$platform"
             [ -d "$PKG" ] || { echo "skip $platform (not built)"; continue; }
+            # The transitional empty runtime/ (see step comment). Created here, not in
+            # the npm package, so only the self-owned upgrade archive carries it.
+            mkdir -p "$PKG/runtime"
             if [[ "$platform" == win32-* ]]; then
               archive="nub-$platform.zip"
-              (cd "$PKG" && zip -qr "$GITHUB_WORKSPACE/release-archives/$archive" bin)
+              (cd "$PKG" && zip -qr "$GITHUB_WORKSPACE/release-archives/$archive" bin runtime)
             else
               # Re-apply +x BEFORE tarring: the build job's chmod (assemble step)
               # does NOT survive the upload-artifact → download-artifact round-trip
@@ -820,7 +834,7 @@ jobs:
               # the curl|sh installer and `nub upgrade` get an executable binary.
               chmod +x "$PKG/bin/nub" "$PKG/bin/nubx"
               archive="nub-$platform.tar.gz"
-              tar -czf "release-archives/$archive" -C "$PKG" bin
+              tar -czf "release-archives/$archive" -C "$PKG" bin runtime
             fi
             (cd release-archives && sha256sum "$archive" > "$archive.sha256")
           done
