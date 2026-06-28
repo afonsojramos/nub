@@ -597,6 +597,20 @@ fn lift_legacy_tree(
                 .entry(child_name.clone())
                 .or_insert_with(|| "*".to_string());
         }
+        // v1 records bundled deps only as a per-entry `bundled: true`
+        // flag on each nested child; it has no parent-level
+        // `bundleDependencies` array the way v3 does. The install path
+        // keys off the parent's `bundled_dependencies` to avoid fetching
+        // the bundled closure (it ships inside the parent's tarball), so
+        // reconstruct that array here from the direct `bundled` children
+        // — otherwise a v1 restore promotes the whole bundled subtree to
+        // registry-fetch nodes and breaks `--offline`.
+        let bundle_dependencies: Vec<String> = dep
+            .dependencies
+            .iter()
+            .filter(|(_, child)| child.bundled)
+            .map(|(child_name, _)| child_name.clone())
+            .collect();
         out.insert(
             install_path.clone(),
             RawNpmPackage {
@@ -605,6 +619,7 @@ fn lift_legacy_tree(
                 integrity: dep.integrity.clone(),
                 dependencies,
                 in_bundle: dep.bundled,
+                bundle_dependencies,
                 ..Default::default()
             },
         );

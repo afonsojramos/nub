@@ -2254,13 +2254,28 @@ impl<'a> ResolveDriver<'a> {
             // dep_path) form, while pnpm stores bare versions. Without
             // the strip, a yarn/bun-locked `is-odd` would emit a
             // transitive task for is-number with range
-            // `"is-number@6.0.0"`, which doesn't parse as semver. The
-            // lockfile already omitted bundled dep edges on write, so
-            // iterating `locked_pkg.dependencies` naturally skips them.
+            // `"is-number@6.0.0"`, which doesn't parse as semver.
+            //
+            // `bundleDependencies` are transitive: a child this package
+            // bundles ships *inside* its tarball along with that child's
+            // entire closure, and npm's lockfile still enumerates the
+            // bundled subtree with live edges (v3 keeps the `inBundle`
+            // entries; v1 nests them, and `lift_legacy_tree`
+            // reconstructs the parent's `bundleDependencies`). Walking
+            // those edges would promote the bundled closure to
+            // first-class registry-fetch nodes — redundant standalone
+            // fetches online, and a fatal offline miss when one isn't
+            // cached. Skip the declared bundle names here exactly as the
+            // fresh-from-packument path does (`bundled_names` above);
+            // skipping the direct bundle root prunes its whole subtree,
+            // since the closure is reachable only through this edge.
             let mut child_ancestors = task.ancestors.to_vec();
             child_ancestors.push((task.name.clone(), version.clone()));
             let child_ancestors: Arc<[(String, String)]> = child_ancestors.into();
             for (dep_name, dep_version) in &locked_pkg.dependencies {
+                if locked_pkg.bundled_dependencies.contains(dep_name) {
+                    continue;
+                }
                 let prefix = format!("{dep_name}@");
                 let stripped = dep_version.strip_prefix(&prefix).unwrap_or(dep_version);
                 let canonical_version = stripped.split('(').next().unwrap_or(stripped).to_string();

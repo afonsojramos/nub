@@ -21,7 +21,10 @@
 //! by iterating `.values()` in that same order and pushing into each
 //! name's bucket, so the first element of a bucket is the first
 //! `.values()` match — applying the same predicate to the bucket
-//! selects the byte-identical package.
+//! selects the byte-identical package. (`find_satisfying` additionally
+//! excludes `inBundle` entries — see its doc — so its predicate is a
+//! strict superset of a plain `.values().find()`; the bucket-order
+//! identity above still holds among the non-bundled candidates.)
 
 use aube_lockfile::{LocalSource, LockedPackage, LockfileGraph};
 use smallvec::SmallVec;
@@ -72,8 +75,16 @@ impl<'a> LockedIndex<'a> {
     /// First locked package whose name matches and whose version both
     /// satisfies `range` and is not vulnerable. The vulnerability check
     /// is part of the predicate, so a vulnerable match is *skipped* and
-    /// the search continues — mirroring `try_lockfile_reuse`'s
-    /// `.find(|p| name && satisfies && !is_vulnerable)`.
+    /// the search continues. This is `try_lockfile_reuse`'s reuse-target
+    /// selector (it calls straight through here).
+    ///
+    /// `inBundle` entries are excluded: a package that ships inside an
+    /// ancestor's tarball is materialized from there, never fetched or
+    /// linked as a standalone node, so it is not a valid reuse target.
+    /// Without the exclusion a legitimate consumer of the same name
+    /// could bind to the integrity-less bundled entry (it sorts ahead of
+    /// the real standalone entry in nested dep_path order) and fail
+    /// offline. The real standalone entry, if any, is selected instead.
     pub fn find_satisfying(
         &self,
         name: &str,
@@ -82,7 +93,8 @@ impl<'a> LockedIndex<'a> {
         vulnerable_ranges: &BTreeMap<String, Vec<String>>,
     ) -> Option<&'a LockedPackage> {
         self.bucket(name).iter().copied().find(|p| {
-            version_satisfies(&p.version, range)
+            !p.in_bundle
+                && version_satisfies(&p.version, range)
                 && !is_vulnerable(registry_name, &p.version, vulnerable_ranges)
         })
     }

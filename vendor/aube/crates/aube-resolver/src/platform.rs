@@ -289,6 +289,37 @@ pub fn filter_graph(
         }
     }
 
+    // 2b. Sever `bundleDependencies` edges. A bundled dep ships *inside*
+    //     its parent's tarball along with that dep's entire closure, so
+    //     it is materialized from the parent's extracted tree — never
+    //     fetched or linked as a standalone node (this is exactly what
+    //     npm records `inBundle` for). But npm's lockfile still
+    //     enumerates the bundled subtree with live `dependencies` edges,
+    //     so without cutting the parent→bundle edge the GC walk below
+    //     keeps the whole closure and the fetch/link path promotes it to
+    //     first-class nodes: redundant standalone copies online, and a
+    //     fatal `--offline` miss on any bundled child not in cache.
+    //     Cutting the edge per the parent's own `bundled_dependencies`
+    //     is context-correct (a legitimate non-bundled consumer of the
+    //     same name keeps its edge) and lets the GC prune the now-
+    //     unreachable closure — the same shape as the optional-edge
+    //     pruning above. The fresh-resolve path already skips these via
+    //     the packument's `bundledDependencies`; this is its frozen-
+    //     restore counterpart. (v1 lockfiles carry no parent-level
+    //     `bundleDependencies`; the npm reader reconstructs it from the
+    //     nested `bundled:true` children so this edge cut fires there
+    //     too.)
+    for pkg in graph.packages.values_mut() {
+        if pkg.bundled_dependencies.is_empty() {
+            continue;
+        }
+        let bundled = pkg.bundled_dependencies.clone();
+        for name in &bundled {
+            pkg.dependencies.remove(name);
+            pkg.optional_dependencies.remove(name);
+        }
+    }
+
     // 3. Garbage-collect unreachable packages by walking from the
     //    surviving roots.
     let mut reachable: FxHashSet<String> = FxHashSet::default();
@@ -841,6 +872,98 @@ mod tests {
         let host = &graph.packages[&host_dep_path];
         assert!(!host.dependencies.contains_key("native-win"));
         assert!(!host.optional_dependencies.contains_key("native-win"));
+    }
+
+    /// `bundleDependencies` are transitive: the parent's tarball ships
+    /// the bundled dep AND its whole closure, so on the frozen-restore
+    /// path the parent→bundle edge must be cut and the now-unreachable
+    /// closure GC'd — otherwise it is promoted to standalone fetch/link
+    /// nodes (redundant online, fatal offline).
+    #[test]
+    fn filter_graph_severs_bundled_edges_and_gcs_closure() {
+        use aube_lockfile::DepType;
+        let mut graph = aube_lockfile::LockfileGraph::default();
+        graph
+            .importers
+            .insert(".".to_string(), vec![dep("host", DepType::Production)]);
+        // `host` bundles `gyp` (which drags in `gyp-dep`) and also has a
+        // normal, non-bundled `plain` dep that must survive.
+        let (host_key, mut host) = pkg("host", &["gyp", "gyp-dep", "plain"], &[]);
+        host.bundled_dependencies = vec!["gyp".to_string(), "gyp-dep".to_string()];
+        graph.packages.extend([
+            (host_key.clone(), host),
+            pkg("gyp", &["gyp-dep"], &[]),
+            pkg("gyp-dep", &[], &[]),
+            pkg("plain", &[], &[]),
+        ]);
+
+        filter_graph(
+            &mut graph,
+            &SupportedArchitectures::default(),
+            &Default::default(),
+        );
+
+        let host = &graph.packages[&host_key];
+        assert!(
+            !host.dependencies.contains_key("gyp"),
+            "bundled edge severed"
+        );
+        assert!(
+            !host.dependencies.contains_key("gyp-dep"),
+            "bundled edge severed"
+        );
+        assert!(
+            host.dependencies.contains_key("plain"),
+            "non-bundled edge kept"
+        );
+        // The bundled closure is unreachable after the cut → GC'd.
+        assert!(!graph.packages.contains_key("gyp@1.0.0"));
+        assert!(!graph.packages.contains_key("gyp-dep@1.0.0"));
+        assert!(graph.packages.contains_key("plain@1.0.0"));
+        assert!(graph.packages.contains_key(&host_key));
+    }
+
+    /// Cutting a bundled edge is scoped to the declaring parent: a
+    /// package the parent bundles can ALSO be a legitimate standalone
+    /// dep of another package, and that consumer's edge (and the shared
+    /// node) must survive.
+    #[test]
+    fn filter_graph_keeps_bundled_name_for_non_bundled_consumer() {
+        use aube_lockfile::DepType;
+        let mut graph = aube_lockfile::LockfileGraph::default();
+        graph.importers.insert(
+            ".".to_string(),
+            vec![
+                dep("host", DepType::Production),
+                dep("app", DepType::Production),
+            ],
+        );
+        let (host_key, mut host) = pkg("host", &["gyp"], &[]);
+        host.bundled_dependencies = vec!["gyp".to_string()];
+        graph.packages.extend([
+            (host_key.clone(), host),
+            pkg("app", &["gyp"], &[]), // legit, non-bundled consumer
+            pkg("gyp", &[], &[]),
+        ]);
+
+        filter_graph(
+            &mut graph,
+            &SupportedArchitectures::default(),
+            &Default::default(),
+        );
+
+        assert!(
+            !graph.packages[&host_key].dependencies.contains_key("gyp"),
+            "host's bundled edge cut"
+        );
+        assert!(
+            graph.packages["app@1.0.0"].dependencies.contains_key("gyp"),
+            "app's legit edge kept"
+        );
+        assert!(
+            graph.packages.contains_key("gyp@1.0.0"),
+            "shared node survives via app"
+        );
     }
 
     #[cfg(not(target_os = "linux"))]

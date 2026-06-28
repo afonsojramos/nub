@@ -2741,6 +2741,55 @@ fn legacy_v1_package_lock_lifts_to_graph() {
     assert_eq!(root[0].specifier.as_deref(), Some("^3.0.0"));
 }
 
+/// v1 records bundled deps only as a per-entry `bundled: true` flag —
+/// there is no parent-level `bundleDependencies` array the way v3 has.
+/// The install/fetch path keys off the parent's `bundled_dependencies`
+/// to avoid re-fetching the bundled closure (it ships inside the
+/// parent's tarball), so the lifter must reconstruct that array from the
+/// `bundled` children. Without it a v1 restore promotes the bundled
+/// subtree to standalone fetch nodes and breaks `--offline`.
+#[test]
+fn legacy_v1_reconstructs_parent_bundle_dependencies_from_bundled_children() {
+    // npm 6 hoists a package's whole bundled closure flat under the
+    // parent's nested `dependencies`, every member flagged `bundled`.
+    const V1_BUNDLED: &str = r#"{
+      "name": "legacy-bundled",
+      "version": "1.0.0",
+      "lockfileVersion": 1,
+      "requires": true,
+      "dependencies": {
+        "host": {
+          "version": "1.0.0",
+          "resolved": "https://registry.npmjs.org/host/-/host-1.0.0.tgz",
+          "integrity": "sha512-host",
+          "requires": { "gyp": "^1.0.0", "plain": "^1.0.0" },
+          "dependencies": {
+            "gyp": { "version": "1.0.0", "bundled": true, "requires": { "gyp-dep": "^1.0.0" } },
+            "gyp-dep": { "version": "1.0.0", "bundled": true }
+          }
+        },
+        "plain": {
+          "version": "1.0.0",
+          "resolved": "https://registry.npmjs.org/plain/-/plain-1.0.0.tgz",
+          "integrity": "sha512-plain"
+        }
+      }
+    }"#;
+    let tmp = write_lockfile(V1_BUNDLED);
+    let manifest = manifest_with_deps(&[("host", "^1.0.0")]);
+    let graph = read::parse(tmp.path(), &manifest).unwrap();
+
+    let host = &graph.packages["host@1.0.0"];
+    // The bundled children are reconstructed onto the parent…
+    assert!(host.bundled_dependencies.contains(&"gyp".to_string()));
+    assert!(host.bundled_dependencies.contains(&"gyp-dep".to_string()));
+    // …while the non-bundled `plain` dep is NOT folded in.
+    assert!(!host.bundled_dependencies.contains(&"plain".to_string()));
+    // The nested bundled children still carry their own `in_bundle` flag.
+    assert!(graph.packages["gyp@1.0.0"].in_bundle);
+    assert!(graph.packages["gyp-dep@1.0.0"].in_bundle);
+}
+
 /// The differential oracle: the lifted v1 graph equals the v2 graph for
 /// the same dependency set, comparing every field v1 carries.
 #[test]
