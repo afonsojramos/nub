@@ -19,9 +19,14 @@
 //      submodule-init step is needed.
 //   3. Apply `.worktreeinclude` — copy/symlink the listed gitignored entries
 //      INTO the worktree (things `git worktree` won't bring, e.g. `.repos/`).
-//   4. Print the stable per-worktree CARGO_TARGET_DIR convention (it does NOT
-//      seed/copy a target dir — cargo's incremental fingerprints are keyed to
-//      the absolute target path, so a stable dedicated dir is the fast loop).
+//   4. Print the SHARED CARGO_TARGET_DIR convention. Every worktree points at
+//      ONE shared target dir (~/.cache/nub/shared-target) instead of a private
+//      `<path>-target`. Cargo reuses the crates.io DEP artifacts (the bulk of a
+//      build) across worktrees and only recompiles the ~10 workspace crates, so
+//      one stable target dir total replaces ~30 multi-GB private copies.
+//      TRADEOFF: cargo takes a build lock on the target dir, so concurrent
+//      builds in different worktrees SERIALIZE (one waits for the other). That
+//      is the deliberate cost of the space win — incremental, not 30 full copies.
 
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, mkdirSync, cpSync, symlinkSync, lstatSync } from "node:fs";
@@ -46,11 +51,11 @@ Options:
 
 After creation:
   cd <path>
-  export CARGO_TARGET_DIR=<path>-target   # stable per-worktree target dir
-  cargo build -p nub-cli --profile fast   # ~3 min cold, ~5s incremental
+  export CARGO_TARGET_DIR=~/.cache/nub/shared-target   # ONE shared cache for all worktrees
+  cargo build -p nub-cli --profile fast                # reuses dep artifacts; only workspace crates recompile
 
 Cleanup when done:
-  git worktree remove <path> --force && rm -rf <path>-target
+  git worktree remove <path> --force   # the shared target dir is intentionally NOT removed
 `;
 
 type Opts = {
@@ -206,14 +211,21 @@ function main(): void {
 
   applyInclude(mainRoot, opts.path);
 
-  const targetDir = `${opts.path}-target`;
+  // ONE shared target dir for ALL worktrees: cargo reuses the crates.io dep
+  // artifacts (the bulk of a build) and only recompiles the workspace crates, so
+  // a second worktree builds incrementally instead of carrying its own multi-GB
+  // copy. Tradeoff: cargo locks the target dir, so concurrent builds across
+  // worktrees serialize (one waits for the other) — the deliberate cost of the
+  // disk win. Pre-create it so the export points at a real path on first run.
+  const sharedTarget = `${homedir()}/.cache/nub/shared-target`;
+  mkdirSync(sharedTarget, { recursive: true });
   process.stderr.write("\n");
   process.stderr.write(`worktree ready: ${opts.path}\n`);
   process.stderr.write(`  cd ${opts.path}\n`);
-  process.stderr.write(`  export CARGO_TARGET_DIR=${targetDir}   # stable per-worktree target dir — keep it for the whole session\n`);
-  process.stderr.write(`  cargo build -p nub-cli --profile fast\n`);
-  process.stderr.write(`  # cleanup when done:\n`);
-  process.stderr.write(`  git worktree remove ${opts.path} --force && rm -rf ${targetDir}\n`);
+  process.stderr.write(`  export CARGO_TARGET_DIR=${sharedTarget}   # SHARED across all worktrees — incremental, not a full copy\n`);
+  process.stderr.write(`  cargo build -p nub-cli --profile fast      # reuses dep artifacts; concurrent builds in other worktrees will serialize on the target lock\n`);
+  process.stderr.write(`  # cleanup when done (leave the shared target dir in place for the next worktree):\n`);
+  process.stderr.write(`  git worktree remove ${opts.path} --force\n`);
 }
 
 main();

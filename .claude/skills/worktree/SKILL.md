@@ -7,8 +7,8 @@ description: >-
   or how to add an entry, or when cleaning up after a merge. Encodes the
   one-command setup (`nub scripts/new-worktree.ts <slug>` or `node …`) that bakes
   in the proven recipe — worktree off origin/main (vendor/aube is plain in-tree
-  files now, no submodule init), the stable per-worktree CARGO_TARGET_DIR fast
-  loop, and applying
+  files now, no submodule init), the shared CARGO_TARGET_DIR
+  (`~/.cache/nub/shared-target`) that all worktrees reuse, and applying
   `.worktreeinclude` — plus the eagerly-pull-the-shared-tree discipline and the
   safe cleanup path. Pairs with the `dev-loop` build skill.
 ---
@@ -35,7 +35,7 @@ It performs the proven recipe, in order:
 1. `git fetch origin` (skip with `--no-fetch`).
 2. `git worktree add ~/.cache/nub/worktrees/<slug> -b <slug> origin/main` — tracked files only; the shared tree is untouched. vendor/aube is plain in-tree files (Pattern B) — checked out by this step, no submodule init needed. The script creates `~/.cache/nub/worktrees/` if it doesn't exist. (Non-temp location: not auto-swept like `/tmp`; out of the repo dir; same volume as the repo so APFS clonefile stays fast.)
 3. Apply `.worktreeinclude` — copy/symlink the listed gitignored entries in (see below).
-4. Print the stable per-worktree `CARGO_TARGET_DIR` convention to export.
+4. Pre-create + print the shared `CARGO_TARGET_DIR` (`~/.cache/nub/shared-target`) to export — one cache for all worktrees, not a per-worktree dir.
 
 Options: `--base <ref>` (default `origin/main`), `--path <dir>` (default `~/.cache/nub/worktrees/<slug>`), `--no-fetch`, `--help`.
 
@@ -43,11 +43,11 @@ After it prints the ready line:
 
 ```bash
 cd ~/.cache/nub/worktrees/<slug>
-export CARGO_TARGET_DIR=~/.cache/nub/worktrees/<slug>-target   # keep this stable for the whole session
-cargo build -p nub-cli --profile fast                          # ~3 min cold, ~5s incremental
+export CARGO_TARGET_DIR=~/.cache/nub/shared-target   # ONE shared cache for all worktrees
+cargo build -p nub-cli --profile fast                # ~3 min cold; a later worktree reuses deps, recompiles only workspace crates
 ```
 
-The build loop, profiles, and crate map live in the `dev-loop` skill (`.claude/skills/dev-loop/SKILL.md`). The one rule that makes iteration fast: keep ONE stable target dir per worktree for the whole session — cargo's incremental fingerprints are keyed to the absolute target path, so cleaning, moving, or re-seeding it forces a full cold rebuild. The script never seeds a target dir for exactly this reason; it just prints the dir to export.
+The build loop, profiles, and crate map live in the `dev-loop` skill (`.claude/skills/dev-loop/SKILL.md`). The key fact: all worktrees share ONE target dir (`~/.cache/nub/shared-target`), so a second worktree reuses the crates.io dependency artifacts another worktree already compiled (the bulk of a build) and recompiles only the ~10 workspace crates — and the disk cost is one target dir instead of ~30 multi-GB private ones. Tradeoff: cargo locks the target dir during a build, so a build in one worktree waits while another is building. If two builds genuinely must run at once, set a private `CARGO_TARGET_DIR` for the second; otherwise keep the shared default. Don't clean the shared dir between iterations — that throws away cargo's incremental cache.
 
 ## `.worktreeinclude` — bringing gitignored things in
 
@@ -61,7 +61,7 @@ Format — one entry per line, `#` comments and blank lines ignored:
 
 The leading verb is optional; the default is `copy`. Use `symlink` for large, read-only things you don't want duplicated on disk. The sources are read from the MAIN working tree (where the gitignored files actually live), even when you run the script from inside another worktree.
 
-The shipped default symlinks `.repos/` (the read-only reference checkouts of Node, Bun, pnpm, …) so worktree agents can Read/Grep them without a multi-GB copy. Do NOT add `target/` — a copied/symlinked target dir is invalidated and rebuilt anyway (the fingerprint finding above); the stable dedicated `CARGO_TARGET_DIR` is the fast loop, not a seeded one.
+The shipped default symlinks `.repos/` (the read-only reference checkouts of Node, Bun, pnpm, …) so worktree agents can Read/Grep them without a multi-GB copy. Do NOT add `target/` — the shared `CARGO_TARGET_DIR` (`~/.cache/nub/shared-target`) is the build cache; an in-worktree `target/` would be a redundant private copy, which is exactly the disk bloat the shared dir exists to avoid.
 
 ## Eagerly pull the shared tree
 
@@ -76,9 +76,9 @@ Corollary: do NOT commit directly in the shared tree's checkout — even control
 ## Clean up after a merge
 
 ```bash
-git worktree remove ~/.cache/nub/worktrees/<slug> --force && rm -rf ~/.cache/nub/worktrees/<slug>-target
+git worktree remove ~/.cache/nub/worktrees/<slug> --force   # leave ~/.cache/nub/shared-target in place for the next worktree
 ```
 
-`--force` is used to discard the worktree even with build artifacts present. Before discarding, make sure your work is pushed — a `git worktree remove --force` throws away anything uncommitted (vendor/aube edits are now plain in-tree files committed to the worktree's branch, so push before removing).
+`--force` is used to discard the worktree even with build artifacts present. Before discarding, make sure your work is pushed — a `git worktree remove --force` throws away anything uncommitted (vendor/aube edits are now plain in-tree files committed to the worktree's branch, so push before removing). Do NOT delete the shared `~/.cache/nub/shared-target` on cleanup — it's the warm cache the next worktree builds against; wiping it forces the next build cold.
 
 There is also an older bash helper, `scripts/worktree.sh` (worktrees under `.worktrees/`, branched off LOCAL main, with `rm`/`list`/`reap` subcommands and uncommitted/unpushed-work safety checks on removal). `new-worktree.ts` is the preferred entry for landing work (off `origin/main`, `.worktreeinclude` support, nub-dogfooding); reach for `worktree.sh reap` to prune stale dead-session worktrees.
