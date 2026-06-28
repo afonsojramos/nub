@@ -101,15 +101,12 @@ Ties directly to the repo's "never juice a benchmark" rule. Non-negotiable:
 - The homepage cites the WARM number because it is the honest, reproducible one (genuine cold needs a clean box).
 - A single non-genuine cell discredits the whole table. When in doubt, exclude the cell and say why.
 
-## Process hygiene — reap children, never leak (HIGH PRIORITY: this runs on the maintainer's machine)
+## Process hygiene — tear down anything long-lived (this runs on the maintainer's machine)
 
-A benchmark spawns hundreds of short-lived processes (each `nub install` forks a `node` runtime child; `npm`/`bun`/`pnpm` fork their own; hyperfine loops multiply them). On a shared dev host these leak and pile up — hundreds of orphan `node` processes, leftover `next-server`/`vite`/`esbuild` dev servers eating GBs of RAM, and a wedged Docker VM can make the maintainer's machine non-responsive. Non-negotiable:
+Short-lived install/measurement processes (the `node` runtime children a `nub install` forks, the per-command `zsh` wrappers) reap themselves — leave them be. The one real hazard is a **long-lived process a bench or test starts and forgets**: a `next dev` / `vite` / site dev server (it grows to multiple GB and never exits), or a Docker container. So:
 
-- **Reap install children.** Run each timed install in its own process group and ensure it (and its `node`/PM children) are dead before the next iteration — don't fire-and-forget. After a bench, sweep: `pkill -f "<bench-dir>"` / kill anything still running under the fixture/store paths. Verify zero leftover `node`/PM processes when done.
-- **Never leave a dev server running.** If a bench or test starts `next dev`/`vite`/a site server, tear it down in the same run (trap EXIT). Don't background one and walk away — it's a multi-GB leak.
-- **Docker: `docker run --rm` ALWAYS, and tear down.** Any container is `--rm`; after a Docker-based cold test, `docker rm -f` any survivor and confirm `docker ps` is empty. A leaked container can wedge the Docker VM to 100% CPU.
-- **Throttle the build, never saturate.** A `~/.cargo/config.toml` job cap (`jobs = 6`) is set machine-wide; leave it. Launch agent builds under `taskpolicy -b` / `nice` (see the `dev-loop` skill). If you spike the host, `renice 20` + `taskpolicy -b` the `cargo`/`rustc` tree.
-- **Clean up on exit even if interrupted.** Use a `trap '…cleanup…' EXIT INT TERM` in bench scripts so a killed agent doesn't orphan its whole process tree.
+- **Never leave a dev server running.** If a bench or test starts a dev server, tear it down in the same run (`trap '…kill…' EXIT INT TERM`). Don't background one and walk away.
+- **Docker: `docker run --rm`, and confirm `docker ps` is empty when done** — a leaked/heavy container can wedge the Docker VM under host load.
 
 ## Reference template
 
