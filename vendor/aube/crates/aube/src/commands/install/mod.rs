@@ -1060,8 +1060,37 @@ pub async fn run(opts: InstallOptions) -> miette::Result<()> {
                 &ws_config_shared,
                 &settings_ctx,
             )?;
-            validate_lockfile_trust_policy(&cwd, &graph, opts.network_mode, &dependency_policy)
-                .await?;
+            // Trust-policy (no-downgrade) validation. Previously this ran
+            // serial-before-fetch and, on a cold lockfile install, was the
+            // dominant cost — a full-packument fan-out over every unique
+            // package, all ahead of the first downloaded byte. It has no
+            // data dependency on the tarball bytes (it checks each picked
+            // version's publish-trust against registry metadata, not file
+            // contents), so it now runs as a concurrent task overlapping
+            // the download phase and is `await`ed at the gate below,
+            // strictly before the link/finalize phase. A genuine
+            // no-downgrade violation still aborts the install (via `?` on
+            // the awaited result) before any package is linked into
+            // `node_modules` or any lifecycle script runs: identical
+            // validation, identical gate, only the `await` point moved
+            // later to hide the metadata round-trip behind the download
+            // tail. Single-task `JoinSet` (abort-on-drop) so an early `?`
+            // between here and the gate cancels the in-flight probe.
+            let trust_cwd = cwd.clone();
+            let trust_graph = graph.clone();
+            let trust_network_mode = opts.network_mode;
+            let trust_policy = dependency_policy.clone();
+            let mut lock_trust_set: tokio::task::JoinSet<miette::Result<()>> =
+                tokio::task::JoinSet::new();
+            lock_trust_set.spawn(async move {
+                validate_lockfile_trust_policy(
+                    &trust_cwd,
+                    &trust_graph,
+                    trust_network_mode,
+                    &trust_policy,
+                )
+                .await
+            });
             let source_label = resolve::lockfile_source_label(kind);
             tracing::debug!(
                 "{source_label}: {} packages for {project_name}",
@@ -1226,16 +1255,28 @@ pub async fn run(opts: InstallOptions) -> miette::Result<()> {
                 Ok(t) => t,
                 Err(e) => {
                     // Fetch failed: the install is aborting, so no build
-                    // script will run. Dropping `lock_osv_set` aborts the
-                    // in-flight OSV probe so it doesn't keep doing network
-                    // I/O after the CLI has errored.
+                    // script will run. Dropping the OSV and trust-policy
+                    // sets aborts the in-flight probes so they don't keep
+                    // doing network I/O after the CLI has errored.
                     drop(lock_osv_set);
+                    drop(lock_trust_set);
                     return Err(combine_install_pipeline_errors(lock_materialize_handle, e).await);
                 }
             };
             // Materializer stats roll into link via GVS-already-linked
             // fast path. Errors abort install.
             let _ = lock_materialize_handle.await.into_diagnostic()??;
+            // Gate: consume the trust-policy verdict that ran concurrently
+            // with the download phase above. This `await` is strictly
+            // before the link + finalize phases, so a no-downgrade
+            // violation aborts the install (via `?`) before any package is
+            // linked or any lifecycle script runs — the security posture is
+            // unchanged, the validation simply overlapped the download tail
+            // instead of serializing ahead of the fetch.
+            match lock_trust_set.join_next().await {
+                Some(joined) => joined.into_diagnostic()??,
+                None => unreachable!("trust-policy JoinSet had exactly one spawned task"),
+            }
             // Gate: consume the OSV verdict that ran concurrently with
             // the download phase above. This `await` is strictly before
             // the link + finalize phases, so a `MAL-*` finding aborts
