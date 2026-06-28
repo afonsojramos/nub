@@ -113,3 +113,6 @@ tests/bench/RESULTS.md
 
 # fray orchestration runtime — local-only, never tracked (internal deliberation; PUBLIC repo)
 .fray/
+
+# local-only design corpus (symlink to external dir) — never tracked
+wiki
