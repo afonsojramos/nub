@@ -754,20 +754,19 @@ pub(crate) async fn run_dep_lifecycle_scripts(
 /// lockfile (`None` for a v1/legacy entry or an integrity-stripping
 /// proxy); `computed_integrity` is the sha512 the streaming path
 /// derived from the tarball bytes when the lockfile carried none. The
-/// index is always saved under the effective key
+/// index is saved under the effective key
 /// (`lockfile_integrity.or(computed_integrity)`).
 ///
-/// The legacy-cache fix: when there is no lockfile integrity but the
-/// effective key is a *computed* sha512, the index lands in a hex
-/// subdirectory. A frozen warm install's classifier, however, reads
-/// with `integrity = None` (the root key) for those same entries, so it
-/// would never look in the hex subdir — a permanent cache miss that
-/// re-fetches the tarball every install. Persisting *also* under the
-/// root key makes the warm read hit, while keeping the hex write for
-/// the self-heal case (the lockfile is later upgraded to v3 carrying
-/// the computed integrity). When `lockfile_integrity` is `Some`, the
-/// effective key already equals it and no root-key write happens — an
-/// integrity-bearing entry must stay discriminated by source.
+/// No content-FREE root-key (`None`) write happens here. A no-integrity
+/// package's index lands ONLY under its computed-sha512 hex key, and the
+/// warm classifier reaches it by content-addressing through the
+/// per-project no-integrity index (`state::read_no_integrity_index`) —
+/// not by reading a bare `<name>@<version>` selector that, in a
+/// per-user shared store, would let one project's bytes be served to
+/// another for the same coordinate. (A predecessor wrote both keys; that
+/// root-key write opened exactly that cross-project substitution surface
+/// and is removed here.) The hex write is kept — both the content-
+/// addressed warm read and the v3-self-heal upgrade resolve through it.
 fn persist_pkg_index(
     store: &aube_store::Store,
     registry_name: &str,
@@ -782,15 +781,6 @@ fn persist_pkg_index(
         tracing::warn!(
             code = aube_codes::warnings::WARN_AUBE_CACHE_WRITE_FAILED,
             "Failed to cache index for {display_name}@{version}: {e}"
-        );
-    }
-    if lockfile_integrity.is_none()
-        && effective.is_some()
-        && let Err(e) = store.save_index(registry_name, version, None, index)
-    {
-        tracing::warn!(
-            code = aube_codes::warnings::WARN_AUBE_CACHE_WRITE_FAILED,
-            "Failed to cache root-key index for {display_name}@{version}: {e}"
         );
     }
 }
@@ -1358,7 +1348,7 @@ mod tests {
     }
 
     #[test]
-    fn no_integrity_import_is_retrievable_by_warm_none_key() {
+    fn no_integrity_import_keys_only_by_computed_hex_never_root() {
         use flate2::write::GzEncoder;
         use std::io::Write;
 
@@ -1393,24 +1383,24 @@ mod tests {
         let index = store.import_tarball(&build_tgz()).unwrap();
         persist_pkg_index(&store, name, version, None, Some(&computed), &index, name);
 
-        // THE REGRESSION: a frozen warm install's classifier reads with
-        // integrity=None, so the no-integrity import must be retrievable
-        // by that root key or it re-fetches every install.
-        assert!(
-            store.load_index(name, version, None).is_some(),
-            "no-integrity import must be retrievable by the warm None key"
-        );
-        // The computed-sha512 key still resolves — the self-heal path
-        // when the lockfile is later upgraded to carry that integrity.
+        // Option B: the no-integrity import is content-addressed by its
+        // computed-sha512 hex key. The warm classifier reaches it through
+        // the per-project no-integrity index, NOT a content-free root
+        // selector — so NO `None`-key entry may exist in the shared store
+        // (that selector is the cross-project substitution surface).
         assert!(
             store.load_index(name, version, Some(&computed)).is_some(),
-            "computed-sha512 key must still resolve (self-heal path)"
+            "no-integrity import must be retrievable by its computed-sha512 hex key"
+        );
+        assert!(
+            store.load_index(name, version, None).is_none(),
+            "no content-free root-key selector may be written to the shared store"
         );
 
         // CONTROL: an integrity-bearing entry is keyed solely by its SRI
-        // and must NOT be dual-saved under the root key — otherwise two
+        // and must NOT be saved under the root key — otherwise two
         // sources for the same (name, version) would alias on disk. A
-        // fresh store isolates it from the legacy entry's root-key write.
+        // fresh store isolates it from the legacy entry above.
         let dir2 = tempfile::tempdir().unwrap();
         let store2 = aube_store::Store::at(dir2.path().join("files"));
         let index2 = store2.import_tarball(&build_tgz()).unwrap();

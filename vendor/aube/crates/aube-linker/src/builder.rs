@@ -41,7 +41,37 @@ impl Linker {
             virtual_store_only: false,
             modules_dir_name: "node_modules".to_string(),
             aube_dir_override: None,
+            no_integrity_read_keys: std::collections::BTreeMap::new(),
         }
+    }
+
+    /// Supply per-project `<registry-name>@<version>` → computed-sha512
+    /// bindings so the `load_index` fallback can content-address the
+    /// index read for a no-integrity package instead of keying by `None`
+    /// (see the field docs on [`Linker`]). The install driver populates
+    /// this from `state::read_no_integrity_index`; standalone callers
+    /// and tests omit it and get unchanged behavior.
+    pub fn with_no_integrity_read_keys(
+        mut self,
+        keys: std::collections::BTreeMap<String, String>,
+    ) -> Self {
+        self.no_integrity_read_keys = keys;
+        self
+    }
+
+    /// The index-cache read key for `pkg`: its lockfile SRI when present,
+    /// else this project's computed-sha512 binding for the coordinate
+    /// (no-integrity packages). `None` only when a no-integrity package
+    /// has no binding yet — the caller then misses cleanly and re-fetches.
+    pub(crate) fn index_read_key<'a>(
+        &'a self,
+        pkg: &'a aube_lockfile::LockedPackage,
+    ) -> Option<&'a str> {
+        pkg.integrity.as_deref().or_else(|| {
+            self.no_integrity_read_keys
+                .get(&format!("{}@{}", pkg.registry_name(), pkg.version))
+                .map(String::as_str)
+        })
     }
 
     /// Select the layout mode. Defaults to `NodeLinker::Isolated`

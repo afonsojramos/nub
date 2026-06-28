@@ -416,7 +416,7 @@ fn materialize_hoisted_node(
         None => {
             owned_index = linker
                 .store
-                .load_index(pkg.registry_name(), &pkg.version, pkg.integrity.as_deref())
+                .load_index(pkg.registry_name(), &pkg.version, linker.index_read_key(pkg))
                 .ok_or_else(|| Error::MissingPackageIndex(dep_path.to_string()))?;
             &owned_index
         }
@@ -475,7 +475,11 @@ fn materialize_hoisted_node(
             let target = pkg_dir.join(rel_path);
             if let Err(e) = linker.link_file_fresh(stored, rel_path, &target) {
                 if let Error::MissingStoreFile { .. } = &e {
-                    crate::invalidate_stale_index_for_package(&linker.store, pkg);
+                    crate::invalidate_stale_index_for_package(
+                        &linker.store,
+                        pkg,
+                        linker.index_read_key(pkg),
+                    );
                 }
                 return Err(e);
             }

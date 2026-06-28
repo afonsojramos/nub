@@ -40,6 +40,7 @@ impl Linker {
             aube_dir_override: self.aube_dir_override.clone(),
             link_concurrency: self.link_concurrency,
             virtual_store_only: self.virtual_store_only,
+            no_integrity_read_keys: self.no_integrity_read_keys.clone(),
         }
     }
 
@@ -326,7 +327,7 @@ impl Linker {
                                         .load_index(
                                             pkg.registry_name(),
                                             &pkg.version,
-                                            pkg.integrity.as_deref(),
+                                            self.index_read_key(pkg),
                                         )
                                         .ok_or_else(|| {
                                             Error::MissingPackageIndex(dep_path.to_string())
@@ -420,7 +421,7 @@ impl Linker {
                                         .load_index(
                                             pkg.registry_name(),
                                             &pkg.version,
-                                            pkg.integrity.as_deref(),
+                                            self.index_read_key(pkg),
                                         )
                                         .ok_or_else(|| {
                                             Error::MissingPackageIndex(dep_path.to_string())
@@ -869,7 +870,7 @@ impl Linker {
                                         .load_index(
                                             pkg.registry_name(),
                                             &pkg.version,
-                                            pkg.integrity.as_deref(),
+                                            self.index_read_key(pkg),
                                         )
                                         .ok_or_else(|| {
                                             Error::MissingPackageIndex(dep_path.to_string())
@@ -940,7 +941,7 @@ impl Linker {
                                         .load_index(
                                             pkg.registry_name(),
                                             &pkg.version,
-                                            pkg.integrity.as_deref(),
+                                            self.index_read_key(pkg),
                                         )
                                         .ok_or_else(|| {
                                             Error::MissingPackageIndex(dep_path.to_string())

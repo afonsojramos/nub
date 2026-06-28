@@ -151,7 +151,12 @@ pub(super) fn run_link_phase(input: LinkPhaseInput<'_>) -> miette::Result<LinkPh
         .with_link_concurrency(link_concurrency_setting)
         .with_virtual_store_only(virtual_store_only)
         .with_modules_dir_name(modules_dir_name.to_string())
-        .with_aube_dir_override(aube_dir.to_path_buf());
+        .with_aube_dir_override(aube_dir.to_path_buf())
+        // Lets the linker's on-demand `load_index` fallback content-address
+        // a no-integrity package's index (matching the warm classifier)
+        // instead of keying by the bare `None` selector — see the field
+        // docs on `aube_linker::Linker`.
+        .with_no_integrity_read_keys(crate::state::read_no_integrity_index(cwd));
     if let Some(enabled) = use_global_virtual_store_override {
         linker = linker.with_use_global_virtual_store(enabled);
     }
