@@ -246,6 +246,28 @@ fn merge_child_env(
     env_map
 }
 
+/// Select which `.env*` vars the watch path injects into the watched Node via
+/// `Command::env` (#207). The watched `node --watch` process also receives the
+/// `.env*` files as `--env-file` args, which Node re-reads on every restart — so
+/// injecting a var Node already delivers identically would FREEZE it at the `nub
+/// watch` startup value (Node's `--env-file` never overrides an already-present
+/// env var). Inject a key iff nub's `${VAR}` expansion changed it from the raw
+/// value Node's `--env-file` delivers (`raw_env` is the unexpanded `.env*` merge);
+/// every plain var is left to Node's `--env-file` and live-reloads on restart. A
+/// key absent from `raw_env` is injected — that is the explicit `--env-file` case
+/// (`raw_env` is empty there: auto-discovery is suppressed and Node gets no
+/// `--env-file` args, so injection is the only delivery channel). Pure over its
+/// inputs so the selection can be unit-tested without spawning Node.
+fn watch_inject_vars<'a>(
+    env_vars: &'a HashMap<String, String>,
+    raw_env: &HashMap<String, String>,
+) -> Vec<(&'a String, &'a String)> {
+    env_vars
+        .iter()
+        .filter(|(k, v)| raw_env.get(*k) != Some(*v))
+        .collect()
+}
+
 /// Apply the `--env-file` vars directly to a child command, for spawn paths
 /// (`nubx` non-node launchers, the dlx fallback) that don't build an env map.
 /// Same precedence as [`overlay_env_file_vars`].
@@ -4148,15 +4170,22 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     // references, which would make `nub watch` inconsistent with `nub <file>`
     // (which uses `load_env_files` and gets full expansion). To close the gap we
     // also load and expand the env files here via `load_env_files` and inject the
-    // expanded values via `cmd.env()` below. Node's `--env-file` never overrides a
-    // var already present in the inherited environment (shell-wins), so the pre-
-    // expanded `cmd.env()` values win. Unexpanded vars not covered by expansion
-    // still reach the child through the `--env-file` args as before.
+    // expansion-changed values via `cmd.env()` below.
     //
-    // Live-reload trade-off: if a `${REF}` source var changes while the watcher is
-    // running, the pre-expanded dependents (in `cmd.env()`) won't update until nub
-    // is restarted. This is the same trade-off `nub <file>` already has — the file
-    // runner also pre-expands once and doesn't re-expand on changes.
+    // Live-reload correctness (#207): Node's `--env-file` never overrides a var
+    // already present in the inherited environment (shell-wins), so any var we
+    // inject via `cmd.env()` FREEZES at its `nub watch` startup value — the long-
+    // lived watcher process never restarts, so it never re-reads `.env`. Injecting
+    // every var (the old behavior) therefore froze plain vars across restarts even
+    // though Node's own `--env-file` would have live-reloaded them. Fix: inject
+    // ONLY the keys whose `${VAR}` expansion actually changed the raw value (Node's
+    // `--env-file` can't reproduce those); every plain/unexpanded var is delivered
+    // SOLELY through the `--env-file` args, so editing `.env` is picked up on the
+    // next restart, matching `node --watch --env-file=.env`. See the inject loop.
+    //
+    // Live-reload trade-off (unchanged): an expansion-dependent var (`B=${A}`) is
+    // still injected, so if `A` changes while the watcher runs, `B` won't update
+    // until nub is restarted — the same trade-off `nub <file>` already has.
     //
     // Precedence among the `.env*` files: Node is *last*-writer-wins, so we pass
     // `discover_env_files`' highest-priority-first list in reverse for nub's
@@ -4178,13 +4207,30 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
             .map(|p| nub_core::workspace::env::discover_env_files(&p.root))
             .unwrap_or_default()
     };
-    // Pre-expand env vars (same path as the direct file runner). Auto `.env*` is
-    // suppressed when `--env-file` is present; `merge_child_env` applies the gate
-    // and overlays the explicit `--env-file` vars (shell still wins).
-    let auto_env = project
-        .as_ref()
-        .map(|p| nub_core::workspace::env::load_env_files(&p.root))
-        .unwrap_or_default();
+    // Load the `.env*` files ONCE: `raw_env` is the unexpanded merge (the values
+    // Node's `--env-file` args deliver), `auto_env` is the same map expanded. A
+    // single read (rather than `load_env_files` + a second `load_env_files_raw`)
+    // avoids re-parsing every file twice and closes the TOCTOU window where a file
+    // changing between two reads could spuriously inject a plain var.
+    let raw_env = if env_file_present {
+        // `--env-file` suppresses auto-discovery: no auto `--env-file` args reach
+        // Node, so injection is the only delivery channel — leave `raw_env` empty
+        // so the inject loop injects every var (see `watch_inject_vars`).
+        HashMap::new()
+    } else {
+        project
+            .as_ref()
+            .map(|p| nub_core::workspace::env::load_env_files_raw(&p.root))
+            .unwrap_or_default()
+    };
+    // Pre-expand the auto base to the same map the direct file runner's
+    // `load_env_files` produces. When `--env-file` is present `merge_child_env`
+    // discards this (auto-discovery suppressed), so the empty `raw_env` clone is
+    // fine — only the explicit `--env-file` overlay survives there.
+    let mut auto_env = raw_env.clone();
+    nub_core::workspace::env::expand_env_map(&mut auto_env);
+    // `merge_child_env` applies the `--env-file` suppression gate and overlays the
+    // explicit `--env-file` vars (shell still wins).
     let env_vars = merge_child_env(
         auto_env,
         env_file_present,
@@ -4232,12 +4278,12 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit());
-    // Inject pre-expanded .env* vars (including --env-file flag overrides,
-    // already merged into env_vars via merge_child_env above). Node's own
-    // --env-file args above still deliver the raw file content for vars that don't
-    // need expansion, but these cmd.env() values win (shell-wins: Node's --env-file
-    // never overrides an already-set env var).
-    for (k, v) in &env_vars {
+    // Inject ONLY the .env* vars whose `${VAR}` expansion changed the raw value
+    // (#207) — see [`watch_inject_vars`]. A var Node's `--env-file` already
+    // delivers identically is left to Node so the long-lived watcher re-reads it
+    // from the file on every restart (a changed `.env` value is picked up) instead
+    // of freezing at startup.
+    for (k, v) in watch_inject_vars(&env_vars, &raw_env) {
         cmd.env(k, v);
     }
     // This path spawns `node` directly and otherwise relies on OS env inheritance
@@ -7161,6 +7207,62 @@ mod tests {
         assert!(
             !merged.contains_key("NUB_TEST_BAR"),
             "non-overridden auto var stays suppressed; got {merged:?}"
+        );
+    }
+
+    // `nub watch` regression guard (#207): the watch path injects via `Command::env`
+    // ONLY the vars whose `${VAR}` expansion changed their raw value. Plain vars are
+    // left to Node's `--env-file` (which re-reads on every restart), so editing
+    // `.env` is picked up live instead of freezing at startup. `watch_inject_vars`
+    // is the selection; locking it here covers the fix without a flaky long-lived
+    // watcher + timed-file-edit integration test.
+    #[test]
+    fn watch_injects_only_expansion_changed_vars() {
+        // A plain var (raw == expanded) and an expansion-changed var.
+        let env_vars = HashMap::from([
+            ("NUB_TEST_PLAIN".to_string(), "value_one".to_string()),
+            (
+                "NUB_TEST_URL".to_string(),
+                "postgres://localhost:5432/db".to_string(),
+            ),
+        ]);
+        let raw_env = HashMap::from([
+            ("NUB_TEST_PLAIN".to_string(), "value_one".to_string()),
+            (
+                "NUB_TEST_URL".to_string(),
+                "postgres://${NUB_TEST_HOST}:5432/db".to_string(),
+            ),
+        ]);
+
+        let injected: HashMap<_, _> = watch_inject_vars(&env_vars, &raw_env)
+            .into_iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+
+        // Plain var: Node's `--env-file` delivers it identically → NOT injected, so
+        // it live-reloads on restart (#207).
+        assert!(
+            !injected.contains_key("NUB_TEST_PLAIN"),
+            "a var unchanged by expansion must be left to Node's --env-file (live reload); got {injected:?}"
+        );
+        // Expansion-changed var: Node's `--env-file` can't reproduce it → injected
+        // with the expanded value (the documented frozen-until-restart trade-off).
+        assert_eq!(
+            injected.get("NUB_TEST_URL").copied(),
+            Some("postgres://localhost:5432/db"),
+            "an expansion-changed var must be injected with its expanded value; got {injected:?}"
+        );
+
+        // Explicit `--env-file` case: `raw_env` is empty (Node gets no `--env-file`
+        // args), so injection is the only delivery channel — inject everything.
+        let all: HashMap<_, _> = watch_inject_vars(&env_vars, &HashMap::new())
+            .into_iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        assert_eq!(
+            all.len(),
+            2,
+            "with no raw_env (--env-file present) every var is injected; got {all:?}"
         );
     }
 

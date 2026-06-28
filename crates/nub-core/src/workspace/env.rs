@@ -90,11 +90,17 @@ pub fn expand_env_map(map: &mut HashMap<String, String>) -> &mut HashMap<String,
     map
 }
 
-/// Load .env* files from the project root, returning the key-value
-/// pairs to inject into the child process environment. Shell env
-/// (from the parent process) always wins — values already set in
-/// the process environment are not overridden.
-pub fn load_env_files(project_root: &Path) -> HashMap<String, String> {
+/// Load and merge `.env*` files WITHOUT `${VAR}` expansion — the *raw* values
+/// Node's own `--env-file` parser would deliver. Shell env (from the parent
+/// process) always wins; first-writer-wins across the `.env*` precedence.
+///
+/// The watch path uses this to decide which keys actually need nub's
+/// pre-expansion injected: a key whose raw value equals its expanded value is
+/// delivered identically by Node's `--env-file` (which re-reads on every
+/// restart), so injecting it would freeze the startup value (#207). Only the
+/// expansion-changed keys — which Node's `--env-file` can't reproduce — get
+/// injected.
+pub fn load_env_files_raw(project_root: &Path) -> HashMap<String, String> {
     let files = env_file_names();
 
     let mut result = HashMap::new();
@@ -112,6 +118,16 @@ pub fn load_env_files(project_root: &Path) -> HashMap<String, String> {
             }
         }
     }
+
+    result
+}
+
+/// Load .env* files from the project root, returning the key-value
+/// pairs to inject into the child process environment. Shell env
+/// (from the parent process) always wins — values already set in
+/// the process environment are not overridden.
+pub fn load_env_files(project_root: &Path) -> HashMap<String, String> {
+    let mut result = load_env_files_raw(project_root);
 
     // Expand ${VAR} references within values. Multi-pass to handle
     // nested references like A=hello, B=${A}_world, C=${B}_!.
@@ -565,6 +581,44 @@ mod tests {
             "`${{DB_HOST}}` must be expanded to its value; got {vars:?}"
         );
         assert_eq!(vars.get("DB_HOST").map(String::as_str), Some("localhost"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `load_env_files_raw` returns the UNEXPANDED file values — the raw bytes
+    /// Node's own `--env-file` parser delivers — while `load_env_files` expands
+    /// `${VAR}`. The watch path diffs the two to decide which vars to inject vs
+    /// leave to Node's live-reloading `--env-file` (#207); this guards that
+    /// distinction (a plain var is identical in both; an expanded var differs).
+    #[test]
+    fn load_env_files_raw_leaves_var_references_literal() {
+        let dir = std::env::temp_dir().join(format!("nub-raw-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(".env"),
+            "DB_HOST=localhost\nDATABASE_URL=postgres://${DB_HOST}:5432/db\nPLAIN=p1\n",
+        )
+        .unwrap();
+
+        let raw = load_env_files_raw(&dir);
+        let expanded = load_env_files(&dir);
+
+        // Plain var: identical in both → the watch path leaves it to `--env-file`.
+        assert_eq!(raw.get("PLAIN"), expanded.get("PLAIN"));
+        assert_eq!(raw.get("PLAIN").map(String::as_str), Some("p1"));
+        // Expanded var: raw keeps `${DB_HOST}` literal; expanded resolves it →
+        // the watch path injects this one.
+        assert_eq!(
+            raw.get("DATABASE_URL").map(String::as_str),
+            Some("postgres://${DB_HOST}:5432/db"),
+            "raw load must NOT expand ${{DB_HOST}}; got {raw:?}"
+        );
+        assert_eq!(
+            expanded.get("DATABASE_URL").map(String::as_str),
+            Some("postgres://localhost:5432/db")
+        );
+        assert_ne!(raw.get("DATABASE_URL"), expanded.get("DATABASE_URL"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
