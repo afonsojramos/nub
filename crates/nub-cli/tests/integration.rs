@@ -408,6 +408,44 @@ fn project_js_v_flag_regexp_lowers() {
 }
 
 #[test]
+fn project_js_transpile_failure_falls_back_to_original() {
+    // #225: pnpm 11.x's bundled `pnpm.mjs` pairs a transformable construct (a `v`-flag
+    // RegExp here) with `set choices(choices = [])` — spec-invalid but V8-accepted. nub
+    // routed the file to oxc (transformable verdict) and HARD-CRASHED on the setter
+    // ("A 'set' accessor cannot have an initializer"). The graceful fallback runs the
+    // ORIGINAL source instead. The oxc rejection must never surface; on Node 20+ (where
+    // the `v` flag is native) the whole file executes.
+    let (stdout, stderr, code) = run_nub("project-js", "setter-default-fallback.mjs");
+    assert!(
+        !stderr.contains("set accessor") && !stderr.contains("Transpile error"),
+        "the oxc setter-rejection must not surface — fallback should run original source: {stderr}"
+    );
+    if node_at_least((20, 0, 0)) {
+        assert_eq!(
+            code, 0,
+            "fallback should run the V8-tolerated file: {stderr}"
+        );
+        assert!(
+            stdout.contains("FALLBACK-RAN:true:[]"),
+            "file ran via fallback to the original source: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn project_js_genuine_syntax_error_still_errors() {
+    // The other side of the #225 fallback: a GENUINELY broken plain-JS file must still
+    // fail loudly — the fallback to original source surfaces V8's own SyntaxError rather
+    // than masking it.
+    let (_stdout, stderr, code) = run_nub("project-js", "genuine-syntax-error.mjs");
+    assert_ne!(code, 0, "a genuine syntax error must still fail: {stderr}");
+    assert!(
+        stderr.contains("SyntaxError"),
+        "V8's syntax error must surface, not be swallowed: {stderr}"
+    );
+}
+
+#[test]
 fn project_js_noop_is_byte_identical() {
     // The load-bearing byte-parity guard: a project `.js` with NOTHING oxc lowers
     // must be served VERBATIM — no quote/semicolon/whitespace normalization, no

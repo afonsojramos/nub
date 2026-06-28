@@ -695,7 +695,23 @@ export function maybeTranspilePlainJs(url, ext) {
   // Transformable: run the SAME pipeline as TS/JSX (target es2022 lowering, tsconfig,
   // source maps, the Stage-3 decorator guard, format detection, cache). loadTranspile
   // re-reads + re-parses, but only for the rare file that actually needs lowering.
-  return loadTranspile(url, ext);
+  try {
+    return loadTranspile(url, ext);
+  } catch (err) {
+    // #225: a plain-JS file the transformable verdict flagged (a `using` decl or
+    // `v`-flag RegExp somewhere) but whose transform oxc then REJECTS — V8 tolerates
+    // constructs oxc's stricter ES grammar forbids, e.g. `set x(v = []) {}` in pnpm
+    // 11.x's bundled `pnpm.mjs`. Falling back to `null` hands the file to Node's
+    // native loader running the ORIGINAL source: a V8-tolerated file runs, and a
+    // GENUINELY broken one still surfaces V8's own SyntaxError at the same spot Node
+    // would — so no real error is masked. Plain-JS only (the `.ts`/`.tsx`/`.jsx` path
+    // keeps hard-erroring, since those MUST transpile to run); the cost is that
+    // down-leveling is forfeited for THIS one file. The Stage-3 decorator diagnostic
+    // is a deliberate nub error and must not be swallowed — a decorator file can't
+    // run on V8 raw regardless, so re-throw nub's guidance.
+    if (info.hasDecorators) throw err;
+    return null;
+  }
 }
 
 // ── Data-format imports ─────────────────────────────────────────────
