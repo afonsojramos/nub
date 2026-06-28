@@ -791,6 +791,72 @@ mod tests {
     }
 
     #[test]
+    fn full_hoist_direct_dep_wins_root_over_transitive_majority() {
+        // The importer DIRECTLY depends on foo@1.0.0, while five transitive
+        // packages each depend on foo@2.0.0 (the transitive majority). The
+        // direct edge must own the root slot regardless of the rival's
+        // consumer count — the importer resolves `foo` from root and must see
+        // its declared 1.0.0. foo@2.0.0 nests under each of its consumers.
+        let nm = PathBuf::from("/project/node_modules");
+        let mut graph = LockfileGraph::default();
+        graph
+            .packages
+            .insert("foo@1.0.0".into(), pkg("foo", "1.0.0", &[]));
+        graph
+            .packages
+            .insert("foo@2.0.0".into(), pkg("foo", "2.0.0", &[]));
+        for t in ["t1", "t2", "t3", "t4", "t5"] {
+            graph
+                .packages
+                .insert(format!("{t}@1.0.0"), pkg(t, "1.0.0", &[("foo", "2.0.0")]));
+        }
+        // foo declared first as a direct dep; the five transitive consumers
+        // of foo@2.0.0 follow. Arrival order does NOT decide root here.
+        let mut root_deps = vec![dep("foo", "foo@1.0.0")];
+        for t in ["t1", "t2", "t3", "t4", "t5"] {
+            root_deps.push(dep(t, &format!("{t}@1.0.0")));
+        }
+
+        let plan = plan_importer(&nm, &root_deps, &graph, HoistingLimits::None).unwrap();
+
+        // The direct dep wins the root slot; the transitive majority never does.
+        assert_eq!(package_dir(&plan, "foo@1.0.0"), nm.join("foo"));
+        assert_eq!(
+            plan.nodes
+                .iter()
+                .filter(|n| n.parent == Some(plan.root_idx)
+                    && n.dep_path.as_deref() == Some("foo@1.0.0"))
+                .count(),
+            1,
+            "exactly one root-level foo, and it is the direct 1.0.0"
+        );
+        assert_eq!(
+            plan.nodes
+                .iter()
+                .filter(|n| n.parent == Some(plan.root_idx)
+                    && n.dep_path.as_deref() == Some("foo@2.0.0"))
+                .count(),
+            0,
+            "foo@2.0.0 must never sit at root when foo@1.0.0 is a direct dep"
+        );
+        // The transitive majority nests under each of its five consumers.
+        let nested_v2: BTreeSet<PathBuf> = plan
+            .nodes
+            .iter()
+            .filter(|n| n.dep_path.as_deref() == Some("foo@2.0.0"))
+            .map(|n| n.pkg_dir.clone().unwrap())
+            .collect();
+        let expected_v2: BTreeSet<PathBuf> = ["t1", "t2", "t3", "t4", "t5"]
+            .iter()
+            .map(|t| nm.join(format!("{t}/node_modules/foo")))
+            .collect();
+        assert_eq!(
+            nested_v2, expected_v2,
+            "foo@2.0.0 must nest under every consumer, never at root"
+        );
+    }
+
+    #[test]
     fn full_hoist_seats_majority_version_at_root_over_arrival_order() {
         // `bad` (one consumer of shared@2.0.0) is declared first, so a plain
         // arrival-order BFS would seat shared@2.0.0 at root and force the
