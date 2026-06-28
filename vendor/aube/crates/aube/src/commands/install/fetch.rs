@@ -376,6 +376,22 @@ pub(super) async fn import_local_source(
     }
 }
 
+/// The warm-classifier index read key for `pkg`: its lockfile SRI when
+/// present, else this project's computed-sha512 binding for the
+/// coordinate (a no-integrity package). `None` means a no-integrity
+/// package with no binding yet — the caller must re-fetch rather than
+/// fall back to the content-free `None` selector.
+fn warm_read_key<'a>(
+    pkg: &'a aube_lockfile::LockedPackage,
+    no_integrity_index: &'a BTreeMap<String, String>,
+) -> Option<&'a str> {
+    pkg.integrity.as_deref().or_else(|| {
+        no_integrity_index
+            .get(&format!("{}@{}", pkg.registry_name(), pkg.version))
+            .map(String::as_str)
+    })
+}
+
 /// Fetch tarballs for resolved packages, checking the index cache first.
 /// Used by the lockfile path where all packages are known upfront.
 /// Exposed to sibling commands so `aube fetch` can reuse the same
@@ -569,6 +585,13 @@ where
         NeedsFetch,
     }
 
+    // Per-project content-address bindings for no-integrity packages
+    // (see `state::read_no_integrity_index`). Loaded once; the warm
+    // classifier resolves each no-integrity lookup through it so the
+    // read content-addresses the store by the sha512 THIS project
+    // computed, never a content-free shared-store selector.
+    let no_integrity_index = crate::state::read_no_integrity_index(project_root);
+
     // Parallel index check (rayon)
     let check_results: Vec<_> = packages
         .par_iter()
@@ -604,14 +627,24 @@ where
             // `ERR_AUBE_MISSING_STORE_FILE`, forcing a whole-install
             // retry. Independent of import-time SRI / `verifyStoreIntegrity`,
             // which is enforced on fetch regardless of this flag.
-            match super::warm_load_index(
-                store,
-                pkg.registry_name(),
-                &pkg.version,
-                pkg.integrity.as_deref(),
-            ) {
-                Some(index) => (dep_path.clone(), pkg, CheckResult::Cached(index)),
+            // Content-address the lookup: a no-integrity package keys by
+            // the sha512 this project bound for the coordinate, not the
+            // bare `None` selector. No binding yet (first install, or a
+            // store predating this index) → re-fetch rather than read the
+            // content-free selector that, in a shared store, could return
+            // a different project's bytes for the same name@version.
+            let read_key = warm_read_key(pkg, &no_integrity_index);
+            match read_key {
                 None => (dep_path.clone(), pkg, CheckResult::NeedsFetch),
+                Some(key) => match super::warm_load_index(
+                    store,
+                    pkg.registry_name(),
+                    &pkg.version,
+                    Some(key),
+                ) {
+                    Some(index) => (dep_path.clone(), pkg, CheckResult::Cached(index)),
+                    None => (dep_path.clone(), pkg, CheckResult::NeedsFetch),
+                },
             }
         })
         .collect();
@@ -1015,6 +1048,28 @@ where
         sem.persist(&state, "tarball:default");
     }
 
+    // Bind every no-integrity package we imported this run to the sha512
+    // we computed, keyed by the coordinate the warm classifier looks up
+    // (`<registry-name>@<version>`), so the next frozen warm install
+    // content-addresses the store lookup instead of re-fetching — and
+    // never relies on a content-free shared-store selector. Only
+    // no-integrity entries need it; `computed_integrities` already holds
+    // exactly those (it is populated only when the lockfile carried no
+    // SRI). Merge-persisted so a partial/filtered run keeps prior
+    // coordinates' bindings.
+    let resolved_no_integrity: BTreeMap<String, String> = packages
+        .iter()
+        .filter(|(_, pkg)| pkg.integrity.is_none())
+        .filter_map(|(dep_path, pkg)| {
+            computed_integrities
+                .get(strip_peer_context_suffix(dep_path))
+                .map(|sri| (format!("{}@{}", pkg.registry_name(), pkg.version), sri.clone()))
+        })
+        .collect();
+    if let Err(e) = crate::state::merge_no_integrity_index(project_root, &resolved_no_integrity) {
+        tracing::debug!("failed to persist no-integrity content-address index: {e}");
+    }
+
     Ok((indices, cached_count, fetch_count, computed_integrities))
 }
 
@@ -1329,5 +1384,121 @@ mod tests {
 
         let out = super::remap_indices_to_contextualized(&canonical_indices, &graph);
         assert!(out.contains_key(canonical));
+    }
+
+    // Option B closure: mirrors the a46858e cross-project root-key repro,
+    // asserting it CANNOT happen anymore. Two projects share one per-user
+    // store and resolve the same `foo@1.0.0` to DIFFERENT bytes from
+    // DIFFERENT registries, neither carrying lockfile integrity. The warm
+    // lookup must content-address to each project's OWN computed sha512,
+    // and the shared store must carry NO content-free selector that could
+    // serve one project's bytes to the other.
+    #[test]
+    fn no_integrity_warm_lookup_is_per_project_content_addressed() {
+        use std::collections::BTreeMap;
+        use std::io::Write;
+
+        // A distinct gzipped tarball per project (distinct manifest body
+        // → distinct stored content), imported into the SHARED store so
+        // load_index's file stat finds real CAS shards.
+        let build_tgz = |marker: &str| {
+            let mut builder = tar::Builder::new(Vec::new());
+            let manifest =
+                format!(r#"{{"name":"foo","version":"1.0.0","_from":"{marker}"}}"#).into_bytes();
+            let mut header = tar::Header::new_gnu();
+            header.set_size(manifest.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "package/package.json", &manifest[..])
+                .unwrap();
+            let tar_bytes = builder.into_inner().unwrap();
+            let mut encoder =
+                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+            encoder.write_all(&tar_bytes).unwrap();
+            encoder.finish().unwrap()
+        };
+
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = aube_store::Store::at(store_dir.path().join("files"));
+        let name = "foo";
+        let version = "1.0.0";
+        let coord = format!("{name}@{version}");
+
+        // Project A and B import different bytes; each is cached ONLY under
+        // its own computed-sha512 hex key (Option B writes no root key).
+        let index_a = store.import_tarball(&build_tgz("registry-a")).unwrap();
+        let index_b = store.import_tarball(&build_tgz("registry-b")).unwrap();
+        let sri_a = aube_store::sha512_integrity_from_digest(&[0xAA; 64]);
+        let sri_b = aube_store::sha512_integrity_from_digest(&[0xBB; 64]);
+        store.save_index(name, version, Some(&sri_a), &index_a).unwrap();
+        store.save_index(name, version, Some(&sri_b), &index_b).unwrap();
+
+        // Each project binds the coordinate to ITS OWN sha512.
+        let proj_a = tempfile::tempdir().unwrap();
+        let proj_b = tempfile::tempdir().unwrap();
+        crate::state::merge_no_integrity_index(
+            proj_a.path(),
+            &BTreeMap::from([(coord.clone(), sri_a.clone())]),
+        )
+        .unwrap();
+        crate::state::merge_no_integrity_index(
+            proj_b.path(),
+            &BTreeMap::from([(coord.clone(), sri_b.clone())]),
+        )
+        .unwrap();
+
+        // The substitution surface is structurally absent: no content-free
+        // selector exists in the shared store.
+        assert!(
+            store.load_index(name, version, None).is_none(),
+            "shared store must carry no content-free <name>@<version> selector"
+        );
+
+        // A v1/no-integrity package; its lockfile carries no SRI.
+        let pkg = aube_lockfile::LockedPackage {
+            name: name.to_string(),
+            version: version.to_string(),
+            dep_path: coord.clone(),
+            ..Default::default()
+        };
+        assert!(pkg.integrity.is_none());
+
+        // Each project's warm classifier resolves its OWN bytes — never
+        // the other project's.
+        let idx_a = crate::state::read_no_integrity_index(proj_a.path());
+        let key_a = super::warm_read_key(&pkg, &idx_a).expect("project A has a binding");
+        assert_eq!(key_a, sri_a);
+        let a_hash = store
+            .load_index(name, version, Some(key_a))
+            .expect("project A hits its own hex index")
+            .get("package.json")
+            .unwrap()
+            .hex_hash
+            .clone();
+
+        let idx_b = crate::state::read_no_integrity_index(proj_b.path());
+        let key_b = super::warm_read_key(&pkg, &idx_b).expect("project B has a binding");
+        assert_eq!(key_b, sri_b);
+        let b_hash = store
+            .load_index(name, version, Some(key_b))
+            .expect("project B hits its own hex index")
+            .get("package.json")
+            .unwrap()
+            .hex_hash
+            .clone();
+
+        assert_ne!(
+            a_hash, b_hash,
+            "each project must resolve its own distinct bytes — no cross-substitution"
+        );
+
+        // No binding yet (a fresh project, or a store predating the index)
+        // → re-fetch, never the content-free selector.
+        let empty = BTreeMap::new();
+        assert!(
+            super::warm_read_key(&pkg, &empty).is_none(),
+            "a no-integrity package with no binding must miss (re-fetch), not read the root key"
+        );
     }
 }

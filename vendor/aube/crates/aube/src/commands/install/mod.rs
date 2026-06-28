@@ -239,6 +239,42 @@ impl InstallPhaseTimings {
     }
 }
 
+/// Persist the per-project no-integrity content-address index from a
+/// run's freshly `computed` sha512s. Keys by the coordinate the warm
+/// classifier looks up (`<registry-name>@<version>`) so the next frozen
+/// warm install content-addresses the store lookup instead of relying on
+/// a content-free shared selector. `computed` holds only no-integrity
+/// packages (the fetch derives a sha512 solely when the lockfile carried
+/// none); registry name + version are read off the graph, where the
+/// canonical (peer-suffix-stripped) dep_path matches `computed`'s keys.
+///
+/// The lockfile/frozen fetch path persists this inside
+/// `fetch::fetch_packages_with_root`; this covers the streaming-resolve
+/// path, whose `computed_integrities` are surfaced here, not there.
+fn persist_no_integrity_index(
+    cwd: &std::path::Path,
+    graph: &aube_lockfile::LockfileGraph,
+    computed: &BTreeMap<String, String>,
+) {
+    if computed.is_empty() {
+        return;
+    }
+    let resolved: BTreeMap<String, String> = graph
+        .packages
+        .values()
+        .filter(|pkg| pkg.local_source.is_none() && pkg.integrity.is_none())
+        .filter_map(|pkg| {
+            let canonical = strip_peer_context_suffix(&pkg.dep_path);
+            computed
+                .get(canonical)
+                .map(|sri| (format!("{}@{}", pkg.registry_name(), pkg.version), sri.clone()))
+        })
+        .collect();
+    if let Err(e) = crate::state::merge_no_integrity_index(cwd, &resolved) {
+        tracing::debug!("failed to persist no-integrity content-address index: {e}");
+    }
+}
+
 fn apply_computed_integrities(
     graph: &mut aube_lockfile::LockfileGraph,
     computed: &BTreeMap<String, String>,
@@ -1462,6 +1498,12 @@ pub async fn run(opts: InstallOptions) -> miette::Result<()> {
                 // single shared atomic.
                 let mut resolved_received: usize = 0;
 
+                // Per-project content-address bindings for no-integrity
+                // packages, so the streaming-resolve warm read hits the
+                // hex index instead of missing on the (removed) root key.
+                let fetch_no_integrity_index =
+                    crate::state::read_no_integrity_index(&fetch_project_root);
+
                 while let Some(pkg) = resolved_rx.recv().await {
                     if let Some(ref msg) = pkg.deprecated {
                         fetch_deprecations_tx.lock().unwrap().push(
@@ -1590,12 +1632,23 @@ pub async fn run(opts: InstallOptions) -> miette::Result<()> {
                     // `ERR_AUBE_MISSING_STORE_FILE`. Independent of
                     // import-time SRI / `verifyStoreIntegrity`.
                     let pkg_registry_name = pkg.registry_name().to_string();
-                    if let Some(index) = warm_load_index(
-                        &fetch_store,
-                        &pkg_registry_name,
-                        &pkg.version,
-                        pkg.integrity.as_deref(),
-                    ) {
+                    // Content-address the lookup; a no-integrity package
+                    // with no per-project binding yet has no read key and
+                    // falls through to fetch rather than reading the
+                    // content-free root selector.
+                    let read_key = pkg.integrity.as_deref().or_else(|| {
+                        fetch_no_integrity_index
+                            .get(&format!("{pkg_registry_name}@{}", pkg.version))
+                            .map(String::as_str)
+                    });
+                    if let Some(read_key) = read_key
+                        && let Some(index) = warm_load_index(
+                            &fetch_store,
+                            &pkg_registry_name,
+                            &pkg.version,
+                            Some(read_key),
+                        )
+                    {
                         materialize_tx
                             .send((pkg.dep_path.clone(), index.clone()))
                             .await
@@ -2066,6 +2119,7 @@ pub async fn run(opts: InstallOptions) -> miette::Result<()> {
             // same canonical package share a single set of files, so
             // cloning the PackageIndex is cheap relative to re-extraction.
             let mut indices = remap_indices_to_contextualized(&canonical_indices, &graph);
+            persist_no_integrity_index(&cwd, &graph, &computed_integrities);
             apply_computed_integrities(&mut graph, &computed_integrities);
 
             // Write the lockfile in whatever format the project was

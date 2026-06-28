@@ -146,6 +146,12 @@ pub(super) fn collect_ignored(project_dir: &std::path::Path) -> miette::Result<V
         super::install::build_policy_from_sources(&manifest, &workspace, false);
 
     let store = super::open_store(project_dir)?;
+    // Resolve a no-integrity package's index by the per-project
+    // computed-sha512 binding (matching the install warm read), so a
+    // v1/legacy-lock package with a suspicious lifecycle script still
+    // surfaces here — keying by `None` would miss now that the
+    // content-free root index is no longer written.
+    let no_integrity_index = crate::state::read_no_integrity_index(project_dir);
 
     let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
     let mut out: Vec<IgnoredEntry> = Vec::new();
@@ -164,12 +170,14 @@ pub(super) fn collect_ignored(project_dir: &std::path::Path) -> miette::Result<V
         ) {
             continue;
         }
-        let Some(suspicions) = lifecycle_scripts_with_suspicions(
-            &store,
-            &pkg.name,
-            &pkg.version,
-            pkg.integrity.as_deref(),
-        ) else {
+        let read_key = pkg.integrity.as_deref().or_else(|| {
+            no_integrity_index
+                .get(&format!("{}@{}", pkg.registry_name(), pkg.version))
+                .map(String::as_str)
+        });
+        let Some(suspicions) =
+            lifecycle_scripts_with_suspicions(&store, &pkg.name, &pkg.version, read_key)
+        else {
             continue;
         };
         out.push(IgnoredEntry {
@@ -201,11 +209,11 @@ fn lifecycle_scripts_with_suspicions(
     version: &str,
     integrity: Option<&str>,
 ) -> Option<Vec<aube_scripts::Suspicion>> {
-    // Cache lookup is integrity-keyed when available (prevents
-    // same-(name, version) entries from different sources colliding)
-    // and falls back to the plain (name, version) key when integrity
-    // is absent so proxy-served packages without `dist.integrity` are
-    // still classifiable.
+    // `integrity` is the read key the caller resolved: the lockfile SRI,
+    // or — for a no-integrity package — the per-project computed-sha512
+    // binding, so a v1/legacy-lock package stays classifiable now that
+    // the content-free root index is no longer written. A package with
+    // no binding yet simply isn't classified (conservative miss).
     let index = store.load_index(name, version, integrity)?;
     let stored = index.get("package.json")?;
     let content = std::fs::read_to_string(&stored.store_path).ok()?;

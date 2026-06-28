@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 const DEFAULT_STATE_DIR: &str = "node_modules";
 const INSTALL_STATE_FILE_NAME: &str = "state.json";
 const FRESH_STATE_FILE_NAME: &str = "fresh.json";
+const NO_INTEGRITY_INDEX_FILE_NAME: &str = "no-integrity-index.json";
 
 /// The install-state directory name, `.<name>-state`. Standalone aube:
 /// `.aube-state`.
@@ -830,6 +831,65 @@ fn read_state(state_path: &Path) -> Option<InstallState> {
 
 fn install_state_file(state_path: &Path) -> PathBuf {
     state_path.join(INSTALL_STATE_FILE_NAME)
+}
+
+fn no_integrity_index_file(state_path: &Path) -> PathBuf {
+    state_path.join(NO_INTEGRITY_INDEX_FILE_NAME)
+}
+
+/// Read the project's no-integrity content-address index — the binding
+/// `<registry-name>@<version>` → computed sha512 that lets a frozen warm
+/// install content-address the store-index lookup for a package whose
+/// lockfile carries no integrity (a v1/legacy lock, or an
+/// integrity-stripping proxy).
+///
+/// WHY this exists: the store index can also be keyed by a content-FREE
+/// `<name>@<version>` selector. In the per-user store shared across all
+/// of a user's projects, that selector lets the first project to import
+/// `foo@1.0.0` (from any registry) decide what every other project's
+/// warm install of the same coordinate links — even one scoped to a
+/// different, locked-down registry — with no registry contact and no
+/// verification. Binding the lookup to the sha512 THIS project computed
+/// from its OWN download closes that substitution surface: the key is
+/// per-project and self-established, so a different registry's bytes
+/// (different hash) can never be substituted. It lives outside the
+/// lockfile so a frozen install reads it without a download and without
+/// rewriting the lock. Missing/corrupt file → empty map (re-fetch
+/// re-establishes it).
+pub fn read_no_integrity_index(project_dir: &Path) -> BTreeMap<String, String> {
+    let state_path = state_dir(project_dir);
+    std::fs::read_to_string(no_integrity_index_file(&state_path))
+        .ok()
+        .and_then(|c| serde_json::from_str(&c).ok())
+        .unwrap_or_default()
+}
+
+/// Merge freshly-resolved `<registry-name>@<version>` → sha512 bindings
+/// into the project's no-integrity index, preserving entries from prior
+/// installs (a `--prod` / `--filter` / partial install must not drop
+/// coordinates it didn't fetch this run). No-op when nothing new.
+pub fn merge_no_integrity_index(
+    project_dir: &Path,
+    resolved: &BTreeMap<String, String>,
+) -> Result<(), std::io::Error> {
+    if resolved.is_empty() {
+        return Ok(());
+    }
+    let mut current = read_no_integrity_index(project_dir);
+    let mut changed = false;
+    for (coord, sri) in resolved {
+        if current.get(coord).map(String::as_str) != Some(sri.as_str()) {
+            current.insert(coord.clone(), sri.clone());
+            changed = true;
+        }
+    }
+    if !changed {
+        return Ok(());
+    }
+    let state_path = state_dir(project_dir);
+    std::fs::create_dir_all(&state_path)?;
+    let json = serde_json::to_string_pretty(&current)?;
+    aube_util::fs_atomic::atomic_write(&no_integrity_index_file(&state_path), json.as_bytes())
 }
 
 fn fresh_state_file(state_path: &Path) -> PathBuf {

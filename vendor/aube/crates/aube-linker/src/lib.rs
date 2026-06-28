@@ -227,6 +227,18 @@ pub struct Linker {
     /// `NodeLinker::Hoisted` — that layout *is* a flat top-level
     /// materialization, so "only the virtual store" doesn't apply.
     virtual_store_only: bool,
+    /// Per-project `<registry-name>@<version>` → computed-sha512
+    /// bindings for packages whose lockfile carries no integrity
+    /// (v1/legacy or an integrity-stripping proxy). Consulted ONLY by
+    /// the on-demand `load_index` fallback (a package the fetch driver
+    /// classified `AlreadyLinked` whose `.aube/<dep_path>` entry then
+    /// vanished or was invalidated). Without it, such a package's index
+    /// read would key by `None` and either miss or, in a shared store,
+    /// hit a content-free selector pointing at another project's bytes;
+    /// this binds the read to the sha512 THIS project computed, matching
+    /// the warm classifier. Empty for callers that don't supply it
+    /// (standalone-default and every existing test) → unchanged behavior.
+    no_integrity_read_keys: std::collections::BTreeMap<String, String>,
 }
 
 /// Strategy for linking files from the store to node_modules.
