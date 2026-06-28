@@ -5016,8 +5016,9 @@ fn perform_selfowned_upgrade(install_dir: &Path, version_spec: &str) -> Result<(
         );
     }
 
-    // Extract into a fresh `staged/` subdir (the single-binary archive contains
-    // bin/ only), matching install.sh's `tar -xzf … -C $install_dir`.
+    // Extract into a fresh `staged/` subdir (the archive carries bin/ plus a
+    // vestigial empty runtime/ that this path ignores — see the swap below),
+    // matching install.sh's `tar -xzf … -C $install_dir`.
     let staged_root = staging.path().join("staged");
     std::fs::create_dir_all(&staged_root)?;
     let tar_status = std::process::Command::new("tar")
