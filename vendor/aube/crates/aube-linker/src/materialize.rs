@@ -1089,7 +1089,24 @@ impl Linker {
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| dep_path.to_string());
-        let tmp = trees_dir.join(format!(".tmp-tree-{}-{leaf}", std::process::id()));
+        // The staging dir name MUST be unique per call, not just per
+        // (pid, leaf): the hoisted linker materializes the same
+        // `dep_path` at multiple placement sites, and two same-depth
+        // duplicates run concurrently in the per-level par_iter. Both
+        // would build the SAME `tree_src` (identical leaf) on a cold
+        // cache — sharing one tmp dir means one build's
+        // `remove_dir_all`/`link_file_fresh` corrupts the other's
+        // in-flight tree before its atomic publish, landing a partial
+        // tree in the global store. A per-call counter keeps each build
+        // isolated; the atomic `rename` below still makes the redundant
+        // second build a harmless lost race. (The isolated linker never
+        // hit this — it par_iters a dep_path-keyed map, so its leaves
+        // are always distinct.)
+        let uniq = {
+            static NEXT_TREE_TMP_ID: AtomicU64 = AtomicU64::new(0);
+            NEXT_TREE_TMP_ID.fetch_add(1, Ordering::Relaxed)
+        };
+        let tmp = trees_dir.join(format!(".tmp-tree-{}-{uniq}-{leaf}", std::process::id()));
         // Clear any leftover from a crashed predecessor.
         let _ = std::fs::remove_dir_all(&tmp);
 
