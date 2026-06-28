@@ -1,6 +1,6 @@
 ---
 name: benchmarking
-description: Comparative install-benchmarking methodology for nub vs npm/pnpm/bun — cold/warm protocol, genuine-cold cache isolation, load-robust measurement, and the anti-juicing honesty bar. Invoke (via the Skill tool) whenever you need to benchmark `nub install` against another package manager, produce or update the homepage/blog install numbers, or verify a perf claim before it ships. Encodes the hard-won gotchas: time setup OUTSIDE the measurement (hyperfine `--prepare`), the cache lives on DISK so env-var isolation is NOT trustworthy (bun ignores `BUN_INSTALL_CACHE_DIR`/`$HOME` — wipe the real path), VERIFY every cold is genuine via an offline-fails check, and lead with load-independent signals (file counts, store-entry counts) on this permanently-contended host. Pairs with `pm-perf-tracing` for the internal Rust phase decomposition.
+description: Comparative install-benchmarking methodology for nub vs npm/pnpm/bun — cold/warm protocol, genuine-cold cache isolation, load-robust measurement, and the anti-juicing honesty bar. Invoke (via the Skill tool) whenever you need to benchmark `nub install` against another package manager, produce or update the homepage/blog install numbers, or verify a perf claim before it ships. Encodes the hard-won gotchas: time setup OUTSIDE the measurement (hyperfine `--prepare`), the cache lives on DISK so env-var isolation is NOT trustworthy (bun ignores `BUN_INSTALL_CACHE_DIR`/`$HOME` — wipe the real path), VERIFY every cold is genuine via an offline-fails check, and only measure wall-clock on a quiet machine (gate on low load) with file counts as a load-independent cross-check. Pairs with `pm-perf-tracing` for the internal Rust phase decomposition.
 ---
 
 # benchmarking
@@ -73,13 +73,14 @@ This is exactly what caught the bun-cache bug: with empty `BUN_INSTALL_CACHE_DIR
 - Identical fixture, identical lockfile present throughout (use a `--frozen-lockfile`/`--frozen` equivalent where the tool offers one).
 - **Interleave tool order round-robin** (nub → npm → bun → pnpm, repeat) — never all-of-one-then-the-other — so drift in host load hits every tool equally.
 
-## Load-robustness — this host NEVER idles
+## Load discipline — measure only on a quiet machine
 
-The dev box load floor is ~20 and routinely 30–270 (see the machine-load memory). Absolute wall-clock σ is inflated by contention, so:
+Wall-clock benchmarks are only trustworthy on an idle machine. Background load inflates and distorts timings, and a number measured under contention is not reproducible. So gate the run on system load:
 
-- **LEAD with load-independent signals** — exact and reproducible regardless of load: `find node_modules -type f -o -type l | wc -l` (materialized file count), store-entry counts, physical-copy counts per package (the dedup story). These often tell the story better than seconds.
-- **Use back-to-back same-box RATIOS** for relative claims (nub/pnpm warm) — robust to a shared load level even when both absolutes are inflated.
-- **For a PUBLISHABLE absolute number, run on a genuinely quiet box or a CI runner — NOT this host.** Never gate a measurement on the host going quiet; it won't.
+- **Check the load average before measuring, and only proceed when the machine is quiet.** The ideal is a dedicated quiet box or a CI runner sitting near zero load — use one for any number that will be published.
+- **On a shared dev host, WAIT for load to fall below a sensible threshold before timing — don't measure above it.** A practical gate is a 1-minute load average under ~40 (pick a threshold the machine actually reaches; lower is better, and below ~5 is ideal on a dedicated box). Poll the load, wait for it to drop, then run; abort and retry if it spikes mid-run.
+- **Report the load that held during the run** alongside the numbers, so a reader can judge them.
+- **File counts and store-entry counts are exact and load-independent** — use them as a robust cross-check on the wall-clock numbers and as the clearest way to tell the dedup story (see below). They complement a properly-measured time; they are not a substitute for measuring on a quiet machine.
 
 ## File-count forensics (the load-independent crux)
 
