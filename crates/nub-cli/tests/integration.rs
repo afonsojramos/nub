@@ -2654,6 +2654,30 @@ fn worker_throw_surfaces_to_parent_onerror() {
 }
 
 #[test]
+fn worker_unhandled_error_is_fatal() {
+    // ORACLE conformance (node:worker_threads): a worker 'error' with NO listener
+    // must be FATAL — surface visibly + nonzero exit — not silently swallowed.
+    // The bug: nub's browser-shape Worker is an EventTarget, whose dispatchEvent
+    // drops an unlistened event, so a failed worker load exited 0 in total silence
+    // (maintainer-found). The fixture spawns a worker whose module fails to
+    // resolve with no onerror; nub must now exit nonzero and print the error.
+    let (stdout, stderr, code) = run_nub("worker", "unhandled-error-fatal-main.ts");
+    assert_ne!(
+        code, 0,
+        "an unhandled worker error must be fatal (nonzero exit), not swallowed: \
+         code={code} stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        !stdout.contains("swallowed-and-survived"),
+        "process must not survive past the unhandled worker error: {stdout}"
+    );
+    assert!(
+        stderr.contains("does-not-exist") || stderr.contains("Cannot find"),
+        "the worker module-resolution error must be printed to stderr: {stderr}"
+    );
+}
+
+#[test]
 fn worker_without_inbound_listener_exits_naturally() {
     // Regression (worker-polyfill delegation — worker-polyfill.md §4): the worker
     // scope once held a persistent `parentPort.on("message")` forwarder, keeping

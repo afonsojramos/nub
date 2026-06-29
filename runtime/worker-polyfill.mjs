@@ -133,6 +133,11 @@ export function installWorkerPolyfill() {
   class Worker extends EventTarget {
     #worker;
     #name;
+    // Live set of registered 'error' listeners, so an UNHANDLED worker 'error'
+    // can be made fatal to match the oracle (node:worker_threads is an
+    // EventEmitter; EventTarget exposes no listener count). The onerror setter
+    // routes through addEventListener below, so it is tracked here automatically.
+    #errorListeners = new Set();
 
     constructor(url, options = {}) {
       super();
@@ -263,6 +268,21 @@ export function installWorkerPolyfill() {
             colno,
           })
         );
+        // ORACLE CONFORMANCE: node:worker_threads re-throws an 'error' that has
+        // NO listener (the EventEmitter unhandled-'error' convention) → it surfaces
+        // as an uncaughtException on the main thread, exit code 1, stack printed.
+        // nub's wrapper owns the node-side 'error' listener, so that throw never
+        // fires natively; we reproduce its fatality when the browser-shape Worker
+        // has no 'error'/onerror listener. Without this an EventTarget silently
+        // drops the unlistened event and a failed worker load exits 0 (the bug).
+        // process.nextTick (not a sync throw inside this emit callback) mirrors
+        // Node's surfacing path exactly: a fresh tick → uncaughtException, so a
+        // user process.on('uncaughtException') still intercepts it as on Node.
+        if (this.#errorListeners.size === 0) {
+          process.nextTick(() => {
+            throw err;
+          });
+        }
       });
       // No `exit` event: WHATWG Workers have no exit event (it is a
       // node:worker_threads concept, not part of the web Worker surface).
@@ -270,6 +290,28 @@ export function installWorkerPolyfill() {
 
     get name() {
       return this.#name;
+    }
+
+    // Track 'error' listeners (for the unhandled-'error' fatality above) without
+    // changing EventTarget semantics — super does the real registration; we only
+    // record/forget the listener reference. Set membership matches EventTarget's
+    // identity-based dedup; {once}/{signal} auto-removal is not mirrored here, but
+    // a present listener is what matters at error-dispatch time (the only effect
+    // of a stale entry is erring toward delivery, never toward a false fatality).
+    addEventListener(type, listener, options) {
+      super.addEventListener(type, listener, options);
+      if (
+        type === "error" &&
+        (typeof listener === "function" ||
+          (listener != null && typeof listener.handleEvent === "function"))
+      ) {
+        this.#errorListeners.add(listener);
+      }
+    }
+
+    removeEventListener(type, listener, options) {
+      super.removeEventListener(type, listener, options);
+      if (type === "error") this.#errorListeners.delete(listener);
     }
 
     postMessage(data, transfer) {
