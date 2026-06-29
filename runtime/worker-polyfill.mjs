@@ -133,11 +133,15 @@ export function installWorkerPolyfill() {
   class Worker extends EventTarget {
     #worker;
     #name;
-    // Live set of registered 'error' listeners, so an UNHANDLED worker 'error'
-    // can be made fatal to match the oracle (node:worker_threads is an
-    // EventEmitter; EventTarget exposes no listener count). The onerror setter
-    // routes through addEventListener below, so it is tracked here automatically.
-    #errorListeners = new Set();
+    // Live registry of 'error' listeners, so an UNHANDLED worker 'error' can be
+    // made fatal to match the oracle (node:worker_threads is an EventEmitter;
+    // EventTarget exposes no listener count). Keyed listener → set of capture
+    // flags, mirroring EventTarget's `(type, callback, capture)` listener identity
+    // — `(fn, capture)` and `(fn, bubble)` are TWO distinct registrations, so the
+    // registry must distinguish them or a capture-only remove could empty it while
+    // a live bubble listener remains (a false fatality). The onerror setter routes
+    // through addEventListener below, so it is tracked here automatically.
+    #errorListeners = new Map();
 
     constructor(url, options = {}) {
       super();
@@ -294,10 +298,12 @@ export function installWorkerPolyfill() {
 
     // Track 'error' listeners (for the unhandled-'error' fatality above) without
     // changing EventTarget semantics — super does the real registration; we only
-    // record/forget the listener reference. Set membership matches EventTarget's
-    // identity-based dedup; {once}/{signal} auto-removal is not mirrored here, but
-    // a present listener is what matters at error-dispatch time (the only effect
-    // of a stale entry is erring toward delivery, never toward a false fatality).
+    // record/forget the (listener, capture) identity. The registry mirrors
+    // EventTarget's identity-based dedup INCLUDING the capture flag, so a
+    // capture-only remove can never empty it while a live bubble listener remains.
+    // The only un-mirrored case is {once}/{signal} auto-removal (EventTarget drops
+    // those without routing through this override) — a stale entry there errs
+    // toward DELIVERY (swallow), never toward a false fatality.
     addEventListener(type, listener, options) {
       super.addEventListener(type, listener, options);
       if (
@@ -305,13 +311,27 @@ export function installWorkerPolyfill() {
         (typeof listener === "function" ||
           (listener != null && typeof listener.handleEvent === "function"))
       ) {
-        this.#errorListeners.add(listener);
+        const capture =
+          options === true ||
+          (typeof options === "object" && options !== null && !!options.capture);
+        let caps = this.#errorListeners.get(listener);
+        if (!caps) this.#errorListeners.set(listener, (caps = new Set()));
+        caps.add(capture);
       }
     }
 
     removeEventListener(type, listener, options) {
       super.removeEventListener(type, listener, options);
-      if (type === "error") this.#errorListeners.delete(listener);
+      if (type === "error") {
+        const capture =
+          options === true ||
+          (typeof options === "object" && options !== null && !!options.capture);
+        const caps = this.#errorListeners.get(listener);
+        if (caps) {
+          caps.delete(capture);
+          if (caps.size === 0) this.#errorListeners.delete(listener);
+        }
+      }
     }
 
     postMessage(data, transfer) {

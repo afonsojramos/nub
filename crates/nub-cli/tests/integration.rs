@@ -2678,6 +2678,24 @@ fn worker_unhandled_error_is_fatal() {
 }
 
 #[test]
+fn worker_error_listener_capture_identity_not_a_false_fatality() {
+    // The unhandled-'error' fatality keys on EventTarget's (type, callback,
+    // capture) listener identity. With a live BUBBLE 'error' listener present, a
+    // capture-only removeEventListener of the same fn must NOT empty the registry
+    // and spuriously throw — the handler must fire and the parent survive (exit 0).
+    let (stdout, stderr, code) = run_nub("worker", "error-listener-capture-main.ts");
+    assert_eq!(
+        code, 0,
+        "a live bubble error listener must not be treated as listener-less: \
+         code={code} stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("capture-bubble-handled:boom from worker"),
+        "the surviving bubble-phase error listener must fire: {stdout}"
+    );
+}
+
+#[test]
 fn worker_without_inbound_listener_exits_naturally() {
     // Regression (worker-polyfill delegation — worker-polyfill.md §4): the worker
     // scope once held a persistent `parentPort.on("message")` forwarder, keeping
