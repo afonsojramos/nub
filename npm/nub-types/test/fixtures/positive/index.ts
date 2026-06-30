@@ -13,11 +13,21 @@ worker.onmessage = (ev) => console.log(ev.data);
 worker.onerror = (ev) => console.error(ev);
 
 // Node worker_threads compatibility: EventEmitter methods (node-channel shapes),
-// the online/exit lifecycle, an awaited terminate(), and { eval: true }.
+// the online/exit lifecycle, an awaited terminate(), and { eval: true }. The
+// callbacks are UNannotated so the per-event payload type is INFERRED from the
+// overload, then pinned under a constraint — an overload-shape regression
+// (e.g. exit→string) fails this fixture instead of falling through to the
+// generic listener overload.
 worker
-  .on("message", (value) => console.log(value)) // raw value, typed `any`
-  .on("error", (err: Error) => console.error(err.stack))
-  .on("exit", (code: number) => console.log(code))
+  .on("message", (value) => console.log(value)) // raw value, inferred `any`
+  .on("error", (err) => {
+    const e: Error = err; // node-channel error is a bare Error
+    void e;
+  })
+  .on("exit", (code) => {
+    const n: number = code; // exit code is numeric
+    void n;
+  })
   .on("online", () => console.log("online"));
 worker.once("message", (value) => console.log(value));
 worker.off("message", () => {});

@@ -146,7 +146,7 @@ worker.on("message", async (value) => {
 worker.postMessage(21);
 ```
 
-On the node channel, `message` listeners get the raw posted value and `error` listeners a bare `Error` — Node's shapes, not the `MessageEvent` / `ErrorEvent` the web channel (`addEventListener` / `onmessage` / `onerror`) keeps. Both channels live on one handle; reach for whichever fits the code.
+On the node channel, `message` listeners get the raw posted value and `error` listeners a bare `Error` — Node's shapes, not the `MessageEvent` / `ErrorEvent` the web channel keeps. Both channels live on one handle; reach for whichever fits the code.
 
 ## Spec conformance
 
