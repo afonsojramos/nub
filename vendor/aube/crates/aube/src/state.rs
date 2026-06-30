@@ -732,6 +732,15 @@ pub fn read_state_dep_build_policy_hash(project_dir: &Path) -> Option<String> {
     Some(state.dep_build_policy_hash)
 }
 
+/// Read the node-linker layout the last install materialized, if
+/// recorded. Authoritative over re-resolving settings because it
+/// reflects a `--node-linker=hoisted` CLI override that was never
+/// persisted to `.npmrc`. `None` when state is missing or predates
+/// layout tracking.
+pub fn read_state_layout_linker(project_dir: &Path) -> Option<InstallLayoutMode> {
+    Some(read_state(&state_dir(project_dir))?.layout?.linker)
+}
+
 /// Read the unreviewed-builds spec keys recorded by the last
 /// install. Powers warm-path warning re-emission so repeat
 /// installs keep nudging users about pending build approvals.

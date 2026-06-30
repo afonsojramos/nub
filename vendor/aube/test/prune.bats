@@ -210,6 +210,107 @@ EOF
 	assert_success
 }
 
+@test "aube prune --prod keeps hoisted prod transitives (#241)" {
+	# Under the hoisted linker the whole closure is flattened into
+	# top-level node_modules/, so a prod transitive (is-number, pulled
+	# by the prod dep is-odd) lives at top level even though it is no
+	# importer's direct dep. prune --prod must keep it — deleting it
+	# (the #241 regression) breaks `require` at runtime.
+	echo 'node-linker=hoisted' >.npmrc
+	cat >package.json <<'EOF'
+{
+  "name": "aube-test-prune-prod-hoisted",
+  "version": "1.0.0",
+  "dependencies": { "is-odd": "^3.0.1" },
+  "devDependencies": { "kind-of": "6.0.3" }
+}
+EOF
+
+	run aube install
+	assert_success
+
+	# Hoisted: real dirs at top level (not symlinks).
+	run test -d node_modules/is-odd
+	assert_success
+	run test -d node_modules/is-number
+	assert_success
+	run test -d node_modules/kind-of
+	assert_success
+
+	run aube prune --prod
+	assert_success
+
+	# Prod dep and its prod transitive must both survive.
+	run test -d node_modules/is-odd
+	assert_success
+	run test -d node_modules/is-number
+	assert_success
+	# Dev dep is gone.
+	run test -e node_modules/kind-of
+	assert_failure
+}
+
+@test "aube prune --prod keeps hoisted prod transitives via --node-linker flag (#241)" {
+	# Same as the .npmrc hoisted case, but the linker is chosen by the
+	# install CLI flag, which is never written to .npmrc. prune reads the
+	# recorded install layout to detect it (re-resolving settings would
+	# miss the flag and delete the transitives again).
+	cat >package.json <<'EOF'
+{
+  "name": "aube-test-prune-prod-hoisted-cli",
+  "version": "1.0.0",
+  "dependencies": { "is-odd": "^3.0.1" },
+  "devDependencies": { "kind-of": "6.0.3" }
+}
+EOF
+
+	run aube install --node-linker hoisted
+	assert_success
+	run test -d node_modules/is-number
+	assert_success
+
+	run aube prune --prod
+	assert_success
+	run test -d node_modules/is-odd
+	assert_success
+	run test -d node_modules/is-number
+	assert_success
+	run test -e node_modules/kind-of
+	assert_failure
+}
+
+@test "aube prune keeps a link: dep whose target is absent" {
+	# A link: dep is a bare symlink to an external path that can be absent
+	# at prune time (e.g. a sibling build output). The dangling-symlink
+	# sweep is scoped to virtual-store-pointing symlinks, so prune must
+	# keep a dangling link: symlink — deleting it drops a declared dep.
+	mkdir -p sib
+	cat >sib/package.json <<'EOF'
+{ "name": "sib", "version": "1.0.0" }
+EOF
+	cat >package.json <<'EOF'
+{
+  "name": "aube-test-prune-link",
+  "version": "1.0.0",
+  "dependencies": { "is-odd": "^3.0.1", "sib": "link:./sib" }
+}
+EOF
+
+	run aube install
+	assert_success
+	run test -L node_modules/sib
+	assert_success
+
+	# Remove the link target so the top-level symlink dangles.
+	rm -rf sib
+
+	run aube prune
+	assert_success
+	# The link symlink must survive even while dangling.
+	run test -L node_modules/sib
+	assert_success
+}
+
 @test "aube install --no-optional excludes optional deps" {
 	cat >package.json <<'EOF'
 {

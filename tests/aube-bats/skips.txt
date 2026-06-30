@@ -15,6 +15,10 @@ install.bats|aube install self-heals when a CAS shard goes missing under a cache
 install.bats|aube install preserves npm-alias as folder on fresh resolve|walks the node_modules/.aube tree
 add.bats|aube add jsr: resolves against the @jsr scope and writes jsr:<range>|asserts the node_modules/.aube path
 lockfile_settings.bats|modulesDir=custom installs into the configured directory|asserts <modulesDir>/.aube; nub's virtual store stem is .nub
+prune.bats|aube prune --help|nub's clap help omits aube's "Remove extraneous packages" about line
+prune.bats|aube prune removes orphaned .aube entries|fixture seeds an orphan under node_modules/.aube; nub's virtual store is node_modules/.nub
+prune.bats|aube prune honors virtualStoreDir|asserts the prune summary's ".aube" label; nub rebrands it to "the virtual store"
+prune.bats|aube prune removes orphan scoped .aube entries and cleans empty scope dir|fixture seeds an orphan under node_modules/.aube; nub's virtual store is node_modules/.nub
 
 # ── fresh projects default to pnpm-lock.yaml (defaultLockfileFormat=pnpm) ───
 install.bats|aube install in CI generates a lockfile when none is present|fresh projects write pnpm-lock.yaml, not aube-lock.yaml
