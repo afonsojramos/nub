@@ -1039,15 +1039,42 @@ pub fn run_install(flags: InstallFlags) -> Result<i32> {
     }
 
     let code = run_engine(&session, opts, yarn, &flags.output)?;
-    // Truly-fresh install: the neutral `lock.yaml` was already written (the
-    // `defaultLockfileFormat=aube` embedder default on this path), and that
-    // lockfile is the quiet identity marker — the classifier treats a present
-    // `lock.yaml` as nub identity, so identity self-reinforces without touching
-    // `package.json`. We deliberately do NOT auto-stamp `packageManager` /
-    // `devEngines` on a plain install: that field is an exclusivity claim other
-    // PMs hard-reject, so writing it would break cross-PM interop. The explicit
-    // `nub pm use nub` command remains the sanctioned identity stamper.
+    // Virgin install only: stamp `packageManager: nub@<v>` so the project
+    // advertises nub the standard, cross-tool way. nub's canonical lockfile is
+    // deliberately NEUTRAL (`lock.yaml`), so — unlike every other PM, whose
+    // branded lockfile is itself the repo's PM signal — nub leaves no signal
+    // downstream tools (turbo, …) can read. The `packageManager` field IS that
+    // signal. The write is gated on `session.truly_fresh`, captured BEFORE the
+    // engine wrote `lock.yaml`: it is `true` ONLY when nub is the FIRST package
+    // manager to touch the project (no foreign lockfile, no pre-existing nub
+    // lockfile, no `packageManager`/`devEngines` declaration). Any incumbent
+    // signal ⇒ `false` ⇒ no write — nub never imposes its brand on another PM's
+    // project (the symmetric brand boundary). `devEngines` is NOT written here:
+    // that heavier exclusivity stamp stays on the explicit `nub pm use nub`.
+    if code == 0 && session.truly_fresh {
+        stamp_virgin_package_manager(&session.cwd);
+    }
     Ok(code)
+}
+
+/// Write `packageManager: "nub@<exact-version>"` into the project manifest of a
+/// VIRGIN install. Best-effort: a successful install must not fail on a manifest
+/// the stamp can't reach (no `package.json` — nub never scaffolds one — or an
+/// unwritable file). Format-preserving + atomic via the shared manifest editor;
+/// it ranks the new key by insertion order at the manifest's tail, leaving the
+/// user's existing keys untouched. The caller has already proven virginity, so
+/// there is no foreign `packageManager` to clobber.
+fn stamp_virgin_package_manager(cwd: &Path) {
+    // Skip silently when the install ran without a `package.json` (the editor
+    // refuses to scaffold one); the install already succeeded, so this is a
+    // no-op, not an error.
+    if find_manifest_root(cwd).is_none() {
+        return;
+    }
+    let value = format!("nub@{}", env!("CARGO_PKG_VERSION"));
+    let _ = nub_core::pm::resolve::edit_root_manifest(cwd, |obj| {
+        obj.insert("packageManager".into(), serde_json::Value::String(value));
+    });
 }
 
 /// FAIL LOUD if `offline_active` and the session's yarn project configures a
@@ -1679,6 +1706,50 @@ mod tests {
         assert!(
             !rewritten.contains("Run `aube install`"),
             "rewrite must neutralize the engine's aube brand, got: {rewritten:?}"
+        );
+    }
+
+    /// The virgin stamp writes `packageManager: "nub@<running-version>"` in the
+    /// corepack `<name>@<semver>` shape, appended at the manifest tail (the
+    /// `preserve_order` editor never reflows the user's existing keys). Gating
+    /// on virginity is the caller's job; this asserts the write itself.
+    #[test]
+    fn virgin_stamp_writes_corepack_shape_at_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            "{\n  \"name\": \"app\",\n  \"version\": \"1.0.0\"\n}\n",
+        )
+        .unwrap();
+
+        stamp_virgin_package_manager(dir.path());
+
+        let written = std::fs::read_to_string(dir.path().join("package.json")).unwrap();
+        let expected = format!("nub@{}", env!("CARGO_PKG_VERSION"));
+        let manifest: serde_json::Value = serde_json::from_str(&written).unwrap();
+        assert_eq!(
+            manifest["packageManager"].as_str(),
+            Some(expected.as_str()),
+            "value must be the running nub version in corepack shape"
+        );
+        // Tail-append + format preservation: the pre-existing keys keep their
+        // order and the new key lands last, so the diff is one added line.
+        assert!(
+            written.contains("\"version\": \"1.0.0\",\n  \"packageManager\""),
+            "stamp must append after the user's keys, not reflow them: {written:?}"
+        );
+    }
+
+    /// A successful install in a directory with NO `package.json` must not fail
+    /// or scaffold one — the stamp is best-effort and silently no-ops (nub never
+    /// creates a manifest).
+    #[test]
+    fn virgin_stamp_is_silent_noop_without_a_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        stamp_virgin_package_manager(dir.path());
+        assert!(
+            !dir.path().join("package.json").exists(),
+            "stamp must never scaffold a missing package.json"
         );
     }
 }
