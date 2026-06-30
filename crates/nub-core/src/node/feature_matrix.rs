@@ -149,23 +149,28 @@ pub static FEATURES: &[Feature] = &[
         )],
         evidence: "flag added Node 9.6.0 (#14253); never unflagged through Node 26",
     },
-    // ── ShadowRealm global ──────────────────────────────────────────────────
-    // `--experimental-shadow-realm` gates `globalThis.ShadowRealm` (TC39 Stage 3:
-    // an isolated global with fresh intrinsics). The flag was added in Node
-    // 18.13.0 / 19.0.0 — below nub's 18.19 floor — and has NEVER been made
-    // default-on through Node 26 (still experimental, rides the V8
-    // `--harmony-shadow-realm` staging). So, like vm-modules, inject across the
-    // ENTIRE supported floor: [18.19.0, ∞). It survives as an accepted bool at
-    // every higher version, so the open-ended band never over-injects into an
-    // unsupported range.
-    Feature {
-        name: "shadow-realm",
-        mitigations: &[(
-            band((18, 19, 0), None),
-            Mitigation::Unflag("--experimental-shadow-realm"),
-        )],
-        evidence: "flag added Node 18.13.0/19.0.0; never default-on through 26 (TC39 Stage 3)",
-    },
+    // ── ShadowRealm — DELIBERATELY NOT AUTO-UNFLAGGED (the harmony-flag policy) ──
+    // POLICY (load-bearing — enforced by `no_v8_harmony_flag_in_unflag_set` and
+    // listed in V8_HARMONY_UNFLAG_DENYLIST below): nub NEVER auto-injects a V8
+    // *harmony* / startup-snapshot-affecting flag into the tree-wide NODE_OPTIONS.
+    // `--experimental-shadow-realm` implies V8's `--harmony-shadow-realm`, which is
+    // part of the isolate's V8-flag hash. NODE_OPTIONS is inherited by the WHOLE
+    // process subtree, including EMBEDDED Node runtimes that boot from a V8 context
+    // SNAPSHOT (Electron). When the runtime V8-flag hash ≠ the snapshot's, V8's
+    // `Context::FromSnapshot` returns empty and `node::CreateEnvironment` aborts on a
+    // failed CHECK — an EXC_BREAKPOINT/SIGTRAP crash BEFORE any preload JS runs, so
+    // no in-process self-disable can catch it (issue #246: Electron 42.5.1 / Node
+    // 24.17 / V8 14.8 crashed deterministically on this flag alone; Electron 37 /
+    // V8 13.8 tolerated it — the breakage is V8-snapshot-version-dependent, which is
+    // exactly why this is a categorical ban, not a per-version carve-out). Node
+    // itself rejects the same flag in Worker execArgv (ERR_WORKER_INVALID_EXEC_ARGV);
+    // runtime/worker-polyfill.mjs already strips it for the same harmony reason.
+    // Only snapshot-NEUTRAL Node feature flags (vm-modules, eventsource, sqlite, …)
+    // are safe to auto-unflag. The cost of NOT injecting: `globalThis.ShadowRealm`
+    // (TC39 Stage 3) is no longer auto-provided — deferred until Node ships it
+    // default-on, at which point no flag is needed and the snapshot hazard is gone.
+    // Full rationale + evidence: wiki/runtime/harmony-flag-policy.md.
+    //
     // ── EventSource global ──────────────────────────────────────────────────
     // #51575 ("add EventSource Client"). Landed on the 22.x line at 22.3.0 and was
     // backported to the 20.x LTS line at 20.18.0. The 21.x line was already EOL
@@ -546,6 +551,16 @@ pub static FEATURES: &[Feature] = &[
     },
 ];
 
+/// V8 *harmony* / startup-snapshot-affecting flags that must NEVER appear in the
+/// auto-unflag set (the harmony-flag policy — see the ShadowRealm note in
+/// [`FEATURES`] and wiki/runtime/harmony-flag-policy.md). These imply a V8
+/// `--harmony-*` staging flag that changes the isolate's V8-flag hash; injected
+/// into the tree-wide NODE_OPTIONS they crash any embedded Node that boots from a
+/// V8 context snapshot (Electron) in `Context::FromSnapshot` → `CreateEnvironment`,
+/// before any preload JS can intervene (#246). The
+/// `no_v8_harmony_flag_in_unflag_set` test enforces this against the whole matrix.
+pub const V8_HARMONY_UNFLAG_DENYLIST: &[&str] = &["--experimental-shadow-realm"];
+
 /// Look up a feature row by name (used by the webstorage-predicate derivation in
 /// [`super::flags`]). Panics if the name is absent — it is only ever called with
 /// a literal that must exist in [`FEATURES`], so an absent name is a programming
@@ -721,10 +736,11 @@ mod tests {
         // vm-modules: whole floor.
         assert!(unflag_flags_for(&v(18, 19, 0)).contains(&"--experimental-vm-modules"));
         assert!(unflag_flags_for(&v(26, 2, 0)).contains(&"--experimental-vm-modules"));
-        // shadow-realm: whole floor, open-ended (never default-on).
-        assert!(unflag_flags_for(&v(18, 19, 0)).contains(&"--experimental-shadow-realm"));
-        assert!(unflag_flags_for(&v(22, 19, 0)).contains(&"--experimental-shadow-realm"));
-        assert!(unflag_flags_for(&v(26, 0, 0)).contains(&"--experimental-shadow-realm"));
+        // shadow-realm: DELIBERATELY never injected (the harmony-flag policy —
+        // it crashes embedded-Node/Electron via a snapshot-flag-hash mismatch, #246).
+        assert!(!unflag_flags_for(&v(18, 19, 0)).contains(&"--experimental-shadow-realm"));
+        assert!(!unflag_flags_for(&v(22, 19, 0)).contains(&"--experimental-shadow-realm"));
+        assert!(!unflag_flags_for(&v(26, 0, 0)).contains(&"--experimental-shadow-realm"));
         // eventsource: the 21.x hole.
         assert!(!unflag_flags_for(&v(21, 0, 0)).contains(&"--experimental-eventsource"));
         assert!(unflag_flags_for(&v(20, 18, 0)).contains(&"--experimental-eventsource"));
@@ -764,6 +780,37 @@ mod tests {
         assert!(unflag_flags_for(&v(22, 4, 0)).contains(&"--experimental-webstorage"));
         assert!(unflag_flags_for(&v(24, 99, 0)).contains(&"--experimental-webstorage"));
         assert!(!unflag_flags_for(&v(25, 0, 0)).contains(&"--experimental-webstorage"));
+    }
+
+    #[test]
+    fn no_v8_harmony_flag_in_unflag_set() {
+        // The harmony-flag policy, enforced (not just documented): no flag in
+        // V8_HARMONY_UNFLAG_DENYLIST may ever appear in the auto-unflag set, at ANY
+        // version. Such flags imply a V8 `--harmony-*` staging flag that changes the
+        // isolate's V8-flag hash and crashes embedded Node booting from a context
+        // snapshot (Electron) in CreateEnvironment, before any preload JS — #246.
+        // Sweep the whole supported range plus the boundary majors so a future matrix
+        // edit that re-adds shadow-realm (or any other harmony flag) trips here.
+        let versions = [
+            v(18, 19, 0),
+            v(20, 18, 0),
+            v(22, 15, 0),
+            v(23, 6, 0),
+            v(24, 17, 0),
+            v(25, 0, 0),
+            v(26, 2, 0),
+        ];
+        for ver in versions {
+            let set = unflag_flags_for(&ver);
+            for &banned in V8_HARMONY_UNFLAG_DENYLIST {
+                assert!(
+                    !set.contains(&banned),
+                    "harmony-flag policy violated: {banned:?} is auto-unflagged at Node {ver:?} \
+                     — it crashes embedded Node (Electron) via a snapshot-flag-hash mismatch (#246). \
+                     See the ShadowRealm note in FEATURES + wiki/runtime/harmony-flag-policy.md."
+                );
+            }
+        }
     }
 
     #[test]
