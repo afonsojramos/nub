@@ -71,13 +71,55 @@ pub async fn run(args: PruneArgs) -> miette::Result<()> {
         .map(|dp| dep_path_to_filename(dp, DEFAULT_VIRTUAL_STORE_DIR_MAX_LENGTH))
         .collect();
 
-    // Per-importer set of top-level package names that should stay
-    // in `<importer>/node_modules/`.
+    // Whether the layout on disk flattens transitive deps into the
+    // importer's top-level `node_modules/`. The hoisted linker
+    // materializes the whole reachable closure at top level;
+    // `shamefully-hoist` promotes every package there under the isolated
+    // linker. In both, a direct-deps-only keep-set deletes reachable prod
+    // transitives that legitimately live at top level (issue #241). Plain
+    // isolated keeps only direct-dep symlinks at top level, so its keep-set
+    // stays direct-deps-only — matching pnpm exactly (a package that is
+    // both a direct devDep and a prod transitive loses its top-level
+    // symlink on `prune --prod` there, rather than being over-retained).
+    //
+    // The install records the node-linker it actually used in the layout
+    // state; prefer it, because it reflects a `--node-linker=hoisted` CLI
+    // override that was never written to `.npmrc` (re-resolving settings
+    // here would miss it). The state does not record `shamefully-hoist`,
+    // so resolve that from settings. Fall back to full settings resolution
+    // when there is no state (a tree installed by another tool).
+    let flattens_transitives = match crate::state::read_state_layout_linker(&cwd) {
+        Some(crate::state::InstallLayoutMode::Hoisted) => true,
+        Some(crate::state::InstallLayoutMode::Isolated) => {
+            super::with_settings_ctx(&cwd, aube_settings::resolved::shamefully_hoist)
+        }
+        None => super::with_settings_ctx(&cwd, |ctx| {
+            matches!(
+                aube_settings::resolved::node_linker(ctx),
+                aube_settings::resolved::NodeLinker::Hoisted
+            ) || aube_settings::resolved::shamefully_hoist(ctx)
+        }),
+    };
+
+    // Per-importer set of top-level package names that should stay in
+    // `<importer>/node_modules/`. Under a flattening layout, union the full
+    // reachable-closure NAME set (the same set the store sweep keeps) so
+    // hoisted transitives survive. A name-keyed keep-set can still retain a
+    // top-level symlink that points at a virtual-store *version* the store
+    // sweep removed (a direct devDep and a prod transitive sharing a name
+    // at different versions); the dangling-symlink sweep in
+    // `prune_top_level` cleans that, so the keep-set never leaves a dangler.
+    let closure_names: HashSet<String> = if flattens_transitives {
+        filtered.packages.values().map(|p| p.name.clone()).collect()
+    } else {
+        HashSet::new()
+    };
     let allowed_top_level: BTreeMap<String, HashSet<String>> = filtered
         .importers
         .iter()
         .map(|(path, deps)| {
-            let names: HashSet<String> = deps.iter().map(|d| d.name.clone()).collect();
+            let mut names: HashSet<String> = deps.iter().map(|d| d.name.clone()).collect();
+            names.extend(closure_names.iter().cloned());
             (path.clone(), names)
         })
         .collect();
@@ -119,7 +161,15 @@ pub async fn run(args: PruneArgs) -> miette::Result<()> {
         } else {
             None
         };
-        prune_top_level(&nm, allowed, preserve_leaf.as_deref(), &mut stats)?;
+        // The virtual-store leaf (e.g. `.nub`) scopes the dangling-symlink
+        // sweep to store-pointing symlinks, sparing `link:`/`portal:` deps.
+        prune_top_level(
+            &nm,
+            allowed,
+            preserve_leaf.as_deref(),
+            aube_dir.file_name(),
+            &mut stats,
+        )?;
 
         // Clean any .bin/ entries that now point at nothing.
         let bin = nm.join(".bin");
@@ -203,6 +253,7 @@ fn prune_top_level(
     nm: &Path,
     allowed: &HashSet<String>,
     preserve_leaf: Option<&std::ffi::OsStr>,
+    store_leaf: Option<&std::ffi::OsStr>,
     stats: &mut PruneStats,
 ) -> miette::Result<()> {
     for entry in std::fs::read_dir(nm).into_diagnostic()? {
@@ -226,7 +277,8 @@ fn prune_top_level(
                 let inner = inner.into_diagnostic()?;
                 let inner_name = inner.file_name();
                 let full = format!("{name}/{}", inner_name.to_string_lossy());
-                if !allowed.contains(&full) {
+                if !allowed.contains(&full) || is_dangling_store_symlink(&inner.path(), store_leaf)
+                {
                     super::remove_existing(&inner.path())?;
                     stats.top_level += 1;
                 }
@@ -234,12 +286,35 @@ fn prune_top_level(
             if std::fs::read_dir(&path).into_diagnostic()?.next().is_none() {
                 let _ = std::fs::remove_dir(&path);
             }
-        } else if !allowed.contains(name.as_ref()) {
+        } else if !allowed.contains(name.as_ref()) || is_dangling_store_symlink(&path, store_leaf) {
             super::remove_existing(&path)?;
             stats.top_level += 1;
         }
     }
     Ok(())
+}
+
+/// A top-level entry that is a broken symlink INTO the virtual store.
+/// The keep-set is name-keyed, so a name-matched top-level symlink can
+/// still point at a virtual-store version the store sweep just removed
+/// (a direct devDep and a prod transitive sharing a name at different
+/// versions). Such an entry is swept regardless of the keep-set so prune
+/// never leaves a dangler. The store-leaf check is load-bearing: a
+/// `link:`/`portal:` dep is a bare symlink to an arbitrary external path
+/// (often a sibling build output that may be absent) — it is a
+/// legitimately installed direct dep and must survive even while
+/// dangling, so only danglers pointing into the virtual store are swept.
+/// Real directories (the hoisted layout) are not symlinks, so they are
+/// unaffected.
+fn is_dangling_store_symlink(path: &Path, store_leaf: Option<&std::ffi::OsStr>) -> bool {
+    let Some(leaf) = store_leaf else { return false };
+    let Ok(meta) = path.symlink_metadata() else {
+        return false;
+    };
+    if !meta.file_type().is_symlink() || path.exists() {
+        return false;
+    }
+    matches!(std::fs::read_link(path), Ok(t) if t.components().any(|c| c.as_os_str() == leaf))
 }
 
 /// Remove any `.bin/` entry whose symlink target no longer resolves.
