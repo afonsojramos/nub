@@ -25,7 +25,7 @@ The reference checkout `.repos/pnpm` tracks pnpm's `main` (currently 11.x), whic
 | file | role |
 | --- | --- |
 | `run.sh` | the harness: clone → bootstrap → seam-swap → jest → classify |
-| `nub-pnpm-shim.cjs` | the seam replacement (re-execs nub as pnpm; `__NUB_BIN__` is baked at swap time) |
+| `nub-pnpm-shim.cjs` | the seam replacement: first entry execs nub-as-pnpm, a NESTED entry execs real pnpm (the re-entry guard — see below); `__NUB_BIN__`/`__ORIG_PNPM__`/`__CLONE_DIR__` are baked at swap time |
 | `classify.mjs` | parses jest `--json` output; classifies each failure against the allowlist |
 | `allowlist.txt` | known-OK failures: intended divergences + tracked bugs |
 
@@ -46,11 +46,23 @@ tests/pnpm-conformance/run.sh target/debug/nub
 # A single test file (fast iteration; stale-allowlist check is skipped on subsets):
 tests/pnpm-conformance/run.sh target/debug/nub v10.15.1 test/root.ts
 
-# Reuse a clone across runs (skips the slow bootstrap):
+# Reuse a clone across runs (skips the slow bootstrap). A reused clone whose
+# checked-out tag differs from the requested pin is re-checked-out automatically.
 PNPM_CLONE_DIR=/tmp/pnpm-conf KEEP_CLONE=1 tests/pnpm-conformance/run.sh target/debug/nub
 ```
 
 Exit 0 iff every failing test is allowlisted AND no allowlist entry is stale.
+
+## Safe local runs — the re-entry guard + process cap
+
+The seam swap makes `pnpm` resolve to the nub shim **everywhere** on a `node_modules/.bin` PATH in the monorepo (jest-config declares `pnpm: workspace:*`, so its `.bin/pnpm` points at the swapped front-door seam too), not only at the test seam. nub-as-pnpm runs lifecycle scripts with `.bin` on PATH, so without a guard a nested `pnpm` (a lifecycle script, dlx, or runtime provision) re-enters nub install and self-spawns unbounded — a fork bomb (once observed locally at ~10k processes).
+
+Two defenses make local runs safe:
+
+- **Re-entry guard (the real fix).** Only the FIRST shim entry is the command under test (nub). It stamps a sentinel env var; a NESTED entry detects the sentinel and execs the REAL pnpm instead — so nested infra `pnpm` terminates exactly as it would in a real-pnpm run. Real pnpm is taken from the `*.orig-pnpm` backup the swap saves (content-verified, so a corrupt backup falls through to a global pnpm on PATH that lives outside the clone).
+- **Process cap (belt-and-suspenders).** `run.sh` sets `ulimit -u` to `current-process-count + headroom` before running, so any future recursion regression still cannot melt the host. Set `NUB_CONF_PROC_HEADROOM` to tune the headroom (default 800), or `NUB_CONF_NO_ULIMIT=1` to skip it (e.g. when relying on a container `--pids-limit` instead).
+
+A reused clone is also tag-verified: if its checked-out tag does not match the requested pin, `run.sh` re-checks-out the correct tag (restoring the seam to pristine) and wipes `node_modules`/`dist` so the bootstrap re-runs cleanly. This closes the stale-clone-reuse hole that originally triggered the fork bomb.
 
 ## Bootstrap, step by step
 

@@ -79,7 +79,49 @@ if [ ! -d "$CLONE_DIR/.git" ]; then
   echo "==> cloning pnpm/pnpm @ $PNPM_TAG (shallow)"
   git clone --depth 1 --branch "$PNPM_TAG" https://github.com/pnpm/pnpm.git "$CLONE_DIR"
 else
-  echo "==> reusing existing clone at $CLONE_DIR"
+  # Reusing a clone is the proximate cause of the historical fork bomb: a stale
+  # v11 clone reused for a v10 pin exercised a version-specific re-entrant path,
+  # AND it left the seam already swapped so the `.orig-pnpm` backup was a shim,
+  # not real pnpm. Verify the checked-out tag matches the request; on mismatch,
+  # fetch + hard-checkout the requested tag (which also restores the tracked
+  # seam to pristine), then wipe node_modules/dist so the bootstrap, compile,
+  # and seam-swap all re-run cleanly against the correct version.
+  CURRENT_TAG="$(git -C "$CLONE_DIR" describe --tags --exact-match HEAD 2>/dev/null || echo '')"
+  if [ "$CURRENT_TAG" = "$PNPM_TAG" ]; then
+    echo "==> reusing existing clone at $CLONE_DIR (at $PNPM_TAG)"
+  else
+    echo "==> existing clone is at '${CURRENT_TAG:-unknown}', need '$PNPM_TAG' — re-checking out"
+    if ! git -C "$CLONE_DIR" fetch --depth 1 origin "refs/tags/$PNPM_TAG:refs/tags/$PNPM_TAG" 2>/dev/null; then
+      echo "error: cannot fetch $PNPM_TAG into existing clone at $CLONE_DIR" >&2
+      echo "       remove that dir (or unset PNPM_CLONE_DIR) and re-run for a fresh clone." >&2
+      exit 2
+    fi
+    git -C "$CLONE_DIR" checkout -f "$PNPM_TAG"
+    rm -rf "$CLONE_DIR/node_modules" "$CLONE_DIR/pnpm/dist"
+  fi
+fi
+
+# ── Process-cap safety net ───────────────────────────────────────────────────
+# Belt-and-suspenders for the seam-recursion fork bomb (which hit ~10k pnpm
+# processes and drove load to ~600). The shim re-entry guard is the real fix;
+# this cap ensures any FUTURE recursion regression (e.g. via a jailed dep script
+# whose env_clear strips the sentinel) still cannot melt the host. Sized as
+# current-usage + headroom so it never trips this box's existing build-fleet
+# load, yet kills an unbounded self-spawn. NUB_CONF_NO_ULIMIT=1 skips it (e.g.
+# when relying on a container `--pids-limit` instead); NUB_CONF_PROC_HEADROOM
+# tunes the headroom.
+if [ "${NUB_CONF_NO_ULIMIT:-0}" != 1 ]; then
+  HEADROOM="${NUB_CONF_PROC_HEADROOM:-800}"
+  CUR_PROCS="$(ps -U "$(id -u)" 2>/dev/null | wc -l | tr -d ' ')"
+  [ -z "$CUR_PROCS" ] && CUR_PROCS=200
+  CAP=$((CUR_PROCS + HEADROOM))
+  HARD="$(ulimit -Hu 2>/dev/null || echo unlimited)"
+  if [ "$HARD" != unlimited ] && [ "$CAP" -gt "$HARD" ]; then CAP="$HARD"; fi
+  if ulimit -u "$CAP" 2>/dev/null; then
+    echo "==> process cap:  ulimit -u $CAP (current ~$CUR_PROCS + headroom $HEADROOM)"
+  else
+    echo "==> warning: could not set process cap (ulimit -u $CAP)" >&2
+  fi
 fi
 
 cd "$CLONE_DIR"
@@ -128,14 +170,33 @@ if [ ! -f "$SEAM" ]; then
   exit 2
 fi
 echo "==> swapping seam: $SEAM -> nub"
-cp "$SEAM" "$SEAM.orig-pnpm"
+# Back up the pristine pnpm seam to `*.orig-pnpm` ONLY when the seam is pristine
+# (not already our shim). The shim's nested-pnpm fallthrough execs this backup,
+# so overwriting it with an already-swapped seam (the stale-reuse failure mode)
+# would poison the fork-bomb guard. The clone-tag re-checkout above restores a
+# reused seam to pristine, so this only trips if a clone is hand-swapped.
+if grep -q 'nub-pnpm-shim' "$SEAM" 2>/dev/null; then
+  echo "==> seam already swapped; preserving existing .orig-pnpm backup"
+  if [ ! -f "$SEAM.orig-pnpm" ] || grep -q 'nub-pnpm-shim' "$SEAM.orig-pnpm" 2>/dev/null; then
+    echo "error: seam is swapped but no pristine .orig-pnpm backup exists." >&2
+    echo "       remove $CLONE_DIR (or unset PNPM_CLONE_DIR) and re-run for a clean clone." >&2
+    exit 2
+  fi
+else
+  cp "$SEAM" "$SEAM.orig-pnpm"
+fi
 # The shim body is CommonJS. A .cjs seam takes it verbatim; a .mjs seam would
 # force ESM and reject `require`, so for .mjs we emit an ESM wrapper that defers
 # to the CJS shim via createRequire. Either way nub is what actually runs.
-# Bake the absolute nub path into the shim — pnpm's createEnv() rebuilds a clean
-# env (keeps only PATH/COLORTERM/APPDATA), so an exported NUB_BIN would not reach
-# the spawned shim. Substituting it into the file is the robust seam.
-SHIM_BODY="$(sed "s#__NUB_BIN__#${NUB_BIN}#" "$HERE/nub-pnpm-shim.cjs")"
+# Bake the absolute nub path, the pristine-pnpm backup path, and the clone dir
+# into the shim — pnpm's createEnv() rebuilds a clean env (keeps only
+# PATH/COLORTERM/APPDATA), so exported env would not reach the spawned shim.
+# Substituting them into the file is the robust seam. `#` is the sed delimiter,
+# so any literal `#` in a path would break it — paths here never contain one.
+SHIM_BODY="$(sed -e "s#__NUB_BIN__#${NUB_BIN}#" \
+                 -e "s#__ORIG_PNPM__#${SEAM}.orig-pnpm#" \
+                 -e "s#__CLONE_DIR__#${CLONE_DIR}#" \
+                 "$HERE/nub-pnpm-shim.cjs")"
 case "$SEAM" in
   *.mjs)
     printf '%s\n' "$SHIM_BODY" > "$CLONE_DIR/pnpm/bin/nub-pnpm-shim.cjs"
