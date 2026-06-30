@@ -360,11 +360,13 @@ fn run_add(typed: &str, args: &[String]) -> Result<i32> {
             &yarn_remedy("add", &verb.packages),
         ));
     }
-    finish_quieted(
+    let code = finish_quieted(
         &globals.output,
         &session,
         aube::commands::add::run(verb, globals.effective_filter()),
-    )
+    )?;
+    stamp_if_virgin(&session, code);
+    Ok(code)
 }
 
 fn run_remove(typed: &str, args: &[String]) -> Result<i32> {
@@ -377,11 +379,13 @@ fn run_remove(typed: &str, args: &[String]) -> Result<i32> {
             &yarn_remedy("remove", &verb.packages),
         ));
     }
-    finish_quieted(
+    let code = finish_quieted(
         &globals.output,
         &session,
         aube::commands::remove::run(verb, globals.effective_filter()),
-    )
+    )?;
+    stamp_if_virgin(&session, code);
+    Ok(code)
 }
 
 fn run_update(typed: &str, args: &[String]) -> Result<i32> {
@@ -404,11 +408,13 @@ fn run_update(typed: &str, args: &[String]) -> Result<i32> {
             &yarn_remedy("upgrade", &verb.packages),
         ));
     }
-    finish_code_quieted(
+    let code = finish_code_quieted(
         &globals.output,
         &session,
         aube::commands::update::run(verb, globals.effective_filter()),
-    )
+    )?;
+    stamp_if_virgin(&session, code);
+    Ok(code)
 }
 
 fn run_dedupe(typed: &str, args: &[String]) -> Result<i32> {
@@ -1039,15 +1045,91 @@ pub fn run_install(flags: InstallFlags) -> Result<i32> {
     }
 
     let code = run_engine(&session, opts, yarn, &flags.output)?;
-    // Truly-fresh install: the neutral `lock.yaml` was already written (the
-    // `defaultLockfileFormat=aube` embedder default on this path), and that
-    // lockfile is the quiet identity marker — the classifier treats a present
-    // `lock.yaml` as nub identity, so identity self-reinforces without touching
-    // `package.json`. We deliberately do NOT auto-stamp `packageManager` /
-    // `devEngines` on a plain install: that field is an exclusivity claim other
-    // PMs hard-reject, so writing it would break cross-PM interop. The explicit
-    // `nub pm use nub` command remains the sanctioned identity stamper.
+    // Virgin install only: stamp `packageManager: nub@<v>` so the project
+    // advertises nub the standard, cross-tool way. nub's canonical lockfile is
+    // deliberately NEUTRAL (`lock.yaml`), so — unlike every other PM, whose
+    // branded lockfile is itself the repo's PM signal — nub leaves no signal
+    // downstream tools (turbo, …) can read. The `packageManager` field IS that
+    // signal. The write is gated on `session.truly_fresh`, captured BEFORE the
+    // engine wrote `lock.yaml`: it is `true` ONLY when nub is the FIRST package
+    // manager to touch the project (no foreign lockfile, no pre-existing nub
+    // lockfile, no `packageManager`/`devEngines` declaration). Any incumbent
+    // signal ⇒ `false` ⇒ no write — nub never imposes its brand on another PM's
+    // project (the symmetric brand boundary). `devEngines` is NOT written here:
+    // that heavier exclusivity stamp stays on the explicit `nub pm use nub`.
+    stamp_if_virgin(&session, code);
     Ok(code)
+}
+
+/// Stamp the virgin `packageManager` marker after a successful package.json-
+/// modifying engine verb (`install`/`add`/`remove`/`update`). Gated on
+/// `session.truly_fresh` — captured at session build, BEFORE the verb wrote
+/// the lockfile — so it fires exactly once, on the FIRST package-manager
+/// operation in a project nub is first to touch, and the gate self-corrects:
+/// a non-virgin project (any lockfile/declaration present) never stamps,
+/// whichever verb ran. `import` is intentionally not a caller — it converts an
+/// existing FOREIGN lockfile, so its project is non-virgin by construction.
+fn stamp_if_virgin(session: &EngineSession, code: i32) {
+    if code == 0 && session.truly_fresh {
+        stamp_virgin_package_manager(&session.cwd);
+    }
+}
+
+/// Write `packageManager: "nub@<exact-version>"` into the project manifest of a
+/// VIRGIN install. Best-effort: a successful install must not fail on a manifest
+/// the stamp can't reach (no `package.json` — nub never scaffolds one — or an
+/// unwritable file). Format-preserving + atomic via the shared manifest editor;
+/// it ranks the new key by insertion order at the manifest's tail, leaving the
+/// user's existing keys untouched. The caller has already proven virginity, so
+/// there is no foreign `packageManager` to clobber.
+fn stamp_virgin_package_manager(cwd: &Path) {
+    // Skip silently when the install ran without a `package.json` (the editor
+    // refuses to scaffold one); the install already succeeded, so this is a
+    // no-op, not an error.
+    let Some(root) = find_manifest_root(cwd) else {
+        return;
+    };
+    // Defensive symmetric-brand-boundary guard. The `truly_fresh` gate derives
+    // virginity from aube's lockfile detection, which does NOT recognize two
+    // foreign PM signals: bun's pre-1.2 BINARY lockfile `bun.lockb` (only the
+    // text `bun.lock` is a detection candidate) and a lone yarn-berry
+    // `.yarnrc.yml` config with no `yarn.lock` yet. Without this re-check a
+    // `packageManager: nub@…` stamp could land in a bun/yarn-owned project —
+    // exactly the brand imposition the virgin predicate forbids. Walk up like
+    // `is_truly_fresh_project` does for pnpm-named files, and bail on a hit.
+    if dir_walk_up_has_any(cwd, &["bun.lockb", ".yarnrc.yml"]) {
+        return;
+    }
+    // Stamp ONLY when this op wrote nub's OWN canonical (neutral) lockfile. The
+    // field's whole purpose is to supply the PM signal that nub's UNBRANDED
+    // lockfile otherwise withholds; when a virgin project resolves to a FOREIGN
+    // lockfile format instead (e.g. `default_lockfile_format=pnpm`), that
+    // lockfile IS the signal — so the stamp is unneeded, AND a `nub@…` claim
+    // beside a pnpm/npm-format lock makes corepack-enforcing PMs refuse the
+    // project. Keyed off the canonical-lockfile NAME accessor (rename-safe;
+    // resolves the embedder profile + git-branch variant).
+    if !root.join(aube_lockfile::aube_lock_filename(&root)).exists() {
+        return;
+    }
+    let value = format!("nub@{}", env!("CARGO_PKG_VERSION"));
+    let _ = nub_core::pm::resolve::edit_root_manifest(&root, |obj| {
+        obj.insert("packageManager".into(), serde_json::Value::String(value));
+    });
+}
+
+/// Bounded ancestor walk (inclusive, 16 levels like the identity/manifest
+/// walk-ups) testing whether any directory carries one of `names`.
+fn dir_walk_up_has_any(cwd: &Path, names: &[&str]) -> bool {
+    let mut dir = cwd.to_path_buf();
+    for _ in 0..16 {
+        if names.iter().any(|n| dir.join(n).exists()) {
+            return true;
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    false
 }
 
 /// FAIL LOUD if `offline_active` and the session's yarn project configures a
@@ -1679,6 +1761,159 @@ mod tests {
         assert!(
             !rewritten.contains("Run `aube install`"),
             "rewrite must neutralize the engine's aube brand, got: {rewritten:?}"
+        );
+    }
+
+    /// The virgin stamp writes `packageManager: "nub@<running-version>"` in the
+    /// corepack `<name>@<semver>` shape, appended at the manifest tail (the
+    /// `preserve_order` editor never reflows the user's existing keys). Gating
+    /// on virginity is the caller's job; this asserts the write itself.
+    /// Seed nub's OWN canonical lockfile in `dir` so the stamp's
+    /// "nub wrote its neutral format" gate passes deterministically, whichever
+    /// embedder profile the test binary happens to have registered.
+    fn seed_nub_lockfile(dir: &Path) {
+        std::fs::write(
+            dir.join(aube_lockfile::aube_lock_filename(dir)),
+            "lockfileVersion: '9.0'\n",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn virgin_stamp_writes_corepack_shape_at_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            "{\n  \"name\": \"app\",\n  \"version\": \"1.0.0\"\n}\n",
+        )
+        .unwrap();
+        seed_nub_lockfile(dir.path());
+
+        stamp_virgin_package_manager(dir.path());
+
+        let written = std::fs::read_to_string(dir.path().join("package.json")).unwrap();
+        let expected = format!("nub@{}", env!("CARGO_PKG_VERSION"));
+        let manifest: serde_json::Value = serde_json::from_str(&written).unwrap();
+        assert_eq!(
+            manifest["packageManager"].as_str(),
+            Some(expected.as_str()),
+            "value must be the running nub version in corepack shape"
+        );
+        // Tail-append + format preservation: the pre-existing keys keep their
+        // order and the new key lands last, so the diff is one added line.
+        assert!(
+            written.contains("\"version\": \"1.0.0\",\n  \"packageManager\""),
+            "stamp must append after the user's keys, not reflow them: {written:?}"
+        );
+    }
+
+    /// A successful install in a directory with NO `package.json` must not fail
+    /// or scaffold one — the stamp is best-effort and silently no-ops (nub never
+    /// creates a manifest).
+    #[test]
+    fn virgin_stamp_is_silent_noop_without_a_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        // Hermeticity guard: the stamp walks UP for a manifest root, so if the
+        // tempdir sits under a checkout (TMPDIR inside a repo) it could reach an
+        // ancestor `package.json` and the no-op intent wouldn't hold. Assert the
+        // precondition and skip rather than risk touching an unrelated manifest.
+        if find_manifest_root(dir.path()).is_some() {
+            return;
+        }
+        stamp_virgin_package_manager(dir.path());
+        assert!(
+            !dir.path().join("package.json").exists(),
+            "stamp must never scaffold a missing package.json"
+        );
+    }
+
+    /// The shared gate every modifying verb (`install`/`add`/`remove`/`update`)
+    /// routes through: stamp iff the op SUCCEEDED (`code == 0`) AND the project
+    /// was virgin at session build (`truly_fresh`). A failed op or a non-virgin
+    /// project never stamps — this is what makes `nub add <pkg>` as the first
+    /// command stamp, while a 2nd op (or any incumbent PM) does not.
+    #[test]
+    fn stamp_if_virgin_gates_on_success_and_freshness() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = dir.path().join("package.json");
+        let seed = "{\n  \"name\": \"app\"\n}\n";
+        let session = |truly_fresh: bool| EngineSession {
+            detected: None,
+            runtime: tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap(),
+            truly_fresh,
+            cwd: dir.path().to_path_buf(),
+        };
+        let stamped = |p: &Path| {
+            std::fs::read_to_string(p)
+                .unwrap()
+                .contains("packageManager")
+        };
+
+        seed_nub_lockfile(dir.path());
+
+        std::fs::write(&pkg, seed).unwrap();
+        stamp_if_virgin(&session(true), 0);
+        assert!(stamped(&pkg), "virgin + success must stamp");
+
+        std::fs::write(&pkg, seed).unwrap();
+        stamp_if_virgin(&session(true), 1);
+        assert!(!stamped(&pkg), "a failed op (code != 0) must not stamp");
+
+        std::fs::write(&pkg, seed).unwrap();
+        stamp_if_virgin(&session(false), 0);
+        assert!(!stamped(&pkg), "a non-virgin project must not stamp");
+    }
+
+    /// Stamp ONLY when nub wrote its own neutral lockfile. A virgin project that
+    /// resolved to a FOREIGN lockfile format (e.g. `default_lockfile_format=pnpm`
+    /// writes `pnpm-lock.yaml`, not nub's lockfile) is NOT stamped — that
+    /// lockfile is already the PM signal, and a `nub@…` claim beside it would
+    /// make corepack-enforcing PMs refuse the project.
+    #[test]
+    fn virgin_stamp_skips_when_nub_wrote_no_neutral_lockfile() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            "{\n  \"name\": \"app\"\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("pnpm-lock.yaml"),
+            "lockfileVersion: '9.0'\n",
+        )
+        .unwrap();
+
+        stamp_virgin_package_manager(dir.path());
+
+        let written = std::fs::read_to_string(dir.path().join("package.json")).unwrap();
+        assert!(
+            !written.contains("packageManager"),
+            "a foreign-format lockfile must not get a nub stamp: {written:?}"
+        );
+    }
+
+    /// Symmetric brand boundary: a foreign PM signal aube's detection misses
+    /// (`bun.lockb`, pre-1.2 bun) still blocks the stamp, so nub never imposes
+    /// `packageManager: nub@…` on a bun-owned project.
+    #[test]
+    fn virgin_stamp_skips_an_undetected_foreign_lockfile() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            "{\n  \"name\": \"app\"\n}\n",
+        )
+        .unwrap();
+        seed_nub_lockfile(dir.path()); // isolate the bun.lockb guard, not the no-lockfile path
+        std::fs::write(dir.path().join("bun.lockb"), b"\0bun").unwrap();
+
+        stamp_virgin_package_manager(dir.path());
+
+        let written = std::fs::read_to_string(dir.path().join("package.json")).unwrap();
+        assert!(
+            !written.contains("packageManager"),
+            "a bun.lockb project must not be stamped: {written:?}"
         );
     }
 }

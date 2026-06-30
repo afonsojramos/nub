@@ -127,19 +127,21 @@ fn install_truly_fresh_project_claims_nub_identity() {
         "neither pnpm-lock.yaml nor aube-lock.yaml may appear on the truly-fresh path"
     );
 
-    // Identity is self-reinforcing via the lockfile alone (the next install
-    // sees lock.yaml and resolves as nub-identity). The manifest is left
-    // untouched — no `packageManager`, no `devEngines` auto-stamp on a plain
-    // install (that exclusivity claim is reserved for `nub pm use nub`).
+    // A virgin install stamps `packageManager: nub@<v>` (the PM signal nub's
+    // neutral lock.yaml withholds) — only that field, never `devEngines` (the
+    // heavier exclusivity claim stays on `nub pm use nub`). Identity is also
+    // self-reinforcing via the lockfile: the next install sees lock.yaml and is
+    // no longer virgin, so it never re-stamps.
     let manifest: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(dir.join("package.json")).unwrap()).unwrap();
-    assert!(
-        manifest.get("packageManager").is_none(),
-        "a plain install must not auto-stamp packageManager: {manifest}"
+    assert_eq!(
+        manifest.get("packageManager").and_then(|v| v.as_str()),
+        Some(concat!("nub@", env!("CARGO_PKG_VERSION"))),
+        "a virgin install stamps packageManager: nub@<version>: {manifest}"
     );
     assert!(
         manifest.get("devEngines").is_none(),
-        "a plain install must not auto-stamp devEngines: {manifest}"
+        "the virgin stamp writes only packageManager, never devEngines: {manifest}"
     );
 }
 
@@ -490,10 +492,11 @@ fn install_refuses_to_mutate_a_drifted_yarn_lock() {
 }
 
 /// A truly-fresh `nub add` claims nub identity exactly like a fresh `install`:
-/// the add resolves + writes nub's neutral `lock.yaml` — the quiet identity
-/// marker — and adds the dep. It must NOT auto-stamp `packageManager` /
-/// `devEngines` into `package.json`; that exclusivity claim is reserved for the
-/// explicit `nub pm use nub` command. Identity self-reinforces via the lockfile.
+/// the add resolves + writes nub's neutral `lock.yaml` and adds the dep, and —
+/// because the project is virgin (nub is the first PM to touch it) — stamps
+/// `packageManager: nub@<v>`. Only that field; `devEngines` stays unstamped
+/// (the heavier claim is `nub pm use nub`'s). This is the common case the stamp
+/// targets: `nub add <pkg>` as the first command on a fresh project.
 #[test]
 #[ignore = "network: resolves + fetches is-positive@3.1.0 from the npm registry"]
 fn add_on_a_truly_fresh_project_claims_nub_identity() {
@@ -522,13 +525,14 @@ fn add_on_a_truly_fresh_project_claims_nub_identity() {
 
     let manifest: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(dir.join("package.json")).unwrap()).unwrap();
-    assert!(
-        manifest.get("packageManager").is_none(),
-        "a truly-fresh add must not auto-stamp packageManager: {manifest}"
+    assert_eq!(
+        manifest.get("packageManager").and_then(|v| v.as_str()),
+        Some(concat!("nub@", env!("CARGO_PKG_VERSION"))),
+        "a virgin add stamps packageManager: nub@<version>: {manifest}"
     );
     assert!(
         manifest.get("devEngines").is_none(),
-        "a truly-fresh add must not auto-stamp devEngines: {manifest}"
+        "the virgin stamp writes only packageManager, never devEngines: {manifest}"
     );
     assert_eq!(
         manifest["dependencies"]["is-positive"].as_str(),

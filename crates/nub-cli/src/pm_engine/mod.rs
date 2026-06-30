@@ -581,6 +581,18 @@ pub(crate) fn stub_error(typed: &str, args: &[String], pm_hint: &str) -> anyhow:
 pub(crate) struct EngineSession {
     pub(crate) detected: Option<DetectedLockfile>,
     pub(crate) runtime: tokio::runtime::Runtime,
+    /// No PM-preference signal anywhere at session-build time — no lockfile of
+    /// ANY package manager (npm/pnpm/yarn/bun, NOR nub's own canonical
+    /// lockfile), no `packageManager`/`devEngines` declaration, no pnpm-named
+    /// file. Captured BEFORE the engine writes anything, so it reflects the
+    /// pre-install state: the FIRST install in a virgin project sees `true`;
+    /// every subsequent install (nub's lockfile now present ⇒ `detected` is
+    /// `Some`) sees `false`. The install family reads this to stamp
+    /// `packageManager: nub@<v>` exactly once, on the virgin install.
+    pub(crate) truly_fresh: bool,
+    /// The resolved working directory the session ran in (after `--dir`). The
+    /// install family writes the virgin `packageManager` stamp relative to it.
+    pub(crate) cwd: PathBuf,
 }
 
 /// Build the shared engine context for one verb invocation: apply `--dir`,
@@ -738,9 +750,12 @@ fn engine_session_inner(
     // declaration, no pnpm-named file). On this path nub claims identity via the
     // neutral lockfile: the embedder default flips to `lock.yaml`, the quiet
     // identity marker the classifier reads back as nub. Any incumbent signal
-    // makes the project pnpm-shaped/compat and is respected untouched. nub does
-    // NOT auto-stamp `package.json` here — that exclusivity claim is reserved
-    // for the explicit `nub pm use nub` command.
+    // makes the project pnpm-shaped/compat and is respected untouched. On a
+    // virgin install the install family ALSO stamps `packageManager: nub@<v>`
+    // (see `install_family::stamp_virgin_package_manager`) — safe ONLY because
+    // `truly_fresh` proves no other PM owns the project (the symmetric brand
+    // boundary); `nub pm use nub` remains the explicit, heavier identity stamper
+    // (it also writes `devEngines`).
     let truly_fresh = is_truly_fresh_project(&cwd, detected.as_ref());
     // Set-unless-user-set: ranks below CLI flags, env vars, and every
     // config file in the engine's settings precedence.
@@ -759,6 +774,8 @@ fn engine_session_inner(
     Ok(EngineSession {
         detected,
         runtime: build_runtime()?,
+        truly_fresh,
+        cwd,
     })
 }
 
