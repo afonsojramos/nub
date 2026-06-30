@@ -7,7 +7,7 @@ description: Use when running a compatibility/parity AUDIT — enumerating where
 
 An **audit** is a distinct thread profile — alongside the implementation thread and the research thread — whose deliverable is a CLEAN, COMPLETE, VERIFIED list of real gaps between nub and a reference it claims parity with. A single false positive surfaced to the maintainer destroys trust in the whole audit; the bar is zero garbage.
 
-**Canonical methodology + rationale: AGENTS.md → "Audit threads — a distinct thread profile."** Read that section first — it holds the full WHY and the named scars. This skill is the OPERATIONAL surface: the gate checklist, the dispatch template every audit sub-agent must receive verbatim, the orchestration shape, and the running learnings log. (Same split as the `prose` skill ↔ `PROSE.md`: the skill never re-derives the canonical doc, it operationalizes it.)
+**Canonical methodology + rationale: AGENTS.md → "Audit threads — a distinct thread profile."** Read that section first — it holds the full WHY and the named scars. This skill is the OPERATIONAL surface: the gate checklist, the dispatch template every audit sub-agent must receive verbatim, the orchestration shape, and the running learnings log. (Same split as the `prose-writing` skill ↔ `PROSE.md`: the skill never re-derives the canonical doc, it operationalizes it.)
 
 ## The 5 gates (checklist — AGENTS.md is canonical)
 

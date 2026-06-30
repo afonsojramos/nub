@@ -1,5 +1,5 @@
 ---
-name: prose
+name: prose-writing
 description: >-
   Copywriting / prose / tone style guide for EVERY user-facing or public-facing
   text artifact. INVOKE THIS SKILL (via the Skill tool) BEFORE you write or edit
@@ -19,7 +19,13 @@ description: >-
   (4) Whenever you APPLY a general copy-style correction — sweep it everywhere it
   applies, not just the one spot it was raised, and record it in PROSE.md.
   (5) A substantive prose chat reply.
-  Through-line: factual, neutral, terse, scannable — state what's true, cut
+  (6) Reformatting or structuring existing copy for scannability — breaking up a
+  wall of text, or converting a run of paragraphs into a list, table, or callout.
+  A bold-sentence lead-in does NOT count as a block-level break: a run of
+  bold-led paragraphs is still a wall of text, and the fix is a real list/table/
+  callout, never bolding the first sentence of each paragraph.
+  Through-line: factual, neutral, terse, scannable — never two-plus dense
+  paragraphs in a row without a block-level element; state what's true, cut
   everything that doesn't add a fact, build for a reader who skims. Encodes
   GitHub maintainer-hygiene tone, sentence/heading mechanics (never open a
   sentence or heading with inline code), scannability, honesty/restraint,
@@ -30,7 +36,7 @@ description: >-
   live in AGENTS.md, layered on top.
 ---
 
-# prose
+# prose-writing
 
 **The canonical guide is [`PROSE.md`](../../../PROSE.md) at the repo root — read it.** This skill exists to make that guide auto-surface whenever copy is being written, and to index it. PROSE.md is the single source of truth; do not duplicate its content elsewhere, and when a general copy rule is added or corrected, update PROSE.md (then sweep every doc/page it applies to).
 

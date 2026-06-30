@@ -122,29 +122,16 @@ Message payloads are cloned with Node's structured serializer:
 
 Transferring an `ArrayBuffer` detaches it on the sending side.
 
-## Conformance
+## Spec conformance
 
-Nub's Worker is gated against a vendored slice of [web-platform-tests](https://github.com/web-platform-tests/wpt) — the `webmessaging` battery, the structured-clone battery over a `MessageChannel`, and the worker-scope event tests — run through nub's runtime on every supported Node tier (`tests/worker-wpt/`). The messaging and structured-clone core passes in full; the divergences below are the documented exceptions, each inherited from the underlying Node primitive.
+Nub's `Worker` runs a vendored slice of [web-platform-tests](https://github.com/web-platform-tests/wpt) on every supported Node tier (`tests/worker-wpt/`) — the `webmessaging` battery, structured clone over a `MessageChannel`, and the worker-scope event tests — green against a checked-in expectations file. Messaging and structured clone pass; the documented exceptions are browser-DOM types Node has no substrate for, like `ImageBitmap` and `OffscreenCanvas`.
 
 ## Divergences
 
-These are the behaviors where nub's wrapper differs from a browser `Worker`. They are inherited from `node:worker_threads` — the same divergences a `node:worker_threads`-based polyfill on plain Node would have.
+The browser `Worker` and nub's share the same shape. Two differences are worth knowing:
 
-**Port start.** Adding a `"message"` listener with `addEventListener` starts a `MessagePort` immediately. The spec starts a port only on `start()` or on setting `onmessage`; `node:worker_threads` (and Cloudflare's `workerd`) start it on any listener, so with nub a message can be delivered before an explicit `start()`.
-
-**Immediate `self.close()`.** Calling `close()` inside a worker exits the thread at once. The browser's `close()` is graceful — already-queued tasks still run — so code that does work *after* `close()` (for example a `postMessage` right after closing) behaves differently here.
-
-**Untrusted `MessageEvent`.** Events from a `MessagePort` report `isTrusted === false`. Node's `MessageEvent` is not a trusted event; native Node behaves the same.
-
-**Non-message `event.target`.** Events other than `"message"` / `"messageerror"` dispatched on `self` inside a worker land on a private `EventTarget`, so `event.target` is that target rather than the global scope. Dispatch itself works — `self.addEventListener("custom", …)` plus `self.dispatchEvent(new Event("custom"))` fires the listener — only the `target` identity differs. The private target is a deliberate seam so worker lifetime (auto-exit when no message listeners remain) matches Node.
-
-**File round-trip on Node 22.** On the Node 22 line, posting or `structuredClone`-ing a `File` deserializes it to a plain `Blob` — the bytes survive but the `File` wrapper (and `instanceof File`) is lost. This is a Node 22 structured-clone limitation, fixed in Node 24; it reproduces on plain Node 22 with no nub involved. `Blob` itself round-trips correctly on every version.
-
-**No `SharedWorker`.** It depends on a browser document/origin model with no server-side equivalent — Bun and Cloudflare omit it too. Use one worker plus message passing.
-
-**Startup cost.** Each `Worker` is a real OS thread with its own V8 isolate and a fresh module graph — meaningfully heavier than a browser worker. Use a small pool for hot paths; don't spawn per task.
-
-A worker that listens for messages keeps itself alive; one that never listens exits naturally, matching `node:worker_threads` and the browser.
+- **No `SharedWorker`** — it needs a browser document and origin model with no server-side equivalent. Use a single worker with message passing.
+- **Workers are real threads** — each is an OS thread with its own V8 isolate and module graph, heavier than a browser worker. Pool them for hot paths instead of spawning one per task.
 
 ## TypeScript
 
