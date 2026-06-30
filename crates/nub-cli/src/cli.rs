@@ -1584,9 +1584,15 @@ fn run_nub() -> Result<i32> {
             if let Some(plugin_path) = plugin {
                 return launch_bin(&plugin_path, &rest[1..], compat, &cwd);
             }
+            // A bareword reaching here is not a known/conventional script (those
+            // took the `nub run` branch above) — so it's most likely a dependency
+            // binary the user meant to exec (`nub turbo login`, `nub eslint`).
+            // Lead with the `nub exec`/`nubx` hint accordingly, then the script
+            // and file fallbacks.
             bail!(
                 "nub: \"{first}\" is not a nub command — see `nub --help`\n\
-                 \x20\x20(to run a script: nub run {first} · to run a file: nub ./{first})"
+                 \x20\x20(to run a dependency's binary: nub exec {first} or nubx {first} · \
+                 to run a script: nub run {first} · to run a file: nub ./{first})"
             );
         }
     }
