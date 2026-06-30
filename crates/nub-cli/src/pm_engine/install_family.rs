@@ -1804,6 +1804,43 @@ mod tests {
         );
     }
 
+    /// The shared gate every modifying verb (`install`/`add`/`remove`/`update`)
+    /// routes through: stamp iff the op SUCCEEDED (`code == 0`) AND the project
+    /// was virgin at session build (`truly_fresh`). A failed op or a non-virgin
+    /// project never stamps — this is what makes `nub add <pkg>` as the first
+    /// command stamp, while a 2nd op (or any incumbent PM) does not.
+    #[test]
+    fn stamp_if_virgin_gates_on_success_and_freshness() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = dir.path().join("package.json");
+        let seed = "{\n  \"name\": \"app\"\n}\n";
+        let session = |truly_fresh: bool| EngineSession {
+            detected: None,
+            runtime: tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap(),
+            truly_fresh,
+            cwd: dir.path().to_path_buf(),
+        };
+        let stamped = |p: &Path| {
+            std::fs::read_to_string(p)
+                .unwrap()
+                .contains("packageManager")
+        };
+
+        std::fs::write(&pkg, seed).unwrap();
+        stamp_if_virgin(&session(true), 0);
+        assert!(stamped(&pkg), "virgin + success must stamp");
+
+        std::fs::write(&pkg, seed).unwrap();
+        stamp_if_virgin(&session(true), 1);
+        assert!(!stamped(&pkg), "a failed op (code != 0) must not stamp");
+
+        std::fs::write(&pkg, seed).unwrap();
+        stamp_if_virgin(&session(false), 0);
+        assert!(!stamped(&pkg), "a non-virgin project must not stamp");
+    }
+
     /// Symmetric brand boundary: a foreign PM signal aube's detection misses
     /// (`bun.lockb`, pre-1.2 bun) still blocks the stamp, so nub never imposes
     /// `packageManager: nub@…` on a bun-owned project.
