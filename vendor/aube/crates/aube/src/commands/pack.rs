@@ -490,7 +490,11 @@ fn is_npm_ignored(name: &str) -> bool {
     // registry. Real footgun, real incidents, npm/pnpm both ship a
     // similar list. Users can still override via `files` field if
     // they really want to publish one of these (nobody should).
-    if name == aube_util::embedder().lockfile_basename {
+    if name == aube_util::embedder().lockfile_basename
+        || aube_util::embedder()
+            .lockfile_legacy_basenames
+            .contains(&name)
+    {
         return true;
     }
     if matches!(

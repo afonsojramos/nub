@@ -3078,7 +3078,17 @@ mod tests {
         }
 
         // ── undeclared: lockfile presence decides ────────────────────────
-        // A lone lock.yaml → nub identity, carrying the deciding dir.
+        // A lone package.lock (nub's canonical name) → nub identity.
+        let d = root(&[
+            ("package.json", "{}"),
+            ("package.lock", "lockfileVersion: '9.0'\n"),
+        ]);
+        assert_eq!(
+            resolve_config_surface(d.path()),
+            ConfigSurface::NubIdentity(d.path().to_path_buf())
+        );
+        // A lone legacy lock.yaml (read-both through the transition) → nub
+        // identity too, carrying the deciding dir.
         let d = root(&[
             ("package.json", "{}"),
             ("lock.yaml", "lockfileVersion: '9.0'\n"),
