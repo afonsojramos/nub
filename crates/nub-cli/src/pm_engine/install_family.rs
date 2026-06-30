@@ -353,6 +353,7 @@ fn finish_code(result: miette::Result<Option<i32>>) -> Result<i32> {
 fn run_add(typed: &str, args: &[String]) -> Result<i32> {
     let (globals, verb): (_, aube::commands::add::AddArgs) = parse_or_return!(typed, args);
     let session = super::engine_session(globals.dir.as_deref())?;
+    super::migrate_session_lockfile(&session);
     if !verb.global && yarn_detected(&session) {
         return Err(yarn_gate_error(
             typed,
@@ -372,6 +373,7 @@ fn run_add(typed: &str, args: &[String]) -> Result<i32> {
 fn run_remove(typed: &str, args: &[String]) -> Result<i32> {
     let (globals, verb): (_, aube::commands::remove::RemoveArgs) = parse_or_return!(typed, args);
     let session = super::engine_session(globals.dir.as_deref())?;
+    super::migrate_session_lockfile(&session);
     if !verb.global && yarn_detected(&session) {
         return Err(yarn_gate_error(
             typed,
@@ -401,6 +403,7 @@ fn run_update(typed: &str, args: &[String]) -> Result<i32> {
         ));
     }
     let session = super::engine_session(globals.dir.as_deref())?;
+    super::migrate_session_lockfile(&session);
     if !verb.global && yarn_detected(&session) {
         return Err(yarn_gate_error(
             typed,
@@ -421,7 +424,11 @@ fn run_dedupe(typed: &str, args: &[String]) -> Result<i32> {
     let (globals, verb): (_, aube::commands::dedupe::DedupeArgs) = parse_or_return!(typed, args);
     let session = super::engine_session(globals.dir.as_deref())?;
     // `--check` writes nothing (diff + exit code only) and stays usable on
-    // yarn projects; a real dedupe re-resolves and rewrites the lockfile.
+    // yarn projects; a real dedupe re-resolves and rewrites the lockfile. Only
+    // a writing dedupe migrates the legacy lockfile name.
+    if !verb.check {
+        super::migrate_session_lockfile(&session);
+    }
     if !verb.check && yarn_detected(&session) {
         return Err(yarn_gate_error(
             typed,
@@ -943,6 +950,10 @@ impl WorkspaceFilterFlags {
 /// `nub install` — route through the embedded aube install engine.
 pub fn run_install(flags: InstallFlags) -> Result<i32> {
     let session = super::engine_session(flags.dir.as_deref())?;
+    // Transitional: rename a legacy `lock.yaml` to `package.lock` before the
+    // engine resolves (no-op unless this is a nub-identity project carrying the
+    // old name).
+    super::migrate_session_lockfile(&session);
     if let Some(err) = pnpm_lockfile_version_preflight(&session) {
         return Err(err);
     }
@@ -1047,11 +1058,11 @@ pub fn run_install(flags: InstallFlags) -> Result<i32> {
     let code = run_engine(&session, opts, yarn, &flags.output)?;
     // Virgin install only: stamp `packageManager: nub@<v>` so the project
     // advertises nub the standard, cross-tool way. nub's canonical lockfile is
-    // deliberately NEUTRAL (`lock.yaml`), so — unlike every other PM, whose
+    // deliberately NEUTRAL (`package.lock`), so — unlike every other PM, whose
     // branded lockfile is itself the repo's PM signal — nub leaves no signal
     // downstream tools (turbo, …) can read. The `packageManager` field IS that
     // signal. The write is gated on `session.truly_fresh`, captured BEFORE the
-    // engine wrote `lock.yaml`: it is `true` ONLY when nub is the FIRST package
+    // engine wrote `package.lock`: it is `true` ONLY when nub is the FIRST package
     // manager to touch the project (no foreign lockfile, no pre-existing nub
     // lockfile, no `packageManager`/`devEngines` declaration). Any incumbent
     // signal ⇒ `false` ⇒ no write — nub never imposes its brand on another PM's
@@ -1163,6 +1174,10 @@ pub fn run_ci(flags: CiFlags) -> Result<i32> {
     // ci's frozen node_modules is COPY-relocatable across multi-stage Docker
     // (#241); isolation/phantom-dep protection is preserved.
     let session = super::engine_session_ci(flags.dir.as_deref())?;
+    // Transitional: rename a legacy `lock.yaml` to `package.lock` before the
+    // engine resolves (no-op unless this is a nub-identity project carrying the
+    // old name).
+    super::migrate_session_lockfile(&session);
     if let Some(err) = pnpm_lockfile_version_preflight(&session) {
         return Err(err);
     }

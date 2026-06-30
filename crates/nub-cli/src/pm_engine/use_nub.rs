@@ -8,7 +8,7 @@
 //! config surface, its grammar. `pm use nub` is the explicit graduation:
 //! `packageManager: "nub@<exact>"` + `devEngines.packageManager
 //! {name:"nub", version:"^<ver>", onFail:"warn"}`, the lockfile renamed (or
-//! converted) to `lock.yaml` (pnpm-v9 bytes, generic name), and
+//! converted) to `package.lock` (pnpm-v9 bytes, generic name), and
 //! `pnpm-workspace.yaml` ALWAYS migrated and deleted:
 //!
 //! - resolution-bearing keys → `package.json` under ecosystem-standard
@@ -801,7 +801,7 @@ fn pnpm_vocab_precedence(root: &Path) -> VocabPrecedence {
 /// the declaration, lockfiles, yaml, and `.npmrc` live). Prints the
 /// file-by-file summary; never silent.
 pub(crate) fn run_use_nub(root: &Path) -> Result<i32> {
-    // The brand preflight registers the yaml names + lock.yaml filename the
+    // The brand preflight registers the yaml names + package.lock filename the
     // discovery below and the engine writers read.
     super::engine_brand_preflight();
 
@@ -892,7 +892,7 @@ pub(crate) fn run_use_nub(root: &Path) -> Result<i32> {
                 "  {}: kept (already nub's lockfile)",
                 kept.file_name().unwrap_or_default().to_string_lossy()
             );
-            remove_strays(&remove, "lock.yaml is authoritative")?;
+            remove_strays(&remove, &format!("{NUB_LOCKFILE} is authoritative"))?;
         }
         AlignPlan::Rename { from, remove } => {
             let to = root.join(NUB_LOCKFILE);

@@ -26,6 +26,7 @@ static ROOT_TOOL: Embedder = Embedder {
     self_names: &["roottool"],
     compatible_names: &["pnpm"],
     lockfile_basename: "roottool-lock.yaml",
+    lockfile_legacy_basenames: &[],
     workspace_yaml: None,
     manifest_namespace: "",
     env_prefix: None,
