@@ -2211,15 +2211,18 @@ fn run_as_node() -> Result<i32> {
 /// `--node` from anywhere before a `--` and so ate a program-arg `--node`
 /// (`node app.js --node`), silently flipping compat off and dropping the arg.
 ///
-/// Subject detection deliberately mirrors the blessed top-level `run_nub`
-/// file-run path and is arity-UNAWARE: a value-flag's separate-token value (the
-/// `4096` in `--max-old-space-size 4096`) reads as the entry and stops the scan.
-/// This is harmless because every token from the entry onward is forwarded to
-/// real Node verbatim and Node does the authoritative flag-vs-entry binding; the
-/// only input it affects is the rare `--flag <bare-value> --node <entry>`, which
-/// forwards `--node` to Node (a loud "bad option" error) exactly as `run_nub`
-/// does today. Unify with the arity-aware nubx resolver scan + `run_nub` once
-/// universal-nubx (#224) lands a shared leading-only helper.
+/// Subject detection follows the blessed top-level `run_nub` file-run grammar
+/// (stop at the first bare token or an `-e`/`-p` eval flag) and is arity-UNAWARE:
+/// a value-flag's separate-token value (the `4096` in `--max-old-space-size
+/// 4096`) reads as the entry and stops the scan. This is harmless because every
+/// token from the entry onward is forwarded to real Node verbatim and Node does
+/// the authoritative flag-vs-entry binding; the only input it affects is the rare
+/// `--flag <bare-value> --node <entry>`, which forwards `--node` to Node (a loud
+/// "bad option" error) exactly as `run_nub` does today. It additionally treats a
+/// bare `--` as an explicit terminator (`run_nub` has no `--` arm) so a `--node`
+/// after `--` is the script's, matching real node. Unify with the arity-aware
+/// nubx resolver scan + `run_nub` once universal-nubx (#224) lands a shared
+/// leading-only helper.
 fn scan_node_compat_flag(args: &[String]) -> (bool, Vec<String>) {
     let mut compat = false;
     let mut forwarded = Vec::with_capacity(args.len());
