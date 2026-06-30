@@ -67,6 +67,7 @@ The second argument is a `WorkerOptions` object:
 | --- | --- | --- |
 | `type` | `"module"` (default), `"classic"` | Selects which `importScripts` form the worker scope exposes — classic gets the synchronous loader, module gets the throwing form |
 | `name` | string | Readable as `self.name` inside the worker |
+| `eval` | `true` | Runs the constructor's first argument as the worker's source instead of resolving it as a URL (Node's inline form) |
 | `execArgv` | string array | Node flags for the worker; merged onto the flags carrying Nub's preload |
 | `env` | object | Environment for the worker thread |
 
@@ -121,6 +122,31 @@ Message payloads are cloned with Node's structured serializer:
 | Unavailable | `ImageBitmap`, `OffscreenCanvas`, stream transfer — no DOM substrate on Node |
 
 Transferring an `ArrayBuffer` detaches it on the sending side.
+
+## Node `worker_threads` compatibility
+
+The web shape above is the primary surface. The same handle also mirrors `node:worker_threads.Worker` for Node-style code: its `EventEmitter` methods, the `online` and `exit` lifecycle events, a `Promise`-returning `terminate()`, and `{ eval: true }` for an inline source string.
+
+```ts
+const worker = new Worker(
+  `const { parentPort } = require("node:worker_threads");
+   parentPort.on("message", (n) => parentPort.postMessage(n * 2));`,
+  { eval: true },
+);
+
+worker.on("online", () => console.log("started"));
+worker.on("error", (err) => console.error(err.stack)); // a bare Error
+worker.on("exit", (code) => console.log("exited", code));
+
+worker.on("message", async (value) => {
+  console.log(value); // 42 — the raw value, not a MessageEvent
+  const code = await worker.terminate(); // Promise<number>
+});
+
+worker.postMessage(21);
+```
+
+On the node channel, `message` listeners get the raw posted value and `error` listeners a bare `Error` — Node's shapes, not the `MessageEvent` / `ErrorEvent` the web channel (`addEventListener` / `onmessage` / `onerror`) keeps. Both channels live on one handle; reach for whichever fits the code.
 
 ## Spec conformance
 

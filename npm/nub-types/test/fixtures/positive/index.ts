@@ -11,7 +11,18 @@ const worker = new Worker(new URL("./worker.js", import.meta.url), { type: "modu
 worker.postMessage({ yaml: yamlCfg, toml: tomlCfg });
 worker.onmessage = (ev) => console.log(ev.data);
 worker.onerror = (ev) => console.error(ev);
-// terminate() resolves to the exit code; { eval: true } takes an inline source.
+
+// Node worker_threads compatibility: EventEmitter methods (node-channel shapes),
+// the online/exit lifecycle, an awaited terminate(), and { eval: true }.
+worker
+  .on("message", (value) => console.log(value)) // raw value, typed `any`
+  .on("error", (err: Error) => console.error(err.stack))
+  .on("exit", (code: number) => console.log(code))
+  .on("online", () => console.log("online"));
+worker.once("message", (value) => console.log(value));
+worker.off("message", () => {});
+const emitted: boolean = worker.emit("message", 1);
+void emitted;
 const exitCode: Promise<number> = worker.terminate();
 void exitCode;
 const inlineWorker = new Worker("self.postMessage(1)", { eval: true });
