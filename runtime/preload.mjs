@@ -46,6 +46,10 @@ const __require = createRequire(import.meta.url);
 const common = __require("./preload-common.cjs");
 const { installSyncPolyfills } = __require("./polyfills.cjs");
 
+// Publish process.versions.nub (self-identification marker) before user code runs.
+// Tier-independent — same call in the fast entry (preload.cjs).
+common.installVersionMarker();
+
 // ── Tier detection ──────────────────────────────────────────────────
 // This `.mjs` preload should only ever be `--import`ed for the compat tier (the
 // Rust spawn path chooses `--require preload.cjs` for 22.15+). But guard anyway: if

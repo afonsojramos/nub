@@ -20,6 +20,10 @@ const { readdirSync, existsSync } = require("node:fs");
 const { fileURLToPath, pathToFileURL } = require("node:url");
 const { join, dirname, extname: pathExtname } = require("node:path");
 
+// Internal `__NUB_*` plumbing var carrying the running binary's version (set by
+// the Rust spawn layer, coupled to preload injection). Read by installVersionMarker.
+const VERSION_ENV = "__NUB_VERSION";
+
 // ── data: URL unknown-format fidelity helpers ───────────────────────
 // Mirror Node's internal/modules/esm/get_format.js so nub's sync registerHooks load
 // hook surfaces ERR_UNKNOWN_MODULE_FORMAT for an unsupported `data:` MIME exactly as
@@ -1180,7 +1184,30 @@ function reenableUserCompileCache() {
   try { module_.enableCompileCache(dir); } catch {}
 }
 
+// Publish `process.versions.nub` = the running binary's version — the universal
+// `process.versions.<runtime>` self-identification convention (cf. `.bun`,
+// `.electron`). A read-only DETECTION marker, never an importable/callable API.
+// The value comes from the Rust spawn layer's `__NUB_VERSION` (env!("CARGO_PKG_VERSION"),
+// coupled to preload injection), so it always matches the running binary; under
+// `--node`/`NODE_COMPAT` no preload runs and the var is unset, so the marker is
+// absent (plain-Node fingerprint). Shape mirrors Node's own `process.versions`
+// entries: enumerable + configurable + non-writable. Called once per main-thread
+// preload entry (fast + compat), so a single mechanism covers both tiers.
+function installVersionMarker() {
+  const v = process.env[VERSION_ENV];
+  if (!v) return;
+  try {
+    Object.defineProperty(process.versions, "nub", {
+      value: v,
+      writable: false,
+      enumerable: true,
+      configurable: true,
+    });
+  } catch {}
+}
+
 module.exports = {
+  installVersionMarker,
   installWatchReporting,
   registerLoaderWorker,
   makeHooks,

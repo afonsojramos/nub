@@ -49,6 +49,9 @@ const __require = createRequire(__filename);
 // configured from the stripped env), so the chain below stays uncached.
 const common = __require("./preload-common.cjs");
 common.restoreCompileCacheEnv();
+// Publish process.versions.nub (self-identification marker) before user code runs.
+// Tier-independent — same call in the compat entry (preload.mjs).
+common.installVersionMarker();
 
 // `--no-experimental-require-module` disables require(esm) globally, so the
 // transform-core require below (and the worker/locks ESM side-effect modules)

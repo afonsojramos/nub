@@ -547,6 +547,12 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
             cmd.arg("--require").arg(pnp);
         }
 
+        // `process.versions.nub` source: hand the running binary's version to the
+        // preload so it can publish the self-identification marker. Coupled to the
+        // preload injection below — both live in this augment block, so `--node`
+        // and re-entrant child shells skip it for free.
+        cmd.env(VERSION_ENV, env!("CARGO_PKG_VERSION"));
+
         // Preload injection: `--require <cjs-path>` (fast tier) or `--import <url>`
         // (compat tier). See PreloadInjection for why the channel is tier-specific.
         if let Some(ref inj) = injection {
@@ -1251,6 +1257,18 @@ fn should_neutralize_localstorage(
 /// brand boundary. The preload deletes it after reading so it does not leak to
 /// grandchild processes.
 pub(crate) const NEUTRALIZE_LOCALSTORAGE_ENV: &str = "__NUB_NEUTRALIZE_LOCALSTORAGE";
+
+/// Carries the running binary's version (`env!("CARGO_PKG_VERSION")`) to the
+/// preload, which publishes it as `process.versions.nub` — the universal
+/// `process.versions.<runtime>` self-identification marker (cf. `.bun`,
+/// `.electron`) that lets tooling detect "running under nub". Set only inside the
+/// augment block, coupled to preload injection: under `--node`/`NODE_COMPAT` no
+/// preload runs and the var is unset, so the marker is correctly absent (plain
+/// Node). An internal `__NUB_*` plumbing var, NOT a user knob — explicitly
+/// permitted by the brand boundary. Unlike the localStorage signal it is NOT
+/// deleted by the preload, so it inherits into augmented descendants (which run
+/// the same preload via NODE_OPTIONS) and they advertise the marker too.
+pub(crate) const VERSION_ENV: &str = "__NUB_VERSION";
 
 /// Whether Node's test-runner coverage is active for this invocation — i.e. the
 /// user passed `--experimental-test-coverage` directly in argv or via NODE_OPTIONS.
