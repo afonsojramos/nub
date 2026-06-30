@@ -395,6 +395,10 @@ The harness renders GitHub-flavored markdown in a terminal that supports OSC-8 h
 
 (This governs chat output only. In tracked files, keep links relative/agent-agnostic and never hardcode a machine-specific absolute path or username.)
 
+## Chat responses: use idiomatic markdown structure
+
+Chat replies that surface lists, options, decisions, or multiple items use proper GitHub-flavored markdown — bulleted or numbered lists, headers where grouping helps. Never a middot-`·`-separated or run-on inline list where a list is meant.
+
 ## User-facing copy: prose & tone
 
 **The cross-project copywriting/prose/tone guide is [`PROSE.md`](PROSE.md) — read it before writing any GitHub issue/PR comment, docs page, blog/marketing copy, or release note.** It is also surfaced as the `prose` skill (`.claude/skills/prose/SKILL.md`), which auto-triggers on copy work and points back to PROSE.md as the canonical source (the skill never duplicates it). It is the single source of truth for register, sentence/heading mechanics (never start a sentence or heading with inline code, command-headed sections, etc.), scannability, inline-code-pileup avoidance, description-field rules, real-output-only mockups, GitHub-response tone, markdown mechanics (never hard-wrap paragraphs), and release-notes shape. The sections below carry ONLY the nub-SPECIFIC copy rules that layer on top of it.
