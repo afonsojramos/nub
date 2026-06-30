@@ -2184,32 +2184,80 @@ fn run_nubx() -> Result<i32> {
 
 fn run_as_node() -> Result<i32> {
     // Invoked as `node` via PATH shim. Default = full augmentation (Colin,
-    // 2026-06-20: go all-in on the hijack). The single opt-out is `--node`: when
-    // it appears anywhere BEFORE a `--` separator, strip it and run the
-    // resolved/pinned Node VANILLA (`compat_mode=true` — no preload, no flag
-    // injection, no `.env`, no NODE_OPTIONS/NODE_PATH/PATH-shim), exactly like
-    // `nub --node`/`nub run --node`. Version resolution/pinning stays on in BOTH
-    // cases — that's the legitimate job of the hijack. A `--node` AFTER `--` is a
-    // literal program arg and is passed through untouched.
+    // 2026-06-20: go all-in on the hijack). The single opt-out is `--node`: a
+    // standalone `--node` in the LEADING option region is nub-owned — consume it
+    // and run the resolved/pinned Node VANILLA (`compat_mode=true` — no preload,
+    // no flag injection, no `.env`, no NODE_OPTIONS/NODE_PATH/PATH-shim), exactly
+    // like `nub --node`/`nub run --node`. Version resolution/pinning stays on in
+    // BOTH cases — that's the legitimate job of the hijack.
     let args: Vec<String> = env::args().skip(1).collect();
-    let mut stripped: Vec<String> = Vec::with_capacity(args.len());
-    let mut compat = false;
-    let mut saw_separator = false;
-    for arg in &args {
-        if !saw_separator && arg == "--node" {
-            compat = true;
-            continue; // strip nub-owned --node before it reaches real node
-        }
-        if arg == "--" {
-            saw_separator = true;
-        }
-        stripped.push(arg.clone());
-    }
+    let (compat, forwarded) = scan_node_compat_flag(&args);
     if compat {
-        run_file_with_compat(&stripped, true)
+        run_file_with_compat(&forwarded, true)
     } else {
-        run_file(&args)
+        run_file(&forwarded)
     }
+}
+
+/// Leading-only `--node` scan for the `node` PATH-hijack. Real `node` reads
+/// options until the ENTRY POINT — the script file, `-`/stdin, an `-e`/`--eval`
+/// eval, or the token after `--` — then passes every remaining arg to the script
+/// VERBATIM. nub's `--node` opt-out follows the same grammar: a standalone
+/// `--node` in the LEADING option region is nub-owned (consume it, never forward
+/// it to real Node, run vanilla); a `--node` AT or AFTER the entry point is the
+/// SCRIPT's argument and is forwarded untouched. Returns `(compat, argv)` where
+/// `argv` is the original args with the leading `--node` flags removed (equal to
+/// the input when none were present). Fixes the prior strip, which removed
+/// `--node` from anywhere before a `--` and so ate a program-arg `--node`
+/// (`node app.js --node`), silently flipping compat off and dropping the arg.
+///
+/// Subject detection follows the blessed top-level `run_nub` file-run grammar
+/// (stop at the first bare token or an `-e`/`-p` eval flag) and is arity-UNAWARE:
+/// a value-flag's separate-token value (the `4096` in `--max-old-space-size
+/// 4096`) reads as the entry and stops the scan. This is harmless because every
+/// token from the entry onward is forwarded to real Node verbatim and Node does
+/// the authoritative flag-vs-entry binding; the only input it affects is the rare
+/// `--flag <bare-value> --node <entry>`, which forwards `--node` to Node (a loud
+/// "bad option" error) exactly as `run_nub` does today. It additionally treats a
+/// bare `--` as an explicit terminator (`run_nub` has no `--` arm) so a `--node`
+/// after `--` is the script's, matching real node. Unify with the arity-aware
+/// nubx resolver scan + `run_nub` once universal-nubx (#224) lands a shared
+/// leading-only helper.
+fn scan_node_compat_flag(args: &[String]) -> (bool, Vec<String>) {
+    let mut compat = false;
+    let mut forwarded = Vec::with_capacity(args.len());
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        // `--` ends nub's option region: from here every token (including a
+        // `--node`) is the script's — forward verbatim and stop interpreting.
+        if arg == "--" {
+            forwarded.extend(args[i..].iter().cloned());
+            break;
+        }
+        // A standalone LEADING `--node` is nub's compat opt-out: consume it (never
+        // forward to real Node) and flip compat. Only reachable while still in the
+        // leading option region — the entry-point arm below breaks out first.
+        if arg == "--node" {
+            compat = true;
+            i += 1;
+            continue;
+        }
+        // The entry point: the first bare (non-flag) token, `-` (stdin), or an
+        // eval flag whose value + trailing argv are the script's (mirrors
+        // `run_nub`'s eval arm — needed so `node -e --node` keeps `--node` as the
+        // eval code). From here, everything is forwarded verbatim.
+        if !arg.starts_with('-') || arg == "-" || matches!(arg, "-e" | "--eval" | "-p" | "--print")
+        {
+            forwarded.extend(args[i..].iter().cloned());
+            break;
+        }
+        // Any other leading flag (a Node option, an inline `--flag=value`, `-r`,
+        // …): forward verbatim and keep scanning the leading region.
+        forwarded.push(args[i].clone());
+        i += 1;
+    }
+    (compat, forwarded)
 }
 
 // ── Subcommand implementations ───────────────────────────────────────
@@ -8341,6 +8389,47 @@ mod tests {
         // A PM-shim name still classifies as a shim, dev-suffixed or not.
         assert!(matches!(Argv0::classify("pnpm"), Argv0::PmShim(_)));
         assert!(matches!(Argv0::classify("pnpm-dev"), Argv0::PmShim(_)));
+    }
+
+    #[test]
+    fn node_hijack_strips_only_a_leading_node_flag() {
+        let s = |args: &[&str]| {
+            let owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+            let (compat, fwd) = scan_node_compat_flag(&owned);
+            (compat, fwd.join(" "))
+        };
+
+        // No `--node`: argv is forwarded byte-for-byte, compat off.
+        assert_eq!(s(&["app.js", "a", "b"]), (false, "app.js a b".into()));
+        // A LEADING standalone `--node` is nub's opt-out: consumed + compat on.
+        assert_eq!(s(&["--node", "app.js"]), (true, "app.js".into()));
+        // The reported bug: a `--node` AFTER the entry point is the script's arg —
+        // forwarded verbatim, compat stays OFF (was eaten + flipped compat before).
+        assert_eq!(s(&["app.js", "--node"]), (false, "app.js --node".into()));
+        assert_eq!(
+            s(&["app.js", "a", "--node", "b"]),
+            (false, "app.js a --node b".into())
+        );
+        // Leading Node options precede the entry; a leading `--node` among them is
+        // still nub's, a post-entry one is the script's.
+        assert_eq!(
+            s(&["--inspect", "--node", "app.js", "--node"]),
+            (true, "--inspect app.js --node".into())
+        );
+        // `--` ends nub's option region: a `--node` after it is a program arg.
+        assert_eq!(
+            s(&["--node", "--", "app.js", "--node"]),
+            (true, "-- app.js --node".into())
+        );
+        // Eval entry: a `--node` after `-e`/`-p` is the script's (and `node -e
+        // --node` keeps `--node` as the eval code).
+        assert_eq!(s(&["-e", "--node"]), (false, "-e --node".into()));
+        assert_eq!(
+            s(&["--node", "-p", "code", "--node"]),
+            (true, "-p code --node".into())
+        );
+        // stdin entry (`-`): trailing `--node` is the script's.
+        assert_eq!(s(&["-", "--node"]), (false, "- --node".into()));
     }
 
     // ── nub pm verbs + PM-verb redirect ─────────────────────────────────
