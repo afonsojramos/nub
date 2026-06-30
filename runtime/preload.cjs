@@ -35,6 +35,22 @@
 // test-cjs-esm-warn, test-disable-require-module-with-detection,
 // test-esm-type-field-errors-2, parallel/test-require-mjs.)
 
+// Electron self-disable (issue #246). Bail before any augmentation when this
+// preload runs inside an Electron process: the fast-tier `module.registerHooks`
+// load hook below DEADLOCKS Electron's main-process module bootstrap (the call
+// returns, then Electron's own synchronous internal module loads hang through the
+// installed hook), and Electron's app JS is pre-bundled (the bundler owns TS) so
+// nub's transpile/polyfills add nothing. `process.versions.electron` is set in
+// EVERY Electron process (main / renderer / utility / an ELECTRON_RUN_AS_NODE
+// child) and absent in plain Node, so this never fires for a normal script. This
+// is the JS half of the #246 fix; the dominant half is NOT injecting the
+// snapshot-crashing `--experimental-shadow-realm` flag (the harmony-flag policy in
+// feature_matrix), which crashes Electron BEFORE this point. Top-level `return` is
+// legal in a CommonJS module wrapper.
+if (process.versions.electron) {
+  return;
+}
+
 const { createRequire } = require("node:module");
 const module_ = require("node:module");
 

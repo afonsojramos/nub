@@ -396,13 +396,17 @@ mod tests {
     }
 
     #[test]
-    fn shadow_realm_injected_across_the_whole_floor() {
-        // ShadowRealm: flag exists from 18.13/19.0 (below the floor), never made
-        // default-on through Node 26 (TC39 Stage 3). Inject from 18.19 to infinity.
+    fn shadow_realm_never_injected() {
+        // ShadowRealm is DELIBERATELY not auto-unflagged (the harmony-flag policy):
+        // `--experimental-shadow-realm` implies V8's `--harmony-shadow-realm`, which
+        // changes the isolate's V8-flag hash and crashes embedded Node booting from a
+        // context snapshot (Electron) in CreateEnvironment — before any preload JS,
+        // so a self-disable can't catch it (#246). Never inject it, at any version.
+        // The categorical guard lives in feature_matrix (no_v8_harmony_flag_in_unflag_set).
         let s = "--experimental-shadow-realm";
-        assert!(compute_inject_flags(v(18, 19, 0), &[], None, false).contains(&s));
-        assert!(compute_inject_flags(v(22, 19, 0), &[], None, false).contains(&s));
-        assert!(compute_inject_flags(v(26, 0, 0), &[], None, false).contains(&s));
+        assert!(!compute_inject_flags(v(18, 19, 0), &[], None, false).contains(&s));
+        assert!(!compute_inject_flags(v(22, 19, 0), &[], None, false).contains(&s));
+        assert!(!compute_inject_flags(v(26, 0, 0), &[], None, false).contains(&s));
     }
 
     #[test]
