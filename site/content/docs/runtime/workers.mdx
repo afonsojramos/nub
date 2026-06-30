@@ -59,7 +59,7 @@ Vite, webpack, and esbuild trace the `new URL("./worker.ts", import.meta.url)` p
 
 A bare relative string resolves against `process.cwd()`, not the calling module: `new Worker("./worker.ts")` matches `node:worker_threads` and Bun. It works when the process is launched from the directory the path is relative to, but it is not module-relative and breaks for a nested file run from elsewhere.
 
-A `data:` URL runs directly. A `blob:` URL from `URL.createObjectURL(blob)` is the WHATWG inline-worker mechanism — Nub snapshots the Blob's source synchronously at `createObjectURL` time and spawns it. For a raw source string, pass `{ eval: true }` and Nub runs the first argument as the worker's source, mirroring `node:worker_threads` (the spec has no inline-string form — `blob:` and `data:` are its standard inline mechanisms). An `eval` worker's `self`/`postMessage` scope is present on the fast tier (Node 22.15+); below it, use `node:worker_threads.parentPort`.
+A `data:` URL runs directly. A `blob:` URL from `URL.createObjectURL(blob)` is the WHATWG inline-worker mechanism — Nub snapshots the Blob's source synchronously at `createObjectURL` time and spawns it. For a raw source string, pass `{ eval: true }` and Nub runs the first argument as the worker's source, mirroring `node:worker_threads` (the spec has no inline-string form — `blob:` and `data:` are its standard inline mechanisms).
 
 The second argument is a `WorkerOptions` object:
 

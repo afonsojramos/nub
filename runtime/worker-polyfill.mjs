@@ -150,15 +150,9 @@ export function installWorkerPolyfill() {
       // { eval: true })` runs the first arg as raw source, mirroring
       // node:worker_threads. Gated STRICTLY on `options.eval === true` — never
       // content-sniffed — so the spec URL path below is untouched for every web
-      // caller. TIER GAP (verified, documented): the worker-side web scope
-      // (self/postMessage/close) is installed by nub's worker preload, which
-      // reaches an eval worker only on the FAST tier (Node 22.15+, sync
-      // module.registerHooks). On the COMPAT tier (18.19–22.14, async
-      // loader-worker) the preload does not run for an eval worker, so it has no
-      // `self` there — matching plain Node, where an eval worker never has `self`
-      // either (purely additive: nub ADDS self on the fast tier, removes nothing).
-      // A compat-tier eval worker uses `node:worker_threads.parentPort` directly,
-      // or a `data:`/file worker (those DO get the preload on every tier).
+      // caller. execArgv (carrying nub's preload) is forwarded for eval workers
+      // too, so they receive the worker-side scope (self/postMessage) like a
+      // file/data worker — verified across the support range (Node 18.19–26).
       const isEval = options.eval === true;
 
       // The WHATWG Worker constructor accepts a script URL. Per §10.2.6.3 the
