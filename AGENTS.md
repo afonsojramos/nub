@@ -385,6 +385,16 @@ This matters because the codebase has gone through posture shifts (soft-fork-on,
 
 Chat replies should use the **minimum words that convey every point**. Tone: a brilliant subject-matter expert who is terse by nature. Sentence fragments, conversational shorthand, no preamble, no recap, no hedging. State conclusions; cut throat-clearing and restatements of the question. This governs chat replies only — docs/code keep their normal rigor. (Concision ≠ omission: keep every distinct point, just strip the words around it.) Same rule, with the full cross-surface tone bar, lives in [`PROSE.md`](PROSE.md).
 
+## Chat responses: references must be CLICKABLE (HIGH PRIORITY)
+
+The harness renders GitHub-flavored markdown in a terminal that supports OSC-8 hyperlinks, so EVERY reference you surface in chat is a markdown link, never a bare URL, a plain `#N`, or a backticked path. Be EAGER — every issue/PR, file, fray thread, design doc, or plan you mention gets a clickable link, every time.
+
+- **GitHub issues/PRs** — render `#N` as `[#N](https://github.com/<owner>/<repo>/issues/N)` (the `/issues/N` form redirects to `/pull/N`, so it works for both). Never emit a bare `#N`.
+- **Local files / fray threads / docs / plans** — link via the reader's IDE URI scheme so a click opens the file in their editor: `[name](cursor://file/<absolute-path>)` or `[name](vscode://file/<absolute-path>)` (append `:<line>` to jump to a line). Use whichever scheme the reader's IDE uses; `cursor://` and `vscode://` are examples, not the only schemes.
+- **Bare URLs** — wrap in `[text](url)`; never paste a raw URL where a link is meant.
+
+(This governs chat output only. In tracked files, keep links relative/agent-agnostic and never hardcode a machine-specific absolute path or username.)
+
 ## User-facing copy: prose & tone
 
 **The cross-project copywriting/prose/tone guide is [`PROSE.md`](PROSE.md) — read it before writing any GitHub issue/PR comment, docs page, blog/marketing copy, or release note.** It is also surfaced as the `prose` skill (`.claude/skills/prose/SKILL.md`), which auto-triggers on copy work and points back to PROSE.md as the canonical source (the skill never duplicates it). It is the single source of truth for register, sentence/heading mechanics (never start a sentence or heading with inline code, command-headed sections, etc.), scannability, inline-code-pileup avoidance, description-field rules, real-output-only mockups, GitHub-response tone, markdown mechanics (never hard-wrap paragraphs), and release-notes shape. The sections below carry ONLY the nub-SPECIFIC copy rules that layer on top of it.
