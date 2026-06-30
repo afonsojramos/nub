@@ -151,6 +151,32 @@ fn workspace_member_lock_yaml_migrates() {
     );
 }
 
+/// `nub ci` is a frozen, ephemeral install: it installs fine from an existing
+/// `lock.yaml` (read-both) but must NEVER migrate or otherwise mutate a
+/// checked-in file — no rename, no `package.lock` written, `lock.yaml` left
+/// byte-for-byte untouched.
+#[test]
+fn ci_never_migrates_or_mutates_the_lockfile() {
+    let dir = project(
+        "ci",
+        &[("package.json", EMPTY_PKG), ("lock.yaml", EMPTY_LOCK)],
+    );
+    let (stdout, stderr, code) = run(&dir, &["ci"]);
+    assert_eq!(
+        code, 0,
+        "ci must install from lock.yaml: {stdout}\n{stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("lock.yaml")).unwrap(),
+        EMPTY_LOCK,
+        "ci must leave lock.yaml byte-for-byte untouched"
+    );
+    assert!(
+        !dir.join("package.lock").exists(),
+        "ci must not rename or write package.lock — a frozen install never mutates checked-in files"
+    );
+}
+
 /// Read-both: a read-only op resolves a project still carrying the legacy
 /// `lock.yaml` without migrating it (read-only must not rewrite the tree).
 #[test]

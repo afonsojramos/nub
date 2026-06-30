@@ -1174,10 +1174,9 @@ pub fn run_ci(flags: CiFlags) -> Result<i32> {
     // ci's frozen node_modules is COPY-relocatable across multi-stage Docker
     // (#241); isolation/phantom-dep protection is preserved.
     let session = super::engine_session_ci(flags.dir.as_deref())?;
-    // Transitional: rename a legacy `lock.yaml` to `package.lock` before the
-    // engine resolves (no-op unless this is a nub-identity project carrying the
-    // old name).
-    super::migrate_session_lockfile(&session);
+    // `ci` is a frozen, ephemeral install — it NEVER mutates checked-in files,
+    // so it does NOT migrate a legacy `lock.yaml`. Read-both still lets it
+    // install from an existing `lock.yaml`; it just leaves the file untouched.
     if let Some(err) = pnpm_lockfile_version_preflight(&session) {
         return Err(err);
     }
