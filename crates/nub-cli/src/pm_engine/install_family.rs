@@ -360,11 +360,13 @@ fn run_add(typed: &str, args: &[String]) -> Result<i32> {
             &yarn_remedy("add", &verb.packages),
         ));
     }
-    finish_quieted(
+    let code = finish_quieted(
         &globals.output,
         &session,
         aube::commands::add::run(verb, globals.effective_filter()),
-    )
+    )?;
+    stamp_if_virgin(&session, code);
+    Ok(code)
 }
 
 fn run_remove(typed: &str, args: &[String]) -> Result<i32> {
@@ -377,11 +379,13 @@ fn run_remove(typed: &str, args: &[String]) -> Result<i32> {
             &yarn_remedy("remove", &verb.packages),
         ));
     }
-    finish_quieted(
+    let code = finish_quieted(
         &globals.output,
         &session,
         aube::commands::remove::run(verb, globals.effective_filter()),
-    )
+    )?;
+    stamp_if_virgin(&session, code);
+    Ok(code)
 }
 
 fn run_update(typed: &str, args: &[String]) -> Result<i32> {
@@ -404,11 +408,13 @@ fn run_update(typed: &str, args: &[String]) -> Result<i32> {
             &yarn_remedy("upgrade", &verb.packages),
         ));
     }
-    finish_code_quieted(
+    let code = finish_code_quieted(
         &globals.output,
         &session,
         aube::commands::update::run(verb, globals.effective_filter()),
-    )
+    )?;
+    stamp_if_virgin(&session, code);
+    Ok(code)
 }
 
 fn run_dedupe(typed: &str, args: &[String]) -> Result<i32> {
@@ -1051,10 +1057,22 @@ pub fn run_install(flags: InstallFlags) -> Result<i32> {
     // signal ⇒ `false` ⇒ no write — nub never imposes its brand on another PM's
     // project (the symmetric brand boundary). `devEngines` is NOT written here:
     // that heavier exclusivity stamp stays on the explicit `nub pm use nub`.
+    stamp_if_virgin(&session, code);
+    Ok(code)
+}
+
+/// Stamp the virgin `packageManager` marker after a successful package.json-
+/// modifying engine verb (`install`/`add`/`remove`/`update`). Gated on
+/// `session.truly_fresh` — captured at session build, BEFORE the verb wrote
+/// the lockfile — so it fires exactly once, on the FIRST package-manager
+/// operation in a project nub is first to touch, and the gate self-corrects:
+/// a non-virgin project (any lockfile/declaration present) never stamps,
+/// whichever verb ran. `import` is intentionally not a caller — it converts an
+/// existing FOREIGN lockfile, so its project is non-virgin by construction.
+fn stamp_if_virgin(session: &EngineSession, code: i32) {
     if code == 0 && session.truly_fresh {
         stamp_virgin_package_manager(&session.cwd);
     }
-    Ok(code)
 }
 
 /// Write `packageManager: "nub@<exact-version>"` into the project manifest of a
