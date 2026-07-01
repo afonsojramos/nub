@@ -26,7 +26,8 @@ pub use config::{
     workspace_yaml_target,
 };
 pub use edits::{
-    edit_setting_map, edit_workspace_yaml, remove_map_entry, remove_setting_entry, upsert_map_entry,
+    add_to_workspace_yaml_string_list, edit_setting_map, edit_workspace_yaml, remove_map_entry,
+    remove_setting_entry, upsert_map_entry,
 };
 pub use mutations::{
     ALLOW_BUILDS_REVIEW_PLACEHOLDER, add_to_allow_builds, remove_workspace_patched_dependency,
@@ -852,5 +853,46 @@ patchedDependencies:
             !written.contains("a@1.0.0"),
             "removed entry still present:\n{written}"
         );
+    }
+
+    #[test]
+    fn add_to_workspace_yaml_string_list_creates_appends_dedupes_and_preserves() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pnpm-workspace.yaml");
+        std::fs::write(&path, "packages:\n  - 'src/*'\n").unwrap();
+
+        // First append creates the sequence key.
+        let added = add_to_workspace_yaml_string_list(
+            &path,
+            "minimumReleaseAgeExclude",
+            &["caniuse-lite@1.0.0".to_string(), "vite@6.0.0".to_string()],
+        )
+        .unwrap();
+        assert_eq!(added, 2);
+        let cfg = WorkspaceConfig::load(dir.path()).unwrap();
+        assert_eq!(
+            cfg.minimum_release_age_exclude.as_deref(),
+            Some(["caniuse-lite@1.0.0".to_string(), "vite@6.0.0".to_string()].as_slice())
+        );
+
+        // Re-append one existing + one new: only the new lands.
+        let added = add_to_workspace_yaml_string_list(
+            &path,
+            "minimumReleaseAgeExclude",
+            &["vite@6.0.0".to_string(), "esbuild@0.20.0".to_string()],
+        )
+        .unwrap();
+        assert_eq!(added, 1);
+
+        // Unrelated keys survive; re-adding only duplicates is a no-op write.
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("src/*"), "packages lost:\n{written}");
+        let added = add_to_workspace_yaml_string_list(
+            &path,
+            "minimumReleaseAgeExclude",
+            &["vite@6.0.0".to_string()],
+        )
+        .unwrap();
+        assert_eq!(added, 0);
     }
 }

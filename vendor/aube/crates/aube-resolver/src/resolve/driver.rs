@@ -118,6 +118,14 @@ pub(crate) struct ResolveDriver<'a> {
     /// versions must clear — the exclude relaxes only the
     /// minimumReleaseAge age-gate, never the time-based wall.
     time_cutoff: Option<String>,
+    /// The `minimumReleaseAge` cutoff alone (never merged with the
+    /// TimeBased wall), retained so `process_task` can detect a loose-mode
+    /// fallback pick: a `Found` version whose publish time is past this
+    /// cutoff and which isn't age-exempt is the lowest-satisfying fallback,
+    /// which the embedder auto-persists to `minimumReleaseAgeExclude`.
+    /// `None` when the age gate is off or strict (strict aborts before a
+    /// fallback pick is ever returned).
+    age_gate_cutoff: Option<String>,
     /// Direct deps still awaiting a terminal outcome (resolved,
     /// dropped, or filtered). Drops to zero once wave 0 completes and
     /// triggers the TimeBased cutoff computation.
@@ -182,6 +190,14 @@ impl<'a> ResolveDriver<'a> {
         if let Some(c) = published_by.as_deref() {
             tracing::debug!("minimumReleaseAge cutoff: {}", c);
         }
+        // The age-gate cutoff for loose-mode fallback detection: the same
+        // computed cutoff, but only in non-strict mode (strict aborts on
+        // `AgeGated` and never returns a fallback pick to detect). Kept
+        // separate from `published_by`, which the TimeBased wall later merges.
+        let age_gate_cutoff: Option<String> = match resolver.minimum_release_age.as_ref() {
+            Some(m) if !m.strict => published_by.clone(),
+            _ => None,
+        };
 
         seed_direct_deps(
             manifests,
@@ -251,6 +267,7 @@ impl<'a> ResolveDriver<'a> {
             deferred_transitives: Vec::new(),
             published_by,
             time_cutoff: None,
+            age_gate_cutoff,
             direct_deps_pending,
             cutoff_pending,
             needs_time,
@@ -1062,6 +1079,23 @@ impl<'a> ResolveDriver<'a> {
             {
                 self.resolved_times.insert(dep_path.clone(), t.clone());
             }
+        }
+
+        // Loose-mode age-gate fallback surfacing. When `minimumReleaseAge` is
+        // set without strict mode, `pick_version` returns the lowest satisfying
+        // version even when it's younger than the cutoff. A `Found` pick whose
+        // publish time is past `age_gate_cutoff` — and which isn't age-exempt —
+        // is exactly that fallback (a within-cutoff pick would be `<=`; strict
+        // mode aborts before returning `Found`). Surface it so the embedder can
+        // auto-persist the package to `minimumReleaseAgeExclude`, matching
+        // pnpm's loose-mode behavior. The sink is inert unless the embedder
+        // armed it, so standalone aube is unaffected.
+        if let Some(cutoff) = self.age_gate_cutoff.as_deref()
+            && let Some(pub_time) = picked_publish_time.as_deref()
+            && pub_time > cutoff
+            && !is_age_exempt(&version, None)
+        {
+            aube_util::record_age_gated_fallback_pick(task.registry_name(), &version);
         }
 
         // Record root dep

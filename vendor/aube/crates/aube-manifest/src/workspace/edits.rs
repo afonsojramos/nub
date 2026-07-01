@@ -475,6 +475,41 @@ pub(super) fn workspace_yaml_submap<'a>(
 ///
 /// For brand-new or empty files there is no source to preserve, so the
 /// helper falls back to `yaml_serde::to_string` for the initial write.
+/// Append `values` to the top-level string-sequence `key` in the workspace
+/// yaml at `path`, creating the file and the sequence as needed, skipping
+/// values already present. Returns how many were newly added (0 = no write).
+/// Comment- and format-preserving via [`edit_workspace_yaml`].
+///
+/// Used for auto-persisted list settings whose home is the workspace yaml
+/// (e.g. `minimumReleaseAgeExclude`). The values are stored as plain scalars;
+/// a non-sequence existing value under `key` is left untouched and nothing is
+/// added, so a hand-authored inline form is never clobbered.
+pub fn add_to_workspace_yaml_string_list(
+    path: &Path,
+    key: &str,
+    values: &[String],
+) -> Result<usize, crate::Error> {
+    use yaml_serde::Value;
+    let mut added = 0usize;
+    edit_workspace_yaml(path, |map| {
+        let entry = map
+            .entry(Value::String(key.to_string()))
+            .or_insert_with(|| Value::Sequence(Vec::new()));
+        let Some(seq) = entry.as_sequence_mut() else {
+            return Ok(());
+        };
+        for v in values {
+            let present = seq.iter().any(|e| e.as_str() == Some(v.as_str()));
+            if !present {
+                seq.push(Value::String(v.clone()));
+                added += 1;
+            }
+        }
+        Ok(())
+    })?;
+    Ok(added)
+}
+
 pub fn edit_workspace_yaml<F>(path: &Path, f: F) -> Result<PathBuf, crate::Error>
 where
     F: FnOnce(&mut yaml_serde::Mapping) -> Result<(), crate::Error>,

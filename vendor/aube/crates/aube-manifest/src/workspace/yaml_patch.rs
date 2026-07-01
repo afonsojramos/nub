@@ -137,15 +137,15 @@ fn diff_into(
                     let mut sub = route.to_vec();
                     sub.push(key.to_string());
                     diff_into(bm, am, &sub, path, out)?;
-                } else if matches!(after_v.as_mapping(), Some(m) if !m.is_empty()) {
-                    // Type-change to a non-empty sub-mapping (e.g.
-                    // scalar -> nested mapping). yamlpatch's
-                    // Op::Replace serializes the mapping value via
-                    // the same path as Op::Add, which strips nested
-                    // indentation and lands the children at the
-                    // parent's column. Split into Remove + manual
-                    // injection so step 2 can re-emit the children
-                    // with their canonical indent.
+                } else if needs_manual_injection(after_v) {
+                    // Change into a non-empty block mapping or sequence (e.g.
+                    // scalar -> nested mapping, or an appended list item).
+                    // yamlpatch's Op::Replace serializes such values via the
+                    // same path as Op::Add, which strips the block structure
+                    // (mapping children land at the parent's column; a sequence
+                    // renders inline and breaks the document). Split into
+                    // Remove + manual injection so step 2 re-emits the value
+                    // with its canonical block indentation.
                     out.push(Edit::Yp(Patch {
                         route: route_obj.with_key(key.to_string()),
                         operation: Op::Remove,
@@ -166,6 +166,16 @@ fn diff_into(
         }
     }
     Ok(())
+}
+
+/// Whether `value` must be re-emitted through the manual block injector
+/// rather than a yamlpatch `Op::Add`/`Op::Replace`. True for a non-empty
+/// mapping or a non-empty sequence — both of which yamlpatch renders without
+/// the block indentation the source needs, producing invalid YAML. Empty
+/// containers and scalars round-trip fine through yamlpatch.
+fn needs_manual_injection(value: &Value) -> bool {
+    matches!(value.as_mapping(), Some(m) if !m.is_empty())
+        || matches!(value.as_sequence(), Some(s) if !s.is_empty())
 }
 
 /// Inject a fresh `<key>: <value>` block-style entry into
