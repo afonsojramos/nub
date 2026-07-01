@@ -4409,7 +4409,11 @@ fn run_exec_with_dlx(
             if let Some(runner) = pnp_bin_runner_path() {
                 let mut cmd_args = vec![runner, bin.to_string()];
                 cmd_args.extend(args.iter().cloned());
-                return run_file_with_compat(&cmd_args, compat_mode);
+                // This is still a bin LAUNCH (a PnP-resolved local bin), so it
+                // carries `npm_config_user_agent` like the node_modules/.bin path
+                // above — `run_file_in_dir` directly (not run_file_with_compat)
+                // to pass `exec_ua=true`. `cwd` is the PnP tree already resolved.
+                return run_file_in_dir(&cmd_args, compat_mode, &cwd, true);
             }
         }
     }
