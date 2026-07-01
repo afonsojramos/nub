@@ -433,7 +433,10 @@ fn run_dedupe(typed: &str, args: &[String]) -> Result<i32> {
             "yarn dedupe",
         ));
     }
-    finish_quieted(&globals.output, &session, aube::commands::dedupe::run(verb))
+    super::min_release_age::arm();
+    let code = finish_quieted(&globals.output, &session, aube::commands::dedupe::run(verb))?;
+    super::min_release_age::persist(&session.cwd, code == 0, &globals.output);
+    Ok(code)
 }
 
 fn run_prune(typed: &str, args: &[String]) -> Result<i32> {

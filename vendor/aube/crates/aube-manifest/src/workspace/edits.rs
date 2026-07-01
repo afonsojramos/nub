@@ -475,39 +475,46 @@ pub(super) fn workspace_yaml_submap<'a>(
 ///
 /// For brand-new or empty files there is no source to preserve, so the
 /// helper falls back to `yaml_serde::to_string` for the initial write.
-/// Append `values` to the top-level string-sequence `key` in the workspace
-/// yaml at `path`, creating the file and the sequence as needed, skipping
-/// values already present. Returns how many were newly added (0 = no write).
-/// Comment- and format-preserving via [`edit_workspace_yaml`].
-///
-/// Used for auto-persisted list settings whose home is the workspace yaml
-/// (e.g. `minimumReleaseAgeExclude`). The values are stored as plain scalars;
-/// a non-sequence existing value under `key` is left untouched and nothing is
-/// added, so a hand-authored inline form is never clobbered.
-pub fn add_to_workspace_yaml_string_list(
+/// Read the top-level string-sequence `key` from the workspace yaml at `path`.
+/// Returns an empty vec when the file, the key, or a sequence value is absent
+/// (a scalar/other value under `key` yields empty — the caller decides how to
+/// reconcile). Used to merge an auto-persisted list setting with what's already
+/// recorded before writing the canonical form back.
+pub fn read_workspace_yaml_string_list(path: &Path, key: &str) -> Vec<String> {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(doc) = crate::parse_yaml::<yaml_serde::Value>(path, content) else {
+        return Vec::new();
+    };
+    doc.as_mapping()
+        .and_then(|m| m.get(yaml_serde::Value::String(key.to_string())))
+        .and_then(|v| v.as_sequence())
+        .map(|seq| {
+            seq.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Set the top-level string-sequence `key` in the workspace yaml at `path` to
+/// exactly `values`, creating the file and key as needed. Comment- and
+/// format-preserving via [`edit_workspace_yaml`] (a no-op when the sequence is
+/// already `values`). Replace semantics — the caller passes the fully-merged
+/// canonical list, so callers that grow a list must read-merge first (see
+/// [`read_workspace_yaml_string_list`]).
+pub fn set_workspace_yaml_string_list(
     path: &Path,
     key: &str,
     values: &[String],
-) -> Result<usize, crate::Error> {
+) -> Result<PathBuf, crate::Error> {
     use yaml_serde::Value;
-    let mut added = 0usize;
     edit_workspace_yaml(path, |map| {
-        let entry = map
-            .entry(Value::String(key.to_string()))
-            .or_insert_with(|| Value::Sequence(Vec::new()));
-        let Some(seq) = entry.as_sequence_mut() else {
-            return Ok(());
-        };
-        for v in values {
-            let present = seq.iter().any(|e| e.as_str() == Some(v.as_str()));
-            if !present {
-                seq.push(Value::String(v.clone()));
-                added += 1;
-            }
-        }
+        let seq: Vec<Value> = values.iter().map(|v| Value::String(v.clone())).collect();
+        map.insert(Value::String(key.to_string()), Value::Sequence(seq));
         Ok(())
-    })?;
-    Ok(added)
+    })
 }
 
 pub fn edit_workspace_yaml<F>(path: &Path, f: F) -> Result<PathBuf, crate::Error>
