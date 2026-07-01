@@ -101,6 +101,16 @@ pub fn expand_env_map(map: &mut HashMap<String, String>) -> &mut HashMap<String,
 /// expansion-changed keys — which Node's `--env-file` can't reproduce — get
 /// injected.
 pub fn load_env_files_raw(project_root: &Path) -> HashMap<String, String> {
+    load_env_files_raw_reporting(project_root).0
+}
+
+/// The raw loader, additionally reporting whether a `.env` FILE declared
+/// `NODE_ENV` (always dropped from the returned map — dotenv/@next/env/Vite
+/// parity, #263). The bool is consumed by [`load_env_files`] (the direct run/file
+/// injection path) to warn the user; the plain [`load_env_files_raw`] wrapper
+/// discards it because the watch path defers `NODE_ENV` to Node's own `--env-file`
+/// and so is NOT the one ignoring it — warning there would be false.
+fn load_env_files_raw_reporting(project_root: &Path) -> (HashMap<String, String>, bool) {
     let files = env_file_names();
 
     let mut result = HashMap::new();
@@ -123,7 +133,7 @@ pub fn load_env_files_raw(project_root: &Path) -> HashMap<String, String> {
                 // production-compiled chunks (two `ReactSharedInternals` → null hooks
                 // dispatcher → `useContext` of null), #263. Reaching here means ambient
                 // `NODE_ENV` is unset (shell-wins above), so this value WOULD have been
-                // injected — drop it and warn once.
+                // injected — drop it and flag it for the caller's warning.
                 if key == "NODE_ENV" {
                     node_env_ignored = true;
                     continue;
@@ -134,18 +144,13 @@ pub fn load_env_files_raw(project_root: &Path) -> HashMap<String, String> {
         }
     }
 
-    if node_env_ignored {
-        warn_node_env_from_dotenv_ignored();
-    }
-
-    result
+    (result, node_env_ignored)
 }
 
-/// Emit the "ignoring `.env` `NODE_ENV`" notice at most once per process. A
-/// `.env`-file `NODE_ENV` is dropped by [`load_env_files_raw`] (dotenv/Next/Vite
-/// parity, #263); this tells the user their value was ignored and where to set it
-/// instead. `Once` keeps the run path (`load_env_files`) and the watch path (which
-/// both funnel through the raw loader) from double-warning.
+/// Emit the "ignoring `.env` `NODE_ENV`" notice at most once per process. Called
+/// only on the direct run/file injection path ([`load_env_files`]), where the
+/// dropped `NODE_ENV` genuinely never reaches the child; the watch path defers to
+/// Node's `--env-file` and does not warn. `Once` guards against any repeat.
 fn warn_node_env_from_dotenv_ignored() {
     use std::sync::Once;
     static WARNED: Once = Once::new();
@@ -161,11 +166,19 @@ fn warn_node_env_from_dotenv_ignored() {
 /// (from the parent process) always wins — values already set in
 /// the process environment are not overridden.
 pub fn load_env_files(project_root: &Path) -> HashMap<String, String> {
-    let mut result = load_env_files_raw(project_root);
+    let (mut result, node_env_ignored) = load_env_files_raw_reporting(project_root);
 
     // Expand ${VAR} references within values. Multi-pass to handle
     // nested references like A=hello, B=${A}_world, C=${B}_!.
     expand_env_map(&mut result);
+
+    // Warn only here — this map is injected straight into the child via
+    // `Command::env`, so a dropped `.env` `NODE_ENV` truly never reaches it. The
+    // watch path (plain `load_env_files_raw`) hands the files to Node's `--env-file`
+    // instead, so nub isn't ignoring `NODE_ENV` there and must not claim to.
+    if node_env_ignored {
+        warn_node_env_from_dotenv_ignored();
+    }
 
     result
 }
