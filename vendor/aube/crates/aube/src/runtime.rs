@@ -192,14 +192,8 @@ pub(crate) fn lockfile_node_pin(
     project_dir: &Path,
     manifest: &PackageJson,
 ) -> Option<aube_lockfile::RuntimePin> {
-    let pinned = std::iter::once(aube_util::embedder().lockfile_basename)
-        .chain(
-            aube_util::embedder()
-                .lockfile_legacy_basenames
-                .iter()
-                .copied(),
-        )
-        .chain(std::iter::once("pnpm-lock.yaml"))
+    let pinned = [aube_util::embedder().lockfile_basename, "pnpm-lock.yaml"]
+        .iter()
         .any(|name| {
             std::fs::read_to_string(project_dir.join(name))
                 .map(|s| s.contains("specifier: runtime:"))

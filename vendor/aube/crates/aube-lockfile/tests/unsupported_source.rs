@@ -23,7 +23,6 @@ static STRICT: Embedder = Embedder {
     self_names: &["aube"],
     compatible_names: &["pnpm"],
     lockfile_basename: "aube-lock.yaml",
-    lockfile_legacy_basenames: &[],
     workspace_yaml: Some("aube-workspace.yaml"),
     manifest_namespace: "aube",
     env_prefix: Some("AUBE"),

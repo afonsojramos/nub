@@ -20,7 +20,6 @@ static MYTOOL: Embedder = Embedder {
     self_names: &["mytool"],
     compatible_names: &["pnpm"],
     lockfile_basename: "lock.yaml",
-    lockfile_legacy_basenames: &[],
     workspace_yaml: Some("mytool-workspace.yaml"),
     manifest_namespace: "mytool",
     env_prefix: Some("MYTOOL"),

@@ -130,11 +130,11 @@ pass "native modules loadable: $LOAD_OUT"
 echo ""
 echo "── frozen install runs trusted builds (Decision 2 regression) ────────────"
 LOCKFILE=""
-for cand in package.lock lock.yaml aube-lock.yaml pnpm-lock.yaml; do
+for cand in lock.yaml aube-lock.yaml pnpm-lock.yaml; do
   [ -f "$PROJ_ALLOW/$cand" ] && { LOCKFILE="$cand"; break; }
 done
 [ -n "$LOCKFILE" ] \
-  || fail "fresh install produced no lockfile in $PROJ_ALLOW (expected package.lock, lock.yaml, aube-lock.yaml, or pnpm-lock.yaml)"
+  || fail "fresh install produced no lockfile in $PROJ_ALLOW (expected lock.yaml, aube-lock.yaml, or pnpm-lock.yaml)"
 
 PROJ_FROZEN="$SANDBOX_ROOT/floor-frozen-clone"
 mkdir -p "$PROJ_FROZEN"

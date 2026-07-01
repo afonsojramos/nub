@@ -78,17 +78,6 @@ pub struct Embedder {
     /// lockfile indistinguishable from the incumbent's in the
     /// lockfile-candidate set (`io.rs` / `clean.rs` / `pack.rs`).
     pub lockfile_basename: &'static str,
-    /// Former canonical lockfile basenames still RECOGNIZED ON READ during a
-    /// rename transition, but never written. The lockfile-candidate machinery
-    /// appends these as [`LockfileKind::Aube`](crate) read-candidates *after*
-    /// the primary [`lockfile_basename`](Self::lockfile_basename), so an
-    /// existing legacy file keeps resolving while every fresh write targets the
-    /// new name. Same per-name invariant as `lockfile_basename` (must contain a
-    /// `.`, must not alias a foreign lockfile). Standalone aube: `&[]` (no
-    /// legacy names — its name has never changed); an embedder mid-rename lists
-    /// the prior name(s) here (nub: `&["lock.yaml"]`, superseded by
-    /// `package.lock`). Additive and no-op for the empty default.
-    pub lockfile_legacy_basenames: &'static [&'static str],
     /// The *branded* workspace-config YAML this tool reads and writes, e.g.
     /// `"aube-workspace.yaml"`. `None` disables the tool's own branded YAML
     /// entirely (the shared `pnpm-workspace.yaml` compatibility surface is
@@ -350,8 +339,6 @@ pub const AUBE: Embedder = Embedder {
     self_names: &["aube"],
     compatible_names: &["pnpm"],
     lockfile_basename: "aube-lock.yaml",
-    // aube's name has never changed — no legacy lockfile names to honor.
-    lockfile_legacy_basenames: &[],
     workspace_yaml: Some("aube-workspace.yaml"),
     manifest_namespace: "aube",
     env_prefix: Some("AUBE"),
@@ -419,19 +406,6 @@ pub fn set_embedder(embedder: &'static Embedder) {
          pick a distinct name so aube's lockfile stays distinguishable in the candidate set",
         embedder.lockfile_basename,
     );
-    // Legacy read-only basenames follow the same invariants as the primary:
-    // they ride the same candidate machinery, so a missing extension or a
-    // foreign-name alias would corrupt the candidate set just as badly.
-    for legacy in embedder.lockfile_legacy_basenames {
-        debug_assert!(
-            legacy.contains('.'),
-            "embedder lockfile_legacy_basenames entry {legacy:?} must contain a `.`",
-        );
-        debug_assert!(
-            !FOREIGN_LOCKFILE_NAMES.contains(legacy),
-            "embedder lockfile_legacy_basenames entry {legacy:?} aliases a foreign package manager's lockfile",
-        );
-    }
     let _ = ACTIVE.set(embedder);
 }
 
@@ -552,7 +526,6 @@ mod tests {
         assert_eq!(id.self_names, &["aube"]);
         assert_eq!(id.compatible_names, &["pnpm"]);
         assert_eq!(id.lockfile_basename, "aube-lock.yaml");
-        assert!(id.lockfile_legacy_basenames.is_empty());
         assert_eq!(id.workspace_yaml, Some("aube-workspace.yaml"));
         assert_eq!(id.manifest_namespace, "aube");
         assert_eq!(id.env_prefix, Some("AUBE"));

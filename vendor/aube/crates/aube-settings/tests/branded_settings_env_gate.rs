@@ -28,7 +28,6 @@ static MYTOOL_NO_BRANDED_ENV: Embedder = Embedder {
     self_names: &["mytool"],
     compatible_names: &["pnpm"],
     lockfile_basename: "lock.yaml",
-    lockfile_legacy_basenames: &[],
     workspace_yaml: Some("mytool-workspace.yaml"),
     manifest_namespace: "mytool",
     // Branded prefix is *still set* — proving the toggle is independent of

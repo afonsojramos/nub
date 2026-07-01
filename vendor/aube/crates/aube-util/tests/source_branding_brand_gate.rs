@@ -25,7 +25,6 @@ static NUBLIKE: Embedder = Embedder {
     self_names: &["nublike"],
     compatible_names: &["pnpm"],
     lockfile_basename: "lock.yaml",
-    lockfile_legacy_basenames: &[],
     workspace_yaml: None,
     manifest_namespace: "",
     env_prefix: None,

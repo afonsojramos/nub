@@ -784,6 +784,7 @@ pub fn remove_state(project_dir: &Path) -> Result<(), std::io::Error> {
 /// any exists.
 fn active_lockfile(project_dir: &Path) -> (String, Option<PathBuf>) {
     let basename = aube_util::embedder().lockfile_basename;
+    let stem = basename.rsplit_once('.').map_or(basename, |(s, _)| s);
     let preferred = aube_lockfile::aube_lock_filename(project_dir);
     let preferred_path = project_dir.join(&preferred);
     if preferred_path.exists() {
@@ -797,22 +798,10 @@ fn active_lockfile(project_dir: &Path) -> (String, Option<PathBuf>) {
             return (basename.to_string(), Some(base));
         }
     }
-    // A legacy canonical name still honored on read during a rename
-    // transition (e.g. nub's `lock.yaml` superseded by `package.lock`): an
-    // unmigrated project must still recognize its lockfile so the freshness
-    // check doesn't loop on "no lockfile found".
-    for legacy in aube_util::embedder().lockfile_legacy_basenames {
-        let legacy_path = project_dir.join(legacy);
-        if legacy_path.exists() {
-            return ((*legacy).to_string(), Some(legacy_path));
-        }
-    }
     // Preserve pnpm-lock.yaml (and its branch variant) as an active
-    // lockfile when the project already uses it. Derived from the shared
-    // branch resolver (`pnpm_lock_filename`), NOT by string-rewriting the
-    // canonical name — the canonical extension may not be `.yaml`.
-    let pnpm_preferred = aube_lockfile::pnpm_lock_filename(project_dir);
-    if pnpm_preferred != "pnpm-lock.yaml" {
+    // lockfile when the project already uses it.
+    let pnpm_preferred = preferred.replacen(&format!("{stem}."), "pnpm-lock.", 1);
+    if pnpm_preferred != preferred {
         let pnpm_branch = project_dir.join(&pnpm_preferred);
         if pnpm_branch.exists() {
             return (pnpm_preferred, Some(pnpm_branch));
