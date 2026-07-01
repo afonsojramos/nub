@@ -12,7 +12,7 @@
 //! - **Interactive TTY** → an arrow-key consent select (Yes / No / Never) on the
 //!   *first* fetch of a spec, then run without re-asking once that spec is
 //!   recorded as consented. Picking **Never** persists the global kill-switch
-//!   `nubx.implicit-dlx = off` (see [`crate::config`]) and disables this whole
+//!   `exec.implicit-dlx = never` (see [`crate::config`]) and disables this whole
 //!   implicit tier until re-enabled.
 //!
 //! `-y`/`--yes` is the explicit non-interactive escape hatch: it lets CI / non-TTY
@@ -42,6 +42,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// Floating-spec consent TTL: 24h, matching pnpm's `dlxCacheMaxAge` (1440 min).
 /// A pinned spec ignores this (immutable identity → consent never expires).
 const FLOATING_TTL_SECS: u64 = 24 * 60 * 60;
+
+/// The abort message printed when `exec.implicit-dlx = never` and the subject
+/// missed every local tier. LOCKED, maintainer-authored copy — reproduce verbatim,
+/// no rewording/capitalization/backtick changes. A test pins the exact bytes.
+const NEVER_ABORT_MESSAGE: &str = "no matching script or executable found.\nto run a package from the remote registry, try `nub dlx`";
 
 /// What the gate decided for an implicit registry fetch.
 pub enum Decision {
@@ -75,7 +80,7 @@ pub fn gate(specs: &[String], yes: bool) -> Decision {
 
     // `-y`: explicit up-front consent — proceed in CI, non-TTY, or a terminal.
     // Record only a spec we don't already hold a live grant for (don't churn it).
-    // `-y` is the documented escape hatch out of an `off` kill-switch, so it is
+    // `-y` is the documented escape hatch out of a `never` kill-switch, so it is
     // checked BEFORE the kill-switch below.
     if yes {
         return Decision::Proceed {
@@ -83,21 +88,17 @@ pub fn gate(specs: &[String], yes: bool) -> Decision {
         };
     }
 
-    // The global kill-switch (`nubx.implicit-dlx = off`) is read FIRST — before CI/
-    // TTY probing, any prompt, prefetch, or network. Writing it via the `Never`
+    // The global kill-switch (`exec.implicit-dlx = never`) is read FIRST — before
+    // CI/TTY probing, any prompt, prefetch, or network. Writing it via the `Never`
     // option (or `nub config set`) permanently disables the implicit registry tier;
-    // explicit `nub dlx <spec>` / `nubx -y <spec>` (above) stay open. Fail closed
-    // and tell the user how to proceed or re-enable.
+    // explicit `nub dlx <spec>` / `nubx -y <spec>` (above) stay open. The subject
+    // already missed every local tier (file/script/bin) to reach here, so we abort
+    // with the locked, maintainer-authored two-line message. Reproduce it verbatim.
     if matches!(
         crate::config::implicit_dlx(),
-        crate::config::ImplicitDlx::Off
+        crate::config::ImplicitDlx::Never
     ) {
-        eprintln!(
-            "nubx: the implicit dlx tier is disabled (nubx.implicit-dlx = off).\n\
-             \x20\x20Run it explicitly with `nub dlx {spec}` or `nubx -y {spec}`,\n\
-             \x20\x20or re-enable prompting with `nub config set nubx.implicit-dlx prompt`.",
-            spec = specs.join(" ")
-        );
+        eprintln!("{NEVER_ABORT_MESSAGE}");
         return Decision::Refused(1);
     }
 
@@ -137,12 +138,12 @@ pub fn gate(specs: &[String], yes: bool) -> Decision {
         Consent::Never => {
             // Persist the global kill-switch, then deny this invocation. A write
             // failure is surfaced but still denies (the user chose Never).
-            if let Err(e) = crate::config::set_implicit_dlx(crate::config::ImplicitDlx::Off) {
+            if let Err(e) = crate::config::set_implicit_dlx(crate::config::ImplicitDlx::Never) {
                 eprintln!("nubx: could not save the setting ({e}); not running.");
             } else {
                 eprintln!(
                     "nubx: disabled the implicit dlx tier. Re-enable with \
-                     `nub config set nubx.implicit-dlx prompt`."
+                     `nub config set exec.implicit-dlx prompt`."
                 );
             }
             Decision::Refused(1)
@@ -443,25 +444,27 @@ mod tests {
 
     /// Run `f` with `XDG_CONFIG_HOME`/`XDG_CACHE_HOME` pointed at fresh temp dirs
     /// and `CI` unset — so `gate`'s config read + ledger + CI probe are all
-    /// hermetic. Serialized because it mutates process-global env vars.
-    fn with_isolated_env(implicit_dlx_off: bool, f: impl FnOnce()) {
-        use std::sync::Mutex;
-        static ENV_LOCK: Mutex<()> = Mutex::new(());
-        let _guard = ENV_LOCK.lock().unwrap();
+    /// hermetic. Holds the process-wide [`crate::config::test_env_lock`] (SHARED
+    /// with `config`'s test helper) so the two env-mutating suites serialize
+    /// against each other under the multi-thread runner.
+    fn with_isolated_env(never: bool, f: impl FnOnce()) {
+        let _guard = crate::config::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
 
         let cfg = tempfile::tempdir().unwrap();
         let cache = tempfile::tempdir().unwrap();
         let prev_cfg = std::env::var_os("XDG_CONFIG_HOME");
         let prev_cache = std::env::var_os("XDG_CACHE_HOME");
         let prev_ci = std::env::var_os("CI");
-        // SAFETY: guarded by ENV_LOCK; every var restored before the guard drops.
+        // SAFETY: guarded by test_env_lock; every var restored before the guard drops.
         unsafe {
             std::env::set_var("XDG_CONFIG_HOME", cfg.path());
             std::env::set_var("XDG_CACHE_HOME", cache.path());
             std::env::remove_var("CI");
         }
-        if implicit_dlx_off {
-            crate::config::set_implicit_dlx(crate::config::ImplicitDlx::Off).unwrap();
+        if never {
+            crate::config::set_implicit_dlx(crate::config::ImplicitDlx::Never).unwrap();
         }
 
         f();
@@ -488,9 +491,11 @@ mod tests {
     }
 
     #[test]
-    fn kill_switch_off_fails_closed_without_yes() {
-        // `off` + no `-y` refuses BEFORE any CI/TTY probe or prompt — the config
-        // read is the first gate after the `-y` bypass.
+    fn never_fails_closed_without_yes() {
+        // `never` + no `-y` refuses BEFORE any CI/TTY probe, prompt, or network —
+        // the config read is the first gate after the `-y` bypass. `Refused` here
+        // means no fetch was attempted (the caller returns the code without
+        // reaching the engine).
         with_isolated_env(true, || {
             assert!(matches!(
                 gate(&["cowsay".into()], false),
@@ -500,14 +505,24 @@ mod tests {
     }
 
     #[test]
-    fn yes_bypasses_kill_switch() {
-        // `-y` is the documented escape hatch out of an `off` kill-switch.
+    fn yes_bypasses_never() {
+        // `-y` is the documented escape hatch out of a `never` kill-switch.
         with_isolated_env(true, || {
             assert!(matches!(
                 gate(&["cowsay".into()], true),
                 Decision::Proceed { .. }
             ));
         });
+    }
+
+    #[test]
+    fn never_abort_message_is_the_locked_copy() {
+        // The message is maintainer-authored and printed verbatim; pin the exact
+        // two lines so a reword can't slip through.
+        assert_eq!(
+            NEVER_ABORT_MESSAGE,
+            "no matching script or executable found.\nto run a package from the remote registry, try `nub dlx`"
+        );
     }
 
     #[test]

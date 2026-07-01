@@ -260,24 +260,27 @@ fn project_scalar_home(pnpm_incumbent: bool) -> config_model::ScalarHome {
 /// nub's OWN durable settings live in `~/.config/nub/nub.toml`, NOT `.npmrc`
 /// (which npm will soon ERROR on for unrecognized keys) — so a nub-namespaced
 /// dotted key is intercepted BEFORE the engine's `.npmrc`/pnpm-yaml routing and
-/// handled by [`crate::config`]. Only `nubx.implicit-dlx` (the dlx consent
+/// handled by [`crate::config`]. Only `exec.implicit-dlx` (the dlx consent
 /// kill-switch) is wired today; the match is shaped so a sibling nub key slots in.
+/// `set`/`get`/`delete` (and the `unset`/`rm` aliases, which parse to `Delete`)
+/// are all routed here so the key can be cleared back to its default too.
 /// Returns `Some(exit)` when the key was ours, `None` to fall through to the
 /// engine's `.npmrc`-class handling.
 fn try_nub_config(parsed: &ConfigArgs) -> Option<i32> {
     use crate::config::ImplicitDlx;
+    const KEY: &str = "exec.implicit-dlx";
     match &parsed.command {
-        Some(ConfigCommand::Set(set)) if set.key == "nubx.implicit-dlx" => {
+        Some(ConfigCommand::Set(set)) if set.key == KEY => {
             let Some(value) = ImplicitDlx::parse(&set.value) else {
                 eprintln!(
-                    "nub: `{}` is not a valid value for nubx.implicit-dlx (use `prompt` or `off`).",
+                    "nub: `{}` is not a valid value for {KEY} (use `prompt` or `never`).",
                     set.value
                 );
                 return Some(1);
             };
             match crate::config::set_implicit_dlx(value) {
                 Ok(()) => {
-                    println!("nubx.implicit-dlx = {}", value.as_str());
+                    println!("{KEY} = {}", value.as_str());
                     Some(0)
                 }
                 Err(e) => {
@@ -286,9 +289,20 @@ fn try_nub_config(parsed: &ConfigArgs) -> Option<i32> {
                 }
             }
         }
-        Some(ConfigCommand::Get(get)) if get.key == "nubx.implicit-dlx" => {
+        Some(ConfigCommand::Get(get)) if get.key == KEY => {
             println!("{}", crate::config::implicit_dlx().as_str());
             Some(0)
+        }
+        // `delete`/`unset`/`rm` all parse to `Delete` — clear it in nub.toml
+        // rather than no-op'ing on `.npmrc` (which never held it).
+        Some(ConfigCommand::Delete(del)) if del.key == KEY => {
+            match crate::config::unset_implicit_dlx() {
+                Ok(()) => Some(0),
+                Err(e) => {
+                    eprintln!("nub: could not write nub.toml: {e}");
+                    Some(1)
+                }
+            }
         }
         _ => None,
     }
