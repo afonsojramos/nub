@@ -848,6 +848,58 @@ pub fn cache_dir() -> Option<PathBuf> {
     }
 }
 
+/// nub's config root (`$XDG_CONFIG_HOME/nub` or `~/.config/nub`) — the home of
+/// the global settings file `nub.toml`. Deliberately NOT `dirs_next::config_dir`,
+/// which resolves to macOS `~/Library/Preferences`: nub follows the XDG `~/.config`
+/// convention on every unix (the norm for developer-facing config, e.g. gh/git/
+/// starship) so the file lands where users expect it. Config and cache live in
+/// separate XDG roots (`~/.config/nub` vs `~/.cache/nub`), by design.
+///
+/// Windows fallback mirrors [`cache_dir`] but uses `%APPDATA%` (roaming per-user
+/// settings) rather than `%LOCALAPPDATA%` (machine-local cache) — config is the
+/// kind of state that should roam.
+pub fn config_dir() -> Option<PathBuf> {
+    if let Some(xdg) = env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(xdg).join("nub"));
+    }
+
+    #[cfg(windows)]
+    {
+        windows_config_dir(
+            dirs_next::home_dir(),
+            env::var_os("APPDATA")
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from)
+                .or_else(dirs_next::config_dir),
+            env::var_os("SystemRoot")
+                .or_else(|| env::var_os("windir"))
+                .map(PathBuf::from),
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        dirs_next::home_dir().map(|h| h.join(".config").join("nub"))
+    }
+}
+
+/// Resolve nub's Windows config dir when there is no `XDG_CONFIG_HOME` override.
+/// Same service/SYSTEM-account guard as [`windows_cache_dir`] (an unusable
+/// `~/.config` under a service profile falls back to `%APPDATA%\nub`), differing
+/// only in the fallback root. Pure so it is unit-testable off Windows.
+#[cfg(any(windows, test))]
+fn windows_config_dir(
+    home: Option<PathBuf>,
+    app_data: Option<PathBuf>,
+    system_root: Option<PathBuf>,
+) -> Option<PathBuf> {
+    match home {
+        Some(home) if !is_windows_system_home(&home, system_root.as_deref()) => {
+            Some(home.join(".config").join("nub"))
+        }
+        _ => app_data.map(|p| p.join("nub")),
+    }
+}
+
 /// Resolve nub's Windows cache dir when there is no `XDG_CACHE_HOME` override.
 /// Pure (takes its env inputs) so the decision is unit-testable off Windows.
 /// See [`cache_dir`] for the rationale.
@@ -1081,6 +1133,40 @@ mod tests {
         // no bogus path).
         assert_eq!(
             windows_cache_dir(Some(PathBuf::from("C:\\Windows")), None, sysroot),
+            None,
+        );
+    }
+
+    #[test]
+    fn windows_config_dir_falls_back_to_appdata_for_system_or_missing_home() {
+        let appdata =
+            PathBuf::from("C:\\Windows\\system32\\config\\systemprofile\\AppData\\Roaming");
+        let sysroot = Some(PathBuf::from("C:\\Windows"));
+
+        // Service/SYSTEM account or unresolvable home → %APPDATA%\nub.
+        for home in [
+            Some(PathBuf::from("C:\\Windows")),
+            Some(PathBuf::from(
+                "C:\\Windows\\system32\\config\\systemprofile",
+            )),
+            None,
+        ] {
+            assert_eq!(
+                windows_config_dir(home, Some(appdata.clone()), sysroot.clone()),
+                Some(appdata.join("nub")),
+            );
+        }
+
+        // A normal user profile keeps ~/.config/nub.
+        let user = PathBuf::from("C:\\Users\\alice");
+        assert_eq!(
+            windows_config_dir(Some(user.clone()), Some(appdata.clone()), sysroot.clone()),
+            Some(user.join(".config").join("nub")),
+        );
+
+        // System home + unresolvable APPDATA → None.
+        assert_eq!(
+            windows_config_dir(Some(PathBuf::from("C:\\Windows")), None, sysroot),
             None,
         );
     }

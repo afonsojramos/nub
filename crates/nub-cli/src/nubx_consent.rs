@@ -9,8 +9,11 @@
 //!   nub does not fetch-and-run arbitrary remote code where no human can intervene.
 //! - **Non-interactive** (stdin/stderr not a terminal) → fail closed. No terminal,
 //!   no way to ask, so refuse rather than guess.
-//! - **Interactive TTY** → prompt `y/N` on the *first* fetch of a spec, then run
-//!   without re-asking once that spec is recorded as consented.
+//! - **Interactive TTY** → an arrow-key consent select (Yes / No / Never) on the
+//!   *first* fetch of a spec, then run without re-asking once that spec is
+//!   recorded as consented. Picking **Never** persists the global kill-switch
+//!   `exec.implicit-dlx = never` (see [`crate::config`]) and disables this whole
+//!   implicit tier until re-enabled.
 //!
 //! `-y`/`--yes` is the explicit non-interactive escape hatch: it lets CI / non-TTY
 //! through and skips the first-fetch prompt. Fail-closed by default, never
@@ -32,13 +35,18 @@
 //! same entries, so it layers on without changing this contract.
 
 use std::collections::BTreeMap;
-use std::io::{IsTerminal, Write};
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Floating-spec consent TTL: 24h, matching pnpm's `dlxCacheMaxAge` (1440 min).
 /// A pinned spec ignores this (immutable identity → consent never expires).
 const FLOATING_TTL_SECS: u64 = 24 * 60 * 60;
+
+/// The abort message printed when `exec.implicit-dlx = never` and the subject
+/// missed every local tier. LOCKED, maintainer-authored copy — reproduce verbatim,
+/// no rewording/capitalization/backtick changes. A test pins the exact bytes.
+const NEVER_ABORT_MESSAGE: &str = "No matching script or executable found.\nTo run a package from the remote registry, try `nub dlx`";
 
 /// What the gate decided for an implicit registry fetch.
 pub enum Decision {
@@ -72,10 +80,26 @@ pub fn gate(specs: &[String], yes: bool) -> Decision {
 
     // `-y`: explicit up-front consent — proceed in CI, non-TTY, or a terminal.
     // Record only a spec we don't already hold a live grant for (don't churn it).
+    // `-y` is the documented escape hatch out of a `never` kill-switch, so it is
+    // checked BEFORE the kill-switch below.
     if yes {
         return Decision::Proceed {
             record: !has_live_consent(specs),
         };
+    }
+
+    // The global kill-switch (`exec.implicit-dlx = never`) is read FIRST — before
+    // CI/TTY probing, any prompt, prefetch, or network. Writing it via the `Never`
+    // option (or `nub config set`) permanently disables the implicit registry tier;
+    // explicit `nub dlx <spec>` / `nubx -y <spec>` (above) stay open. The subject
+    // already missed every local tier (file/script/bin) to reach here, so we abort
+    // with the locked, maintainer-authored two-line message. Reproduce it verbatim.
+    if matches!(
+        crate::config::implicit_dlx(),
+        crate::config::ImplicitDlx::Never
+    ) {
+        eprintln!("{NEVER_ABORT_MESSAGE}");
+        return Decision::Refused(1);
     }
 
     // No `-y`. CI → always fail closed (a human can't intervene; the blast radius
@@ -105,11 +129,25 @@ pub fn gate(specs: &[String], yes: bool) -> Decision {
     if has_live_consent(specs) {
         return Decision::Proceed { record: false };
     }
-    if prompt_yes(specs) {
-        Decision::Proceed { record: true }
-    } else {
-        eprintln!("nubx: aborted.");
-        Decision::Refused(1)
+    match prompt_consent(specs) {
+        Consent::Yes => Decision::Proceed { record: true },
+        Consent::No => {
+            eprintln!("nubx: aborted.");
+            Decision::Refused(1)
+        }
+        Consent::Never => {
+            // Persist the global kill-switch, then deny this invocation. A write
+            // failure is surfaced but still denies (the user chose Never).
+            if let Err(e) = crate::config::set_implicit_dlx(crate::config::ImplicitDlx::Never) {
+                eprintln!("nubx: could not save the setting ({e}); not running.");
+            } else {
+                eprintln!(
+                    "nubx: disabled the implicit dlx tier. Re-enable with \
+                     `nub config set exec.implicit-dlx prompt`."
+                );
+            }
+            Decision::Refused(1)
+        }
     }
 }
 
@@ -287,20 +325,114 @@ fn is_ci() -> bool {
     }
 }
 
-/// Interactive `y/N` confirmation on stderr (so stdout stays clean for the tool's
-/// own output). Default is NO — an empty line, EOF, or anything but `y`/`yes`
-/// refuses. Reads a single line from stdin.
-fn prompt_yes(specs: &[String]) -> bool {
-    eprint!(
-        "nubx: {} is not installed locally. Download and run it? [y/N] ",
-        specs.join(" ")
-    );
-    let _ = std::io::stderr().flush();
-    let mut line = String::new();
-    if std::io::stdin().read_line(&mut line).is_err() {
-        return false;
+/// The three outcomes of the interactive consent select.
+enum Consent {
+    /// Run it this time.
+    Yes,
+    /// Don't run it this time (no persistent effect).
+    No,
+    /// Never ask again — persist the global kill-switch and don't run.
+    Never,
+}
+
+/// The select's row labels, in display order (index 0=Yes, 1=No, 2=Never — see
+/// `option_at`). Default highlight is `Yes` (index 0) so a bare Enter accepts.
+const OPTIONS: [&str; 3] = ["Yes", "No", "Never (don't ask me again)"];
+
+/// Interactive consent select on stderr (stdout stays clean for the tool's own
+/// output). A ●/○ radio: Up/Down move the highlight, Enter picks it, and `y`/`n`
+/// are immediate single-key hotkeys. Ctrl-C / Esc → No (abort, no run).
+///
+/// The caller has already proven stdin AND stderr are real TTYs, so raw-mode init
+/// is expected to succeed; if `console` still can't drive the terminal (returns a
+/// non-tty key or errors), we fall back to the plain `y/N` line reader rather than
+/// deadlock — the fail-safe answer is always No.
+fn prompt_consent(specs: &[String]) -> Consent {
+    use console::{Key, Term};
+
+    let term = Term::stderr();
+    // Belt-and-suspenders: the gate's IsTerminal check already guards this, but if
+    // `console` disagrees about tty-ness, don't attempt a raw-mode draw.
+    if !term.is_term() {
+        return prompt_line(specs, &term);
     }
-    matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+
+    let bin = specs.join(" ");
+    let prompt_line1 = format!(
+        "The {} bin is not installed locally.",
+        console::style(&bin).cyan()
+    );
+    let prompt_line2 = "Install and run from the remote registry?";
+    let mut sel: usize = 0; // default-highlight Yes (a bare Enter accepts)
+
+    let _ = term.write_line(&prompt_line1);
+    let _ = term.write_line(prompt_line2);
+    let _ = term.hide_cursor();
+
+    let draw = |sel: usize| {
+        for (i, label) in OPTIONS.iter().enumerate() {
+            let glyph = if i == sel { '●' } else { '○' };
+            let _ = term.write_line(&format!("  {glyph} {label}"));
+        }
+    };
+    draw(sel);
+
+    let result = loop {
+        let key = match term.read_key() {
+            Ok(k) => k,
+            // Ctrl-C surfaces as an Interrupted error here → treat as No/abort.
+            Err(_) => break Consent::No,
+        };
+        match key {
+            Key::ArrowUp => sel = (sel + OPTIONS.len() - 1) % OPTIONS.len(),
+            Key::ArrowDown => sel = (sel + 1) % OPTIONS.len(),
+            Key::Enter => break option_at(sel),
+            Key::Char('y') | Key::Char('Y') => break Consent::Yes,
+            Key::Char('n') | Key::Char('N') => break Consent::No,
+            Key::Escape | Key::CtrlC => break Consent::No,
+            // A stray key on a terminal that isn't delivering arrows (Unknown)
+            // shouldn't spin: fall back to the line reader.
+            Key::Unknown => {
+                let _ = term.clear_last_lines(OPTIONS.len());
+                let _ = term.show_cursor();
+                return prompt_line(specs, &term);
+            }
+            _ => continue,
+        }
+        // Redraw the options in place (clear the N rows we last wrote).
+        let _ = term.clear_last_lines(OPTIONS.len());
+        draw(sel);
+    };
+
+    let _ = term.clear_last_lines(OPTIONS.len());
+    let _ = term.show_cursor();
+    result
+}
+
+fn option_at(sel: usize) -> Consent {
+    match sel {
+        0 => Consent::Yes,
+        2 => Consent::Never,
+        _ => Consent::No,
+    }
+}
+
+/// Plain `y/N` line-reader fallback for terminals where the raw-mode select can't
+/// run. Default NO — anything but `y`/`yes` refuses. Never offers `Never` (that
+/// only lives on the interactive select).
+fn prompt_line(specs: &[String], term: &console::Term) -> Consent {
+    let bin = specs.join(" ");
+    let _ = term.write_str(&format!(
+        "The {} bin is not installed locally.\nInstall and run from the remote registry? [Y/n] ",
+        console::style(&bin).cyan()
+    ));
+    let _ = term.flush();
+    match term.read_line() {
+        Ok(line) if matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes") => {
+            Consent::Yes
+        }
+        _ => Consent::No,
+    }
 }
 
 fn now_unix() -> u64 {
@@ -313,6 +445,99 @@ fn now_unix() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Run `f` with `XDG_CONFIG_HOME`/`XDG_CACHE_HOME` pointed at fresh temp dirs
+    /// and `CI` unset — so `gate`'s config read + ledger + CI probe are all
+    /// hermetic. Holds the process-wide [`crate::config::test_env_lock`] (SHARED
+    /// with `config`'s test helper) so the two env-mutating suites serialize
+    /// against each other under the multi-thread runner.
+    fn with_isolated_env(never: bool, f: impl FnOnce()) {
+        let _guard = crate::config::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let cfg = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let prev_cfg = std::env::var_os("XDG_CONFIG_HOME");
+        let prev_cache = std::env::var_os("XDG_CACHE_HOME");
+        let prev_ci = std::env::var_os("CI");
+        // SAFETY: guarded by test_env_lock; every var restored before the guard drops.
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", cfg.path());
+            std::env::set_var("XDG_CACHE_HOME", cache.path());
+            std::env::remove_var("CI");
+        }
+        if never {
+            crate::config::set_implicit_dlx(crate::config::ImplicitDlx::Never).unwrap();
+        }
+
+        f();
+
+        unsafe {
+            match prev_cfg {
+                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
+            }
+            match prev_cache {
+                Some(v) => std::env::set_var("XDG_CACHE_HOME", v),
+                None => std::env::remove_var("XDG_CACHE_HOME"),
+            }
+            match prev_ci {
+                Some(v) => std::env::set_var("CI", v),
+                None => std::env::remove_var("CI"),
+            }
+        }
+    }
+
+    #[test]
+    fn empty_specs_refuse() {
+        assert!(matches!(gate(&[], false), Decision::Refused(1)));
+    }
+
+    #[test]
+    fn never_fails_closed_without_yes() {
+        // `never` + no `-y` refuses BEFORE any CI/TTY probe, prompt, or network —
+        // the config read is the first gate after the `-y` bypass. `Refused` here
+        // means no fetch was attempted (the caller returns the code without
+        // reaching the engine).
+        with_isolated_env(true, || {
+            assert!(matches!(
+                gate(&["cowsay".into()], false),
+                Decision::Refused(1)
+            ));
+        });
+    }
+
+    #[test]
+    fn yes_bypasses_never() {
+        // `-y` is the documented escape hatch out of a `never` kill-switch.
+        with_isolated_env(true, || {
+            assert!(matches!(
+                gate(&["cowsay".into()], true),
+                Decision::Proceed { .. }
+            ));
+        });
+    }
+
+    #[test]
+    fn never_abort_message_is_the_locked_copy() {
+        // The message is maintainer-authored and printed verbatim; pin the exact
+        // two lines so a reword can't slip through.
+        assert_eq!(
+            NEVER_ABORT_MESSAGE,
+            "No matching script or executable found.\nTo run a package from the remote registry, try `nub dlx`"
+        );
+    }
+
+    #[test]
+    fn yes_proceeds_by_default() {
+        with_isolated_env(false, || {
+            assert!(matches!(
+                gate(&["cowsay".into()], true),
+                Decision::Proceed { record: true }
+            ));
+        });
+    }
 
     #[test]
     fn exact_semver_is_pinned() {
