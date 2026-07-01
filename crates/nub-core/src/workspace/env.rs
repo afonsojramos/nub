@@ -101,16 +101,41 @@ pub fn expand_env_map(map: &mut HashMap<String, String>) -> &mut HashMap<String,
 /// expansion-changed keys — which Node's `--env-file` can't reproduce — get
 /// injected.
 pub fn load_env_files_raw(project_root: &Path) -> HashMap<String, String> {
+    load_env_files_raw_reporting(project_root).0
+}
+
+/// The raw loader, additionally reporting whether a `.env` FILE declared
+/// `NODE_ENV` (always dropped from the returned map — dotenv/@next/env/Vite
+/// parity, #263). The bool is consumed by [`load_env_files`] (the direct run/file
+/// injection path) to warn the user; the plain [`load_env_files_raw`] wrapper
+/// discards it because the watch path defers `NODE_ENV` to Node's own `--env-file`
+/// and so is NOT the one ignoring it — warning there would be false.
+fn load_env_files_raw_reporting(project_root: &Path) -> (HashMap<String, String>, bool) {
     let files = env_file_names();
 
     let mut result = HashMap::new();
+    let mut node_env_ignored = false;
 
     for filename in &files {
         let path = project_root.join(filename);
         if let Some(content) = read_env_file(&path) {
             for (key, value) in parse_env(&content) {
-                // Shell env wins: don't override existing env vars.
+                // Shell env wins: don't override existing env vars. An AMBIENT
+                // `NODE_ENV` (set in the real process env) therefore passes through
+                // untouched and still selects `.env.<NODE_ENV>` files above — only a
+                // `.env`-FILE `NODE_ENV` is dropped below.
                 if std::env::var_os(&key).is_some() {
+                    continue;
+                }
+                // dotenv / @next/env / Vite parity: a `.env` FILE never sets
+                // `NODE_ENV`. Injecting it broke `next build` — the prerender forks
+                // inherited `NODE_ENV=development`, loading the dev React against
+                // production-compiled chunks (two `ReactSharedInternals` → null hooks
+                // dispatcher → `useContext` of null), #263. Reaching here means ambient
+                // `NODE_ENV` is unset (shell-wins above), so this value WOULD have been
+                // injected — drop it and flag it for the caller's warning.
+                if key == "NODE_ENV" {
+                    node_env_ignored = true;
                     continue;
                 }
                 // First writer wins among .env files.
@@ -119,7 +144,21 @@ pub fn load_env_files_raw(project_root: &Path) -> HashMap<String, String> {
         }
     }
 
-    result
+    (result, node_env_ignored)
+}
+
+/// Emit the "ignoring `.env` `NODE_ENV`" notice at most once per process. Called
+/// only on the direct run/file injection path ([`load_env_files`]), where the
+/// dropped `NODE_ENV` genuinely never reaches the child; the watch path defers to
+/// Node's `--env-file` and does not warn. `Once` guards against any repeat.
+fn warn_node_env_from_dotenv_ignored() {
+    use std::sync::Once;
+    static WARNED: Once = Once::new();
+    WARNED.call_once(|| {
+        eprintln!(
+            "nub: ignoring NODE_ENV set in .env (dotenv, Next, and Vite do the same); set it in the environment instead"
+        );
+    });
 }
 
 /// Load .env* files from the project root, returning the key-value
@@ -127,11 +166,19 @@ pub fn load_env_files_raw(project_root: &Path) -> HashMap<String, String> {
 /// (from the parent process) always wins — values already set in
 /// the process environment are not overridden.
 pub fn load_env_files(project_root: &Path) -> HashMap<String, String> {
-    let mut result = load_env_files_raw(project_root);
+    let (mut result, node_env_ignored) = load_env_files_raw_reporting(project_root);
 
     // Expand ${VAR} references within values. Multi-pass to handle
     // nested references like A=hello, B=${A}_world, C=${B}_!.
     expand_env_map(&mut result);
+
+    // Warn only here — this map is injected straight into the child via
+    // `Command::env`, so a dropped `.env` `NODE_ENV` truly never reaches it. The
+    // watch path (plain `load_env_files_raw`) hands the files to Node's `--env-file`
+    // instead, so nub isn't ignoring `NODE_ENV` there and must not claim to.
+    if node_env_ignored {
+        warn_node_env_from_dotenv_ignored();
+    }
 
     result
 }
@@ -619,6 +666,35 @@ mod tests {
             Some("postgres://localhost:5432/db")
         );
         assert_ne!(raw.get("DATABASE_URL"), expanded.get("DATABASE_URL"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #263: a `.env` FILE must never inject `NODE_ENV` into the child env
+    /// (dotenv/@next/env/Vite parity). Leaking `NODE_ENV=development` into
+    /// `next build` loaded the dev React against production-compiled chunks → a
+    /// null hooks dispatcher. Sibling keys still load; `.env.<NODE_ENV>` file
+    /// SELECTION is untouched — it reads AMBIENT `NODE_ENV`, never this map — so
+    /// the assertion holds whether or not the test process itself has `NODE_ENV`
+    /// set (an ambient value is dropped by shell-wins; a file value by the strip).
+    #[test]
+    fn dotenv_node_env_is_never_injected() {
+        let dir = std::env::temp_dir().join(format!("nub-nodeenv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".env"), "NODE_ENV=development\nAPP_KEY=secret\n").unwrap();
+
+        let vars = load_env_files(&dir);
+
+        assert!(
+            !vars.contains_key("NODE_ENV"),
+            "a `.env` file must not inject NODE_ENV (#263); got {vars:?}"
+        );
+        assert_eq!(
+            vars.get("APP_KEY").map(String::as_str),
+            Some("secret"),
+            "sibling keys must still load after NODE_ENV is stripped; got {vars:?}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

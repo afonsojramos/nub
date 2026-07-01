@@ -4594,6 +4594,84 @@ fn env_file_flag_reaches_child_and_shell_wins() {
     );
 }
 
+/// #263, end-to-end through the binary — the differential that broke `next build`.
+/// A `.env` FILE must NOT leak its `NODE_ENV` into the spawned child (dotenv/
+/// @next/env/Vite parity), yet an AMBIENT `NODE_ENV` must both pass through
+/// untouched AND still select the `.env.<NODE_ENV>` file. Child ambient is set via
+/// `Command::env`, so the test never mutates its own process env (hermetic).
+#[test]
+fn dotenv_node_env_stripped_but_ambient_selects_env_file() {
+    let work = unique_test_cache();
+    let proj = work.join("proj");
+    std::fs::create_dir_all(&proj).unwrap();
+    std::fs::write(proj.join("package.json"), "{}\n").unwrap();
+    std::fs::write(proj.join(".env"), "NODE_ENV=development\nFROM_BASE=base\n").unwrap();
+    std::fs::write(proj.join(".env.production"), "FROM_PROD=prod\n").unwrap();
+    std::fs::write(
+        proj.join("print.mjs"),
+        "console.log(`NE=[${process.env.NODE_ENV || ''}] BASE=[${process.env.FROM_BASE || ''}] PROD=[${process.env.FROM_PROD || ''}]`);\n",
+    )
+    .unwrap();
+
+    let run = |ambient: Option<&str>| {
+        let mut cmd = Command::new(nub_binary());
+        cmd.arg(proj.join("print.mjs").to_str().unwrap())
+            .current_dir(&proj)
+            .env("XDG_CACHE_HOME", unique_test_cache());
+        match ambient {
+            Some(v) => cmd.env("NODE_ENV", v),
+            None => cmd.env_remove("NODE_ENV"),
+        };
+        let out = cmd.output().expect("failed to spawn nub");
+        (
+            String::from_utf8_lossy(&out.stdout).to_string(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+            out.status.code().unwrap_or(-1),
+        )
+    };
+
+    // (a) ambient NODE_ENV unset: the `.env` NODE_ENV is dropped (not "development"),
+    //     so `.env` — not `.env.production` — is selected, and nub warns once.
+    let (out_a, err_a, code_a) = run(None);
+    assert_eq!(code_a, 0, "run must succeed; stderr: {err_a}");
+    assert!(
+        out_a.contains("NE=[]"),
+        "`.env` NODE_ENV must not leak into the child: {out_a}"
+    );
+    assert!(
+        out_a.contains("BASE=[base]"),
+        "`.env` siblings must still load: {out_a}"
+    );
+    assert!(
+        out_a.contains("PROD=[]"),
+        "ambient NODE_ENV unset must select `.env`, never `.env.production`: {out_a}"
+    );
+    assert!(
+        err_a.contains("ignoring NODE_ENV set in .env"),
+        "nub must warn that a `.env` NODE_ENV was ignored: {err_a}"
+    );
+
+    // (b) ambient NODE_ENV=production: passes through untouched AND selects
+    //     `.env.production` (selection keys off ambient, never the `.env` value),
+    //     with no spurious warning (ambient wins before the strip).
+    let (out_b, err_b, code_b) = run(Some("production"));
+    assert_eq!(code_b, 0, "run must succeed; stderr: {err_b}");
+    assert!(
+        out_b.contains("NE=[production]"),
+        "ambient NODE_ENV must pass through: {out_b}"
+    );
+    assert!(
+        out_b.contains("PROD=[prod]"),
+        "ambient NODE_ENV must select `.env.production`: {out_b}"
+    );
+    assert!(
+        !err_b.contains("ignoring NODE_ENV set in .env"),
+        "no warning when an ambient NODE_ENV wins over the `.env` value: {err_b}"
+    );
+
+    let _ = std::fs::remove_dir_all(&work);
+}
+
 #[test]
 fn env_file_if_exists_skips_absent_file_and_loads_present_one() {
     // Node v22 parity: `--env-file-if-exists` loads the file when present but is a
