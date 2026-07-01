@@ -2289,7 +2289,9 @@ fn run_file(args: &[String]) -> Result<i32> {
 
 fn run_file_with_compat(args: &[String], compat_mode: bool) -> Result<i32> {
     let cwd = env::current_dir()?;
-    run_file_in_dir(args, compat_mode, &cwd)
+    // A plain file run (`nub <file>`, the `node`-hijack descendant) — not a bin
+    // launch, so no `npm_config_user_agent` (parity with `node <file>`).
+    run_file_in_dir(args, compat_mode, &cwd, false)
 }
 
 /// Run a file with the project context (Node pin, `.env`, PnP, webstorage) and
@@ -2300,7 +2302,7 @@ fn run_file_with_compat(args: &[String], compat_mode: bool) -> Result<i32> {
 /// the member's `.env`, Node pin, and `.bin` chain — not the workspace root's. The
 /// child's cwd is set on `SpawnConfig` so the override reaches Node itself, not
 /// just nub's discovery (spawn_node otherwise inherits the parent's cwd).
-fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path) -> Result<i32> {
+fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool) -> Result<i32> {
     // A truthy `NODE_COMPAT` forces compat tree-wide (the persistent `--node`);
     // OR it into the per-invocation bit so `NODE_COMPAT=1 nub foo.ts` /
     // `NODE_COMPAT=1 node foo.ts` (via the hijack → run_file → here) run vanilla.
@@ -2336,11 +2338,25 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path) -> Result<i32
     } else {
         Default::default()
     };
-    let env_vars = merge_child_env(
+    let mut env_vars = merge_child_env(
         auto_env,
         env_file_flag_present(),
         ENV_FILE_VARS.get().unwrap_or(&HashMap::new()),
     );
+
+    // Bin-exec parity with `nub run`: when this spawn is nub LAUNCHING a resolved
+    // node bin (a `nubx`/`nub exec` scaffolder — `exec_ua`), set the same role-
+    // aware `npm_config_user_agent` the run path emits so the tool detects nub as
+    // the invoking PM. Not set for a plain `nub <file>` run (`exec_ua == false`),
+    // matching `node <file>`, which leaves it undefined; skipped in compat mode
+    // (`--node` = vanilla). nub's value overrides an inherited one — nub is the
+    // running PM here, exactly as the run path overrides it.
+    if exec_ua && !compat_mode {
+        env_vars.insert(
+            "npm_config_user_agent".to_string(),
+            exec_user_agent(cwd, &node.version.to_string()),
+        );
+    }
 
     let nub_binary = nub_core::node::spawn::current_nub_binary()?;
     // Yarn PnP: inject the user's own `.pnp.cjs` (spawn.rs gates this on
@@ -4399,7 +4415,11 @@ fn run_exec_with_dlx(
             if let Some(runner) = pnp_bin_runner_path() {
                 let mut cmd_args = vec![runner, bin.to_string()];
                 cmd_args.extend(args.iter().cloned());
-                return run_file_with_compat(&cmd_args, compat_mode);
+                // This is still a bin LAUNCH (a PnP-resolved local bin), so it
+                // carries `npm_config_user_agent` like the node_modules/.bin path
+                // above — `run_file_in_dir` directly (not run_file_with_compat)
+                // to pass `exec_ua=true`. `cwd` is the PnP tree already resolved.
+                return run_file_in_dir(&cmd_args, compat_mode, &cwd, true);
             }
         }
     }
@@ -4497,8 +4517,10 @@ fn launch_bin(bin_path: &Path, args: &[String], compat_mode: bool, cwd: &Path) -
         // passes each member's dir so the node bin sees the member's `.env` / Node
         // pin / `.bin` chain. The single-package path passes the process cwd (a
         // no-op override). run_file_in_dir threads cwd onto SpawnConfig so the
-        // child's working directory is set, not just nub's discovery.
-        return run_file_in_dir(&cmd_args, compat_mode, cwd);
+        // child's working directory is set, not just nub's discovery. `true` =
+        // this is a bin LAUNCH, so it carries `npm_config_user_agent` (the non-
+        // node branch below sets it via apply_exec_augmentation).
+        return run_file_in_dir(&cmd_args, compat_mode, cwd, true);
     }
 
     let mut cmd = bin_launcher(bin_path, args);
@@ -4573,6 +4595,17 @@ fn bin_launcher(path: &Path, args: &[String]) -> std::process::Command {
     c
 }
 
+/// The `npm_config_user_agent` value nub emits when it LAUNCHES a bin/tool
+/// (`nubx`, `nub exec`, a workspace-bin run), reusing the same role-aware
+/// composer + platform tail as the `nub run` / lifecycle paths — no second
+/// hardcoded format. `nub/<v> npm/? …` under nub identity / fresh, incumbent-
+/// first (`pnpm/<pin> nub/<v> …`) in a compat project. `node_version` is the
+/// caller's already-resolved Node so this does not re-discover it.
+fn exec_user_agent(cwd: &Path, node_version: &str) -> String {
+    let product = crate::pm_engine::run_lifecycle_ua_product(cwd, node_version);
+    nub_core::workspace::scripts::user_agent_string(&product)
+}
+
 /// Apply nub's augmentation env (NODE_OPTIONS preload + PATH shim + `.bin`
 /// chain) to a non-node launcher, so any `node` the tool spawns is transpile-
 /// enabled — the same env `nub run` gives a script. No-op if augmentation can't
@@ -4583,6 +4616,16 @@ fn apply_exec_augmentation(cmd: &mut std::process::Command, cwd: &Path) {
     };
     let node = nub_core::node::discovery::discover_node(cwd)
         .unwrap_or_else(|_| nub_core::node::discovery::ResolvedNode::fallback());
+    // Exec-path parity with `nub run`/lifecycle: a launched non-node bin (a
+    // create-* scaffolder, a tool that shells out) must see the same role-aware
+    // `npm_config_user_agent` so it detects nub as the invoking PM instead of a
+    // blank value (which the whitelist detectors fall back to npm on). Set before
+    // the preload early-return below — the UA is independent of whether the
+    // transpile preload was found.
+    cmd.env(
+        "npm_config_user_agent",
+        exec_user_agent(cwd, &node.version.to_string()),
+    );
     let pnp_ctx = nub_core::pnp::detect(cwd);
     let Some(aug) = nub_core::node::spawn::compute_augmentation_env(
         &nub_binary,

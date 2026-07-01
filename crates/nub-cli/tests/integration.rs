@@ -3565,6 +3565,107 @@ fn exec_runs_node_and_non_node_bins() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+/// `nub exec`/`nubx` must set the same role-aware `npm_config_user_agent` as
+/// `nub run` (regression guard for the exec-path gap where a launched bin saw a
+/// blank UA and `create-*` scaffolders fell back to detecting nub as npm).
+/// Covers BOTH `launch_bin` branches — a node `.bin` (spawned via `node <bin>`)
+/// and a non-node `.bin` (execed directly with `apply_exec_augmentation`) — plus
+/// role-awareness (fresh nub-identity leads `nub/`, a pnpm incumbent leads
+/// `pnpm/`) and the compat gate (`--node` leaves it unset, matching vanilla
+/// `node <file>`). Unix-only for the same reason as the sibling A40 test: the
+/// fixtures are POSIX shebang scripts; the Windows `.cmd` path rides CI.
+#[cfg(unix)]
+#[test]
+fn exec_bin_reports_role_aware_user_agent() {
+    use std::os::unix::fs::PermissionsExt;
+    let nub_version = env!("CARGO_PKG_VERSION");
+    let base = std::env::temp_dir().join(format!("nub-exec-ua-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+
+    // A project dir with a local node .bin and non-node .bin, each printing the
+    // UA the launched tool sees. `manifest_extra`/`lockfile` set the PM identity.
+    let make_project = |name: &str, manifest_extra: &str, lockfile: Option<(&str, &str)>| {
+        let dir = base.join(name);
+        let bin = dir.join("node_modules").join(".bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let write_exec = |path: std::path::PathBuf, body: &str| {
+            std::fs::write(&path, body).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        write_exec(
+            bin.join("printua"),
+            "#!/usr/bin/env node\nprocess.stdout.write(process.env.npm_config_user_agent || '<unset>');\n",
+        );
+        write_exec(
+            bin.join("shprintua"),
+            "#!/bin/sh\nprintf '%s' \"${npm_config_user_agent:-<unset>}\"\n",
+        );
+        std::fs::write(
+            dir.join("package.json"),
+            format!(r#"{{ "name": "{name}", "version": "1.0.0"{manifest_extra} }}"#),
+        )
+        .unwrap();
+        if let Some((lock_name, lock_body)) = lockfile {
+            std::fs::write(dir.join(lock_name), lock_body).unwrap();
+        }
+        dir
+    };
+    let exec_ua = |dir: &std::path::Path, extra_args: &[&str], bin: &str| -> String {
+        let mut args = vec!["exec"];
+        args.extend_from_slice(extra_args);
+        args.push(bin);
+        let out = Command::new(nub_binary())
+            .args(&args)
+            .current_dir(dir)
+            .env("XDG_CACHE_HOME", unique_test_cache())
+            .output()
+            .expect("failed to spawn nub exec");
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "nub exec {bin} exited non-zero: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    // Fresh / nub-identity → nub-first, on BOTH branches.
+    let fresh = make_project("fresh", "", None);
+    let fresh_prefix = format!("nub/{nub_version} npm/?");
+    let node_ua = exec_ua(&fresh, &[], "printua");
+    assert!(
+        node_ua.starts_with(&fresh_prefix) && node_ua.contains(" node/v"),
+        "node .bin exec must lead `{fresh_prefix}` with the node/v tail: {node_ua:?}"
+    );
+    let sh_ua = exec_ua(&fresh, &[], "shprintua");
+    assert!(
+        sh_ua.starts_with(&fresh_prefix),
+        "non-node .bin exec (apply_exec_augmentation) must lead `{fresh_prefix}`: {sh_ua:?}"
+    );
+
+    // pnpm incumbent → incumbent-first, nub second (role-aware, same as run).
+    let pnpm = make_project(
+        "pnpm",
+        r#", "packageManager": "pnpm@9.1.0""#,
+        Some(("pnpm-lock.yaml", "lockfileVersion: \"9.0\"\n")),
+    );
+    let pnpm_ua = exec_ua(&pnpm, &[], "printua");
+    let pnpm_prefix = format!("pnpm/9.1.0 nub/{nub_version}");
+    assert!(
+        pnpm_ua.starts_with(&pnpm_prefix),
+        "a pnpm-incumbent exec must lead `{pnpm_prefix}`: {pnpm_ua:?}"
+    );
+
+    // Compat (`--node`) is vanilla: no augmentation, so no UA — matching `node <file>`.
+    let compat_ua = exec_ua(&fresh, &["--node"], "printua");
+    assert_eq!(
+        compat_ua, "<unset>",
+        "`nub exec --node` must not set npm_config_user_agent (vanilla): {compat_ua:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 #[test]
 fn env_disabled_under_node_flag() {
     let fixture_path = fixtures_dir().join("env-test");

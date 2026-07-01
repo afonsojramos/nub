@@ -195,16 +195,9 @@ pub fn npm_env(
 
     env_vars.insert("npm_command".to_string(), "run-script".to_string());
 
-    // pnpm's UA shape (`<product tokens> <platform> <arch>`) so postinstall
-    // sniffers (which-pm-runs, only-allow, create-* scaffolders) parse it. The
-    // product tokens are ROLE-AWARE — composed by the PM engine and threaded in
-    // (incumbent-first in compat mode, e.g. `pnpm/9.1.0 nub/<v> node/v<ver>`;
-    // nub-first under nub identity / fresh). Platform tokens use Node's
-    // process.platform/process.arch vocabulary (darwin/win32, x64/arm64), not
-    // Rust's, so parsers see the same words npm/pnpm send.
     env_vars.insert(
         "npm_config_user_agent".to_string(),
-        format!("{user_agent_product} {} {}", node_platform(), node_arch()),
+        user_agent_string(user_agent_product),
     );
 
     if let Ok(exe) = env::current_exe() {
@@ -223,6 +216,16 @@ pub fn npm_env(
     );
 
     env_vars
+}
+
+/// The full `npm_config_user_agent` value: role-aware product tokens plus the
+/// `<platform> <arch>` tail in Node's `process.platform`/`process.arch`
+/// vocabulary (darwin/win32, x64/arm64) so postinstall sniffers (which-pm-runs,
+/// only-allow, create-* scaffolders) parse one shape regardless of which nub
+/// surface — `run`, lifecycle, or bin-exec — emitted it. The single source of
+/// truth for the UA format; callers supply only the composed product tokens.
+pub fn user_agent_string(product: &str) -> String {
+    format!("{product} {} {}", node_platform(), node_arch())
 }
 
 /// Node's `process.platform` vocabulary for the UA string (`darwin`, `win32`,
