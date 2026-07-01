@@ -45,6 +45,14 @@ add.bats|aube add -w: errors outside a workspace|engine emits pnpm-workspace.yam
 # ── pnpm-parity divergences (decision C: nub extends aube's behavior to match pnpm) ──
 add.bats|aube add --save-peer writes only peerDependencies and does not install|nub dual-writes --save-peer to devDependencies+peerDependencies for pnpm parity (decision C); aube asserts peerDependencies-only
 
+# ── virgin projects get a `packageManager: nub@<v>` identity stamp (PR #255) ──
+# On a truly-fresh project (no lockfile / packageManager / devEngines), nub's
+# first mutating PM op stamps `packageManager: nub@<v>` so the repo advertises
+# nub the standard cross-tool way. That appends a top-level key aube's upstream
+# order/key-preservation tests don't expect; the mutation itself is correct.
+add.bats|aube add: preserves existing package.json top-level order|a virgin add stamps a packageManager:nub@version identity marker, appending a top-level key the upstream order assertion does not expect (PR #255)
+remove.bats|aube remove: preserves package.json top-level key order|a virgin remove stamps a packageManager:nub@version identity marker, appending a top-level key the upstream key-order assertion does not expect (PR #255)
+
 # ── aube-lock.yaml is another tool's file (canonical-lockfile name = package.lock) ──
 # The basic fixture commits an aube-lock.yaml; under nub the engine's
 # canonical-lockfile slot carries the generic package.lock name (two-mode model),
