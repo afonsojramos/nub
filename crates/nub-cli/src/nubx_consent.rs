@@ -358,12 +358,13 @@ fn prompt_consent(specs: &[String]) -> Consent {
         return prompt_line(specs, &term);
     }
 
-    let header = format!("nubx: {} is not installed locally.", specs.join(" "));
-    let question = "install and run it from the remote registry?";
+    let prompt = format!(
+        "nubx: {} is not installed locally. install and run it from the remote registry?",
+        specs.join(" ")
+    );
     let mut sel: usize = 1; // default-highlight No
 
-    let _ = term.write_line(&header);
-    let _ = term.write_line(question);
+    let _ = term.write_line(&prompt);
     let _ = term.hide_cursor();
 
     let draw = |sel: usize| {
