@@ -5240,6 +5240,13 @@ fn bareword_unknown_verb_errors() {
         stderr.contains("\"frobnicate\" is not a nub command"),
         "an unknown verb must error, not dispatch: {stderr}"
     );
+    // An unknown bareword is most likely a dependency binary the user meant to
+    // exec (`nub turbo login`), so the hint must point at `nub exec`/`nubx`
+    // alongside the script/file fallbacks.
+    assert!(
+        stderr.contains("nub exec frobnicate") && stderr.contains("nubx frobnicate"),
+        "the hint must suggest nub exec / nubx: {stderr}"
+    );
     assert_ne!(out.status.code(), Some(0));
 }
 
