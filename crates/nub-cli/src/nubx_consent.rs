@@ -46,7 +46,7 @@ const FLOATING_TTL_SECS: u64 = 24 * 60 * 60;
 /// The abort message printed when `exec.implicit-dlx = never` and the subject
 /// missed every local tier. LOCKED, maintainer-authored copy — reproduce verbatim,
 /// no rewording/capitalization/backtick changes. A test pins the exact bytes.
-const NEVER_ABORT_MESSAGE: &str = "no matching script or executable found.\nto run a package from the remote registry, try `nub dlx`";
+const NEVER_ABORT_MESSAGE: &str = "No matching script or executable found.\nTo run a package from the remote registry, try `nub dlx`";
 
 /// What the gate decided for an implicit registry fetch.
 pub enum Decision {
@@ -357,13 +357,16 @@ fn prompt_consent(specs: &[String]) -> Consent {
         return prompt_line(specs, &term);
     }
 
-    let prompt = format!(
-        "nubx: {} is not installed locally. install and run it from the remote registry?",
-        specs.join(" ")
+    let bin = specs.join(" ");
+    let prompt_line1 = format!(
+        "The {} bin is not installed locally.",
+        console::style(&bin).cyan()
     );
+    let prompt_line2 = "Install and run from the remote registry?";
     let mut sel: usize = 0; // default-highlight Yes (a bare Enter accepts)
 
-    let _ = term.write_line(&prompt);
+    let _ = term.write_line(&prompt_line1);
+    let _ = term.write_line(prompt_line2);
     let _ = term.hide_cursor();
 
     let draw = |sel: usize| {
@@ -418,9 +421,10 @@ fn option_at(sel: usize) -> Consent {
 /// run. Default NO — anything but `y`/`yes` refuses. Never offers `Never` (that
 /// only lives on the interactive select).
 fn prompt_line(specs: &[String], term: &console::Term) -> Consent {
+    let bin = specs.join(" ");
     let _ = term.write_str(&format!(
-        "nubx: {} is not installed locally. Download and run it? [y/N] ",
-        specs.join(" ")
+        "The {} bin is not installed locally.\nInstall and run from the remote registry? [Y/n] ",
+        console::style(&bin).cyan()
     ));
     let _ = term.flush();
     match term.read_line() {
@@ -521,7 +525,7 @@ mod tests {
         // two lines so a reword can't slip through.
         assert_eq!(
             NEVER_ABORT_MESSAGE,
-            "no matching script or executable found.\nto run a package from the remote registry, try `nub dlx`"
+            "No matching script or executable found.\nTo run a package from the remote registry, try `nub dlx`"
         );
     }
 
