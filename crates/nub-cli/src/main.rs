@@ -10,6 +10,7 @@ mod nubx_consent;
 mod nubx_resolve;
 mod pm_engine;
 mod self_shim;
+mod verify_deps;
 
 use anyhow::Result;
 

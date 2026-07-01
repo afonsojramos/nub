@@ -498,6 +498,11 @@ pub enum Command {
         #[arg(long)]
         if_present: bool,
 
+        /// Skip the pre-run dependency-freshness check for this invocation
+        /// (`--no-install` is the alias).
+        #[arg(long = "no-check", visible_alias = "no-install")]
+        no_check: bool,
+
         /// Remaining arguments forwarded to the script.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -557,6 +562,12 @@ pub enum Command {
         /// Run the bin in all packages concurrently with no topological ordering.
         #[arg(long)]
         parallel: bool,
+
+        /// Skip the pre-run dependency-freshness check for this invocation.
+        /// (Spelled `--no-check` — `--no-install` is reserved for the npx
+        /// fetch semantics on `nubx`, so `nub exec` does not accept it.)
+        #[arg(long = "no-check")]
+        no_check: bool,
 
         /// Remaining arguments forwarded to the binary.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -640,6 +651,12 @@ pub enum Command {
         /// Accepted for `npx` parity. Removed from npm v9+; nubx warns and ignores it.
         #[arg(long = "ignore-existing")]
         ignore_existing: bool,
+
+        /// Skip the pre-run dependency-freshness check for this invocation.
+        /// (Spelled `--no-check` here — `--no-install` already means "don't
+        /// fetch a missing tool" on this surface.)
+        #[arg(long = "no-check")]
+        no_check: bool,
 
         /// Remaining arguments forwarded to the binary.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -1223,6 +1240,11 @@ fn run_nub() -> Result<i32> {
             }
             "--watch" => watch = true,
             "--node" => compat = true,
+            // The pre-run dependency-freshness opt-out on the top-level file
+            // runner (`nub --no-check foo.ts`). Consumed here so it never reaches
+            // Node as an unknown flag; after the entry point it forwards to the
+            // script (the three-position rule). `--no-install` is the alias.
+            "--no-check" | "--no-install" => crate::verify_deps::disable(),
             "--silent" | "-s" => silent = true,
             // `--verbose` is the user-facing spelling; `--show-warnings` is its
             // legacy twin. Both raise nub's diagnostic verbosity (e.g. the full
@@ -1863,6 +1885,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             reporter_hide_prefix,
             shell_emulator,
             if_present,
+            no_check,
             ignore_scripts,
             script_shell,
             aggregate_output,
@@ -1870,6 +1893,9 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             mut args,
         }) => {
             args.extend(suffix);
+            if no_check {
+                crate::verify_deps::disable();
+            }
             // `--reporter`: `silent` is `-s`; `ndjson` switches every output site to
             // machine JSON (set the global once, read at each emission site).
             match reporter {
@@ -1945,9 +1971,13 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             fail_if_no_match,
             workspace_concurrency,
             parallel,
+            no_check,
             mut args,
         }) => {
             args.extend(suffix);
+            if no_check {
+                crate::verify_deps::disable();
+            }
             // `--workspace <name>` desugars to a name filter, exactly as on `run`.
             filter.extend(workspace);
             // `--include-workspace-root`/`--parallel` imply a workspace run even
@@ -2011,9 +2041,13 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             quiet,
             yes,
             ignore_existing,
+            no_check,
             mut args,
         }) => {
             args.extend(suffix);
+            if no_check {
+                crate::verify_deps::disable();
+            }
             filter.extend(workspace);
             let recursive = recursive || parallel || include_workspace_root;
             let workspace_run = recursive || !filter.is_empty() || parallel;
@@ -2416,6 +2450,13 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
     // this path (pin resolution, .env, PnP), so the run silently drops the
     // project context with no diagnostic. Surface the coded cause up front.
     check_manifest_json(cwd)?;
+    // Pre-run dependency-freshness gate (#252). Fires for `nub <file>`, the
+    // hijack-descendant `node`, and node-bin launches (which reach here via
+    // `launch_bin`); the once-per-process latch keeps a bin launch that already
+    // checked at the exec entry from re-checking. Skipped in compat mode.
+    if let Some(code) = crate::verify_deps::gate(cwd, compat_mode) {
+        return Ok(code);
+    }
     // Fire point: `nub <file>` (and the hijack-descendant `node`, which routes
     // through run_as_node → run_file). A pinned-but-uncached version is downloaded
     // + installed from nodejs.org here, uv-style. (`nub run`/`nub exec` keep plain
@@ -2459,6 +2500,16 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
         env_vars.insert(
             "npm_config_user_agent".to_string(),
             exec_user_agent(cwd, &node.version.to_string()),
+        );
+    }
+
+    // Dep-check dedup across processes (#252): once this process owns the
+    // decision, mark the spawned child so a hijack-descendant `node` (a worker a
+    // test runner forks) skips re-checking and the warning appears at most once.
+    if crate::verify_deps::should_propagate_marker() {
+        env_vars.insert(
+            crate::verify_deps::CHECKED_MARKER.to_string(),
+            "1".to_string(),
         );
     }
 
@@ -2518,6 +2569,14 @@ fn run_script(
         }
         return Ok(0);
     };
+
+    // Pre-run dependency-freshness gate (#252): warn (or, per policy, abort)
+    // when node_modules looks stale, so a missing dep surfaces as a nub message
+    // rather than a raw `foo: command not found`. Cheap and once-per-process;
+    // skipped in compat mode and inside a running script (see `verify_deps`).
+    if let Some(code) = crate::verify_deps::gate(&project.root, compat_mode) {
+        return Ok(code);
+    }
 
     // Workspace-wide execution: -r, --filter, or --parallel.
     if ws.recursive || !ws.filter.is_empty() || ws.parallel {
@@ -3351,6 +3410,14 @@ fn run_single_script(
     args: &[String],
     exec: &ScriptExecOpts,
 ) -> Result<i32> {
+    // Pre-run dependency-freshness gate (#252) for direct callers that bypass
+    // `run_script` — the `nubx`/`nub x` script tier (`nubx_resolve_local`). A
+    // `nub run` already gated at `run_script`, and a workspace fan-out gated at
+    // its root, so the once-per-process latch makes this a no-op there.
+    if let Some(code) = crate::verify_deps::gate(&project.root, compat_mode) {
+        return Ok(code);
+    }
+
     // Run pre-script if it exists (unless --ignore-scripts).
     if !exec.ignore_scripts {
         let pre_name = format!("pre{script}");
@@ -4506,6 +4573,14 @@ fn run_exec_with_dlx(
 
     if !force_fetch {
         if let Some(bin_path) = nub_core::workspace::scripts::find_bin(bin, &cwd) {
+            // A local bin is about to run: gate on dependency freshness (#252).
+            // Only here — never on the registry-fetch fallback below, where the
+            // whole point is an ad-hoc tool the project need not have installed.
+            // A node bin re-enters `run_file_in_dir`, but the once-per-process
+            // latch keeps that from re-checking.
+            if let Some(code) = crate::verify_deps::gate(&cwd, compat_mode) {
+                return Ok(code);
+            }
             return launch_bin(&bin_path, args, compat_mode, &cwd);
         }
 
@@ -4657,6 +4732,11 @@ fn launch_bin(bin_path: &Path, args: &[String], compat_mode: bool, cwd: &Path) -
     apply_env_file_vars(&mut cmd);
     if !compat_mode {
         apply_exec_augmentation(&mut cmd, cwd);
+    }
+    // Dep-check dedup (#252): a non-node bin still gets nub's augmentation env, so
+    // a `node` it spawns re-enters nub — mark it so the warning isn't repeated.
+    if crate::verify_deps::should_propagate_marker() {
+        cmd.env(crate::verify_deps::CHECKED_MARKER, "1");
     }
     let status = cmd.status()?;
     Ok(nub_core::node::spawn::exit_code_from_status(&status))

@@ -122,6 +122,32 @@ To skip the `pre` / `post` hooks (CI, or a security-conscious run), pass `--igno
 nub run --ignore-scripts build
 ```
 
+## Dependency freshness
+
+Before a script runs, Nub checks the installed `node_modules` against your `package.json`. When a dependency is missing or its installed version has drifted out of the declared range — the usual "fresh clone, forgot to install" case — Nub warns and still runs, so a stale tree surfaces as a clear message instead of a raw `husky: command not found`:
+
+```
+nub: dependencies may be out of date (`chalk` is not installed). Run `nub install`.
+```
+
+The check is fast and marker-free, and it works whatever installed the tree — npm, pnpm, Yarn, Bun, or Nub itself. It errs toward silence: an ambiguous tree (Yarn PnP, an unparseable version, or a production-only install with devDependencies deliberately omitted) never warns.
+
+Set the behavior with the `verify-deps-before-run` key in `.npmrc`. The values are `warn` (the default — warn, then run), `error` (print the message and refuse to run), and `off` (skip the check):
+
+```ini
+# .npmrc
+verify-deps-before-run = warn
+```
+
+The `NUB_VERIFY_DEPS_BEFORE_RUN` variable overrides the file for one shell, and `--no-check` (or `--no-install` on `nub run`) skips the check for a single invocation:
+
+```bash
+nub run --no-check build
+NUB_VERIFY_DEPS_BEFORE_RUN=off nub run build
+```
+
+Nub does not install on your behalf here — `install` is accepted as a value but behaves like `warn`, since Nub won't reshape a tree another package manager set up. Run `nub install` when you see the warning. The check also applies to `nub <file>`, `nub exec`, and `nubx`, and is skipped in [`--node` / compat mode](#--node) and inside an already-running script (so a script that spawns `node` doesn't re-check).
+
 ## The `npm_*` environment
 
 Nub populates the child process with the full npm-compatible environment, so scripts and tooling that read `npm_*` variables behave exactly as they do under `npm run`. Locally installed CLIs are on `PATH` via the `node_modules/.bin` chain, so you can call them by bare name.
