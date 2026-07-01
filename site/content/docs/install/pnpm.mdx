@@ -37,12 +37,11 @@ Nub mirrors pnpm most closely: the CLI surface, the isolated `node_modules` layo
     { feature: <><code>dependencies</code> / <code>devDependencies</code></>, status: 'yes' },
     { feature: <><code>optionalDependencies</code></>, status: 'yes' },
     { feature: <><code>peerDependencies</code> / <code>peerDependenciesMeta</code></>, status: 'yes' },
-    { feature: <><code>dependenciesMeta.injected</code></>, status: 'partial', note: 'Not honored under Nub-identity migration.' },
+    { feature: <><code>dependenciesMeta.injected</code></>, status: 'yes' },
     { feature: <><code>pnpm.overrides</code></>, status: 'yes' },
     { feature: <><code>pnpm.packageExtensions</code></>, status: 'yes' },
     { feature: <><code>pnpm.patchedDependencies</code></>, status: 'yes' },
     { feature: <><code>resolutions</code></>, status: 'yes' },
-    { feature: <code>overrides</code>, status: 'no', note: 'npm/Bun field; ignored under pnpm. Use pnpm.overrides.' },
     { feature: <><code>onlyBuiltDependencies</code> / <code>neverBuiltDependencies</code></>, status: 'yes' },
     { feature: <><code>packageManager</code> / <code>engines</code></>, status: 'yes' },
     // ── Workspaces ────────────────────────────────────────────────────

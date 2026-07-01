@@ -66,7 +66,7 @@ Config reads are symmetric with the lockfile: under each incumbent Nub reads tha
         { code: 'catalog:', ok: true },
         { code: 'workspace:', ok: true },
         { code: 'workspaces', ok: true },
-        { code: 'dependenciesMeta.injected', ok: true, partial: true, note: 'Not honored under Nub-identity migration.' },
+        { code: 'dependenciesMeta.injected', ok: true },
         { code: 'nodeLinker', ok: true, partial: true, note: 'No PnP — node-linker=pnp errors.' },
         { code: 'engines / os / cpu', ok: true },
         { code: 'pnpm_config_*', ok: true, note: 'Generic settings under any pnpm version; registry-client keys (registry, proxy, strict-ssl) under pnpm v11+.' },
@@ -180,7 +180,7 @@ A project is Nub's own in three cases: it declares Nub through `nub pm use nub`,
 - **Config and env:** the `.npmrc` cascade, `npm_config_*`, neutral env (`CI`, proxies), plus `NUB_CACHE_DIR`, `NUB_CONCURRENCY`, `NUB_PRIMER_TTL`
 - **Install state:** `node_modules/.nub/`, `.nub-state`, and the global store under Nub's own directories
 
-This is the brand boundary in both directions: Nub never emits its own brand into your config, and under its own identity reads *only* neutral, cross-tool config — never `pnpm-workspace.yaml`, `.pnpmfile.cjs`, the `pnpm.*` namespace, `pnpm_config_*`, `.yarnrc.yml`, `bunfig.toml`, Bun `trustedDependencies`, or aube's `AUBE_*` knobs. Injected dependencies are unsupported under Nub identity — `nub pm use nub` refuses a project that relies on `dependenciesMeta.injected`. To keep pnpm hooks or workspace config active, stay pnpm-owned or run `nub pm use pnpm`.
+This is the brand boundary in both directions: Nub never emits its own brand into your config, and under its own identity reads *only* neutral, cross-tool config — never `pnpm-workspace.yaml`, `.pnpmfile.cjs`, the `pnpm.*` namespace, `pnpm_config_*`, `.yarnrc.yml`, `bunfig.toml`, Bun `trustedDependencies`, or aube's `AUBE_*` knobs. To keep pnpm hooks or pnpm-named workspace config active, stay pnpm-owned or run `nub pm use pnpm`.
 
 ```console
 # captured: Nub-identity project (package.lock) with a stray pnpm-workspace.yaml
