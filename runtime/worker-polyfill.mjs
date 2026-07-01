@@ -547,19 +547,33 @@ if (!isMainThread && parentPort) {
     });
   }
 
-  // `message`/`messageerror` are DELEGATED straight onto the native `parentPort`
-  // (a real Node MessagePort) so Node's own C++ event-loop ref-counting governs
-  // worker lifetime: a worker that never listens leaves parentPort with no
-  // listeners → Node unrefs it → the worker exits naturally (matching
-  // `node:worker_threads` and Bun); a worker listening via `self.onmessage` /
-  // `addEventListener("message", …)` refs it → stays alive. Node reflects
-  // `{once}`/`{signal}`/last-listener removal in the loop ref-count in C++,
-  // which no userland counter can observe. (Earlier this block eagerly held a
-  // `parentPort.on("message")` forwarder, which kept EVERY worker's event loop
-  // alive → pure `parentPort` workers that should exit hung forever. See
-  // wiki/research/worker-polyfill.md §4.) All OTHER event types go to a private
-  // EventTarget (additive; no globalThis prototype re-parenting — `event.target`
-  // is that private target, the documented minor divergence).
+  // `message`/`messageerror` are DELEGATED onto the native `parentPort` (a real
+  // Node MessagePort) so Node's own C++ event-loop ref-counting governs worker
+  // lifetime: a worker that never listens leaves parentPort with no listeners →
+  // Node unrefs it → the worker exits naturally (matching `node:worker_threads`
+  // and Bun); a worker listening via `self.onmessage` / `addEventListener` refs
+  // it → stays alive. (Earlier this block eagerly held a `parentPort.on("message")`
+  // forwarder that kept EVERY worker's loop alive → pure `parentPort` workers that
+  // should exit hung forever. See wiki/research/worker-polyfill.md §4.)
+  //
+  // DISPATCH THROUGH A REAL EventTarget (`inbound`), not a hand-invoked callback:
+  // an inbound event MUST have `event.target === self` and `event.currentTarget
+  // === self` per WHATWG DedicatedWorkerGlobalScope (browsers + Deno agree) — the
+  // old path `cb.call(scope, new MessageEvent(...))` never went through dispatch,
+  // so both stayed null. We can't make globalThis a genuine EventTarget without
+  // prototype re-parenting (a plain object has no [[EventTargetData]] slot, so a
+  // native dispatch keyed on it is impossible), so we dispatch on a private
+  // EventTarget and SHADOW `target`/`currentTarget` = self as own data properties
+  // on the event (they override Event.prototype's accessors; native dispatch still
+  // drives ordering / stopImmediatePropagation over the ONE shared event object).
+  //
+  // REF-COUNTING is preserved by mediating every add/remove and implementing
+  // `{once}`/`{signal}` OURSELVES (not via native EventTarget options), so every
+  // removal — including once-fire and signal-abort — routes through our count and
+  // attaches/detaches the SINGLE parentPort forwarder per type exactly on the
+  // 0↔1 boundary. All OTHER (custom) event types still go to a separate private
+  // EventTarget (`other`); a user-dispatched event's `target` is that private
+  // target — the documented minor divergence, unchanged here.
   const other = new EventTarget();
   const otherAdd =
     typeof scope.addEventListener === "function"
@@ -575,35 +589,66 @@ if (!isMainThread && parentPort) {
       : other.dispatchEvent.bind(other);
 
   const DELEGATED = new Set(["message", "messageerror"]);
-  // user listener → its parentPort wrapper (per delegated event), so
-  // removeEventListener detaches the exact wrapper Node registered.
-  const wrappers = { message: new Map(), messageerror: new Map() };
+  const inbound = new EventTarget();
+  // Per delegated type: the single parentPort forwarder + a live listener count,
+  // so parentPort holds a listener iff ≥1 user listener exists (worker lifetime).
+  const portState = {
+    message: { count: 0, forwarder: null },
+    messageerror: { count: 0, forwarder: null },
+  };
+  // user listener → the wrapper actually registered on `inbound`, so remove
+  // detaches the exact one and dedup of identical (type, listener) holds.
+  const registered = { message: new Map(), messageerror: new Map() };
+
+  function forward(evt, data) {
+    const ev = new MessageEvent(evt, { data });
+    // Shadow the inherited accessors so worker code observes the spec-required
+    // DedicatedWorkerGlobalScope as target/currentTarget instead of `inbound`.
+    Object.defineProperty(ev, "target", { value: scope, configurable: true });
+    Object.defineProperty(ev, "currentTarget", { value: scope, configurable: true });
+    inbound.dispatchEvent(ev);
+  }
+  function attachPort(evt) {
+    const st = portState[evt];
+    if (st.count++ === 0) {
+      st.forwarder = (data) => forward(evt, data);
+      parentPort.on(evt, st.forwarder);
+    }
+  }
+  function detachPort(evt) {
+    const st = portState[evt];
+    if (--st.count === 0 && st.forwarder) {
+      parentPort.off(evt, st.forwarder);
+      st.forwarder = null;
+    }
+  }
 
   function addDelegated(evt, listener, opts) {
+    // Normalize to the function to invoke, binding a handleEvent object so its
+    // `this` is the object (spec) while a bare function gets `this` = self below.
     const cb =
       typeof listener === "function"
         ? listener
         : listener && typeof listener.handleEvent === "function"
-          ? (e) => listener.handleEvent(e)
+          ? listener.handleEvent.bind(listener)
           : null;
     if (!cb) return;
-    const map = wrappers[evt];
+    const map = registered[evt];
     if (map.has(listener)) return; // EventTarget dedups identical (type, listener)
     const o = opts && typeof opts === "object" ? opts : {};
     if (o.signal && o.signal.aborted) return;
-    const fire = (data) => cb.call(scope, new MessageEvent(evt, { data }));
-    let wrapper;
-    if (o.once) {
-      wrapper = (data) => {
-        map.delete(listener);
-        fire(data);
-      };
-      parentPort.once(evt, wrapper);
-    } else {
-      wrapper = fire;
-      parentPort.on(evt, wrapper);
-    }
+    // `once`/`signal` are OURS (not native options) so removal stays observable to
+    // the ref-count. The once wrapper removes itself BEFORE invoking — safe mid
+    // dispatch (removing an EventTarget listener while dispatching is spec-legal).
+    const wrapper = o.once
+      ? (ev) => {
+          removeDelegated(evt, listener);
+          cb.call(scope, ev);
+        }
+      : (ev) => cb.call(scope, ev);
     map.set(listener, wrapper);
+    inbound.addEventListener(evt, wrapper);
+    attachPort(evt);
     if (o.signal) {
       o.signal.addEventListener("abort", () => removeDelegated(evt, listener), {
         once: true,
@@ -611,11 +656,11 @@ if (!isMainThread && parentPort) {
     }
   }
   function removeDelegated(evt, listener) {
-    const wrapper = wrappers[evt].get(listener);
-    if (wrapper) {
-      parentPort.off(evt, wrapper);
-      wrappers[evt].delete(listener);
-    }
+    const wrapper = registered[evt].get(listener);
+    if (!wrapper) return;
+    registered[evt].delete(listener);
+    inbound.removeEventListener(evt, wrapper);
+    detachPort(evt);
   }
 
   defineGlobal("addEventListener", (type, listener, opts) =>

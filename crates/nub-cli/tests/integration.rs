@@ -2632,6 +2632,29 @@ fn worker_message_roundtrip() {
 }
 
 #[test]
+fn worker_inbound_message_target_is_self() {
+    // WHATWG DedicatedWorkerGlobalScope: an inbound `message` event's `target` and
+    // `currentTarget` are `self` (browsers + Deno agree). The polyfill's worker-side
+    // scope used to hand-invoke the listener with a constructed MessageEvent that
+    // never went through EventTarget dispatch, so both were `null`. Both observation
+    // channels — `addEventListener('message')` and `self.onmessage` — must now see
+    // `=== self`, over the ONE shared event, in registration order.
+    let (stdout, stderr, code) = run_nub("worker", "event-target-self-main.ts");
+    assert_eq!(code, 0, "target-self worker should complete: {stderr}");
+    assert!(
+        stdout.contains("add:target=true:currentTarget=true:type=message:data=ping"),
+        "addEventListener('message') must see target/currentTarget === self: {stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "onmessage:target=true:currentTarget=true:type=message:data=ping:sawAdd=true"
+        ),
+        "self.onmessage must see target/currentTarget === self, after the earlier-\
+         registered addEventListener listener: {stdout}"
+    );
+}
+
+#[test]
 fn worker_throw_surfaces_to_parent_onerror() {
     // A worker that throws at top level must surface as an ErrorEvent on the
     // parent's `Worker.onerror`, and the parent must NOT crash. Below Node 26
