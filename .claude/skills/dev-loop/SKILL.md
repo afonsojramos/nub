@@ -5,12 +5,15 @@ description: >-
   you need to compile the dev `nub` binary, set up a worktree for fast
   incremental iteration, run a specific test file or a single test, or get
   oriented in the codebase (the crate map). Encodes the measured fast-build
-  loop: the `fast` profile + ONE shared CARGO_TARGET_DIR across all worktrees
-  (`~/.cache/nub/shared-target`) — deps are reused, only the workspace crates
-  recompile, and the disk cost is one target dir instead of ~30. A shared
-  cross-worktree compiler-WRAPPER cache (sccache) was separately measured to
-  give 0% Rust speedup and is NOT used; a shared cargo target DIR is a
-  different mechanism and is the default. Covers the real incantations (`cargo
+  loop: the `fast` profile built through `scripts/rust-build.sh`, which shares
+  ONE CARGO_TARGET_DIR across worktrees (`~/.cache/nub/shared-target`) so deps
+  are reused and only the workspace crates recompile — but auto-isolates a
+  worktree to a private target dir the moment it diverges a depended-on crate
+  (vendor/aube, nub-core, …), which is when a shared dir would clobber a sibling
+  and fail with a phantom compile error on correct source (the `rust-build`
+  skill). A shared cross-worktree compiler-WRAPPER cache (sccache) was
+  separately measured to give 0% Rust speedup and is NOT used. Covers the real
+  incantations (`cargo
   build -p nub-cli --profile fast`, `make install-dev`, `make addon-fast`), the
   test invocations, and the exact CI cheap gates.
 ---
@@ -19,20 +22,20 @@ description: >-
 
 nub is a Rust workspace — three crates (`nub-cli`, `nub-core`, `nub-native`) plus the vendored aube PM engine (`vendor/aube`, plain in-tree files since Pattern B, its own Cargo workspace, linked in-process as a library). This skill is the fast, measured way to build and test it in a worktree, plus a crate map so you know where things live.
 
-**The one rule that makes iteration fast:** build with the `--profile fast` profile (NEVER `release`), pointing CARGO_TARGET_DIR at the ONE shared dir `~/.cache/nub/shared-target` (`new-worktree.ts` prints exactly this). Cold ≈ 3 min, every rebuild after ≈ 5s. Don't clean the shared dir between iterations — that throws away cargo's incremental cache and forces a full rebuild. The shared dir means a second worktree reuses all the crates.io dependency artifacts (the bulk of a build) and recompiles only the ~10 workspace crates. Tradeoff: cargo takes a build lock on the target dir, so a build in one worktree waits for a concurrent build in another — the deliberate cost of not carrying ~30 multi-GB private target dirs.
+**The one rule that makes iteration fast:** build with the `--profile fast` profile (NEVER `release`), through `scripts/rust-build.sh` (`scripts/rust-build.sh build -p nub-cli --profile fast`). The wrapper points CARGO_TARGET_DIR at the ONE shared dir `~/.cache/nub/shared-target` for the fast path — cold ≈ 3 min, every rebuild after ≈ 5s, because a second worktree reuses all the crates.io dependency artifacts (the bulk of a build) and recompiles only the ~10 workspace crates. Don't clean the shared dir between iterations — that throws away cargo's incremental cache. **Why the wrapper and not a raw `export CARGO_TARGET_DIR`:** the shared dir is safe only while every worktree agrees on the depended-on crates; two worktrees that diverge the same one (classically `vendor/aube`) clobber each other's rlib and fail with a phantom `E0063`-class error on correct source. `rust-build.sh` shares by default and auto-isolates to a private target dir exactly when this worktree diverges such a crate — you get the fast path in the common case and correctness in the rare one, with no manual decision. See the `rust-build` skill. (Tradeoff of sharing: cargo build-locks the target dir, so concurrent builds in two sharing worktrees serialize — a latency cost, never a correctness one.)
 
 ---
 
 ## Step 1 — Set up a worktree to iterate in
 
-Substantive work lands via a PR from an isolated worktree. Create one with the `worktree` skill (`nub scripts/new-worktree.ts <slug>` — it bakes in the proven `git worktree add … origin/main` recipe). Then, for the build context, point CARGO_TARGET_DIR at the shared dir the script prints:
+Substantive work lands via a PR from an isolated worktree. Create one with the `worktree` skill (`nub scripts/new-worktree.ts <slug>` — it bakes in the proven `git worktree add … origin/main` recipe). Then build through the wrapper, from the worktree root:
 
 ```bash
 cd ~/.cache/nub/worktrees/<slug>
-export CARGO_TARGET_DIR=~/.cache/nub/shared-target             # ONE shared cache for all worktrees
+scripts/rust-build.sh build -p nub-cli --profile fast          # shared cache; auto-isolates on divergence
 ```
 
-The shared target dir means cargo reuses the crates.io dependency artifacts (the bulk of a build) that another worktree already compiled — a fresh worktree recompiles only the ~10 workspace crates instead of all ~400. It also replaces ~30 multi-GB private target dirs with one. Tradeoff: cargo locks the target dir during a build, so a build in one worktree waits while another worktree is building — the deliberate cost of the disk win. (If you genuinely need two builds to run at once, set a private `CARGO_TARGET_DIR` for the second — but the shared dir is the default.)
+The wrapper shares `~/.cache/nub/shared-target` so a fresh worktree reuses the crates.io dependency artifacts another worktree already compiled — it recompiles only the ~10 workspace crates instead of all ~400, and one shared dir replaces ~30 multi-GB private ones. It flips to a private target dir automatically when this worktree diverges a depended-on crate (see the `rust-build` skill for why). Two sharing worktrees serialize on cargo's build lock; if you need them to build at once, an isolated worktree (one that has diverged a lib crate) already runs in parallel, or set a private `CARGO_TARGET_DIR` by hand.
 
 ## Step 2 — Build the dev binary (the `fast` profile)
 
@@ -66,7 +69,7 @@ There is **no `nub build` command** — the dev build is `cargo build -p nub-cli
 
 The `fast` profile (defined in `Cargo.toml`) inherits `dev` (debug-assertions + overflow checks stay on), drops LTO, uses `codegen-units=256`, line-tables-only debuginfo, and `incremental=true`. It is the iteration profile; `release` is a ship profile and must not be used to iterate.
 
-**A shared cargo target DIR (the default here) is NOT sccache — don't conflate them.** sccache (a compiler-WRAPPER cache) was measured against this workspace and gives a **0% Rust cache-hit rate** across separate target dirs (rustc embeds per-target-dir artifact paths in sccache's cache keys; `--remap-path-prefix` + `CARGO_INCREMENTAL=0` does not fix it) — so sccache is NOT used. A shared cargo *target dir* sidesteps that entirely: with one target dir there's a single artifact path, so cargo's own incremental reuses the dependency rlibs directly across worktrees. That is why the default is `~/.cache/nub/shared-target`, not a per-worktree dir. (Seeding a private worktree target dir from a warm sibling via APFS clone is still useless — cargo invalidates the cloned fingerprints and rebuilds; the shared dir avoids the copy in the first place.)
+**A shared cargo target DIR (the default here) is NOT sccache — don't conflate them.** sccache (a compiler-WRAPPER cache) was measured against this workspace and gives a **0% Rust cache-hit rate** across separate target dirs (rustc embeds per-target-dir artifact paths in sccache's cache keys; `--remap-path-prefix` + `CARGO_INCREMENTAL=0` does not fix it) — so sccache is NOT used. A shared cargo *target dir* sidesteps that entirely: with one target dir there's a single artifact path, so cargo's own incremental reuses the dependency rlibs directly across worktrees. That is why the shared dir — not a per-worktree one — is the fast path. (Seeding a private worktree target dir from a warm sibling via APFS clone is still useless — cargo invalidates the cloned fingerprints and rebuilds; the shared dir avoids the copy in the first place. There is no copy-on-write shortcut.) The catch is that a single artifact path is safe only while every sharing worktree agrees on the depended-on crates; `scripts/rust-build.sh` is what keeps that invariant (auto-isolating a diverged worktree) so the shared dir stays both fast and correct — see the `rust-build` skill.
 
 ## Step 3 — Run tests
 
@@ -132,7 +135,10 @@ Then run the full [pre-push local verification loop in AGENTS.md](../../../AGENT
 
 ```bash
 # fresh worktree (see the `worktree` skill: nub scripts/new-worktree.ts <slug>)
-cd ~/.cache/nub/worktrees/<slug> && export CARGO_TARGET_DIR=~/.cache/nub/shared-target  # ONE shared cache
+cd ~/.cache/nub/worktrees/<slug>
+# build/test through the wrapper — shared cache, auto-isolates on depended-on-crate divergence (`rust-build` skill)
+scripts/rust-build.sh build -p nub-cli --profile fast
+scripts/rust-build.sh test  -p nub-cli --test <file_stem>
 
 # build (fast profile)
 cargo build -p nub-cli --profile fast          # -> target/fast/nub  (~3 min cold, ~5s incremental)

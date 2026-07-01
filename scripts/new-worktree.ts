@@ -19,14 +19,16 @@
 //      submodule-init step is needed.
 //   3. Apply `.worktreeinclude` — copy/symlink the listed gitignored entries
 //      INTO the worktree (things `git worktree` won't bring, e.g. `.repos/`).
-//   4. Print the SHARED CARGO_TARGET_DIR convention. Every worktree points at
-//      ONE shared target dir (~/.cache/nub/shared-target) instead of a private
-//      `<path>-target`. Cargo reuses the crates.io DEP artifacts (the bulk of a
-//      build) across worktrees and only recompiles the ~10 workspace crates, so
-//      one stable target dir total replaces ~30 multi-GB private copies.
-//      TRADEOFF: cargo takes a build lock on the target dir, so concurrent
-//      builds in different worktrees SERIALIZE (one waits for the other). That
-//      is the deliberate cost of the space win — incremental, not 30 full copies.
+//   4. Print the build convention: use `scripts/rust-build.sh` instead of bare
+//      `cargo`. Worktrees SHARE one target dir (~/.cache/nub/shared-target) so a
+//      fresh worktree reuses the crates.io DEP artifacts a sibling compiled and
+//      only recompiles the workspace crates — the fast path. But sharing clobbers
+//      when two worktrees diverge the SAME depended-on crate (e.g. vendor/aube on
+//      different branches), so rust-build.sh shares by default and auto-isolates
+//      to a private target dir the moment THIS worktree diverges such a crate.
+//      See .claude/skills/rust-build/SKILL.md. (Bare `cargo` + a hardcoded shared
+//      CARGO_TARGET_DIR still works but risks that contamination — prefer the
+//      wrapper.)
 
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, mkdirSync, cpSync, symlinkSync, lstatSync } from "node:fs";
@@ -51,8 +53,7 @@ Options:
 
 After creation:
   cd <path>
-  export CARGO_TARGET_DIR=~/.cache/nub/shared-target   # ONE shared cache for all worktrees
-  cargo build -p nub-cli --profile fast                # reuses dep artifacts; only workspace crates recompile
+  scripts/rust-build.sh build -p nub-cli --profile fast   # shares the cache; auto-isolates if you diverge a depended-on crate
 
 Cleanup when done:
   git worktree remove <path> --force   # the shared target dir is intentionally NOT removed
@@ -211,19 +212,18 @@ function main(): void {
 
   applyInclude(mainRoot, opts.path);
 
-  // ONE shared target dir for ALL worktrees: cargo reuses the crates.io dep
-  // artifacts (the bulk of a build) and only recompiles the workspace crates, so
-  // a second worktree builds incrementally instead of carrying its own multi-GB
-  // copy. Tradeoff: cargo locks the target dir, so concurrent builds across
-  // worktrees serialize (one waits for the other) — the deliberate cost of the
-  // disk win. Pre-create it so the export points at a real path on first run.
+  // Build via scripts/rust-build.sh, not a hardcoded CARGO_TARGET_DIR: it points
+  // at the shared dir (~/.cache/nub/shared-target) for the fast incremental path,
+  // but auto-isolates to a private target dir the moment this worktree diverges a
+  // depended-on crate (vendor/aube, nub-core, …) — which is when the shared dir
+  // would otherwise clobber a sibling and fail with a phantom compile error on
+  // correct source. Pre-create the shared dir so the fast path is real on run 1.
   const sharedTarget = `${homedir()}/.cache/nub/shared-target`;
   mkdirSync(sharedTarget, { recursive: true });
   process.stderr.write("\n");
   process.stderr.write(`worktree ready: ${opts.path}\n`);
   process.stderr.write(`  cd ${opts.path}\n`);
-  process.stderr.write(`  export CARGO_TARGET_DIR=${sharedTarget}   # SHARED across all worktrees — incremental, not a full copy\n`);
-  process.stderr.write(`  cargo build -p nub-cli --profile fast      # reuses dep artifacts; concurrent builds in other worktrees will serialize on the target lock\n`);
+  process.stderr.write(`  scripts/rust-build.sh build -p nub-cli --profile fast   # shared cache; auto-isolates on depended-on-crate divergence\n`);
   process.stderr.write(`  # cleanup when done (leave the shared target dir in place for the next worktree):\n`);
   process.stderr.write(`  git worktree remove ${opts.path} --force\n`);
 }
