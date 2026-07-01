@@ -30,7 +30,6 @@ Both formats are read:
     { feature: <><code>optionalDependencies</code></>, status: 'yes' },
     { feature: <><code>peerDependencies</code> / <code>peerDependenciesMeta</code></>, status: 'yes' },
     { feature: <code>resolutions</code>, status: 'yes' },
-    { feature: <code>overrides</code>, status: 'yes' },
     { feature: <code>dependenciesMeta.*.built</code>, status: 'yes' },
     { feature: <code>packageExtensions</code>, status: 'yes' },
     { feature: <code>packageManager</code>, status: 'yes' },
@@ -67,7 +66,7 @@ nub run <script>   # runs package.json scripts
 nubx <bin>         # one-off binary execution
 ```
 
-Top-level `resolutions` in `package.json` is honored — Nub applies it the way Yarn does. The `packageManager` field is what tells Nub the project is a Yarn project.
+Top-level `resolutions` in `package.json` is honored — Nub applies it the way Yarn does. Top-level `overrides` is npm and Bun's pin field; Yarn ignores it, and so does Nub under a Yarn incumbent — put pins in `resolutions`. The `packageManager` field is what tells Nub the project is a Yarn project.
 
 ## Refused commands
 
