@@ -109,6 +109,34 @@ Versions live at `~/.cache/nub/pm/<pm>/<version>`. A cached exact pin runs fully
 
 The shims are an opt-in: run `nub pm shim` and a bare `pnpm`, `npm`, or `yarn` command routes through Nub to the pinned manager, with `nub pm unshim` to remove them. Default usage needs none of this — `nub install` and `nub run` already run the pin. See [Package-manager shims](/docs/pm-shim) for the install, the strict-by-default refusal, and the per-invocation overhead.
 
+## Pinning Nub itself
+
+The `packageManager` field can also pin Nub — `nub@X.Y.Z`. When the running Nub is a different version, it fetches that exact release, verifies it, and hands off, so a project's installs don't depend on which Nub each contributor happens to have.
+
+```json
+{
+  "packageManager": "nub@0.2.9"
+}
+```
+
+The handoff runs on the install verbs — where the result is a committed lockfile and `node_modules`:
+
+```console
+$ nub install
+nub: provisioning pinned nub@0.2.9 (darwin-arm64)...
+nub: provisioned nub@0.2.9
+```
+
+The release comes from Nub's own channel and is checksum-verified before it runs; a corrupt, missing, or wrong-version build is a hard error, never a silent fallback. The store lives at `~/.cache/nub/self/<version>`, so a pinned version runs offline once provisioned.
+
+Only the install verbs hand off. Everything else — the file runner, script running, [`nubx`](/docs/nubx), version management, self-update — never reads the pin, so `nub script.ts` stays fast. A matching pin runs in place. A non-exact pin does too, with a notice: like corepack, the `packageManager` field is exact-only.
+
+To run with your installed Nub regardless of the pin, set `NUB_SELF_SHIM=0`. It disables the handoff for the whole tree:
+
+```bash
+NUB_SELF_SHIM=0 nub install
+```
+
 ## `.npmrc`
 
 The PM download — packument and tarball — goes through your `.npmrc`: `registry=` picks the mirror, `//host/:_authToken=` authenticates. An auth-required Artifactory/Nexus mirror works with the config you already have:

@@ -86,18 +86,18 @@ enum Plan {
     Notice(String),
 }
 
-/// The loop-safe core decision. `declared` is [`declared_pm_raw`]'s output (the
-/// workspace-root pin with any `+sha512` build-metadata already stripped);
+/// The loop-safe core decision. `declared` is the workspace-root `packageManager`
+/// field's `(name, version)` (with `+sha512` build-metadata already stripped);
 /// `running` is the running nub's version; `guard_set` is whether
-/// `__NUB_SELF_DISPATCHED` is present; `opted_out` is the `NUB_SELF_SHIM`
-/// opt-out. The caller has already confirmed the verb is a delegating one.
-///
-/// [`declared_pm_raw`]: nub_core::pm::resolve::declared_pm_raw
+/// `__NUB_SELF_DISPATCHED` is present; `opted_out` is the `NUB_SELF_SHIM` opt-out;
+/// `platform_supported` is whether nub publishes a release build for this OS/arch.
+/// The caller has already confirmed the verb is a delegating one.
 fn decide(
     declared: Option<(String, Option<String>)>,
     running: &semver::Version,
     guard_set: bool,
     opted_out: bool,
+    platform_supported: bool,
 ) -> Plan {
     // No pin, or a name-only pin with no version → nothing to honor.
     let Some((name, Some(pinned_raw))) = declared else {
@@ -124,7 +124,7 @@ fn decide(
     };
     // Matching pin → the pinning user's hot path: a field read + a compare, then
     // continue IN-PROCESS. Never respawn when we already are the pinned version
-    // (this is the trap the `+sha512` strip in `declared_pm_raw` exists to avoid).
+    // (this is the trap the `+sha512` strip in the field reader exists to avoid).
     if pinned == *running {
         return Plan::Continue;
     }
@@ -134,6 +134,18 @@ fn decide(
             "nub: this project pins nub@{pinned}; you're running nub@{running}. \
              Auto-provisioning is disabled (NUB_SELF_SHIM=0) — running with your \
              installed nub."
+        ));
+    }
+    // No published build for this OS/arch → graceful in-process fallback, NOT a
+    // hard error. A default-on provision that can't succeed on a whole platform
+    // (e.g. one with no release artifact yet) must not brick every install there.
+    if !platform_supported {
+        return Plan::Notice(format!(
+            "nub: this project pins nub@{pinned}, but nub publishes no build for this \
+             platform ({}/{}) — running with your installed nub@{running}. Set \
+             NUB_SELF_SHIM=0 to silence.",
+            std::env::consts::OS,
+            std::env::consts::ARCH
         ));
     }
     Plan::Delegate(pinned)
@@ -157,9 +169,18 @@ pub(crate) fn delegate_target(rest: &[String], cwd_override: Option<&Path>) -> O
     let guard_set = std::env::var_os(SELF_DISPATCHED_ENV).is_some();
     let effective = effective_cwd(cwd_override);
     // The one manifest read — reached only for a delegating verb, which reads the
-    // root manifest downstream anyway (declared_pm_raw hits ROOT_MANIFEST_CACHE).
-    let declared = nub_core::pm::resolve::declared_pm_raw(&effective);
-    match decide(declared, &running, guard_set, opted_out()) {
+    // root manifest downstream anyway (the field reader hits ROOT_MANIFEST_CACHE).
+    // The `packageManager` field ONLY (never the devEngines range-of-intent) drives
+    // the shim — matching the exact-pin channel corepack enforces.
+    let declared = nub_core::pm::resolve::declared_package_manager_field(&effective);
+    let platform_supported = crate::cli::platform_target().is_some();
+    match decide(
+        declared,
+        &running,
+        guard_set,
+        opted_out(),
+        platform_supported,
+    ) {
         Plan::Continue => None,
         Plan::Notice(msg) => {
             eprintln!("{msg}");
@@ -240,11 +261,17 @@ mod tests {
         }
     }
 
+    // decide()'s trailing args: (guard_set, opted_out, platform_supported). The
+    // common case is (false, false, true) — not a guard, not opted out, a real
+    // platform build exists.
     #[test]
     fn no_pin_or_foreign_pin_continues() {
-        assert_eq!(decide(None, &v("0.2.9"), false, false), Plan::Continue);
         assert_eq!(
-            decide(Some(("nub".into(), None)), &v("0.2.9"), false, false),
+            decide(None, &v("0.2.9"), false, false, true),
+            Plan::Continue
+        );
+        assert_eq!(
+            decide(Some(("nub".into(), None)), &v("0.2.9"), false, false, true),
             Plan::Continue,
             "a name-only nub pin has no version to honor"
         );
@@ -253,7 +280,8 @@ mod tests {
                 Some(("pnpm".into(), Some("9.1.0".into()))),
                 &v("0.2.9"),
                 false,
-                false
+                false,
+                true
             ),
             Plan::Continue,
             "a foreign PM pin is the engine's concern, not the self-shim's"
@@ -262,7 +290,7 @@ mod tests {
 
     #[test]
     fn matching_pin_is_a_silent_no_op() {
-        // The `+sha512` strip happens in declared_pm_raw upstream — decide sees the
+        // The `+sha512` strip happens in the field reader upstream — decide sees the
         // bare version. A stripped self-pin equal to the running version must NOT
         // respawn (the regression the whole feature would otherwise ship).
         assert_eq!(
@@ -270,7 +298,8 @@ mod tests {
                 Some(("nub".into(), Some("0.2.9".into()))),
                 &v("0.2.9"),
                 false,
-                false
+                false,
+                true
             ),
             Plan::Continue
         );
@@ -283,7 +312,8 @@ mod tests {
                 Some(("nub".into(), Some("0.1.0".into()))),
                 &v("0.2.9"),
                 false,
-                false
+                false,
+                true
             ),
             Plan::Delegate(v("0.1.0"))
         );
@@ -298,7 +328,8 @@ mod tests {
                 Some(("nub".into(), Some("0.1.0".into()))),
                 &v("0.2.9"),
                 true,
-                false
+                false,
+                true
             ),
             Plan::Continue
         );
@@ -311,12 +342,32 @@ mod tests {
             &v("0.2.9"),
             false,
             true,
+            true,
         );
         match plan {
             Plan::Notice(msg) => {
                 assert!(msg.contains("0.1.0") && msg.contains("0.2.9"));
                 assert!(msg.contains("NUB_SELF_SHIM=0"));
             }
+            other => panic!("expected a Notice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unsupported_platform_falls_through_in_process() {
+        // A default-on provision that can't succeed on a whole platform must NOT
+        // brick every install there — it runs in-process with a notice.
+        match decide(
+            Some(("nub".into(), Some("0.1.0".into()))),
+            &v("0.2.9"),
+            false,
+            false,
+            false,
+        ) {
+            Plan::Notice(msg) => assert!(
+                msg.contains("no build for this platform") && msg.contains("NUB_SELF_SHIM=0"),
+                "notice: {msg}"
+            ),
             other => panic!("expected a Notice, got {other:?}"),
         }
     }
@@ -329,6 +380,7 @@ mod tests {
                 &v("0.2.9"),
                 false,
                 false,
+                true,
             ) {
                 Plan::Notice(msg) => assert!(
                     msg.contains(spec) && msg.contains("exact"),
@@ -339,7 +391,7 @@ mod tests {
         }
     }
 
-    /// The `+sha512` regression, end-to-end through the real manifest reader: nub's
+    /// The `+sha512` regression, end-to-end through the real field reader: nub's
     /// own #255 stamp is `nub@<v>` (bare today) but a hand-written or future
     /// `+sha512`-suffixed self-pin must strip to the bare version so a matching pin
     /// is a silent no-op — never a spurious delegation on nub's own stamp.
@@ -351,16 +403,34 @@ mod tests {
             r#"{"name":"x","version":"1.0.0","packageManager":"nub@0.2.9+sha512.deadbeefcafe"}"#,
         )
         .unwrap();
-        let declared = nub_core::pm::resolve::declared_pm_raw(dir.path());
+        let declared = nub_core::pm::resolve::declared_package_manager_field(dir.path());
         assert_eq!(
             declared,
             Some(("nub".to_string(), Some("0.2.9".to_string()))),
-            "declared_pm_raw must strip the +sha512 build metadata"
+            "the field reader must strip the +sha512 build metadata"
         );
         assert_eq!(
-            decide(declared, &v("0.2.9"), false, false),
+            decide(declared, &v("0.2.9"), false, false, true),
             Plan::Continue,
             "a suffixed self-pin equal to the running version must NOT delegate"
+        );
+    }
+
+    /// The self-shim reads the exact `packageManager` field ONLY — a nub named in
+    /// the `devEngines` range-of-intent must NOT drive a provision or a not-exact
+    /// notice (that would nag on every command for a legitimate range).
+    #[test]
+    fn devengines_nub_is_not_read_as_a_pin() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"x","version":"1.0.0","devEngines":{"packageManager":{"name":"nub","version":">=0.1.0"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            nub_core::pm::resolve::declared_package_manager_field(dir.path()),
+            None,
+            "a devEngines-only nub entry is not the exact packageManager pin"
         );
     }
 }

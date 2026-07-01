@@ -4839,7 +4839,7 @@ fn detect_channel(bin_path: &Path) -> UpgradeChannel {
 /// error rather than fetching a 404). musl vs glibc on Linux is a runtime
 /// distinction install.sh makes via `ldd`/`/etc/alpine-release`; we encode the
 /// glibc default here and document musl as the known gap (see note below).
-fn platform_target() -> Option<&'static str> {
+pub(crate) fn platform_target() -> Option<&'static str> {
     // NOTE: a glibc build and a musl build of the same arch are the same Rust
     // `target_env` only under `target_env = "musl"`, so this distinguishes them
     // correctly when Nub itself is built for musl. The detection matches the
@@ -5332,6 +5332,16 @@ fn provision_self(version: &str) -> Result<PathBuf> {
 
     std::fs::create_dir_all(&store)
         .with_context(|| format!("creating the nub self store at {}", store.display()))?;
+    // Defense-in-depth: the self store holds binaries this process EXECs, and a
+    // store hit skips re-verification, so restrict it to the owner (0700) — a
+    // shared/world-writable cache dir can't be used to pre-plant a binary a later
+    // run would exec unverified. Best-effort; a failure here doesn't block the
+    // provision (the verify-before-exec chain below is the real gate).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o700));
+    }
     let staging = tempfile::Builder::new()
         .prefix(&format!(".self-{version}-"))
         .tempdir_in(&store)
@@ -5360,7 +5370,8 @@ fn provision_self(version: &str) -> Result<PathBuf> {
         bail!(
             "{ERR_NUB_SELF_SHIM}: checksum mismatch for the pinned nub@{version}\n  \
              expected: {expected}\n  actual:   {actual}\n\
-             Refusing to run a corrupted or tampered nub binary."
+             Refusing to run a corrupted or tampered nub binary. \
+             Set NUB_SELF_SHIM=0 to run with your installed nub."
         );
     }
 
@@ -5374,11 +5385,17 @@ fn provision_self(version: &str) -> Result<PathBuf> {
         .status()
         .context("invoking tar to extract the pinned nub")?;
     if !tar_status.success() {
-        bail!("{ERR_NUB_SELF_SHIM}: failed to extract the pinned nub@{version} archive");
+        bail!(
+            "{ERR_NUB_SELF_SHIM}: failed to extract the pinned nub@{version} archive. \
+             Set NUB_SELF_SHIM=0 to run with your installed nub."
+        );
     }
     let staged_bin = staged.join("bin").join(nub_release_bin_name());
     if !staged_bin.is_file() {
-        bail!("{ERR_NUB_SELF_SHIM}: the pinned nub@{version} archive did not contain bin/nub");
+        bail!(
+            "{ERR_NUB_SELF_SHIM}: the pinned nub@{version} archive did not contain bin/nub. \
+             Set NUB_SELF_SHIM=0 to run with your installed nub."
+        );
     }
     // CI's upload/download-artifact round-trip strips +x from the archived binary
     // (see perform_selfowned_upgrade) — re-apply it before the version probe.
@@ -5419,7 +5436,10 @@ fn verify_provisioned_version(bin: &Path, expected: &str) -> Result<()> {
         .output()
         .with_context(|| format!("probing {} --version", bin.display()))?;
     if !out.status.success() {
-        bail!("{ERR_NUB_SELF_SHIM}: the provisioned nub@{expected} failed its --version probe");
+        bail!(
+            "{ERR_NUB_SELF_SHIM}: the provisioned nub@{expected} failed its --version probe. \
+             Set NUB_SELF_SHIM=0 to run with your installed nub."
+        );
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
     let reported = stdout
@@ -5431,7 +5451,8 @@ fn verify_provisioned_version(bin: &Path, expected: &str) -> Result<()> {
     if reported != expected {
         bail!(
             "{ERR_NUB_SELF_SHIM}: the provisioned binary reports nub@{reported}, expected \
-             nub@{expected} — refusing to run a version-mismatched artifact."
+             nub@{expected} — refusing to run a version-mismatched artifact. \
+             Set NUB_SELF_SHIM=0 to run with your installed nub."
         );
     }
     Ok(())
