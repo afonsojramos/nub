@@ -5,6 +5,8 @@
 
 mod agent;
 mod cli;
+mod nubx_consent;
+mod nubx_resolve;
 mod pm_engine;
 
 use anyhow::Result;

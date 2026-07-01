@@ -249,8 +249,12 @@ fn transient_runs_do_not_error_on_multi_lockfile_projects() {
     {
         let nubx = dir.join("nubx");
         std::os::unix::fs::symlink(nub_binary(), &nubx).unwrap();
+        // `-y` clears the registry-consent gate: this test runs non-interactively
+        // (no TTY), where `nubx` now fails closed by default. The escape hatch lets
+        // it proceed to the fetch, which is the property under test (identity
+        // preflight cleared → reaches the dead-port registry).
         let out = Command::new(&nubx)
-            .args(["cowsay", "hi"])
+            .args(["-y", "cowsay", "hi"])
             .current_dir(&dir)
             .env("XDG_DATA_HOME", dir.join("xdg-data"))
             .env("XDG_CACHE_HOME", dir.join("xdg-cache"))

@@ -1408,8 +1408,8 @@ function Footer() {
             title="Toolkit"
             links={[
               ['File runner', '/docs/runtime'],
-              ['Script runner', '/docs/run'],
-              ['Package runner', '/docs/nubx'],
+              ['Runner', '/docs/runner'],
+              ['Script runner', '/docs/runner/run'],
               ['Package manager', '/docs/pm'],
               ['Version manager', '/docs/node'],
               ['Watch mode', '/docs/watch'],

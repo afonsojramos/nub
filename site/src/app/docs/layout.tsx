@@ -8,8 +8,10 @@ import { source } from '@/lib/source';
    in the sidebar — descriptive label on the left, the command on the right. */
 const COMMAND_BY_URL: Record<string, string> = {
   '/docs/runtime': 'nub <file>',
-  '/docs/run': 'nub run',
-  '/docs/nubx': 'nubx',
+  '/docs/runner': 'nubx',
+  '/docs/runner/run': 'nub run',
+  '/docs/runner/exec': 'nub exec',
+  '/docs/runner/dlx': 'nub dlx',
   '/docs/install': 'nub install',
   '/docs/node': 'nub node',
   '/docs/pm': 'nub pm',

@@ -568,11 +568,18 @@ fn run_dlx(typed: &str, args: &[String]) -> Result<i32> {
 /// populates `DlxArgs.package` (the package(s) to fetch, with `<tool>` as the bin
 /// to run from them) and `-q`/`--quiet` switches the engine's progress UI to
 /// text mode.
+/// Returns `(exit_code, fetched_ok)`. `fetched_ok` distinguishes "the tool was
+/// resolved, installed, and executed" (engine `Ok` — whatever the tool's own exit
+/// code) from "the fetch/install itself failed" (404 / resolution error /
+/// binary-not-found — engine `Err`, surfaced here as a nonzero code). The consent
+/// caller MUST gate its ledger write on `fetched_ok`: recording a failed fetch
+/// would turn a one-time `y` on a not-yet-published spec into a permanent silent
+/// run-grant that activates if the name is later (maliciously) published.
 pub fn run_dlx_for_nubx(
     bin: &str,
     args: &[String],
     flags: &crate::cli::NubxDlxFlags,
-) -> Result<i32> {
+) -> Result<(i32, bool)> {
     if flags.quiet {
         // Same knob aube's own startup flips for `--silent`: drop the animated
         // progress UI to plain text so a `-q` fetch stays quiet.
@@ -584,9 +591,14 @@ pub fn run_dlx_for_nubx(
     // irrelevant, so a multi-lockfile project must not raise
     // ERR_NUB_LOCKFILE_AMBIGUOUS the way npm/pnpm/bun's npx/dlx/bunx don't.
     let session = super::engine_session_transient(None)?;
-    // NOTE: on child failure the engine propagates the child's exit code via
-    // std::process::exit — control does not return here on that path.
-    finish_code(session.runtime.block_on(aube::commands::dlx::run(verb)))
+    // `Ok` = fetched + ran (the tool's own code via Ok(Some(code)), success via
+    // Ok(None)); `Err` = the fetch/install failed before the tool ran. We surface
+    // the Err's report exactly as `finish_code` would, but also report the
+    // success bit so the consent caller never records a failed fetch.
+    match session.runtime.block_on(aube::commands::dlx::run(verb)) {
+        Ok(code) => Ok((code.unwrap_or(0), true)),
+        Err(report) => Ok((present::emit_report(&report), false)),
+    }
 }
 
 /// Build the `dlx` invocation for a `nubx <tool> [args]` fallback: `<tool>` is

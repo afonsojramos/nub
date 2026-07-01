@@ -74,6 +74,7 @@ dotenvy = "0.15"
 # `preserve_order` keeps serde_json::Map in INSERTION order (IndexMap-backed) so
 # pm_engine's config rewrites (use_nub.rs, config_scope.rs, store_config_family.rs)
 # preserve the user's existing key order rather than alphabetizing the file.
+serde = { workspace = true }
 serde_json = { workspace = true, features = ["preserve_order"] }
 rustc-hash.workspace = true
 semver = "1"

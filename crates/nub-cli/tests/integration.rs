@@ -4395,6 +4395,417 @@ fn nubx_help_and_version_do_not_error_on_missing_bin() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// ── Section 6b: unified `nubx` (resolution chain + registry consent gate) ──
+//
+// `nubx <thing>` resolves file → script → bin locally, reaching the registry
+// only on a full local miss — and that implicit registry tier never executes
+// remote code silently: fail-closed in CI / non-TTY, `-y` is the escape hatch.
+// (cargo test runs with stdin NOT a terminal, so the gate sees a non-TTY; the CI
+// vs non-TTY branch is pinned per test by controlling the `CI` env var.)
+
+/// Symlink (Unix) / copy (Windows) the test binary to a `nubx`-named path in a
+/// fresh temp dir so argv0 dispatch enters nubx mode. Returns `(alias, dir)`; the
+/// caller removes `dir` when done.
+fn nubx_alias() -> (PathBuf, PathBuf) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "nub-nubx-uni-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let nubx = dir.join(if cfg!(windows) { "nubx.exe" } else { "nubx" });
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(nub_binary(), &nubx).expect("symlink nub → nubx");
+    #[cfg(windows)]
+    std::fs::copy(nub_binary(), &nubx).expect("copy nub → nubx");
+    (nubx, dir)
+}
+
+/// Non-TTY (no CI): an implicit registry fallthrough fails closed — refuses to
+/// download, names the missing tool, and points at `-y`. No network is touched:
+/// the gate fires before any fetch.
+#[test]
+fn nubx_registry_fallthrough_fails_closed_without_tty() {
+    let (nubx, dir) = nubx_alias();
+    let project = dir.join("proj");
+    std::fs::create_dir_all(&project).unwrap();
+    let out = Command::new(&nubx)
+        .arg("definitely-not-installed-xyzzy")
+        .current_dir(&project)
+        .env_remove("CI") // force the non-TTY branch, not the CI branch
+        .env("XDG_CACHE_HOME", dir.join("xdg-cache")) // isolate the consent ledger
+        .output()
+        .expect("spawn nubx");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_ne!(out.status.code(), Some(0), "must fail closed: {stderr}");
+    assert!(
+        stderr.contains("definitely-not-installed-xyzzy")
+            && stderr.to_lowercase().contains("terminal"),
+        "non-TTY fallthrough must refuse and mention the terminal: {stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// CI: an implicit registry fallthrough fails closed with the CI-specific
+/// message (a CI job should declare the tool, or pass `-y`). No network touched.
+#[test]
+fn nubx_registry_fallthrough_fails_closed_in_ci() {
+    let (nubx, dir) = nubx_alias();
+    let out = Command::new(&nubx)
+        .arg("definitely-not-installed-xyzzy")
+        .current_dir(&dir)
+        .env("CI", "1")
+        .env("XDG_CACHE_HOME", dir.join("xdg-cache")) // isolate the consent ledger
+        .output()
+        .expect("spawn nubx");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_ne!(
+        out.status.code(),
+        Some(0),
+        "must fail closed in CI: {stderr}"
+    );
+    assert!(
+        stderr.to_lowercase().contains("ci"),
+        "CI fallthrough must name CI: {stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A pre-recorded consent must NOT bypass the CI fail-closed gate. The ledger's
+/// "skip the prompt" hit applies only in an interactive terminal — in CI the gate
+/// fails closed unconditionally, so a restored/shared `consent.json` can't let a
+/// fetch run silently where no human can confirm. (The P2-A regression guard.)
+#[test]
+fn nubx_preseeded_consent_still_fails_closed_in_ci() {
+    let (nubx, dir) = nubx_alias();
+    // Seed an immortal (pinned) consent for the spec, as a shared/restored cache
+    // would carry it. The ledger lives at <XDG_CACHE_HOME>/nub/dlx/consent.json.
+    let ledger_dir = dir.join("xdg-cache/nub/dlx");
+    std::fs::create_dir_all(&ledger_dir).unwrap();
+    std::fs::write(
+        ledger_dir.join("consent.json"),
+        r#"{"preseeded-tool-zzz":{"specs":["preseeded-tool-zzz"],"recorded_at":9999999999,"pinned":true}}"#,
+    )
+    .unwrap();
+    let out = Command::new(&nubx)
+        .arg("preseeded-tool-zzz")
+        .current_dir(&dir)
+        .env("CI", "1")
+        .env("XDG_CACHE_HOME", dir.join("xdg-cache"))
+        .output()
+        .expect("spawn nubx");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_ne!(
+        out.status.code(),
+        Some(0),
+        "a pre-seeded ledger must not bypass CI fail-closed: {stderr}"
+    );
+    assert!(
+        stderr.to_lowercase().contains("ci"),
+        "must still refuse in CI despite the seeded consent: {stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `-y` is the escape hatch: it passes the consent gate even non-interactively,
+/// so the run proceeds to a fetch (which then fails on the unreachable registry).
+/// The proof is the ABSENCE of the gate's refusal message — `-y` got through.
+/// Registry points at a dead local port so no real network is hit.
+#[test]
+fn nubx_yes_flag_bypasses_the_consent_gate() {
+    let (nubx, dir) = nubx_alias();
+    let out = Command::new(&nubx)
+        .args(["-y", "definitely-not-installed-xyzzy"])
+        .current_dir(&dir)
+        .env("CI", "1") // even in CI, -y proceeds
+        .env("XDG_CACHE_HOME", dir.join("xdg-cache")) // isolate the consent ledger
+        .env("npm_config_registry", "http://127.0.0.1:1/")
+        .env("npm_config_fetch_retries", "0") // dead port: fail fast, no backoff
+        .output()
+        .expect("spawn nubx -y");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_ne!(out.status.code(), Some(0), "the dead-registry fetch fails");
+    assert!(
+        !stderr.contains("refusing to download"),
+        "-y must bypass the gate (no refusal message): {stderr}"
+    );
+    // A FAILED fetch must NOT record consent — otherwise a one-time `y` on a
+    // not-yet-published spec becomes a standing silent run-grant. The ledger
+    // (under the isolated XDG_CACHE_HOME) must hold no entry for the dead spec.
+    let ledger = dir.join("xdg-cache/nub/dlx/consent.json");
+    let recorded = std::fs::read_to_string(&ledger).unwrap_or_default();
+    assert!(
+        !recorded.contains("definitely-not-installed-xyzzy"),
+        "a failed fetch must not record consent: {recorded}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The dlx/nubx split: `nub dlx <tool>` is the EXPLICIT download command —
+/// invoking it is the consent, so it is NOT gated and runs in CI / non-TTY. It
+/// proceeds straight to a fetch (here failing on the dead registry), never
+/// printing nubx's refusal. (Run via the normal `nub` binary — dlx is an engine
+/// verb, not argv0 dispatch.)
+#[test]
+fn nub_dlx_is_not_consent_gated() {
+    let dir = std::env::temp_dir().join(format!("nub-dlx-ungated-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let out = Command::new(nub_binary())
+        .args(["dlx", "definitely-not-installed-xyzzy"])
+        .current_dir(&dir)
+        .env("CI", "1")
+        .env("XDG_CACHE_HOME", dir.join("xdg-cache"))
+        .env("npm_config_registry", "http://127.0.0.1:1/")
+        .env("npm_config_fetch_retries", "0") // dead port: fail fast, no backoff
+        .output()
+        .expect("spawn nub dlx");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("refusing to download"),
+        "nub dlx must not be consent-gated: {stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// SCRIPT tier: `nubx <name>` runs a `package.json` script of that name — nub's
+/// addition over npx (which only resolves bins). A local script must win over the
+/// registry: no download, no prompt, even in CI / non-TTY.
+#[test]
+fn nubx_resolves_a_local_script() {
+    let (nubx, dir) = nubx_alias();
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"t","scripts":{"greet":"node -e \"console.log('FROM-SCRIPT')\""}}"#,
+    )
+    .unwrap();
+    let out = Command::new(&nubx)
+        .arg("greet")
+        .current_dir(&dir)
+        .env("CI", "1") // a script never reaches the gate
+        .output()
+        .expect("spawn nubx greet");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("FROM-SCRIPT"),
+        "nubx must run the local script: stdout={stdout} stderr={stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// FILE beats SCRIPT: when a token is both a verbatim-existing file and a script
+/// name, the file wins (precedence file > script, matching run/mux). The file is
+/// extensionless `greet`; the file runner runs it through Node.
+#[test]
+fn nubx_file_wins_over_script() {
+    let (nubx, dir) = nubx_alias();
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"t","scripts":{"greet":"node -e \"console.log('FROM-SCRIPT')\""}}"#,
+    )
+    .unwrap();
+    std::fs::write(dir.join("greet"), "console.log('FROM-FILE')\n").unwrap();
+    let out = Command::new(&nubx)
+        .arg("greet")
+        .current_dir(&dir)
+        .env("CI", "1")
+        .output()
+        .expect("spawn nubx greet");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("FROM-FILE") && !stdout.contains("FROM-SCRIPT"),
+        "the verbatim file must win over the same-named script: stdout={stdout} stderr={stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The nubx flag/argv resolution spec (`wiki/research/nubx-flag-env-resolution.md`
+/// §3 edge-case table). nubx is a pure pass-through runner: it locates the SUBJECT
+/// token, decides its TIER by precedence (file > script > bin > registry), then
+/// hands the RAW remaining argv to that tier's runner. This drives the table as
+/// real argv0 invocations and asserts each lands in the right tier with the right
+/// raw argv — the file tier (the headline #224 fix), the `-r`/`-p` collision
+/// rulings, and the SCRIPT re-dispatch to `nub run`. Registry/consent rows live in
+/// their own focused tests above.
+#[test]
+fn nubx_resolution_spec() {
+    let (nubx, dir) = nubx_alias();
+    // `app.js` echoes the argv + execArgv Node actually received, so a delegated
+    // file invocation is verified by what reached Node — not just exit codes.
+    std::fs::write(
+        dir.join("app.js"),
+        "console.log('ARGV='+JSON.stringify(process.argv.slice(2))+\
+         ' EXEC='+JSON.stringify(process.execArgv));\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    std::fs::write(dir.join("sub/x.js"), "console.log('SUBX');\n").unwrap();
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"t","scripts":{"build":"node -e \"console.log('SCRIPT-BUILD')\""}}"#,
+    )
+    .unwrap();
+    // A real `node_modules/.bin` entry is platform-shaped: a bare shebang file on
+    // POSIX, but on Windows `find_bin` only matches `.cmd`/`.exe`/`.bat`/`.ps1`, so
+    // a Windows bin needs a `.cmd` shim alongside the JS (exactly what npm/pnpm
+    // write, and what the nubx-test fixture's `hello`+`hello.cmd` pair does). The
+    // `.cmd` runs `node <bare-file> %*` so args forward; the bare file's shebang is
+    // stripped by Node. Without the shim, the Bin tier misses on Windows and falls
+    // through to the gated registry — the windows-latest-only failure this fixes.
+    let bin_dir = dir.join("node_modules/.bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    std::fs::write(
+        bin_dir.join("mytool"),
+        "#!/usr/bin/env node\nconsole.log('BIN '+JSON.stringify(process.argv.slice(2)));\n",
+    )
+    .unwrap();
+    #[cfg(windows)]
+    std::fs::write(
+        bin_dir.join("mytool.cmd"),
+        "@ECHO off\nnode \"%~dp0\\mytool\" %*\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(
+            bin_dir.join("mytool"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+    }
+
+    let nx = |args: &[&str]| -> (String, String, i32) {
+        let out = Command::new(&nubx)
+            .args(args)
+            .current_dir(&dir)
+            .env("CI", "1") // pin the non-TTY registry branch deterministically
+            .env("XDG_CACHE_HOME", dir.join("xdg-cache"))
+            .output()
+            .expect("spawn nubx");
+        (
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+            out.status.code().unwrap_or(-1),
+        )
+    };
+
+    // ── FILE tier — a leading Node flag, eval, stdin, `--`, and `--node` compat
+    // all reach Node; the raw argv (minus nub's own `--node`) is preserved. This is
+    // the half #224 broke: clap used to reject any Node flag before the file.
+    //
+    // Augmentation PREPENDS nub's own execArgv (the preload + experimental flags)
+    // and APPENDS the user's verbatim, so the user's leading flags are the TAIL of
+    // execArgv, in their original order. Assert that tail — NOT an exact-from-start
+    // match, which only holds when augmentation is off (the trap that masked this
+    // locally: a worktree target dir outside the tree can't find runtime/, so the
+    // dev binary ran un-augmented while CI ran augmented).
+    let (o, e, _) = nx(&["--inspect-port=0", "--enable-source-maps", "app.js"]);
+    assert!(
+        o.contains(r#""--inspect-port=0","--enable-source-maps"]"#),
+        "leading Node flags must reach Node verbatim, in order, as the execArgv tail: {o}{e}"
+    );
+    let (o, _, _) = nx(&["--import", "./app.js", "app.js", "tail"]); // value-flag skips its value
+    assert!(
+        o.contains(r#"ARGV=["tail"]"#),
+        "a Node value-flag consumes its value; the next bare token is the subject: {o}"
+    );
+    assert!(
+        nx(&["-e", "console.log(2+2)"]).0.contains('4'),
+        "`-e` eval is the Node tier"
+    );
+    // `--` is PRESERVED into Node's argv (not stripped) — node `app.js -- --foo`
+    // keeps `--` as a program arg.
+    assert!(
+        nx(&["app.js", "--", "--foo"])
+            .0
+            .contains(r#"ARGV=["--","--foo"]"#),
+        "the first `--` after a file must reach Node, not be stripped"
+    );
+    assert!(
+        nx(&["--node", "app.js"]).0.contains(r#"EXEC=[]"#),
+        "`--node` is stripped + forces compat: no augmentation flags in execArgv"
+    );
+    // The review's P0 re-confirm: a relative / bare path that EXISTS resolves as a
+    // FILE, never falling through to the registry.
+    assert!(
+        nx(&["./app.js"]).0.contains("ARGV="),
+        "`./app.js` runs as a file"
+    );
+    assert!(
+        nx(&["sub/x.js"]).0.contains("SUBX"),
+        "a bare relative path that exists runs as a file"
+    );
+    assert!(
+        nx(&["app.js"]).0.contains("ARGV="),
+        "a bare filename that exists runs as a file"
+    );
+
+    // ── SCRIPT tier — a bare script re-dispatches to `nub run`, gaining its full
+    // flag surface. A run-only flag (`--if-present`) now works; a Node flag on a
+    // script is a clean clap error, never a silent registry fetch.
+    assert!(
+        nx(&["build"]).0.contains("SCRIPT-BUILD"),
+        "a bare script runs via `nub run`"
+    );
+    assert!(
+        nx(&["--if-present", "build"]).0.contains("SCRIPT-BUILD"),
+        "`--if-present` reaches `nub run` (the script tier's full grammar)"
+    );
+    let (_, e, code) = nx(&["--inspect", "build"]);
+    assert!(
+        code != 0 && e.contains("--inspect") && !e.to_lowercase().contains("download"),
+        "a Node flag on a script is a clean error from `nub run`, not a registry attempt: {e}"
+    );
+
+    // ── BIN tier — flags after the bin reach the bin; the post-target `--` is
+    // KEPT verbatim (Option A, decided 2026-06-28 — = pnpm 10 exec / node).
+    assert!(
+        nx(&["mytool", "a1"]).0.contains(r#"BIN ["a1"]"#),
+        "a local bin runs with its args"
+    );
+    assert!(
+        nx(&["mytool", "--help"]).0.contains(r#"BIN ["--help"]"#),
+        "a flag after the bin reaches it"
+    );
+    assert!(
+        nx(&["mytool", "--", "--fix"])
+            .0
+            .contains(r#"BIN ["--","--fix"]"#),
+        "the bin's post-target `--` is kept verbatim (Option A)"
+    );
+
+    // ── Collisions (decided): `-p` = `--package` (registry force, NOT Node print);
+    // `-r` = `--recursive` (workspace, NOT Node `--require`).
+    let (_, e, _) = nx(&["-p", "cowsay", "mytool"]);
+    assert!(
+        e.to_lowercase().contains("download") || e.to_lowercase().contains("ci"),
+        "`-p` forces the registry tier even with a local `mytool`: {e}"
+    );
+    let (_, e, code) = nx(&["-p", "cowsay", "--no-install", "mytool"]);
+    assert!(
+        code == 127 && e.contains("--no-install"),
+        "`-p`+`--no-install` errors 127, no fetch: {e}"
+    );
+    let (_, e, code) = nx(&["-r", "build"]);
+    assert!(
+        code != 0 && e.to_lowercase().contains("workspace"),
+        "`-r` is `--recursive` (workspace run), never Node's `--require`: {e}"
+    );
+
+    // ── No subject at all → the missing-name bail (registry consent never fires).
+    let (_, e, code) = nx(&["--node"]);
+    assert!(
+        code != 0 && e.contains("missing binary name"),
+        "no subject bails: {e}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ── Section 7: pnpm workspace behavior tests ────────────────────
 
 /// --bail: when a workspace package fails, stop execution.
