@@ -1159,7 +1159,10 @@ fn offline_mirror_preflight(
 /// `strict_no_lockfile` (drift or no lockfile ⇒ hard error), root lifecycle
 /// hooks on unless `--ignore-scripts`.
 pub fn run_ci(flags: CiFlags) -> Result<i32> {
-    let session = super::engine_session(flags.dir.as_deref())?;
+    // `engine_session_ci` forces a project-local virtual store (GVS off) so
+    // ci's frozen node_modules is COPY-relocatable across multi-stage Docker
+    // (#241); isolation/phantom-dep protection is preserved.
+    let session = super::engine_session_ci(flags.dir.as_deref())?;
     if let Some(err) = pnpm_lockfile_version_preflight(&session) {
         return Err(err);
     }

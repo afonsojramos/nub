@@ -618,7 +618,33 @@ pub(crate) struct EngineSession {
 /// land after it (they feed settings resolution, which no detection-path
 /// code consults).
 pub(crate) fn engine_session(dir: Option<&Path>) -> Result<EngineSession> {
-    engine_session_inner(dir, ConfigScopeNoise::Warn, IdentityStrictness::Strict)
+    engine_session_inner(
+        dir,
+        ConfigScopeNoise::Warn,
+        IdentityStrictness::Strict,
+        VirtualStoreLocality::Default,
+    )
+}
+
+/// [`engine_session`] for `nub ci` — identical resolution (Warn + Strict, it
+/// writes/reads the project lockfile) but forces a PROJECT-LOCAL virtual store
+/// (GVS off, isolation kept). `nub ci` is the frozen, ephemeral, deploy-oriented
+/// install; its `node_modules` is almost always COPY-relocated (multi-stage
+/// Docker) or thrown away, and a machine-global virtual store makes that tree
+/// non-relocatable — every `.nub/<dep>` becomes an absolute symlink into
+/// `~/.cache/nub/pm/virtual-store` that a `COPY --from` leaves dangling (#241).
+/// Forcing the store project-local yields the self-contained, COPY-safe tree
+/// `CI=1 nub install` already produces, while keeping the isolated layout's
+/// phantom-dep protection. An explicit user `enableGlobalVirtualStore`/
+/// `nodeLinker` still wins — this is an embedder-tier default (mirrors how
+/// `aube dlx` defaults GVS off for its scratch installs).
+pub(crate) fn engine_session_ci(dir: Option<&Path>) -> Result<EngineSession> {
+    engine_session_inner(
+        dir,
+        ConfigScopeNoise::Warn,
+        IdentityStrictness::Strict,
+        VirtualStoreLocality::ProjectLocal,
+    )
 }
 
 /// [`engine_session`] for the TRANSIENT-package families (`nubx`/`dlx`,
@@ -633,7 +659,12 @@ pub(crate) fn engine_session(dir: Option<&Path>) -> Result<EngineSession> {
 /// warnings are suppressed (Silent) for the same reason: the CWD project's
 /// config does not shape a transient run.
 pub(crate) fn engine_session_transient(dir: Option<&Path>) -> Result<EngineSession> {
-    engine_session_inner(dir, ConfigScopeNoise::Silent, IdentityStrictness::Lenient)
+    engine_session_inner(
+        dir,
+        ConfigScopeNoise::Silent,
+        IdentityStrictness::Lenient,
+        VirtualStoreLocality::Default,
+    )
 }
 
 /// [`engine_session`] for the read-only PROJECT-GRAPH families that resolve
@@ -648,7 +679,12 @@ pub(crate) fn engine_session_transient(dir: Option<&Path>) -> Result<EngineSessi
 /// silent degrade to no-identity would yield an empty/wrong graph. See the
 /// config-scoping policy ([`config_scope`]).
 pub(crate) fn engine_session_quiet(dir: Option<&Path>) -> Result<EngineSession> {
-    engine_session_inner(dir, ConfigScopeNoise::Silent, IdentityStrictness::Strict)
+    engine_session_inner(
+        dir,
+        ConfigScopeNoise::Silent,
+        IdentityStrictness::Strict,
+        VirtualStoreLocality::Default,
+    )
 }
 
 /// [`engine_session_quiet`] for GLOBAL-SCOPE commands that never read or write
@@ -667,7 +703,12 @@ pub(crate) fn engine_session_quiet(dir: Option<&Path>) -> Result<EngineSession> 
 /// ambiguity guard remains for the mutating install family (writes the
 /// lockfile) and the project-graph readers above (see [`engine_session_quiet`]).
 pub(crate) fn engine_session_global(dir: Option<&Path>) -> Result<EngineSession> {
-    engine_session_inner(dir, ConfigScopeNoise::Silent, IdentityStrictness::Lenient)
+    engine_session_inner(
+        dir,
+        ConfigScopeNoise::Silent,
+        IdentityStrictness::Lenient,
+        VirtualStoreLocality::Default,
+    )
 }
 
 /// Whether an identity-resolution failure (multi-lockfile ambiguity, declared
@@ -694,10 +735,24 @@ enum ConfigScopeNoise {
     Silent,
 }
 
+/// Where the isolated layout's virtual store materializes. `Default` engages
+/// the machine-global virtual store (the shared, cross-project fast path) per
+/// the embedder default; `ProjectLocal` forces GVS off so the store lands
+/// inside `node_modules/.nub` (real dirs + relative symlinks) — a self-
+/// contained, COPY-relocatable tree. Only `nub ci` requests `ProjectLocal`
+/// (see [`engine_session_ci`]); isolation/phantom-dep protection is preserved
+/// either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VirtualStoreLocality {
+    Default,
+    ProjectLocal,
+}
+
 fn engine_session_inner(
     dir: Option<&Path>,
     noise: ConfigScopeNoise,
     strictness: IdentityStrictness,
+    store_locality: VirtualStoreLocality,
 ) -> Result<EngineSession> {
     // Register the embedder profile BEFORE initializing diagnostics: the diag
     // recorder reads its toggles through the active profile's `diag_env_prefix`
@@ -763,6 +818,7 @@ fn engine_session_inner(
         detected.as_ref(),
         truly_fresh,
         &cwd,
+        store_locality,
     ));
     // Route the engine's lifecycle scripts through nub's runtime augmentation
     // (project-pinned + augmented Node, shim on PATH, preload) — the SAME
@@ -1970,6 +2026,7 @@ fn nub_setting_defaults(
     detected: Option<&DetectedLockfile>,
     truly_fresh: bool,
     cwd: &Path,
+    store_locality: VirtualStoreLocality,
 ) -> Vec<(String, String)> {
     let fresh_format = if truly_fresh { "aube" } else { "pnpm" };
     let mut defaults = vec![
@@ -2013,6 +2070,18 @@ fn nub_setting_defaults(
     if !injected {
         defaults.push(("nodeLinker".to_string(), "isolated".to_string()));
         defaults.push(("hoist".to_string(), "false".to_string()));
+    }
+    // `nub ci` forces the virtual store PROJECT-LOCAL (GVS off). Combined with
+    // the isolated+hoist=false layout above, this yields real `node_modules/
+    // .nub/<dep>` dirs + relative symlinks (aube: `effective_gvs = planned_gvs
+    // && !hoist && Isolated`, and `planned_gvs = override ?? !$CI`) — a self-
+    // contained tree that survives a multi-stage-Docker `COPY --from`, unlike
+    // the machine-global store the default install engages (#241). Isolation
+    // (phantom-dep protection) is unchanged; only the store LOCATION moves.
+    // Embedder-tier, so an explicit user `enableGlobalVirtualStore`/`nodeLinker`
+    // still wins.
+    if store_locality == VirtualStoreLocality::ProjectLocal {
+        defaults.push(("enableGlobalVirtualStore".to_string(), "false".to_string()));
     }
     defaults
 }
@@ -2503,7 +2572,12 @@ mod tests {
             LockfileKind::Pnpm,
             LockfileKind::Aube,
         ] {
-            let defaults = nub_setting_defaults(Some(&detected(kind)), false, dir.path());
+            let defaults = nub_setting_defaults(
+                Some(&detected(kind)),
+                false,
+                dir.path(),
+                VirtualStoreLocality::Default,
+            );
             assert_eq!(
                 get(&defaults, "nodeLinker"),
                 Some("isolated"),
@@ -2517,7 +2591,7 @@ mod tests {
         }
 
         // A fresh project (no lockfile) gets the same GVS default.
-        let fresh = nub_setting_defaults(None, true, dir.path());
+        let fresh = nub_setting_defaults(None, true, dir.path(), VirtualStoreLocality::Default);
         assert_eq!(
             get(&fresh, "nodeLinker"),
             Some("isolated"),
@@ -2548,8 +2622,13 @@ mod tests {
             fresh: false,
         };
         for defaults in [
-            nub_setting_defaults(Some(&detected), false, dir.path()),
-            nub_setting_defaults(None, true, dir.path()), // fresh, injected at cwd
+            nub_setting_defaults(
+                Some(&detected),
+                false,
+                dir.path(),
+                VirtualStoreLocality::Default,
+            ),
+            nub_setting_defaults(None, true, dir.path(), VirtualStoreLocality::Default), // fresh, injected at cwd
         ] {
             assert_eq!(
                 get(&defaults, "nodeLinker"),
@@ -2565,6 +2644,50 @@ mod tests {
     }
 
     #[test]
+    fn ci_forces_project_local_store_but_keeps_isolation() {
+        // `nub ci` (VirtualStoreLocality::ProjectLocal) pushes
+        // `enableGlobalVirtualStore=false` so the frozen node_modules is
+        // COPY-relocatable (#241), while keeping the isolated+hoist=false layout
+        // (phantom-dep protection). A plain install (Default) leaves GVS on.
+        let dir = tempfile::tempdir().unwrap();
+        let detected = DetectedLockfile {
+            kind: LockfileKind::Npm,
+            dir: dir.path().to_path_buf(),
+            fresh: false,
+        };
+
+        let ci = nub_setting_defaults(
+            Some(&detected),
+            false,
+            dir.path(),
+            VirtualStoreLocality::ProjectLocal,
+        );
+        assert_eq!(
+            get(&ci, "enableGlobalVirtualStore"),
+            Some("false"),
+            "ci must force the store project-local (GVS off)"
+        );
+        assert_eq!(
+            get(&ci, "nodeLinker"),
+            Some("isolated"),
+            "ci keeps the isolated layout"
+        );
+        assert_eq!(get(&ci, "hoist"), Some("false"), "ci keeps hoist off");
+
+        let plain = nub_setting_defaults(
+            Some(&detected),
+            false,
+            dir.path(),
+            VirtualStoreLocality::Default,
+        );
+        assert_eq!(
+            get(&plain, "enableGlobalVirtualStore"),
+            None,
+            "a plain install never forces GVS off (stays on outside CI)"
+        );
+    }
+
+    #[test]
     fn fresh_write_format_flips_with_truly_fresh() {
         let dir = tempfile::tempdir().unwrap();
         // A truly-fresh project writes nub's neutral `lock.yaml`
@@ -2572,7 +2695,7 @@ mod tests {
         // pnpm-lock fresh-write default for drop-in interop.
         assert_eq!(
             get(
-                &nub_setting_defaults(None, true, dir.path()),
+                &nub_setting_defaults(None, true, dir.path(), VirtualStoreLocality::Default),
                 "defaultLockfileFormat"
             ),
             Some("aube"),
@@ -2580,7 +2703,7 @@ mod tests {
         );
         assert_eq!(
             get(
-                &nub_setting_defaults(None, false, dir.path()),
+                &nub_setting_defaults(None, false, dir.path(), VirtualStoreLocality::Default),
                 "defaultLockfileFormat"
             ),
             Some("pnpm"),
@@ -2593,7 +2716,12 @@ mod tests {
         };
         assert_eq!(
             get(
-                &nub_setting_defaults(Some(&pnpm), false, dir.path()),
+                &nub_setting_defaults(
+                    Some(&pnpm),
+                    false,
+                    dir.path(),
+                    VirtualStoreLocality::Default
+                ),
                 "defaultLockfileFormat"
             ),
             Some("pnpm"),
@@ -2622,7 +2750,12 @@ mod tests {
             // identity-settings invariants for the non-truly-fresh surfaces
             // (the truly-fresh lockfile-format flip is covered separately in
             // `fresh_write_format_flips_with_truly_fresh`).
-            let defaults = nub_setting_defaults(detected.as_ref(), false, dir.path());
+            let defaults = nub_setting_defaults(
+                detected.as_ref(),
+                false,
+                dir.path(),
+                VirtualStoreLocality::Default,
+            );
             assert_eq!(get(&defaults, "defaultLockfileFormat"), Some("pnpm"));
             assert_eq!(get(&defaults, "virtualStoreDir"), Some("node_modules/.nub"));
             assert_eq!(get(&defaults, "stateDir"), Some("node_modules/.nub"));
@@ -2672,7 +2805,8 @@ mod tests {
 
         for kind in all_kinds {
             let d = kind.map(detected);
-            let defaults = nub_setting_defaults(d.as_ref(), false, dir.path());
+            let defaults =
+                nub_setting_defaults(d.as_ref(), false, dir.path(), VirtualStoreLocality::Default);
             let label = format!("{kind:?}");
 
             // Must always carry the safe explicit-allowlist posture.
