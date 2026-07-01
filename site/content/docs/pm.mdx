@@ -82,6 +82,26 @@ Every file written or removed is named in the output; rerunning is a no-op. The 
 
 A converting `use yarn` is otherwise fine — Nub writes a classic `yarn.lock` directly. Running `use bun` writes the pin and lockfile but doesn't provision bun.
 
+### `nub pm pin`
+
+Lock the project to an exact Nub version. Bare, it pins the Nub you're running; pass a version to pin a specific one.
+
+```bash
+nub pm pin           # pin the running Nub
+nub pm pin 0.2.10    # pin an exact version
+```
+
+```console
+$ nub pm pin
+pinned nub@0.2.10
+  package.json: packageManager = nub@0.2.10
+  package.json: devEngines.packageManager = { name: "nub", version: "^0.2.10", onFail: "warn" }
+```
+
+It writes only the identity fields — the exact `packageManager` pin and the `devEngines.packageManager` caret beside it — and nothing else: no lockfile conversion, no config migration. That fuller switch onto Nub is [`nub pm use nub`](#nub-pm-use)'s job; pin is the lightweight lock, the package-manager analog of [Nub's Node pin](/docs/node).
+
+The version must be exact — Nub is the binary you're running, not a registry package, so a range or dist-tag has nothing to resolve against.
+
 ### `nub pm update`
 
 Bump the pin: resolve the newest version satisfying the `devEngines` range (or the registry `latest` if there's no range), provision it, and rewrite `packageManager` with a fresh hash. Alias: `nub pm up`.

@@ -6033,6 +6033,7 @@ fn run_pm(args: &[String]) -> Result<i32> {
              \x20 use <pm>[@<spec>]  declare the project's package manager (npm|pnpm|yarn|bun|nub;\n\
              \x20                    default: latest) — writes packageManager and aligns the lockfile;\n\
              \x20                    `use nub` migrates the full config surface, `use pnpm` reverses it\n\
+             \x20 pin [<version>]    lock this project to an exact nub version (default: the running nub)\n\
              \x20 update             re-resolve within the pinned range and bump the pin (alias: up)\n\
              \x20 cache [clear]      list cached package managers (or clear the cache)\n\
              \x20 shim               link npm/pnpm/yarn shims into ~/.nub/shims (re-run after `nub upgrade`)\n\
@@ -6222,18 +6223,26 @@ fn run_pm(args: &[String]) -> Result<i32> {
             }
             Ok(0)
         }
+        // Lock the project to an EXACT nub version — the sole writer of the
+        // hard `packageManager: "nub@<v>"` pin that arms nub's self-shim
+        // (provision+delegate when the pinned nub ≠ the running one). Writes only
+        // the two identity fields; the heavier into-nub migration (lockfile,
+        // pnpm-workspace.yaml, settings) is `use nub`'s job. Symmetric with
+        // `nub node pin <version>`.
+        "pin" => run_pm_pin(args.get(1).map(String::as_str), &cwd),
         // Install / remove the PM shims (spec: wiki/research/package-manager-shims.md).
         "shim" => run_pm_shim_install(),
         "unshim" => run_pm_unshim(),
-        // `pin`/`switch` were replaced by `use` (2026-06-10, identity-policy
-        // ratification) — name the successor instead of the generic unknown.
-        "pin" | "switch" => bail!(
-            "`nub pm {}` was replaced by `nub pm use <pm>[@<spec>]` — one verb declares \
-             the package manager and aligns the lockfile.",
-            verb.expect("verb present in this arm")
+        // `switch` (the old cross-PM, declaration-only verb) was replaced by
+        // `use` (2026-06-10, identity-policy ratification) — name the successor
+        // instead of the generic unknown. (`pin` is a live verb again above, with
+        // its new nub-lock meaning — not the retired incumbent-version pin.)
+        "switch" => bail!(
+            "`nub pm switch` was replaced by `nub pm use <pm>[@<spec>]` — one verb declares \
+             the package manager and aligns the lockfile."
         ),
         _ => {
-            bail!("nub pm takes a subcommand (which, use, update (up), cache, shim, unshim).")
+            bail!("nub pm takes a subcommand (which, use, pin, update (up), cache, shim, unshim).")
         }
     }
 }
@@ -6612,6 +6621,80 @@ fn run_pm_use(name: &str, spec: &str, cwd: &Path) -> Result<i32> {
         for line in crate::pm_engine::use_nub::regenerate_workspace_yaml(&root)? {
             println!("  {line}");
         }
+    }
+    Ok(0)
+}
+
+/// `nub pm pin [<version>]` — write the locked identity pin
+/// `packageManager: "nub@<exact>"` (defaulting to the running nub when no
+/// version is given). This is the SOLE deliberate lock gesture and the one
+/// thing that arms nub's self-shim: a locked exact `nub@<v>` ≠ the running nub
+/// makes the next PM command provision that version and delegate to it. It is
+/// the PM-namespace analog of `nub node pin <version>`.
+///
+/// It is DELIBERATELY lightweight — it writes only the two identity fields
+/// (via [`use_nub::write_nub_identity_fields`]) and does no lockfile conversion
+/// or `pnpm-workspace.yaml`/settings migration; that heavier into-nub switch is
+/// `nub pm use nub`'s job. It never touches the network: nub is the running
+/// binary, so the pin is a pure local declaration.
+fn run_pm_pin(arg: Option<&str>, cwd: &Path) -> Result<i32> {
+    use crate::pm_engine::use_nub;
+    use nub_core::pm::resolve;
+
+    let running = env!("CARGO_PKG_VERSION");
+
+    // Resolve the exact version to pin. Bare `nub pm pin` (and the forgiving
+    // `nub pm pin nub`) lock the running binary. An explicit version must be an
+    // EXACT semver — nub is the running binary, not a registry package, so a
+    // range/dist-tag (`^1`, `1.x`, `next`, `latest`) has nothing to resolve
+    // against and can't be pinned (the same rule `split_pm_arg` enforces for
+    // `pm use nub@<spec>`). A leading `nub@` is stripped for forgiveness so
+    // `pin nub@<v>` and `pin <v>` are the same gesture.
+    let version = match arg {
+        None => running.to_string(),
+        Some(a) => {
+            let spec = a.strip_prefix("nub@").unwrap_or(a);
+            if spec == "nub" {
+                running.to_string()
+            } else if semver::Version::parse(spec).is_ok() {
+                spec.to_string()
+            } else {
+                bail!(
+                    "`nub pm pin {spec}` needs an exact version (e.g. {running}) — nub is the \
+                     running binary, not a registry package, so a range/tag can't be pinned."
+                );
+            }
+        }
+    };
+
+    // The pin is written into the workspace-root manifest (the same home `use`
+    // targets). Surface a malformed manifest first — resolution otherwise reads
+    // it as "no project" and this would misreport a typo as a missing manifest.
+    check_manifest_json(cwd)?;
+    let Some(project) = nub_core::workspace::detect::detect_project(cwd) else {
+        bail!(
+            "no package.json found from {} — the pin is written into the project manifest",
+            cwd.display()
+        );
+    };
+    let root = project.workspace_root.unwrap_or(project.root);
+
+    resolve::edit_root_manifest(&root, |obj| {
+        use_nub::write_nub_identity_fields(obj, Some(&version), &version);
+    })?;
+
+    println!("pinned nub@{version}");
+    println!("  package.json: packageManager = nub@{version}");
+    println!(
+        "  package.json: devEngines.packageManager = {{ name: \"nub\", version: \"^{version}\", onFail: \"warn\" }}"
+    );
+    // A pin at a version other than the running nub is honored by the self-shim,
+    // not eagerly: say what happens next, download nothing now.
+    if version != running {
+        println!(
+            "  note: pinned nub@{version} (the running nub is {running}) — the next package-manager \
+             command provisions and delegates to it."
+        );
     }
     Ok(0)
 }
@@ -8931,17 +9014,16 @@ mod tests {
             run(&["use", "pnpm@"]).contains("empty version spec"),
             "a trailing @ is named, not treated as latest"
         );
-        // The removed verbs name their successor — a clean break, not an alias.
-        for verb in ["pin", "switch"] {
-            let err = run(&[verb, "pnpm@9.1.0"]);
-            assert!(
-                err.contains("replaced by `nub pm use"),
-                "`{verb}` must name the successor verb, got: {err}"
-            );
-        }
+        // `switch` (removed) names its successor — a clean break, not an alias.
+        // (`pin` is a LIVE verb again — the nub-lock gesture — so it is NOT here.)
+        let err = run(&["switch", "pnpm@9.1.0"]);
+        assert!(
+            err.contains("replaced by `nub pm use"),
+            "`switch` must name the successor verb, got: {err}"
+        );
         let err = run(&["frobnicate"]);
         assert!(
-            err.contains("which, use, update (up), cache"),
+            err.contains("which, use, pin, update (up), cache"),
             "the unknown-verb error names the full verb set, got: {err}"
         );
     }

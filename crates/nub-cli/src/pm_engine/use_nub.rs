@@ -523,6 +523,40 @@ pub(crate) fn plan_migration(source: &Map<String, Value>) -> Result<YamlMigratio
     Ok(m)
 }
 
+/// Write nub's two identity fields onto the root manifest object: the exact
+/// corepack-visible pin `packageManager: "nub@<v>"` — a HARD lock, written only
+/// when `exact_pin` is `Some` (the `nub pm use nub@<exact>` opt-in or `nub pm
+/// pin`), and REMOVED when `None` (the non-locking `nub pm use nub`, so the
+/// field never contradicts the devEngines entry) — and, always, the
+/// `devEngines.packageManager {name:"nub", version:"^<range>", onFail:"warn"}`
+/// signal beside it (sibling devEngines entries survive). The pair is kept in
+/// lockstep by this one writer so the exact pin and the caret range can't drift.
+/// Shared by the full into-nub switch ([`apply_manifest_edits`]) and the
+/// lightweight lock (`nub pm pin`), which writes ONLY these two fields.
+pub(crate) fn write_nub_identity_fields(
+    obj: &mut Map<String, Value>,
+    exact_pin: Option<&str>,
+    range_version: &str,
+) {
+    match exact_pin {
+        Some(v) => {
+            obj.insert("packageManager".into(), Value::String(format!("nub@{v}")));
+        }
+        None => {
+            obj.remove("packageManager");
+        }
+    }
+    let dev = obj
+        .entry("devEngines")
+        .or_insert_with(|| Value::Object(Map::new()));
+    if let Some(dev) = dev.as_object_mut() {
+        dev.insert(
+            "packageManager".into(),
+            json!({ "name": "nub", "version": format!("^{range_version}"), "onFail": "warn" }),
+        );
+    }
+}
+
 /// Apply the migration's package.json half onto the (already parsed) root
 /// manifest object, plus the identity fields. Merge rules preserve the
 /// pre-switch EFFECTIVE config:
@@ -547,33 +581,7 @@ pub(crate) fn apply_manifest_edits(
 ) -> Vec<String> {
     let mut notes = Vec::new();
 
-    // The exact `packageManager: nub@<v>` field is a HARD, corepack-visible pin
-    // that freezes the repo at one nub version — so it is written ONLY on the
-    // explicit opt-in `nub pm use nub@<exact>`. Bare `nub pm use nub` is the
-    // non-locking gesture: it writes only the devEngines range below, and REMOVES
-    // any prior `packageManager` (a stale exact nub pin being unlocked, or the
-    // incumbent PM's pin being cleared as identity moves to nub) so the field
-    // never contradicts the devEngines entry.
-    match exact_pin {
-        Some(v) => {
-            obj.insert("packageManager".into(), Value::String(format!("nub@{v}")));
-        }
-        None => {
-            obj.remove("packageManager");
-        }
-    }
-    // devEngines.packageManager: the always-written signal (this verb is a
-    // sanctioned creator), replacing any prior entry wholesale; sibling
-    // devEngines entries (runtime/os/…) survive.
-    let dev = obj
-        .entry("devEngines")
-        .or_insert_with(|| Value::Object(Map::new()));
-    if let Some(dev) = dev.as_object_mut() {
-        dev.insert(
-            "packageManager".into(),
-            json!({ "name": "nub", "version": format!("^{range_version}"), "onFail": "warn" }),
-        );
-    }
+    write_nub_identity_fields(obj, exact_pin, range_version);
 
     // workspaces: array vs object form.
     let has_catalogs = m.catalog.is_some() || m.catalogs.is_some();

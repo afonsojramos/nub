@@ -501,3 +501,88 @@ fn pnpmfile_honored_under_pnpm_incumbent_without_warning() {
         "no ignore warning when pnpm is the incumbent: {stderr}"
     );
 }
+
+/// `nub pm pin` — the lightweight lock. It writes ONLY the two nub identity
+/// fields (the exact corepack `packageManager: nub@<v>` pin that arms the
+/// self-shim, plus the beside-it devEngines caret) and touches nothing else:
+/// no lockfile, no pnpm-workspace.yaml, no settings migration, and — unlike the
+/// heavier `pm use nub` switch — NOT a project's `pnpm.*` config. Bare pins the
+/// running nub; an explicit exact version pins that and notes the delegation; a
+/// range/tag is refused; a missing manifest bails; reruns are idempotent. All
+/// offline — the pin never touches the network.
+#[test]
+fn pm_pin_locks_only_the_nub_identity_fields_offline() {
+    let running = env!("CARGO_PKG_VERSION");
+    let manifest = |d: &Path| -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(d.join("package.json")).unwrap()).unwrap()
+    };
+
+    // A project carrying an unrelated pnpm.* config block: pin must NOT strip it
+    // (the full `use nub` migration moves then removes it; pin leaves it alone).
+    let dir = project(
+        "pm-pin",
+        &[(
+            "package.json",
+            r#"{"name":"app","version":"1.0.0","pnpm":{"overrides":{"left-pad":"1.3.0"}}}"#,
+        )],
+    );
+
+    // (a) bare `nub pm pin` locks the running nub — both fields, nothing else.
+    let (stdout, stderr, code) = run(&dir, &["pm", "pin"]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let m = manifest(&dir);
+    assert_eq!(m["packageManager"], format!("nub@{running}"));
+    assert_eq!(m["devEngines"]["packageManager"]["name"], "nub");
+    assert_eq!(
+        m["devEngines"]["packageManager"]["version"],
+        format!("^{running}")
+    );
+    assert_eq!(m["devEngines"]["packageManager"]["onFail"], "warn");
+    assert_eq!(
+        m["pnpm"]["overrides"]["left-pad"], "1.3.0",
+        "pin must not touch the pnpm.* config it does not migrate: {m}"
+    );
+    assert!(
+        !stdout.contains("note:"),
+        "pinning the running nub emits no delegation note: {stdout}"
+    );
+
+    // (e) idempotent rerun — same state, exit 0.
+    let (stdout2, stderr2, code2) = run(&dir, &["pm", "pin"]);
+    assert_eq!(code2, 0, "stdout: {stdout2}\nstderr: {stderr2}");
+    assert_eq!(manifest(&dir)["packageManager"], format!("nub@{running}"));
+
+    // (b) an explicit exact version (≠ running) pins THAT and announces the
+    // delegation; the `nub@` prefix is forgiven (pin nub@<v> == pin <v>).
+    let (stdout3, stderr3, code3) = run(&dir, &["pm", "pin", "nub@0.0.1"]);
+    assert_eq!(code3, 0, "stdout: {stdout3}\nstderr: {stderr3}");
+    let m3 = manifest(&dir);
+    assert_eq!(m3["packageManager"], "nub@0.0.1");
+    assert_eq!(m3["devEngines"]["packageManager"]["version"], "^0.0.1");
+    assert!(
+        stdout3.contains("note:") && stdout3.contains("0.0.1"),
+        "a pin off the running version announces the provision+delegate: {stdout3}"
+    );
+
+    // (c) a range or dist-tag is refused — nub is the running binary, not a
+    // registry package, so there is nothing to resolve a non-exact spec against.
+    for bad in ["^1", "1.x", "next", "latest"] {
+        let (o, e, c) = run(&dir, &["pm", "pin", bad]);
+        assert_ne!(c, 0, "`pin {bad}` must fail: {o}\n{e}");
+        assert!(
+            e.contains("needs an exact version") && e.contains("running binary"),
+            "`pin {bad}` must name the exact-version rule: {e}"
+        );
+    }
+    // The failed pins wrote nothing — the last good pin still stands.
+    assert_eq!(manifest(&dir)["packageManager"], "nub@0.0.1");
+
+    // (d) no package.json → the write has no home, so it bails cleanly.
+    let empty = project("pm-pin-nomanifest", &[]);
+    let (o, e, c) = run(&empty, &["pm", "pin"]);
+    assert_ne!(c, 0, "pin with no manifest must fail: {o}\n{e}");
+    assert!(
+        e.contains("no package.json found"),
+        "the missing-manifest bail must name the cause: {e}"
+    );
+}
