@@ -97,14 +97,45 @@ interface WorkerOptions {
   type?: "module" | "classic";
   name?: string;
   credentials?: "omit" | "same-origin" | "include";
+  // `eval: true` runs the constructor's first argument as the worker's source
+  // (Node's worker_threads inline form) instead of resolving it as a URL.
+  eval?: true;
 }
 interface __NubWorker extends EventTarget {
   readonly name: string;
   postMessage(message: any, transfer?: readonly (ArrayBuffer | MessagePort)[]): void;
-  terminate(): void;
+  // Returns the underlying worker_threads `Promise<exitCode>` (additive
+  // void→value widening; spec code that ignores the return is unaffected).
+  terminate(): Promise<number>;
   onmessage: ((this: Worker, ev: MessageEvent) => any) | null;
   onmessageerror: ((this: Worker, ev: MessageEvent) => any) | null;
   onerror: ((this: Worker, ev: ErrorEvent) => any) | null;
+  // node:worker_threads EventEmitter surface, delegated to the underlying real
+  // Worker. The node channel carries Node's shapes — `message` the RAW posted
+  // value, `error` a bare `Error`, `exit` the numeric exit code, `online` no arg —
+  // distinct from the web channel above (`MessageEvent`/`ErrorEvent`). The adders
+  // return the handle for chaining.
+  on(event: "message", listener: (value: any) => void): this;
+  on(event: "messageerror", listener: (error: Error) => void): this;
+  on(event: "error", listener: (err: Error) => void): this;
+  on(event: "exit", listener: (exitCode: number) => void): this;
+  on(event: "online", listener: () => void): this;
+  on(event: string | symbol, listener: (...args: any[]) => void): this;
+  once(event: "message", listener: (value: any) => void): this;
+  once(event: "messageerror", listener: (error: Error) => void): this;
+  once(event: "error", listener: (err: Error) => void): this;
+  once(event: "exit", listener: (exitCode: number) => void): this;
+  once(event: "online", listener: () => void): this;
+  once(event: string | symbol, listener: (...args: any[]) => void): this;
+  addListener(event: "message", listener: (value: any) => void): this;
+  addListener(event: "messageerror", listener: (error: Error) => void): this;
+  addListener(event: "error", listener: (err: Error) => void): this;
+  addListener(event: "exit", listener: (exitCode: number) => void): this;
+  addListener(event: "online", listener: () => void): this;
+  addListener(event: string | symbol, listener: (...args: any[]) => void): this;
+  off(event: string | symbol, listener: (...args: any[]) => void): this;
+  removeListener(event: string | symbol, listener: (...args: any[]) => void): this;
+  emit(event: string | symbol, ...args: any[]): boolean;
 }
 type __NubLibWorkerOrNubWorker = __NubLibDomIsLoaded extends true ? {} : __NubWorker;
 interface Worker extends __NubLibWorkerOrNubWorker {}

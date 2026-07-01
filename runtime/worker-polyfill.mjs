@@ -146,48 +146,64 @@ export function installWorkerPolyfill() {
     constructor(url, options = {}) {
       super();
 
+      // ADDITIVE node-mirroring (NOT a spec mechanism): `new Worker(code,
+      // { eval: true })` runs the first arg as raw source, mirroring
+      // node:worker_threads. Gated STRICTLY on `options.eval === true` — never
+      // content-sniffed — so the spec URL path below is untouched for every web
+      // caller. execArgv (carrying nub's preload) is forwarded for eval workers
+      // too, so an eval worker inherits nub's augmentation like any other.
+      const isEval = options.eval === true;
+
       // The WHATWG Worker constructor accepts a script URL. Per §10.2.6.3 the
       // standard inline mechanisms are `blob:` and `data:` URLs (there is no
       // inline-source-string form in the spec). We map each to a Node spawn:
       //   - file path / file: URL  → spawn the file (transpiled by nub's preload)
       //   - data: URL              → Node runs it directly (worker_threads v14.9)
-      //   - blob: URL              → resolve the Blob via node:buffer, spawn its
-      //                              source with eval:true (Node can't open blob:)
+      //   - blob: URL              → snapshot the Blob's source, spawn it as a
+      //                              data: URL (Node can't open blob:)
       let spawnTarget;
 
-      const asUrlString =
-        url instanceof URL ? url.href : typeof url === "string" ? url : null;
-      if (asUrlString === null) {
-        throw new TypeError("Worker constructor: url must be a string or URL");
-      }
-
-      if (asUrlString.startsWith("blob:")) {
-        // A `blob:` worker (WHATWG inline mechanism). Node cannot open a blob:
-        // URL as a worker entry, and the Blob's bytes are only readable
-        // ASYNCHRONOUSLY (Blob.text/arrayBuffer) while this constructor is sync.
-        // We close that gap by snapshotting the source SYNCHRONOUSLY at
-        // `URL.createObjectURL(blob)` time (see installBlobUrlSupport) into a
-        // module-scope registry keyed by URL, then spawn the source as a `data:`
-        // URL. We use data: (NOT eval:true) deliberately: the `--import` preload
-        // that installs nub's worker-side scope (self/postMessage) does NOT run in
-        // an eval:true worker on the compat-tier FLOOR (Node 18.19 — verified), so
-        // an eval-based blob worker has no `self` there; a data: URL worker is a
-        // real module load and DOES receive the preload on every supported tier.
-        const source = blobUrlSources.get(asUrlString);
-        if (source === undefined) {
+      if (isEval) {
+        if (typeof url !== "string") {
           throw new TypeError(
-            `Worker constructor: blob URL '${asUrlString}' is not a known object URL`
+            "Worker constructor: with { eval: true }, the source must be a string"
           );
         }
-        spawnTarget = new URL(
-          "data:text/javascript;base64," + Buffer.from(source, "utf8").toString("base64")
-        );
-      } else if (asUrlString.startsWith("data:")) {
-        spawnTarget = new URL(asUrlString);
-      } else if (asUrlString.startsWith("file://")) {
-        spawnTarget = fileURLToPath(asUrlString);
+        spawnTarget = url;
       } else {
-        spawnTarget = asUrlString;
+
+        const asUrlString =
+          url instanceof URL ? url.href : typeof url === "string" ? url : null;
+        if (asUrlString === null) {
+          throw new TypeError("Worker constructor: url must be a string or URL");
+        }
+
+        if (asUrlString.startsWith("blob:")) {
+          // A `blob:` worker (WHATWG inline mechanism). Node cannot open a blob:
+          // URL as a worker entry, and the Blob's bytes are only readable
+          // ASYNCHRONOUSLY (Blob.text/arrayBuffer) while this constructor is sync.
+          // We close that gap by snapshotting the source SYNCHRONOUSLY at
+          // `URL.createObjectURL(blob)` time (see installBlobUrlSupport) into a
+          // module-scope registry keyed by URL, then spawn the source as a `data:`
+          // URL — a real module load (a proper worker entry that receives nub's
+          // preload, so `self`/`postMessage` are present) on every supported tier.
+          const source = blobUrlSources.get(asUrlString);
+          if (source === undefined) {
+            throw new TypeError(
+              `Worker constructor: blob URL '${asUrlString}' is not a known object URL`
+            );
+          }
+          spawnTarget = new URL(
+            "data:text/javascript;base64," + Buffer.from(source, "utf8").toString("base64")
+          );
+        } else if (asUrlString.startsWith("data:")) {
+          spawnTarget = new URL(asUrlString);
+        } else if (asUrlString.startsWith("file://")) {
+          spawnTarget = fileURLToPath(asUrlString);
+        } else {
+          spawnTarget = asUrlString;
+        }
+
       }
 
       this.#name = typeof options.name === "string" ? options.name : "";
@@ -223,7 +239,7 @@ export function installWorkerPolyfill() {
 
       const nodeOptions = {
         ...options,
-        eval: false,
+        eval: isEval,
         execArgv,
       };
       // Thread the worker type AND name to the worker via internal env vars
@@ -282,14 +298,41 @@ export function installWorkerPolyfill() {
         // process.nextTick (not a sync throw inside this emit callback) mirrors
         // Node's surfacing path exactly: a fresh tick → uncaughtException, so a
         // user process.on('uncaughtException') still intercepts it as on Node.
-        if (this.#errorListeners.size === 0) {
+        //
+        // DUAL-CHANNEL FATALITY INVARIANT: an 'error' is "handled" if the user
+        // registered a listener on EITHER channel — the web one (addEventListener
+        // /onerror, tracked in #errorListeners) OR the node one (.on('error'),
+        // which delegates straight onto this underlying worker). The wrapper owns
+        // exactly ONE persistent node-side 'error' listener (this very one), so a
+        // node-channel listenerCount > 1 means the user added their own; counting
+        // only the web channel would wrongly throw a fatal at a user handling via
+        // .on('error'), or swallow one they aren't handling. Both channels MUST be
+        // counted here.
+        if (
+          this.#errorListeners.size === 0 &&
+          this.#worker.listenerCount("error") <= 1
+        ) {
           process.nextTick(() => {
             throw err;
           });
         }
       });
-      // No `exit` event: WHATWG Workers have no exit event (it is a
-      // node:worker_threads concept, not part of the web Worker surface).
+
+      // ADDITIVE node lifecycle events, dispatched as plain EventTarget `Event`s
+      // on the parent handle. `exit` carries the worker's exit code as a property
+      // (the raw-arg `.on('exit', code)` form rides the node channel via the
+      // delegation methods below). NavigatorOnLine's web `online` targets the
+      // worker GLOBAL (`self`), not this parent handle — disjoint objects, no
+      // collision. The raw-arg `.on('online'|'exit')` node form is available via
+      // delegation; these are the web-shape Event mirrors.
+      this.#worker.on("online", () => {
+        this.dispatchEvent(new Event("online"));
+      });
+      this.#worker.on("exit", (code) => {
+        const ev = new Event("exit");
+        ev.code = code;
+        this.dispatchEvent(ev);
+      });
     }
 
     get name() {
@@ -338,11 +381,29 @@ export function installWorkerPolyfill() {
       this.#worker.postMessage(data, transfer);
     }
 
-    // WHATWG terminate() returns void. Node's returns a Promise; we discard it so
-    // the surface matches the spec (the underlying termination still proceeds).
+    // WHATWG terminate() returns void; node:worker_threads returns a
+    // `Promise<exitCode>`. We RETURN that promise — void→value widening, additive
+    // and unobservable to spec code that ignores the return.
     terminate() {
-      this.#worker.terminate();
+      return this.#worker.terminate();
     }
+
+    // ADDITIVE EventEmitter surface, delegated to the underlying real
+    // node:worker_threads.Worker (Node's ACTUAL EventEmitter, not a reimpl). The
+    // node channel delivers what node delivers — `.on('message')` the RAW value,
+    // `.on('error')` a BARE Error, `.on('exit', code)`/`.on('online')` the raw
+    // args — disjoint from the web channel (addEventListener/onmessage/onerror →
+    // MessageEvent/ErrorEvent), which stays primary and unchanged. Chainable
+    // methods return THIS wrapper (not the inner worker) so chaining stays on the
+    // web-shape object; .emit returns the EventEmitter boolean. The unhandled-
+    // 'error' fatality (constructor) counts node-channel listeners via
+    // listenerCount, so a `.on('error')` here correctly suppresses the fatal.
+    on(type, listener) { this.#worker.on(type, listener); return this; }
+    once(type, listener) { this.#worker.once(type, listener); return this; }
+    off(type, listener) { this.#worker.off(type, listener); return this; }
+    addListener(type, listener) { this.#worker.addListener(type, listener); return this; }
+    removeListener(type, listener) { this.#worker.removeListener(type, listener); return this; }
+    emit(type, ...args) { return this.#worker.emit(type, ...args); }
 
     #onmessageHandler = null;
     get onmessage() { return this.#onmessageHandler; }

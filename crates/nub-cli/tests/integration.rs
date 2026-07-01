@@ -2818,18 +2818,115 @@ fn worker_error_event_carries_source_location() {
 }
 
 #[test]
-fn worker_has_no_exit_event() {
-    // The non-spec `exit` event is GONE: web Workers have no exit event (it is a
-    // node:worker_threads concept). An addEventListener('exit') must never fire,
-    // even after the worker exits via self.close().
-    let (stdout, stderr, code) = run_nub("worker", "spec-events-main.ts");
+fn worker_fires_online_and_exit_lifecycle_events() {
+    // ADDITIVE node-mirroring: `online` and `exit` fire on the parent handle as
+    // EventTarget `Event` objects (disjoint from NavigatorOnLine's `online` on the
+    // worker GLOBAL — no collision), and `exit` carries the worker's exit code as
+    // a property. (Reverses the prior pure-web stance that omitted `exit`.)
+    let (stdout, stderr, code) = run_nub("worker", "lifecycle-events-main.ts");
     assert_eq!(
         code, 0,
-        "spec-events fixture should run: {stderr}\n{stdout}"
+        "lifecycle-events fixture should run: {stderr}\n{stdout}"
     );
     assert!(
-        stdout.contains("exit-event-fired:false"),
-        "no `exit` event may fire on the web Worker (it is not a spec event): {stdout}"
+        stdout.contains("online-fired:true"),
+        "an `online` event must fire on the parent handle: {stdout}"
+    );
+    assert!(
+        stdout.contains("exit-is-event:true:code=0"),
+        "an `exit` Event must fire carrying the worker's exit code: {stdout}"
+    );
+}
+
+#[test]
+fn worker_eval_true_runs_inline_source() {
+    // ADDITIVE node-mirroring: `new Worker(code, { eval: true })` runs the first
+    // arg as raw source (mirrors node:worker_threads), gated strictly on the
+    // option. On the fast tier the worker-side `self` scope is installed, so the
+    // inline source replies over `self.postMessage`.
+    let (stdout, stderr, code) = run_nub("worker", "eval-source-main.ts");
+    assert_eq!(code, 0, "eval:true worker should run: {stderr}\n{stdout}");
+    assert!(
+        stdout.contains("eval:42"),
+        "an eval:true inline-source worker must execute and reply: {stdout}"
+    );
+}
+
+#[test]
+fn worker_terminate_returns_promise_of_exit_code() {
+    // terminate() now RETURNS the underlying node:worker_threads
+    // `Promise<exitCode>` (additive void→value widening) instead of discarding it.
+    let (stdout, stderr, code) = run_nub("worker", "terminate-promise-main.ts");
+    assert_eq!(
+        code, 0,
+        "terminate-promise fixture should run: {stderr}\n{stdout}"
+    );
+    assert!(
+        stdout.contains("terminate-thenable:true")
+            && stdout.contains("terminate-code-is-number:true"),
+        "terminate() must return a Promise resolving to a numeric exit code: {stdout}"
+    );
+}
+
+#[test]
+fn worker_on_delegates_raw_message_keeping_web_channel_primary() {
+    // ADDITIVE EventEmitter delegation: `.on('message', fn)` delivers the RAW
+    // value (node channel), while `addEventListener('message')` still delivers a
+    // `MessageEvent` (web channel, primary + unchanged). Chainable `.on` returns
+    // the wrapper, not the inner node Worker.
+    let (stdout, stderr, code) = run_nub("worker", "emitter-message-main.ts");
+    assert_eq!(
+        code, 0,
+        "emitter-message fixture should run: {stderr}\n{stdout}"
+    );
+    assert!(
+        stdout.contains("web-is-messageevent:true"),
+        "the web channel must still deliver a MessageEvent: {stdout}"
+    );
+    assert!(
+        stdout.contains("node-is-messageevent:false") && stdout.contains("node-raw-echo:ping"),
+        "the node channel `.on('message')` must deliver the raw value: {stdout}"
+    );
+    assert!(
+        stdout.contains("on-chain-returns-worker:true"),
+        "`.on` must return the wrapper for chaining, not the inner worker: {stdout}"
+    );
+}
+
+#[test]
+fn worker_error_handled_via_on_is_not_fatal() {
+    // DUAL-CHANNEL FATALITY INVARIANT: a worker error handled ONLY via the node
+    // channel (`.on('error')`, delivering a BARE Error) must NOT be treated as
+    // unhandled. The parent must survive (exit 0), not throw the fatal that an
+    // unlistened error produces — the fatality check counts error listeners on
+    // BOTH the web and node channels. (Counting only the web channel here would
+    // wrongly kill a parent that IS handling errors via `.on('error')`.)
+    let (stdout, stderr, code) = run_nub("worker", "on-error-not-fatal-main.ts");
+    assert_eq!(
+        code, 0,
+        "a `.on('error')`-handled worker error must not be fatal: \
+         code={code} stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("on-error-bare:true:boom"),
+        "`.on('error')` must receive a bare Error carrying the message: {stdout}"
+    );
+    assert!(
+        stdout.contains("parent-alive:true"),
+        "the parent must survive an error it handles via `.on('error')`: {stdout}"
+    );
+}
+
+#[test]
+fn worker_forwards_workerdata() {
+    // Regression: workerData passed to the constructor is forwarded to the worker
+    // (spread via ...options into node:worker_threads.Worker), so a worker reading
+    // worker_threads.workerData sees the parent's value.
+    let (stdout, stderr, code) = run_nub("worker", "workerdata-main.ts");
+    assert_eq!(code, 0, "workerData fixture should run: {stderr}\n{stdout}");
+    assert!(
+        stdout.contains("workerdata:seed:41"),
+        "the worker must read the forwarded workerData: {stdout}"
     );
 }
 
