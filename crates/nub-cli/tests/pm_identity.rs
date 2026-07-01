@@ -44,6 +44,9 @@ fn run(dir: &Path, args: &[&str]) -> (String, String, i32) {
     let out = Command::new(nub_binary())
         .args(args)
         .current_dir(dir)
+        // These fixtures pin a differing `nub@<v>` to exercise nub identity, not
+        // the self-shim — opt out so a PM verb doesn't try to provision that nub.
+        .env("NUB_SELF_SHIM", "0")
         .env("XDG_DATA_HOME", dir.join("xdg-data"))
         .env("XDG_CACHE_HOME", dir.join("xdg-cache"))
         .output()

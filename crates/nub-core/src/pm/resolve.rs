@@ -434,6 +434,35 @@ pub fn declared_pm_raw(cwd: &Path) -> Option<(String, Option<String>)> {
     Some((name, version))
 }
 
+/// The workspace-root `packageManager` field's `(name, version)` — the exact
+/// Corepack ENFORCEMENT field ONLY, with the `+sha512` build metadata stripped.
+/// Deliberately does NOT fall back to `devEngines.packageManager` the way
+/// [`declared_pm_raw`] does: `packageManager` is the exact pin a tool executes,
+/// while `devEngines` is a range-of-intent. The nub self-shim reads through this
+/// so a `devEngines.packageManager` naming nub (a range) never drives a provision
+/// or a spurious not-exact notice — only the exact `packageManager` field does.
+/// `None` when there is no `packageManager` field at the workspace root.
+pub fn declared_package_manager_field(cwd: &Path) -> Option<(String, Option<String>)> {
+    let manifest = root_manifest(cwd)?;
+    let spec = manifest
+        .get("packageManager")
+        .and_then(|v| v.as_str())?
+        .trim();
+    let (name, version) = match spec.split_once('@') {
+        Some((n, v)) => (n, Some(v.to_string())),
+        None => (spec, None),
+    };
+    if name.is_empty() {
+        return None;
+    }
+    let version = version.map(|v| {
+        v.split_once('+')
+            .map_or(v.as_str(), |(bare, _)| bare)
+            .to_string()
+    });
+    Some((name.to_string(), version))
+}
+
 /// The workspace-root `packageManager` field decomposed as
 /// `(name, exact_version, sha512_hex)` — but ONLY when it pins an EXACT semver
 /// WITH a `+sha512.<hex>` suffix (`pnpm@9.1.0+sha512.abc…`). Returns `None` for

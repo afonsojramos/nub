@@ -21,6 +21,11 @@ const ERR_NUB_MANIFEST_PARSE: &str = "ERR_NUB_MANIFEST_PARSE";
 /// cause as a coded miette diagnostic from the engine; `nub run` reuses this code
 /// so both spellings read consistently (was a bare `Error: no package.json found`).
 const ERR_NUB_NO_MANIFEST: &str = "ERR_NUB_NO_MANIFEST";
+/// The self-shim's failure surface — provisioning or verifying the pinned nub
+/// named by `packageManager: "nub@x.y.z"` failed. Every message carrying it names
+/// the `NUB_SELF_SHIM=0` escape hatch so a bad pin someone else committed can't
+/// brick a clone.
+const ERR_NUB_SELF_SHIM: &str = "ERR_NUB_SELF_SHIM";
 
 static SHOW_WARNINGS: AtomicBool = AtomicBool::new(false);
 /// `--silent` suppresses Nub's own preamble (the `$ <command>` script echo),
@@ -1370,6 +1375,19 @@ fn run_nub() -> Result<i32> {
             }
         }
         i += 1;
+    }
+
+    // ── nub self-shim ── honor `packageManager: "nub@x.y.z"` by provisioning that
+    // exact nub and delegating to it (crates/nub-cli/src/self_shim.rs). Gated on
+    // the resolved verb FIRST — a pure allowlist string compare, so the flagship
+    // `nub <file>` / `run` / `nubx` / `node` / `upgrade` paths pay only that and
+    // never read the manifest. Placed BEFORE the `--cwd` set_current_dir below so
+    // a delegated child re-applies `--cwd` from the original directory exactly
+    // once (delegation execs the ORIGINAL argv from the unchanged cwd).
+    if subcommand_found
+        && let Some(version) = crate::self_shim::delegate_target(&rest, cwd.as_deref())
+    {
+        return delegate_to_self(&version);
     }
 
     // Expand ${VAR} references in --env-file values now that all files have been
@@ -4931,7 +4949,7 @@ fn detect_channel(bin_path: &Path) -> UpgradeChannel {
 /// error rather than fetching a 404). musl vs glibc on Linux is a runtime
 /// distinction install.sh makes via `ldd`/`/etc/alpine-release`; we encode the
 /// glibc default here and document musl as the known gap (see note below).
-fn platform_target() -> Option<&'static str> {
+pub(crate) fn platform_target() -> Option<&'static str> {
     // NOTE: a glibc build and a musl build of the same arch are the same Rust
     // `target_env` only under `target_env = "musl"`, so this distinguishes them
     // correctly when Nub itself is built for musl. The detection matches the
@@ -5380,6 +5398,191 @@ fn sha256_hex(bytes: &[u8]) -> String {
         let _ = write!(s, "{b:02x}");
     }
     s
+}
+
+/// The nub binary's filename inside a release archive's `bin/` dir.
+fn nub_release_bin_name() -> &'static str {
+    if cfg!(windows) { "nub.exe" } else { "nub" }
+}
+
+/// Provision an exact nub version into the version-addressed self store and return
+/// the path to its `bin/nub` — the delegated-artifact half of the self-shim
+/// (`self_shim.rs` owns the decision). Reuses the `nub upgrade` release channel:
+/// download `<base>/v<ver>/nub-<target>.tar.gz`, SHA-256-verify it against the
+/// published `.sha256` sidecar BEFORE extracting, then confirm the extracted
+/// binary reports the expected version before it is trusted for a default-on exec.
+///
+/// INTEGRITY: nub's own `packageManager` self-pin carries no `+sha512` (a
+/// pnpm/yarn pin's hash covers a platform-independent npm tarball; nub's release
+/// artifact is per-platform, so a single pin hash could not cover all 8), so this
+/// release-channel checksum is the integrity anchor. A verified store entry
+/// (`<cache>/self/<ver>/bin/nub`) IS the trust cache — a hit is network- and
+/// verification-free. Atomic: stage in a sibling temp dir, then rename into place.
+fn provision_self(version: &str) -> Result<PathBuf> {
+    let store = pm_store_root()?.join("self");
+    let final_dir = store.join(version);
+    let bin = final_dir.join("bin").join(nub_release_bin_name());
+    if bin.is_file() {
+        return Ok(bin); // verified store hit — silent, no network
+    }
+
+    // "No build for this platform" is a distinct, actionable failure — surfaced
+    // BEFORE any download so it never reads as a network error. The 8-platform
+    // release model means a pin can exist for linux-x64 and not win32-arm64.
+    let target = platform_target().ok_or_else(|| {
+        anyhow::anyhow!(
+            "{ERR_NUB_SELF_SHIM}: this project pins nub@{version}, but nub publishes no build \
+             for this platform ({}/{}). Set NUB_SELF_SHIM=0 to run with your installed nub.",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        )
+    })?;
+    let url = tarball_url(version, target);
+    let sha_url = checksum_url(version, target);
+
+    std::fs::create_dir_all(&store)
+        .with_context(|| format!("creating the nub self store at {}", store.display()))?;
+    // Defense-in-depth: the self store holds binaries this process EXECs, and a
+    // store hit skips re-verification, so restrict it to the owner (0700) — a
+    // shared/world-writable cache dir can't be used to pre-plant a binary a later
+    // run would exec unverified. Best-effort; a failure here doesn't block the
+    // provision (the verify-before-exec chain below is the real gate).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o700));
+    }
+    let staging = tempfile::Builder::new()
+        .prefix(&format!(".self-{version}-"))
+        .tempdir_in(&store)
+        .context("creating a staging dir for the pinned-nub provision")?;
+    let archive = staging.path().join("nub.tar.gz");
+
+    eprintln!("nub: provisioning pinned nub@{version} ({target})...");
+    curl_download(&url, &archive).map_err(|_| {
+        anyhow::anyhow!(
+            "{ERR_NUB_SELF_SHIM}: could not download the pinned nub@{version} from {url} — the \
+             version may not exist or may have been yanked. Set NUB_SELF_SHIM=0 to run with \
+             your installed nub."
+        )
+    })?;
+
+    // Verify BEFORE extracting — a checked digest gates the executable landing on
+    // disk, the same order `perform_selfowned_upgrade` uses.
+    let expected = fetch_expected_sha256(&sha_url).map_err(|_| {
+        anyhow::anyhow!(
+            "{ERR_NUB_SELF_SHIM}: could not fetch the checksum for nub@{version} from {sha_url}. \
+             Set NUB_SELF_SHIM=0 to run with your installed nub."
+        )
+    })?;
+    let actual = sha256_hex(&std::fs::read(&archive)?);
+    if !actual.eq_ignore_ascii_case(&expected) {
+        bail!(
+            "{ERR_NUB_SELF_SHIM}: checksum mismatch for the pinned nub@{version}\n  \
+             expected: {expected}\n  actual:   {actual}\n\
+             Refusing to run a corrupted or tampered nub binary. \
+             Set NUB_SELF_SHIM=0 to run with your installed nub."
+        );
+    }
+
+    let staged = staging.path().join("staged");
+    std::fs::create_dir_all(&staged)?;
+    let tar_status = std::process::Command::new("tar")
+        .arg("-xzf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(&staged)
+        .status()
+        .context("invoking tar to extract the pinned nub")?;
+    if !tar_status.success() {
+        bail!(
+            "{ERR_NUB_SELF_SHIM}: failed to extract the pinned nub@{version} archive. \
+             Set NUB_SELF_SHIM=0 to run with your installed nub."
+        );
+    }
+    let staged_bin = staged.join("bin").join(nub_release_bin_name());
+    if !staged_bin.is_file() {
+        bail!(
+            "{ERR_NUB_SELF_SHIM}: the pinned nub@{version} archive did not contain bin/nub. \
+             Set NUB_SELF_SHIM=0 to run with your installed nub."
+        );
+    }
+    // CI's upload/download-artifact round-trip strips +x from the archived binary
+    // (see perform_selfowned_upgrade) — re-apply it before the version probe.
+    ensure_bin_executable(&staged_bin)?;
+
+    // Provision-then-verify: a version-mismatched or corrupt artifact hard-errors
+    // HERE instead of exec-looping. The tarball was already checksum-verified and
+    // the store path is version-addressed, so this is belt-and-suspenders — but it
+    // is the last gate before a default-on exec, so it stays.
+    verify_provisioned_version(&staged_bin, version)?;
+
+    // Atomic place. A concurrent provisioner may have won the race — keep theirs.
+    if !bin.is_file() {
+        if let Err(e) = std::fs::rename(&staged, &final_dir) {
+            if !bin.is_file() {
+                return Err(e).with_context(|| {
+                    format!(
+                        "installing pinned nub@{version} into {}",
+                        final_dir.display()
+                    )
+                });
+            }
+        }
+    }
+    eprintln!("nub: provisioned nub@{version}");
+    Ok(final_dir.join("bin").join(nub_release_bin_name()))
+}
+
+/// Run the freshly-provisioned binary's `--version` and confirm it reports the
+/// expected version — the loop-safety gate before a default-on exec. `nub
+/// --version` prints a bare `v<X.Y.Z>` on its first stdout line. The probe carries
+/// the re-entry guard so it can never itself delegate (`--version` short-circuits
+/// before the dispatcher anyway, but the guard is cheap insurance).
+fn verify_provisioned_version(bin: &Path, expected: &str) -> Result<()> {
+    let out = std::process::Command::new(bin)
+        .arg("--version")
+        .env(crate::self_shim::SELF_DISPATCHED_ENV, expected)
+        .output()
+        .with_context(|| format!("probing {} --version", bin.display()))?;
+    if !out.status.success() {
+        bail!(
+            "{ERR_NUB_SELF_SHIM}: the provisioned nub@{expected} failed its --version probe. \
+             Set NUB_SELF_SHIM=0 to run with your installed nub."
+        );
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let reported = stdout
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .trim_start_matches('v');
+    if reported != expected {
+        bail!(
+            "{ERR_NUB_SELF_SHIM}: the provisioned binary reports nub@{reported}, expected \
+             nub@{expected} — refusing to run a version-mismatched artifact. \
+             Set NUB_SELF_SHIM=0 to run with your installed nub."
+        );
+    }
+    Ok(())
+}
+
+/// Provision the pinned nub and hand off to it: replace the process image (Unix
+/// `exec`) / spawn+wait (Windows) with the pinned binary, running the ORIGINAL
+/// argv so the pinned nub applies its own CLI grammar (it may accept flags this
+/// nub would reject). The child carries `__NUB_SELF_DISPATCHED=<version>`, whose
+/// presence suppresses ALL further delegation — the exec-loop guard. Never returns
+/// on success (Unix).
+fn delegate_to_self(version: &str) -> Result<i32> {
+    let bin = provision_self(version)?;
+    // The unmodified original argv (env::args is stable within the process).
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let envs = vec![(
+        crate::self_shim::SELF_DISPATCHED_ENV.to_string(),
+        version.to_string(),
+    )];
+    exec_program(&bin, &args, &envs)
 }
 
 /// Print nub's version exactly like `nub --version` (and now `nubx --version`).

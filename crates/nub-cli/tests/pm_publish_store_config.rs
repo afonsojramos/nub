@@ -53,6 +53,9 @@ impl Ctx {
         let out = Command::new(nub_binary())
             .args(args)
             .current_dir(&self.project)
+            // The fixture pins a differing `nub@<v>` to exercise nub identity, not
+            // the self-shim — opt out so a PM verb doesn't provision that nub.
+            .env("NUB_SELF_SHIM", "0")
             .env("HOME", &self.home)
             .env("XDG_DATA_HOME", self.home.join("xdg-data"))
             .env("XDG_CACHE_HOME", self.home.join("xdg-cache"))
@@ -358,6 +361,7 @@ fn global_pnpm_config_is_read_regardless_of_cwd_incumbency() {
         let out = Command::new(nub_binary())
             .args(args)
             .current_dir(project)
+            .env("NUB_SELF_SHIM", "0")
             .env("HOME", &home)
             .env("XDG_DATA_HOME", home.join("xdg-data"))
             .env("XDG_CACHE_HOME", home.join("xdg-cache"))

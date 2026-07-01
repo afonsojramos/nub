@@ -9,6 +9,7 @@ mod config;
 mod nubx_consent;
 mod nubx_resolve;
 mod pm_engine;
+mod self_shim;
 
 use anyhow::Result;
 
