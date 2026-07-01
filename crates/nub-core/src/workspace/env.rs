@@ -104,13 +104,28 @@ pub fn load_env_files_raw(project_root: &Path) -> HashMap<String, String> {
     let files = env_file_names();
 
     let mut result = HashMap::new();
+    let mut node_env_ignored = false;
 
     for filename in &files {
         let path = project_root.join(filename);
         if let Some(content) = read_env_file(&path) {
             for (key, value) in parse_env(&content) {
-                // Shell env wins: don't override existing env vars.
+                // Shell env wins: don't override existing env vars. An AMBIENT
+                // `NODE_ENV` (set in the real process env) therefore passes through
+                // untouched and still selects `.env.<NODE_ENV>` files above — only a
+                // `.env`-FILE `NODE_ENV` is dropped below.
                 if std::env::var_os(&key).is_some() {
+                    continue;
+                }
+                // dotenv / @next/env / Vite parity: a `.env` FILE never sets
+                // `NODE_ENV`. Injecting it broke `next build` — the prerender forks
+                // inherited `NODE_ENV=development`, loading the dev React against
+                // production-compiled chunks (two `ReactSharedInternals` → null hooks
+                // dispatcher → `useContext` of null), #263. Reaching here means ambient
+                // `NODE_ENV` is unset (shell-wins above), so this value WOULD have been
+                // injected — drop it and warn once.
+                if key == "NODE_ENV" {
+                    node_env_ignored = true;
                     continue;
                 }
                 // First writer wins among .env files.
@@ -119,7 +134,26 @@ pub fn load_env_files_raw(project_root: &Path) -> HashMap<String, String> {
         }
     }
 
+    if node_env_ignored {
+        warn_node_env_from_dotenv_ignored();
+    }
+
     result
+}
+
+/// Emit the "ignoring `.env` `NODE_ENV`" notice at most once per process. A
+/// `.env`-file `NODE_ENV` is dropped by [`load_env_files_raw`] (dotenv/Next/Vite
+/// parity, #263); this tells the user their value was ignored and where to set it
+/// instead. `Once` keeps the run path (`load_env_files`) and the watch path (which
+/// both funnel through the raw loader) from double-warning.
+fn warn_node_env_from_dotenv_ignored() {
+    use std::sync::Once;
+    static WARNED: Once = Once::new();
+    WARNED.call_once(|| {
+        eprintln!(
+            "nub: ignoring NODE_ENV set in .env (dotenv, Next, and Vite do the same); set it in the environment instead"
+        );
+    });
 }
 
 /// Load .env* files from the project root, returning the key-value
@@ -619,6 +653,35 @@ mod tests {
             Some("postgres://localhost:5432/db")
         );
         assert_ne!(raw.get("DATABASE_URL"), expanded.get("DATABASE_URL"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #263: a `.env` FILE must never inject `NODE_ENV` into the child env
+    /// (dotenv/@next/env/Vite parity). Leaking `NODE_ENV=development` into
+    /// `next build` loaded the dev React against production-compiled chunks → a
+    /// null hooks dispatcher. Sibling keys still load; `.env.<NODE_ENV>` file
+    /// SELECTION is untouched — it reads AMBIENT `NODE_ENV`, never this map — so
+    /// the assertion holds whether or not the test process itself has `NODE_ENV`
+    /// set (an ambient value is dropped by shell-wins; a file value by the strip).
+    #[test]
+    fn dotenv_node_env_is_never_injected() {
+        let dir = std::env::temp_dir().join(format!("nub-nodeenv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".env"), "NODE_ENV=development\nAPP_KEY=secret\n").unwrap();
+
+        let vars = load_env_files(&dir);
+
+        assert!(
+            !vars.contains_key("NODE_ENV"),
+            "a `.env` file must not inject NODE_ENV (#263); got {vars:?}"
+        );
+        assert_eq!(
+            vars.get("APP_KEY").map(String::as_str),
+            Some("secret"),
+            "sibling keys must still load after NODE_ENV is stripped; got {vars:?}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
