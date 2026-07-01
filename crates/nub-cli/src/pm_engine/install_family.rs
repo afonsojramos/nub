@@ -1056,44 +1056,50 @@ pub fn run_install(flags: InstallFlags) -> Result<i32> {
     }
 
     let code = run_engine(&session, opts, yarn, &flags.output)?;
-    // Virgin install only: stamp `packageManager: nub@<v>` so the project
-    // advertises nub the standard, cross-tool way. nub's canonical lockfile is
-    // deliberately NEUTRAL (`package.lock`), so — unlike every other PM, whose
-    // branded lockfile is itself the repo's PM signal — nub leaves no signal
-    // downstream tools (turbo, …) can read. The `packageManager` field IS that
-    // signal. The write is gated on `session.truly_fresh`, captured BEFORE the
-    // engine wrote `package.lock`: it is `true` ONLY when nub is the FIRST package
-    // manager to touch the project (no foreign lockfile, no pre-existing nub
-    // lockfile, no `packageManager`/`devEngines` declaration). Any incumbent
-    // signal ⇒ `false` ⇒ no write — nub never imposes its brand on another PM's
-    // project (the symmetric brand boundary). `devEngines` is NOT written here:
-    // that heavier exclusivity stamp stays on the explicit `nub pm use nub`.
+    // Virgin install only: stamp a caret RANGE into `devEngines.packageManager`
+    // so the project advertises nub the standard, cross-tool way WITHOUT locking
+    // itself to one exact nub version. nub's canonical lockfile is deliberately
+    // NEUTRAL (`package.lock`), so — unlike every other PM, whose branded lockfile
+    // is itself the repo's PM signal — nub leaves no signal downstream tools
+    // (turbo, pmd, nypm) can read; the `devEngines.packageManager` object IS that
+    // signal, and detectors key on its `name`, so a `^` range is signal-equivalent
+    // to an exact pin while staying a non-locking floor (upgrades just work). It is
+    // NOT the exact `packageManager: nub@<v>` field: that hard, corepack-visible
+    // pin freezes the repo at one nub version and stays the OPT-IN gesture of an
+    // explicit `nub pm use nub@<exact>`. The write is gated on
+    // `session.truly_fresh`, captured BEFORE the engine wrote `package.lock`: `true`
+    // ONLY when nub is the FIRST package manager to touch the project (no foreign
+    // lockfile, no pre-existing nub lockfile, no `packageManager`/`devEngines`
+    // declaration). Any incumbent signal ⇒ `false` ⇒ no write — nub never imposes
+    // its brand on another PM's project (the symmetric brand boundary).
     stamp_if_virgin(&session, code);
     Ok(code)
 }
 
-/// Stamp the virgin `packageManager` marker after a successful package.json-
-/// modifying engine verb (`install`/`add`/`remove`/`update`). Gated on
-/// `session.truly_fresh` — captured at session build, BEFORE the verb wrote
-/// the lockfile — so it fires exactly once, on the FIRST package-manager
+/// Stamp the virgin `devEngines.packageManager` range after a successful
+/// package.json-modifying engine verb (`install`/`add`/`remove`/`update`).
+/// Gated on `session.truly_fresh` — captured at session build, BEFORE the verb
+/// wrote the lockfile — so it fires exactly once, on the FIRST package-manager
 /// operation in a project nub is first to touch, and the gate self-corrects:
 /// a non-virgin project (any lockfile/declaration present) never stamps,
 /// whichever verb ran. `import` is intentionally not a caller — it converts an
 /// existing FOREIGN lockfile, so its project is non-virgin by construction.
 fn stamp_if_virgin(session: &EngineSession, code: i32) {
     if code == 0 && session.truly_fresh {
-        stamp_virgin_package_manager(&session.cwd);
+        stamp_virgin_dev_engines(&session.cwd);
     }
 }
 
-/// Write `packageManager: "nub@<exact-version>"` into the project manifest of a
-/// VIRGIN install. Best-effort: a successful install must not fail on a manifest
-/// the stamp can't reach (no `package.json` — nub never scaffolds one — or an
-/// unwritable file). Format-preserving + atomic via the shared manifest editor;
-/// it ranks the new key by insertion order at the manifest's tail, leaving the
-/// user's existing keys untouched. The caller has already proven virginity, so
-/// there is no foreign `packageManager` to clobber.
-fn stamp_virgin_package_manager(cwd: &Path) {
+/// Write `devEngines.packageManager = {name:"nub", version:"^<x.y.z>",
+/// onFail:"warn"}` into the project manifest of a VIRGIN install — the
+/// non-locking cross-tool PM signal (see the call-site comment). Best-effort: a
+/// successful install must not fail on a manifest the stamp can't reach (no
+/// `package.json` — nub never scaffolds one — or an unwritable file).
+/// Format-preserving + atomic via the shared manifest editor; it ranks the new
+/// key by insertion order at the manifest's tail, leaving the user's existing
+/// keys untouched. The caller has already proven virginity (no prior
+/// `devEngines`), so the object is created wholesale.
+fn stamp_virgin_dev_engines(cwd: &Path) {
     // Skip silently when the install ran without a `package.json` (the editor
     // refuses to scaffold one); the install already succeeded, so this is a
     // no-op, not an error.
@@ -1104,27 +1110,35 @@ fn stamp_virgin_package_manager(cwd: &Path) {
     // virginity from aube's lockfile detection, which does NOT recognize two
     // foreign PM signals: bun's pre-1.2 BINARY lockfile `bun.lockb` (only the
     // text `bun.lock` is a detection candidate) and a lone yarn-berry
-    // `.yarnrc.yml` config with no `yarn.lock` yet. Without this re-check a
-    // `packageManager: nub@…` stamp could land in a bun/yarn-owned project —
+    // `.yarnrc.yml` config with no `yarn.lock` yet. Without this re-check a nub
+    // `devEngines.packageManager` stamp could land in a bun/yarn-owned project —
     // exactly the brand imposition the virgin predicate forbids. Walk up like
     // `is_truly_fresh_project` does for pnpm-named files, and bail on a hit.
     if dir_walk_up_has_any(cwd, &["bun.lockb", ".yarnrc.yml"]) {
         return;
     }
     // Stamp ONLY when this op wrote nub's OWN canonical (neutral) lockfile. The
-    // field's whole purpose is to supply the PM signal that nub's UNBRANDED
+    // stamp's whole purpose is to supply the PM signal that nub's UNBRANDED
     // lockfile otherwise withholds; when a virgin project resolves to a FOREIGN
     // lockfile format instead (e.g. `default_lockfile_format=pnpm`), that
-    // lockfile IS the signal — so the stamp is unneeded, AND a `nub@…` claim
-    // beside a pnpm/npm-format lock makes corepack-enforcing PMs refuse the
-    // project. Keyed off the canonical-lockfile NAME accessor (rename-safe;
-    // resolves the embedder profile + git-branch variant).
+    // lockfile IS the signal — so the stamp is unneeded, AND a nub claim beside a
+    // pnpm/npm-format lock misrepresents the project. Keyed off the
+    // canonical-lockfile NAME accessor (rename-safe; resolves the embedder
+    // profile + git-branch variant).
     if !root.join(aube_lockfile::aube_lock_filename(&root)).exists() {
         return;
     }
-    let value = format!("nub@{}", env!("CARGO_PKG_VERSION"));
+    let range = format!("^{}", env!("CARGO_PKG_VERSION"));
     let _ = nub_core::pm::resolve::edit_root_manifest(&root, |obj| {
-        obj.insert("packageManager".into(), serde_json::Value::String(value));
+        let dev = obj
+            .entry("devEngines")
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        if let Some(dev) = dev.as_object_mut() {
+            dev.insert(
+                "packageManager".into(),
+                serde_json::json!({ "name": "nub", "version": range, "onFail": "warn" }),
+            );
+        }
     });
 }
 
@@ -1781,11 +1795,11 @@ mod tests {
         );
     }
 
-    /// The virgin stamp writes `packageManager: "nub@<running-version>"` in the
-    /// corepack `<name>@<semver>` shape, appended at the manifest tail (the
-    /// `preserve_order` editor never reflows the user's existing keys). Gating
-    /// on virginity is the caller's job; this asserts the write itself.
-    /// Seed nub's OWN canonical lockfile in `dir` so the stamp's
+    /// The virgin stamp writes the `devEngines.packageManager` caret range
+    /// object, appended at the manifest tail (the `preserve_order` editor never
+    /// reflows the user's existing keys), and NEVER the hard `packageManager`
+    /// pin. Gating on virginity is the caller's job; this asserts the write
+    /// itself. Seed nub's OWN canonical lockfile in `dir` so the stamp's
     /// "nub wrote its neutral format" gate passes deterministically, whichever
     /// embedder profile the test binary happens to have registered.
     fn seed_nub_lockfile(dir: &Path) {
@@ -1797,7 +1811,7 @@ mod tests {
     }
 
     #[test]
-    fn virgin_stamp_writes_corepack_shape_at_tail() {
+    fn virgin_stamp_writes_dev_engines_range_at_tail() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("package.json"),
@@ -1806,20 +1820,27 @@ mod tests {
         .unwrap();
         seed_nub_lockfile(dir.path());
 
-        stamp_virgin_package_manager(dir.path());
+        stamp_virgin_dev_engines(dir.path());
 
         let written = std::fs::read_to_string(dir.path().join("package.json")).unwrap();
-        let expected = format!("nub@{}", env!("CARGO_PKG_VERSION"));
         let manifest: serde_json::Value = serde_json::from_str(&written).unwrap();
         assert_eq!(
-            manifest["packageManager"].as_str(),
-            Some(expected.as_str()),
-            "value must be the running nub version in corepack shape"
+            manifest.pointer("/devEngines/packageManager"),
+            Some(&serde_json::json!({
+                "name": "nub",
+                "version": format!("^{}", env!("CARGO_PKG_VERSION")),
+                "onFail": "warn"
+            })),
+            "value must be the non-locking caret range on the running nub version"
+        );
+        assert!(
+            manifest.get("packageManager").is_none(),
+            "the virgin stamp must NOT write the hard packageManager pin: {written:?}"
         );
         // Tail-append + format preservation: the pre-existing keys keep their
-        // order and the new key lands last, so the diff is one added line.
+        // order and the new key lands last, so the diff is one added block.
         assert!(
-            written.contains("\"version\": \"1.0.0\",\n  \"packageManager\""),
+            written.contains("\"version\": \"1.0.0\",\n  \"devEngines\""),
             "stamp must append after the user's keys, not reflow them: {written:?}"
         );
     }
@@ -1837,7 +1858,7 @@ mod tests {
         if find_manifest_root(dir.path()).is_some() {
             return;
         }
-        stamp_virgin_package_manager(dir.path());
+        stamp_virgin_dev_engines(dir.path());
         assert!(
             !dir.path().join("package.json").exists(),
             "stamp must never scaffold a missing package.json"
@@ -1862,11 +1883,7 @@ mod tests {
             truly_fresh,
             cwd: dir.path().to_path_buf(),
         };
-        let stamped = |p: &Path| {
-            std::fs::read_to_string(p)
-                .unwrap()
-                .contains("packageManager")
-        };
+        let stamped = |p: &Path| std::fs::read_to_string(p).unwrap().contains("devEngines");
 
         seed_nub_lockfile(dir.path());
 
@@ -1886,8 +1903,8 @@ mod tests {
     /// Stamp ONLY when nub wrote its own neutral lockfile. A virgin project that
     /// resolved to a FOREIGN lockfile format (e.g. `default_lockfile_format=pnpm`
     /// writes `pnpm-lock.yaml`, not nub's lockfile) is NOT stamped — that
-    /// lockfile is already the PM signal, and a `nub@…` claim beside it would
-    /// make corepack-enforcing PMs refuse the project.
+    /// lockfile is already the PM signal, and a nub claim beside it would
+    /// misrepresent the project.
     #[test]
     fn virgin_stamp_skips_when_nub_wrote_no_neutral_lockfile() {
         let dir = tempfile::tempdir().unwrap();
@@ -1902,18 +1919,18 @@ mod tests {
         )
         .unwrap();
 
-        stamp_virgin_package_manager(dir.path());
+        stamp_virgin_dev_engines(dir.path());
 
         let written = std::fs::read_to_string(dir.path().join("package.json")).unwrap();
         assert!(
-            !written.contains("packageManager"),
+            !written.contains("devEngines"),
             "a foreign-format lockfile must not get a nub stamp: {written:?}"
         );
     }
 
     /// Symmetric brand boundary: a foreign PM signal aube's detection misses
     /// (`bun.lockb`, pre-1.2 bun) still blocks the stamp, so nub never imposes
-    /// `packageManager: nub@…` on a bun-owned project.
+    /// its `devEngines` marker on a bun-owned project.
     #[test]
     fn virgin_stamp_skips_an_undetected_foreign_lockfile() {
         let dir = tempfile::tempdir().unwrap();
@@ -1925,11 +1942,11 @@ mod tests {
         seed_nub_lockfile(dir.path()); // isolate the bun.lockb guard, not the no-lockfile path
         std::fs::write(dir.path().join("bun.lockb"), b"\0bun").unwrap();
 
-        stamp_virgin_package_manager(dir.path());
+        stamp_virgin_dev_engines(dir.path());
 
         let written = std::fs::read_to_string(dir.path().join("package.json")).unwrap();
         assert!(
-            !written.contains("packageManager"),
+            !written.contains("devEngines"),
             "a bun.lockb project must not be stamped: {written:?}"
         );
     }

@@ -87,12 +87,19 @@ fn use_nub_migrates_a_single_package_catalog_project_offline_and_idempotently() 
 
     let manifest: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(dir.join("package.json")).unwrap()).unwrap();
-    assert_eq!(
-        manifest["packageManager"],
-        format!("nub@{}", env!("CARGO_PKG_VERSION"))
+    // Bare `pm use nub` is the non-locking switch: the incumbent pnpm@ pin is
+    // cleared and only the devEngines caret range is written — never a hard
+    // `packageManager: nub@<v>` pin (that is `pm use nub@<exact>`'s opt-in).
+    assert!(
+        manifest.get("packageManager").is_none(),
+        "bare pm use nub writes no exact packageManager pin: {manifest}"
     );
     assert_eq!(manifest["devEngines"]["packageManager"]["name"], "nub");
     assert_eq!(manifest["devEngines"]["packageManager"]["onFail"], "warn");
+    assert_eq!(
+        manifest["devEngines"]["packageManager"]["version"],
+        format!("^{}", env!("CARGO_PKG_VERSION"))
+    );
     assert_eq!(
         manifest["workspaces"]["catalog"]["left-pad"], "1.3.0",
         "single-package catalogs land as a packages-less workspaces object"
@@ -111,9 +118,11 @@ fn use_nub_migrates_a_single_package_catalog_project_offline_and_idempotently() 
         stdout.contains("production"),
         "the warn tail must name the transient key loudly: {stdout}"
     );
+    // The corepack line is gated to the exact-pin path; the pnpm-refuses line is
+    // the always-present consequence for the bare switch.
     assert!(
-        stdout.contains("corepack") && stdout.contains("nub pm use pnpm"),
-        "the summary must carry the teammates consequences block: {stdout}"
+        stdout.contains("nub pm use pnpm") && !stdout.contains("corepack"),
+        "bare switch carries the consequences block without the corepack (exact-pin) line: {stdout}"
     );
 
     // Idempotent rerun: same identity, lockfile kept, nothing new to migrate.
@@ -126,7 +135,7 @@ fn use_nub_migrates_a_single_package_catalog_project_offline_and_idempotently() 
 }
 
 /// Crash-recovery for the one half-migrated window `use nub` can be killed in:
-/// the manifest edit (atomic — packageManager flipped, the yaml's catalog
+/// the manifest edit (atomic — devEngines range written, the yaml's catalog
 /// already copied into `workspaces`, the `pnpm` namespace dropped) and the
 /// lockfile rename both completed, but the process died BEFORE the final
 /// `pnpm-workspace.yaml` deletion. The project then declares nub identity yet
@@ -138,16 +147,16 @@ fn use_nub_migrates_a_single_package_catalog_project_offline_and_idempotently() 
 /// too fast to interrupt mid-write reliably).
 #[test]
 fn use_nub_recovers_from_a_crash_before_the_yaml_deletion() {
-    let nub_ver = env!("CARGO_PKG_VERSION");
     let dir = project(
         "use-nub-halfstate",
         &[
-            // Manifest as the atomic edit would have left it: nub identity,
-            // catalog migrated into the workspaces object, no pnpm namespace.
+            // Manifest as the atomic (bare) edit would have left it: nub identity
+            // via the devEngines range (no exact packageManager), catalog migrated
+            // into the workspaces object, no pnpm namespace.
             (
                 "package.json",
                 &format!(
-                    r#"{{"name":"app","version":"1.0.0","packageManager":"nub@{nub_ver}",{}}}"#,
+                    r#"{{"name":"app","version":"1.0.0",{}}}"#,
                     r#""devEngines":{"packageManager":{"name":"nub","version":"^0.0.0","onFail":"warn"}},"workspaces":{"catalog":{"left-pad":"1.3.0"}}"#
                 ),
             ),
@@ -176,7 +185,14 @@ fn use_nub_recovers_from_a_crash_before_the_yaml_deletion() {
     // The migrated data survived the half-state — never silently dropped.
     let manifest: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(dir.join("package.json")).unwrap()).unwrap();
-    assert_eq!(manifest["packageManager"], format!("nub@{nub_ver}"));
+    assert!(
+        manifest.get("packageManager").is_none(),
+        "bare use nub leaves no exact packageManager pin after recovery: {manifest}"
+    );
+    assert_eq!(
+        manifest["devEngines"]["packageManager"]["version"],
+        format!("^{}", env!("CARGO_PKG_VERSION"))
+    );
     assert_eq!(
         manifest["workspaces"]["catalog"]["left-pad"], "1.3.0",
         "the catalog must remain in the manifest after recovery"
@@ -194,7 +210,6 @@ fn use_nub_recovers_from_a_crash_before_the_yaml_deletion() {
 /// byte-for-byte in the manifest.
 #[test]
 fn use_nub_migrates_with_injected_deps_and_preserves_meta() {
-    let nub_ver = env!("CARGO_PKG_VERSION");
     let dir = project(
         "injected",
         &[
@@ -218,7 +233,14 @@ fn use_nub_migrates_with_injected_deps_and_preserves_meta() {
     );
     let manifest: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(dir.join("package.json")).unwrap()).unwrap();
-    assert_eq!(manifest["packageManager"], format!("nub@{nub_ver}"));
+    assert!(
+        manifest.get("packageManager").is_none(),
+        "bare pm use nub writes no exact packageManager pin: {manifest}"
+    );
+    assert_eq!(
+        manifest["devEngines"]["packageManager"]["version"],
+        format!("^{}", env!("CARGO_PKG_VERSION"))
+    );
     // The injected dependenciesMeta survives untouched — the install path honors it.
     assert_eq!(
         manifest["dependenciesMeta"]["sibling"]["injected"], true,

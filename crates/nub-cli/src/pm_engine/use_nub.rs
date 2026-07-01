@@ -6,10 +6,11 @@
 //! its Bun-names addendum). The two-mode model in one paragraph: compat mode
 //! (default) plays the incumbent PM's role completely — its lockfile, its
 //! config surface, its grammar. `pm use nub` is the explicit graduation:
-//! `packageManager: "nub@<exact>"` + `devEngines.packageManager
-//! {name:"nub", version:"^<ver>", onFail:"warn"}`, the lockfile renamed (or
-//! converted) to `package.lock` (pnpm-v9 bytes, generic name), and
-//! `pnpm-workspace.yaml` ALWAYS migrated and deleted:
+//! `devEngines.packageManager {name:"nub", version:"^<ver>", onFail:"warn"}`
+//! (the non-locking cross-tool signal, always written) plus — ONLY on the
+//! explicit `pm use nub@<exact>` opt-in — the hard `packageManager: "nub@<exact>"`
+//! pin; the lockfile renamed (or converted) to `package.lock` (pnpm-v9 bytes,
+//! generic name), and `pnpm-workspace.yaml` ALWAYS migrated and deleted:
 //!
 //! - resolution-bearing keys → `package.json` under ecosystem-standard
 //!   top-level names (`workspaces` incl. the object form,
@@ -541,24 +542,36 @@ pub(crate) fn plan_migration(source: &Map<String, Value>) -> Result<YamlMigratio
 pub(crate) fn apply_manifest_edits(
     obj: &mut Map<String, Value>,
     m: &YamlMigration,
-    nub_version: &str,
+    exact_pin: Option<&str>,
+    range_version: &str,
 ) -> Vec<String> {
     let mut notes = Vec::new();
 
-    obj.insert(
-        "packageManager".into(),
-        Value::String(format!("nub@{nub_version}")),
-    );
-    // devEngines.packageManager: created (this verb is the one sanctioned
-    // creator), replacing any prior entry wholesale; sibling devEngines
-    // entries (runtime/os/…) survive.
+    // The exact `packageManager: nub@<v>` field is a HARD, corepack-visible pin
+    // that freezes the repo at one nub version — so it is written ONLY on the
+    // explicit opt-in `nub pm use nub@<exact>`. Bare `nub pm use nub` is the
+    // non-locking gesture: it writes only the devEngines range below, and REMOVES
+    // any prior `packageManager` (a stale exact nub pin being unlocked, or the
+    // incumbent PM's pin being cleared as identity moves to nub) so the field
+    // never contradicts the devEngines entry.
+    match exact_pin {
+        Some(v) => {
+            obj.insert("packageManager".into(), Value::String(format!("nub@{v}")));
+        }
+        None => {
+            obj.remove("packageManager");
+        }
+    }
+    // devEngines.packageManager: the always-written signal (this verb is a
+    // sanctioned creator), replacing any prior entry wholesale; sibling
+    // devEngines entries (runtime/os/…) survive.
     let dev = obj
         .entry("devEngines")
         .or_insert_with(|| Value::Object(Map::new()));
     if let Some(dev) = dev.as_object_mut() {
         dev.insert(
             "packageManager".into(),
-            json!({ "name": "nub", "version": format!("^{nub_version}"), "onFail": "warn" }),
+            json!({ "name": "nub", "version": format!("^{range_version}"), "onFail": "warn" }),
         );
     }
 
@@ -798,9 +811,12 @@ fn pnpm_vocab_precedence(root: &Path) -> VocabPrecedence {
 }
 
 /// `nub pm use nub` — the full switch. `root` is the workspace root (where
-/// the declaration, lockfiles, yaml, and `.npmrc` live). Prints the
-/// file-by-file summary; never silent.
-pub(crate) fn run_use_nub(root: &Path) -> Result<i32> {
+/// the declaration, lockfiles, yaml, and `.npmrc` live). `exact_pin` carries an
+/// explicit `nub pm use nub@<version>` opt-in: `Some(v)` writes the hard
+/// `packageManager: nub@<v>` pin (and bases the devEngines range on `v`); `None`
+/// (bare `nub pm use nub`) writes only the non-locking devEngines caret range on
+/// the running version. Prints the file-by-file summary; never silent.
+pub(crate) fn run_use_nub(root: &Path, exact_pin: Option<&str>) -> Result<i32> {
     // The brand preflight registers the yaml names + package.lock filename the
     // discovery below and the engine writers read.
     super::engine_brand_preflight();
@@ -847,18 +863,24 @@ pub(crate) fn run_use_nub(root: &Path) -> Result<i32> {
         }
     );
     // ── writes ──────────────────────────────────────────────────────────
-    let nub_version = env!("CARGO_PKG_VERSION");
+    // The devEngines range is based on the pinned version when one is named
+    // (`nub@<v>`), else the running binary. The exact `packageManager` field is
+    // written only for the named-version opt-in (see `apply_manifest_edits`).
+    let running_version = env!("CARGO_PKG_VERSION");
+    let range_version = exact_pin.unwrap_or(running_version);
     let mut manifest_notes = Vec::new();
     nub_core::pm::resolve::edit_root_manifest(root, |obj| {
-        manifest_notes = apply_manifest_edits(obj, &migration, nub_version);
+        manifest_notes = apply_manifest_edits(obj, &migration, exact_pin, range_version);
     })?;
 
     let (appended, skipped) = append_npmrc(root, &migration.npmrc)?;
 
-    println!("using nub@{nub_version}");
-    println!("  package.json: packageManager = nub@{nub_version}");
+    println!("using nub@{running_version}");
+    if let Some(v) = exact_pin {
+        println!("  package.json: packageManager = nub@{v}");
+    }
     println!(
-        "  package.json: devEngines.packageManager = {{ name: \"nub\", version: \"^{nub_version}\", onFail: \"warn\" }}"
+        "  package.json: devEngines.packageManager = {{ name: \"nub\", version: \"^{range_version}\", onFail: \"warn\" }}"
     );
     if migration.packages.is_some() || migration.catalog.is_some() || migration.catalogs.is_some() {
         println!(
@@ -966,8 +988,13 @@ pub(crate) fn run_use_nub(root: &Path) -> Result<i32> {
     // support thread later.
     println!();
     println!("heads-up for teammates and tooling not on nub:");
-    println!("  - corepack-enabled shells hard-error on packageManager \"nub@…\" —");
-    println!("    fix: install nub (npm i -g @nubjs/nub) or `corepack disable`");
+    // The corepack hard-error is triggered by the exact `packageManager` field
+    // only — corepack ignores `devEngines`, so the bare (range-only) switch does
+    // not hit it.
+    if exact_pin.is_some() {
+        println!("  - corepack-enabled shells hard-error on packageManager \"nub@…\" —");
+        println!("    fix: install nub (npm i -g @nubjs/nub) or `corepack disable`");
+    }
     println!("  - real pnpm refuses to run here (ERR_PNPM_OTHER_PM_EXPECTED) — by design;");
     println!("    `nub pm use pnpm` reverses this switch completely");
     println!("  - turbo requires a recognized packageManager + lockfile name and will error");
@@ -1255,8 +1282,9 @@ mod tests {
             "catalog": { "react": "^18.0.0" }
         })))
         .unwrap();
+        // Explicit `nub@<exact>` opt-in: the hard packageManager pin IS written.
         let mut obj = src(json!({ "name": "app", "pnpm": { "overrides": {} } }));
-        apply_manifest_edits(&mut obj, &m, "0.1.0");
+        apply_manifest_edits(&mut obj, &m, Some("0.1.0"), "0.1.0");
 
         assert_eq!(obj.get("packageManager"), Some(&json!("nub@0.1.0")));
         assert_eq!(
@@ -1270,6 +1298,21 @@ mod tests {
         );
         assert!(obj.get("pnpm").is_none(), "pnpm namespace must be removed");
 
+        // Bare `nub pm use nub` (None): devEngines range only, and any prior
+        // packageManager (here the incumbent pnpm pin) is CLEARED so the field
+        // never contradicts the nub devEngines entry.
+        let mut obj = src(json!({ "name": "app", "packageManager": "pnpm@9.1.0" }));
+        apply_manifest_edits(&mut obj, &m, None, "0.2.9");
+        assert!(
+            obj.get("packageManager").is_none(),
+            "bare use nub writes no exact packageManager and clears the incumbent pin: {obj:?}"
+        );
+        assert_eq!(
+            obj.get("devEngines").unwrap().get("packageManager"),
+            Some(&json!({ "name": "nub", "version": "^0.2.9", "onFail": "warn" })),
+            "bare use nub still writes the non-locking devEngines range"
+        );
+
         // Conflicting top-level override: package.json wins, named in notes.
         let m = plan_migration(&src(json!({
             "packages": ["packages/*"],
@@ -1277,7 +1320,7 @@ mod tests {
         })))
         .unwrap();
         let mut obj = src(json!({ "name": "app", "overrides": { "lodash": "4.17.20" } }));
-        let notes = apply_manifest_edits(&mut obj, &m, "0.1.0");
+        let notes = apply_manifest_edits(&mut obj, &m, Some("0.1.0"), "0.1.0");
         assert_eq!(
             obj.get("overrides").unwrap().get("lodash"),
             Some(&json!("4.17.20")),

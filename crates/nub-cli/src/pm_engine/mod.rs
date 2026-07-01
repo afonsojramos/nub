@@ -587,11 +587,11 @@ pub(crate) struct EngineSession {
     /// file. Captured BEFORE the engine writes anything, so it reflects the
     /// pre-install state: the FIRST install in a virgin project sees `true`;
     /// every subsequent install (nub's lockfile now present ⇒ `detected` is
-    /// `Some`) sees `false`. The install family reads this to stamp
-    /// `packageManager: nub@<v>` exactly once, on the virgin install.
+    /// `Some`) sees `false`. The install family reads this to stamp the
+    /// `devEngines.packageManager` caret range exactly once, on the virgin install.
     pub(crate) truly_fresh: bool,
     /// The resolved working directory the session ran in (after `--dir`). The
-    /// install family writes the virgin `packageManager` stamp relative to it.
+    /// install family writes the virgin `devEngines` stamp relative to it.
     pub(crate) cwd: PathBuf,
 }
 
@@ -806,11 +806,12 @@ fn engine_session_inner(
     // neutral lockfile: the embedder default flips to `package.lock`, the quiet
     // identity marker the classifier reads back as nub. Any incumbent signal
     // makes the project pnpm-shaped/compat and is respected untouched. On a
-    // virgin install the install family ALSO stamps `packageManager: nub@<v>`
-    // (see `install_family::stamp_virgin_package_manager`) — safe ONLY because
+    // virgin install the install family ALSO stamps the non-locking
+    // `devEngines.packageManager` caret range (see
+    // `install_family::stamp_virgin_dev_engines`) — safe ONLY because
     // `truly_fresh` proves no other PM owns the project (the symmetric brand
-    // boundary); `nub pm use nub` remains the explicit, heavier identity stamper
-    // (it also writes `devEngines`).
+    // boundary). `nub pm use nub@<exact>` remains the explicit opt-in for the
+    // hard `packageManager: nub@<v>` pin.
     let truly_fresh = is_truly_fresh_project(&cwd, detected.as_ref());
     // Set-unless-user-set: ranks below CLI flags, env vars, and every
     // config file in the engine's settings precedence.

@@ -63,10 +63,10 @@ const EMPTY_PNPM: &str = r#"{"name":"app","version":"1.0.0","packageManager":"pn
 #[test]
 fn fresh_projects_write_the_identity_format_declared_first_else_nub() {
     // none + none → truly fresh: nub claims identity via the neutral lockfile
-    // (writes package.lock) AND stamps `packageManager: nub@<v>` — the field is the
-    // PM signal nub's unbranded package.lock withholds, the coherent counterpart to
-    // keeping the lockfile neutral. Only `packageManager`; `devEngines` stays
-    // unstamped (that heavier exclusivity claim is `nub pm use nub`'s job).
+    // (writes package.lock) AND stamps a caret RANGE into `devEngines.packageManager`
+    // — the non-locking PM signal nub's unbranded package.lock withholds, the
+    // coherent counterpart to keeping the lockfile neutral. Never the exact
+    // `packageManager: nub@<v>` pin (that hard claim is `nub pm use nub@<exact>`'s).
     let dir = project("fresh-default", r#"{"name":"app","version":"1.0.0"}"#);
     let (stdout, stderr, code) = run(&dir, &["install"]);
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
@@ -81,13 +81,17 @@ fn fresh_projects_write_the_identity_format_declared_first_else_nub() {
     let manifest: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(dir.join("package.json")).unwrap()).unwrap();
     assert_eq!(
-        manifest.get("packageManager").and_then(|v| v.as_str()),
-        Some(concat!("nub@", env!("CARGO_PKG_VERSION"))),
-        "a virgin install stamps packageManager: nub@<version>: {manifest}"
+        manifest.pointer("/devEngines/packageManager"),
+        Some(&serde_json::json!({
+            "name": "nub",
+            "version": concat!("^", env!("CARGO_PKG_VERSION")),
+            "onFail": "warn"
+        })),
+        "a virgin install stamps a devEngines.packageManager caret range: {manifest}"
     );
     assert!(
-        manifest.get("devEngines").is_none(),
-        "the virgin stamp writes only packageManager, never devEngines: {manifest}"
+        manifest.get("packageManager").is_none(),
+        "the virgin stamp writes only the devEngines range, never the exact packageManager pin: {manifest}"
     );
 
     // declared npm + none → package-lock.json, NOT the nub default.
