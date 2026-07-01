@@ -1134,9 +1134,14 @@ fn stamp_virgin_dev_engines(cwd: &Path) {
             .entry("devEngines")
             .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
         if let Some(dev) = dev.as_object_mut() {
-            dev.insert(
-                "packageManager".into(),
-                serde_json::json!({ "name": "nub", "version": range, "onFail": "warn" }),
+            // Never overwrite an existing `devEngines.packageManager`. The
+            // `truly_fresh` gate keys on lockfiles + pnpm-named files, NOT on the
+            // manifest's declaration fields, so a hand-written foreign
+            // `devEngines.packageManager` (e.g. `{name:"pnpm"}`) can coexist with
+            // a virgin lockfile state — and clobbering it would impose nub's
+            // brand over another PM's declaration (the symmetric brand boundary).
+            dev.entry("packageManager").or_insert_with(
+                || serde_json::json!({ "name": "nub", "version": range, "onFail": "warn" }),
             );
         }
     });
@@ -1842,6 +1847,39 @@ mod tests {
         assert!(
             written.contains("\"version\": \"1.0.0\",\n  \"devEngines\""),
             "stamp must append after the user's keys, not reflow them: {written:?}"
+        );
+    }
+
+    /// The stamp NEVER overwrites an existing `devEngines.packageManager`. The
+    /// `truly_fresh` gate keys on lockfiles + pnpm-named files, not on manifest
+    /// declarations, so a hand-written foreign `devEngines.packageManager` can
+    /// reach this path — and imposing nub's brand over it would break the
+    /// symmetric brand boundary. A sibling `devEngines` entry is left intact.
+    #[test]
+    fn virgin_stamp_never_overwrites_an_existing_dev_engines_pin() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"app","devEngines":{"packageManager":{"name":"pnpm","version":"^10"},"runtime":{"name":"node"}}}"#,
+        )
+        .unwrap();
+        seed_nub_lockfile(dir.path());
+
+        stamp_virgin_dev_engines(dir.path());
+
+        let manifest: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("package.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            manifest.pointer("/devEngines/packageManager/name"),
+            Some(&serde_json::json!("pnpm")),
+            "a foreign devEngines.packageManager must not be clobbered by the nub stamp"
+        );
+        assert_eq!(
+            manifest.pointer("/devEngines/runtime/name"),
+            Some(&serde_json::json!("node")),
+            "a sibling devEngines entry survives"
         );
     }
 

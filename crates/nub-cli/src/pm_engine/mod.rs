@@ -581,14 +581,15 @@ pub(crate) fn stub_error(typed: &str, args: &[String], pm_hint: &str) -> anyhow:
 pub(crate) struct EngineSession {
     pub(crate) detected: Option<DetectedLockfile>,
     pub(crate) runtime: tokio::runtime::Runtime,
-    /// No PM-preference signal anywhere at session-build time — no lockfile of
-    /// ANY package manager (npm/pnpm/yarn/bun, NOR nub's own canonical
-    /// lockfile), no `packageManager`/`devEngines` declaration, no pnpm-named
-    /// file. Captured BEFORE the engine writes anything, so it reflects the
-    /// pre-install state: the FIRST install in a virgin project sees `true`;
-    /// every subsequent install (nub's lockfile now present ⇒ `detected` is
-    /// `Some`) sees `false`. The install family reads this to stamp the
-    /// `devEngines.packageManager` caret range exactly once, on the virgin install.
+    /// No PM-preference lockfile signal at session-build time — no lockfile of
+    /// ANY package manager (npm/pnpm/yarn/bun, NOR nub's own canonical lockfile)
+    /// and no pnpm-named file (`is_truly_fresh_project` keys on those, not on the
+    /// manifest's declaration fields). Captured BEFORE the engine writes
+    /// anything, so it reflects the pre-install state: the FIRST install in a
+    /// virgin project sees `true`; every subsequent install (nub's lockfile now
+    /// present ⇒ `detected` is `Some`) sees `false`. The install family reads
+    /// this to stamp the `devEngines.packageManager` caret range exactly once,
+    /// on the virgin install (and never over an existing `devEngines` pin).
     pub(crate) truly_fresh: bool,
     /// The resolved working directory the session ran in (after `--dir`). The
     /// install family writes the virgin `devEngines` stamp relative to it.
