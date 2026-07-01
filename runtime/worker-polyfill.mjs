@@ -159,8 +159,8 @@ export function installWorkerPolyfill() {
       // inline-source-string form in the spec). We map each to a Node spawn:
       //   - file path / file: URL  → spawn the file (transpiled by nub's preload)
       //   - data: URL              → Node runs it directly (worker_threads v14.9)
-      //   - blob: URL              → resolve the Blob via node:buffer, spawn its
-      //                              source with eval:true (Node can't open blob:)
+      //   - blob: URL              → snapshot the Blob's source, spawn it as a
+      //                              data: URL (Node can't open blob:)
       let spawnTarget;
 
       if (isEval) {
