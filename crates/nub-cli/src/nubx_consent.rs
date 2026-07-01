@@ -336,8 +336,7 @@ enum Consent {
 }
 
 /// The select's row labels, in display order (index 0=Yes, 1=No, 2=Never — see
-/// `option_at`). Default highlight is `No` (index 1) so an accidental Enter is the
-/// safe choice.
+/// `option_at`). Default highlight is `Yes` (index 0) so a bare Enter accepts.
 const OPTIONS: [&str; 3] = ["Yes", "No", "Never (don't ask me again)"];
 
 /// Interactive consent select on stderr (stdout stays clean for the tool's own
@@ -362,7 +361,7 @@ fn prompt_consent(specs: &[String]) -> Consent {
         "nubx: {} is not installed locally. install and run it from the remote registry?",
         specs.join(" ")
     );
-    let mut sel: usize = 1; // default-highlight No
+    let mut sel: usize = 0; // default-highlight Yes (a bare Enter accepts)
 
     let _ = term.write_line(&prompt);
     let _ = term.hide_cursor();
