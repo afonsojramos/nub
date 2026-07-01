@@ -257,7 +257,47 @@ fn project_scalar_home(pnpm_incumbent: bool) -> config_model::ScalarHome {
     config_model::pnpm_scalar_home(major)
 }
 
+/// nub's OWN durable settings live in `~/.config/nub/nub.toml`, NOT `.npmrc`
+/// (which npm will soon ERROR on for unrecognized keys) — so a nub-namespaced
+/// dotted key is intercepted BEFORE the engine's `.npmrc`/pnpm-yaml routing and
+/// handled by [`crate::config`]. Only `nubx.implicit-dlx` (the dlx consent
+/// kill-switch) is wired today; the match is shaped so a sibling nub key slots in.
+/// Returns `Some(exit)` when the key was ours, `None` to fall through to the
+/// engine's `.npmrc`-class handling.
+fn try_nub_config(parsed: &ConfigArgs) -> Option<i32> {
+    use crate::config::ImplicitDlx;
+    match &parsed.command {
+        Some(ConfigCommand::Set(set)) if set.key == "nubx.implicit-dlx" => {
+            let Some(value) = ImplicitDlx::parse(&set.value) else {
+                eprintln!(
+                    "nub: `{}` is not a valid value for nubx.implicit-dlx (use `prompt` or `off`).",
+                    set.value
+                );
+                return Some(1);
+            };
+            match crate::config::set_implicit_dlx(value) {
+                Ok(()) => {
+                    println!("nubx.implicit-dlx = {}", value.as_str());
+                    Some(0)
+                }
+                Err(e) => {
+                    eprintln!("nub: could not write nub.toml: {e}");
+                    Some(1)
+                }
+            }
+        }
+        Some(ConfigCommand::Get(get)) if get.key == "nubx.implicit-dlx" => {
+            println!("{}", crate::config::implicit_dlx().as_str());
+            Some(0)
+        }
+        _ => None,
+    }
+}
+
 fn dispatch_config(parsed: ConfigArgs, explicit_global: bool) -> Result<i32> {
+    if let Some(code) = try_nub_config(&parsed) {
+        return Ok(code);
+    }
     match &parsed.command {
         // Write routing (module doc). GLOBAL writes (`--location user|global`)
         // are NEUTRAL-ONLY — nub never writes a PM-branded global file: in
