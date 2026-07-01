@@ -820,7 +820,7 @@ fn engine_session_inner(
     }
     // Truly-fresh = no PM-preference signal anywhere (no lockfile, no
     // declaration, no pnpm-named file). On this path nub claims identity via the
-    // neutral lockfile: the embedder default flips to `lock.yaml`, the quiet
+    // neutral lockfile: the embedder default flips to `nub.lock`, the quiet
     // identity marker the classifier reads back as nub. Any incumbent signal
     // makes the project pnpm-shaped/compat and is respected untouched. On a
     // virgin install the install family ALSO stamps the non-locking
@@ -1530,7 +1530,7 @@ fn identity_error(err: aube_lockfile::Error) -> anyhow::Error {
 /// [`engine_session`]). Every seam is idempotent.
 pub(crate) fn engine_brand_preflight() {
     // Static identity FIRST, before anything reads project state or branding.
-    // The whole compile-time profile — name, `nub/<ver>` UA, `lock.yaml`
+    // The whole compile-time profile — name, `nub/<ver>` UA, `nub.lock`
     // canonical lockfile, `["nub"]`/`["pnpm"]` detection names, and the five
     // embedder-fixed toggles (engines-self check OFF, runtime-switching OFF,
     // warm-store-verify OFF, canonical-lockfile-always-wins OFF, self-update
@@ -1815,7 +1815,7 @@ fn resolve_config_surface(cwd: &Path) -> ConfigSurface {
                 _ => ConfigSurface::PnpmOrFresh,
             };
         }
-        let nub_lock = dir.join(use_align::NUB_LOCKFILE).is_file();
+        let nub_lock = nub_lockfile_present(&dir);
         let pnpm_lock = dir.join("pnpm-lock.yaml").is_file();
         let foreign = FOREIGN_NON_PNPM
             .iter()
@@ -1842,7 +1842,7 @@ fn resolve_config_surface(cwd: &Path) -> ConfigSurface {
     }
     // Nothing decided anywhere within the walk. A truly-fresh project (no
     // PM-preference signal of any kind, no pnpm-named file) becomes NUB
-    // identity: the next install writes `lock.yaml` and stamps the manifest,
+    // identity: the next install writes `nub.lock` and stamps the manifest,
     // and the project self-reinforces as nub-identity thereafter. A
     // pnpm-named file seen in the walk keeps the pnpm-shaped surface.
     if saw_pnpm_named {
@@ -1944,7 +1944,7 @@ fn read_file_head(path: &Path, max_bytes: usize) -> std::io::Result<String> {
 /// `npm_config_node_linker`, `.npmrc`, or workspace yaml all win):
 ///
 /// - `defaultLockfileFormat` — a TRULY-fresh project (no PM-preference signal
-///   of any kind) writes nub's neutral `lock.yaml` (`=aube`); every other
+///   of any kind) writes nub's neutral `nub.lock` (`=aube`); every other
 ///   surface writes `pnpm-lock.yaml` (`=pnpm`) for drop-in interop. See
 ///   [`nub_setting_defaults`]'s `truly_fresh` arm.
 /// - `virtualStoreDir` / `stateDir` = `node_modules/.nub` — the isolated
@@ -2100,7 +2100,7 @@ fn strip_yarnrc_value(rest: &str) -> &str {
 ///   DOES veto GVS under the profile (per-project + hidden tree, always). A
 ///   user-set `nodeLinker`/`hoist` (env/.npmrc/yaml) still wins — embedder-tier.
 /// - Fresh-write lockfile format: a TRULY-fresh project (no PM-preference
-///   signal of any kind — `truly_fresh`) writes nub's neutral `lock.yaml`
+///   signal of any kind — `truly_fresh`) writes nub's neutral `nub.lock`
 ///   (`defaultLockfileFormat=aube`, which under the nub embedder resolves to
 ///   the `lock.yaml` basename); every other surface writes `pnpm-lock.yaml`,
 ///   keeping a pnpm-incumbent / mixed project drop-in interoperable. A
@@ -2227,7 +2227,7 @@ fn nub_setting_defaults(
 /// `None` only then); this additionally requires that no pnpm-NAMED file
 /// (`pnpm-workspace.yaml`, `.pnpmfile.*`, `.pnpmrc`) sits in the walk — a
 /// pnpm-named file is a genuine pnpm signal that makes the project pnpm-shaped,
-/// not nub's to claim. On the truly-fresh path nub writes `lock.yaml` and
+/// not nub's to claim. On the truly-fresh path nub writes `nub.lock` and
 /// stamps the manifest with its own identity; any incumbent signal is
 /// respected and left untouched.
 fn is_truly_fresh_project(cwd: &Path, detected: Option<&DetectedLockfile>) -> bool {
@@ -2244,6 +2244,58 @@ fn is_truly_fresh_project(cwd: &Path, detected: Option<&DetectedLockfile>) -> bo
         }
     }
     true
+}
+
+/// Whether `dir` holds nub's own canonical lockfile under EITHER the current
+/// name (`nub.lock`) or the legacy name (`lock.yaml`) still honored through
+/// the rename transition. The bespoke nub-side identity probes
+/// (`resolve_config_surface`) check the file directly rather than through the
+/// engine's candidate set, so they consult both names here.
+fn nub_lockfile_present(dir: &Path) -> bool {
+    dir.join(use_align::NUB_LOCKFILE).is_file()
+        || dir.join(use_align::NUB_LEGACY_LOCKFILE).is_file()
+}
+
+/// Transitional auto-migration of nub's own lockfile name: `lock.yaml` →
+/// `nub.lock`. The bytes are identical (pnpm-lock v9), so this is a pure
+/// rename; when `nub.lock` already exists the redundant `lock.yaml` is
+/// simply removed. Runs at the project root and every workspace member dir at
+/// the start of a mutating PM op, so a project upgraded onto the new name
+/// converges silently. Best-effort: any IO error is ignored — the engine's
+/// read-both candidate set keeps an unmigrated `lock.yaml` resolvable
+/// regardless. Sunset at the next major (drop the legacy read + this sweep).
+pub(crate) fn migrate_legacy_nub_lockfile(root: &Path) {
+    migrate_legacy_nub_lockfile_dir(root);
+    for member_dir in nub_core::workspace::detect::find_workspace_members(root, None) {
+        migrate_legacy_nub_lockfile_dir(&member_dir);
+    }
+}
+
+/// Run [`migrate_legacy_nub_lockfile`] when `session` resolved a nub-identity
+/// project — the only identity that owns the `nub.lock`/`lock.yaml` pair
+/// (so a pnpm/npm/yarn/bun incumbent's tree is never touched). Call at the
+/// start of every MUTATING PM op (install/ci/add/remove/update/dedupe), before
+/// the engine resolves, so the engine reads and writes `nub.lock` with no
+/// stale `lock.yaml` left behind.
+pub(crate) fn migrate_session_lockfile(session: &EngineSession) {
+    if let Some(d) = session.detected.as_ref()
+        && d.kind == aube_lockfile::LockfileKind::Aube
+    {
+        migrate_legacy_nub_lockfile(&d.dir);
+    }
+}
+
+fn migrate_legacy_nub_lockfile_dir(dir: &Path) {
+    let legacy = dir.join(use_align::NUB_LEGACY_LOCKFILE);
+    if !legacy.is_file() {
+        return;
+    }
+    let target = dir.join(use_align::NUB_LOCKFILE);
+    if target.exists() {
+        let _ = std::fs::remove_file(&legacy);
+    } else {
+        let _ = std::fs::rename(&legacy, &target);
+    }
 }
 
 /// Nub's XDG data root (`$XDG_DATA_HOME/nub` or `~/.local/share/nub`), the
@@ -2898,7 +2950,7 @@ mod tests {
     #[test]
     fn fresh_write_format_flips_with_truly_fresh() {
         let dir = tempfile::tempdir().unwrap();
-        // A truly-fresh project writes nub's neutral `lock.yaml`
+        // A truly-fresh project writes nub's neutral `nub.lock`
         // (`defaultLockfileFormat=aube`); every other surface keeps the
         // pnpm-lock fresh-write default for drop-in interop.
         assert_eq!(
@@ -2907,7 +2959,7 @@ mod tests {
                 "defaultLockfileFormat"
             ),
             Some("aube"),
-            "truly-fresh must write nub's lock.yaml"
+            "truly-fresh must write nub's nub.lock"
         );
         assert_eq!(
             get(
@@ -3234,7 +3286,17 @@ mod tests {
         }
 
         // ── undeclared: lockfile presence decides ────────────────────────
-        // A lone lock.yaml → nub identity, carrying the deciding dir.
+        // A lone nub.lock (nub's canonical name) → nub identity.
+        let d = root(&[
+            ("package.json", "{}"),
+            ("nub.lock", "lockfileVersion: '9.0'\n"),
+        ]);
+        assert_eq!(
+            resolve_config_surface(d.path()),
+            ConfigSurface::NubIdentity(d.path().to_path_buf())
+        );
+        // A lone legacy lock.yaml (read-both through the transition) → nub
+        // identity too, carrying the deciding dir.
         let d = root(&[
             ("package.json", "{}"),
             ("lock.yaml", "lockfileVersion: '9.0'\n"),

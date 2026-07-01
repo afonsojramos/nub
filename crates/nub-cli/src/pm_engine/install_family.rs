@@ -353,6 +353,7 @@ fn finish_code(result: miette::Result<Option<i32>>) -> Result<i32> {
 fn run_add(typed: &str, args: &[String]) -> Result<i32> {
     let (globals, verb): (_, aube::commands::add::AddArgs) = parse_or_return!(typed, args);
     let session = super::engine_session(globals.dir.as_deref())?;
+    super::migrate_session_lockfile(&session);
     if !verb.global && yarn_detected(&session) {
         return Err(yarn_gate_error(
             typed,
@@ -380,6 +381,7 @@ fn run_add(typed: &str, args: &[String]) -> Result<i32> {
 fn run_remove(typed: &str, args: &[String]) -> Result<i32> {
     let (globals, verb): (_, aube::commands::remove::RemoveArgs) = parse_or_return!(typed, args);
     let session = super::engine_session(globals.dir.as_deref())?;
+    super::migrate_session_lockfile(&session);
     if !verb.global && yarn_detected(&session) {
         return Err(yarn_gate_error(
             typed,
@@ -409,6 +411,7 @@ fn run_update(typed: &str, args: &[String]) -> Result<i32> {
         ));
     }
     let session = super::engine_session(globals.dir.as_deref())?;
+    super::migrate_session_lockfile(&session);
     if !verb.global && yarn_detected(&session) {
         return Err(yarn_gate_error(
             typed,
@@ -434,7 +437,11 @@ fn run_dedupe(typed: &str, args: &[String]) -> Result<i32> {
     let (globals, verb): (_, aube::commands::dedupe::DedupeArgs) = parse_or_return!(typed, args);
     let session = super::engine_session(globals.dir.as_deref())?;
     // `--check` writes nothing (diff + exit code only) and stays usable on
-    // yarn projects; a real dedupe re-resolves and rewrites the lockfile.
+    // yarn projects; a real dedupe re-resolves and rewrites the lockfile. Only
+    // a writing dedupe migrates the legacy lockfile name.
+    if !verb.check {
+        super::migrate_session_lockfile(&session);
+    }
     if !verb.check && yarn_detected(&session) {
         return Err(yarn_gate_error(
             typed,
@@ -994,6 +1001,10 @@ impl WorkspaceFilterFlags {
 /// `nub install` — route through the embedded aube install engine.
 pub fn run_install(flags: InstallFlags) -> Result<i32> {
     let session = super::engine_session(flags.dir.as_deref())?;
+    // Transitional: rename a legacy `lock.yaml` to `nub.lock` before the
+    // engine resolves (no-op unless this is a nub-identity project carrying the
+    // old name).
+    super::migrate_session_lockfile(&session);
     if let Some(err) = pnpm_lockfile_version_preflight(&session) {
         return Err(err);
     }
@@ -1107,7 +1118,7 @@ pub fn run_install(flags: InstallFlags) -> Result<i32> {
     // Virgin install only: stamp a caret RANGE into `devEngines.packageManager`
     // so the project advertises nub the standard, cross-tool way WITHOUT locking
     // itself to one exact nub version. nub's canonical lockfile is deliberately
-    // NEUTRAL (`lock.yaml`), so — unlike every other PM, whose branded lockfile
+    // NEUTRAL (`nub.lock`), so — unlike every other PM, whose branded lockfile
     // is itself the repo's PM signal — nub leaves no signal downstream tools
     // (turbo, pmd, nypm) can read; the `devEngines.packageManager` object IS that
     // signal, and detectors key on its `name`, so a `^` range is signal-equivalent
@@ -1115,7 +1126,7 @@ pub fn run_install(flags: InstallFlags) -> Result<i32> {
     // NOT the exact `packageManager: nub@<v>` field: that hard, corepack-visible
     // pin freezes the repo at one nub version and stays the OPT-IN gesture of an
     // explicit `nub pm use nub@<exact>`. The write is gated on
-    // `session.truly_fresh`, captured BEFORE the engine wrote `lock.yaml`: `true`
+    // `session.truly_fresh`, captured BEFORE the engine wrote `nub.lock`: `true`
     // ONLY when nub is the FIRST package manager to touch the project (no foreign
     // lockfile, no pre-existing nub lockfile, no `packageManager`/`devEngines`
     // declaration). Any incumbent signal ⇒ `false` ⇒ no write — nub never imposes
@@ -1241,6 +1252,9 @@ pub fn run_ci(flags: CiFlags) -> Result<i32> {
     // ci's frozen node_modules is COPY-relocatable across multi-stage Docker
     // (#241); isolation/phantom-dep protection is preserved.
     let session = super::engine_session_ci(flags.dir.as_deref())?;
+    // `ci` is a frozen, ephemeral install — it NEVER mutates checked-in files,
+    // so it does NOT migrate a legacy `lock.yaml`. Read-both still lets it
+    // install from an existing `lock.yaml`; it just leaves the file untouched.
     if let Some(err) = pnpm_lockfile_version_preflight(&session) {
         return Err(err);
     }

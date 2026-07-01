@@ -31,17 +31,20 @@ pub struct CleanArgs {
 /// Lockfile basenames removed by `--lockfile`. Kept in one place so
 /// `clean` and any future `purge`-adjacent command see the same set.
 /// Lockfile names `aube clean --lockfile` removes: this tool's canonical
-/// lockfile plus every foreign format it round-trips. Standalone aube leads
-/// with `aube-lock.yaml`.
-fn lockfile_names() -> [&'static str; 6] {
-    [
+/// lockfile (plus any legacy basename still honored through a rename
+/// transition) and every foreign format it round-trips. Standalone aube leads
+/// with `aube-lock.yaml` and has no legacy names.
+fn lockfile_names() -> Vec<&'static str> {
+    let mut names = vec![
         aube_util::embedder().lockfile_basename,
         "pnpm-lock.yaml",
         "package-lock.json",
         "npm-shrinkwrap.json",
         "yarn.lock",
         "bun.lock",
-    ]
+    ];
+    names.extend_from_slice(aube_util::embedder().lockfile_legacy_basenames);
+    names
 }
 
 pub async fn run(args: CleanArgs) -> miette::Result<Option<i32>> {

@@ -66,16 +66,16 @@ const EMPTY_PNPM: &str = r#"{"name":"app","version":"1.0.0","packageManager":"pn
 #[test]
 fn fresh_projects_write_the_identity_format_declared_first_else_nub() {
     // none + none → truly fresh: nub claims identity via the neutral lockfile
-    // (writes lock.yaml) AND stamps a caret RANGE into `devEngines.packageManager`
-    // — the non-locking PM signal nub's unbranded lock.yaml withholds, the
+    // (writes nub.lock) AND stamps a caret RANGE into `devEngines.packageManager`
+    // — the non-locking PM signal nub's unbranded nub.lock withholds, the
     // coherent counterpart to keeping the lockfile neutral. Never the exact
     // `packageManager: nub@<v>` pin (that hard claim is `nub pm use nub@<exact>`'s).
     let dir = project("fresh-default", r#"{"name":"app","version":"1.0.0"}"#);
     let (stdout, stderr, code) = run(&dir, &["install"]);
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(
-        dir.join("lock.yaml").is_file(),
-        "truly-fresh install must write nub's neutral lock.yaml: {stderr}"
+        dir.join("nub.lock").is_file(),
+        "truly-fresh install must write nub's neutral nub.lock: {stderr}"
     );
     assert!(
         !dir.join("pnpm-lock.yaml").exists(),
@@ -357,8 +357,8 @@ fn a_fresh_declared_yarn_project_hits_the_write_gate_not_a_pnpm_lockfile() {
     );
 }
 
-/// The lock.yaml rows (two-mode model, the maintainer 2026-06-10): the generically
-/// named `lock.yaml` (the engine's canonical slot under nub's filename
+/// The nub.lock rows (two-mode model, the maintainer 2026-06-10): the generically
+/// named `nub.lock` (the engine's canonical slot under nub's filename
 /// toggle) IS nub identity — alone it resolves and installs in place; beside
 /// a foreign lockfile or against a contradicting declaration it is the same
 /// loud error as any other identity conflict, never a silent winner (nub
@@ -367,57 +367,57 @@ fn a_fresh_declared_yarn_project_hits_the_write_gate_not_a_pnpm_lockfile() {
 fn lock_yaml_is_nub_identity_and_conflicts_are_loud() {
     let empty_lock = "lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n";
 
-    // lock.yaml + no declaration → nub identity: install works in place,
-    // lock.yaml stays the lockfile, no pnpm-lock.yaml appears.
+    // nub.lock + no declaration → nub identity: install works in place,
+    // nub.lock stays the lockfile, no pnpm-lock.yaml appears.
     let dir = project("lockyaml-nub", r#"{"name":"app","version":"1.0.0"}"#);
-    std::fs::write(dir.join("lock.yaml"), empty_lock).unwrap();
+    std::fs::write(dir.join("nub.lock"), empty_lock).unwrap();
     let (stdout, stderr, code) = run(&dir, &["install"]);
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(
-        dir.join("lock.yaml").is_file() && !dir.join("pnpm-lock.yaml").exists(),
-        "lock.yaml is the lockfile under nub identity: {stderr}"
+        dir.join("nub.lock").is_file() && !dir.join("pnpm-lock.yaml").exists(),
+        "nub.lock is the lockfile under nub identity: {stderr}"
     );
 
-    // lock.yaml + package-lock.json, no declaration → ambiguity naming both.
+    // nub.lock + package-lock.json, no declaration → ambiguity naming both.
     let dir = project("lockyaml-ambig", r#"{"name":"app","version":"1.0.0"}"#);
-    std::fs::write(dir.join("lock.yaml"), empty_lock).unwrap();
+    std::fs::write(dir.join("nub.lock"), empty_lock).unwrap();
     std::fs::write(
         dir.join("package-lock.json"),
         r#"{"name":"app","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{}}"#,
     )
     .unwrap();
     let (_, stderr, code) = run(&dir, &["install"]);
-    assert_ne!(code, 0, "lock.yaml beside a foreign lockfile must refuse");
+    assert_ne!(code, 0, "nub.lock beside a foreign lockfile must refuse");
     assert!(
         stderr.contains("ERR_NUB_LOCKFILE_AMBIGUOUS")
-            && stderr.contains("lock.yaml")
+            && stderr.contains("nub.lock")
             && stderr.contains("package-lock.json"),
         "the ambiguity must carry the code and name both files: {stderr}"
     );
 
-    // Declared pnpm + only lock.yaml → contradiction (a half-reversed switch;
+    // Declared pnpm + only nub.lock → contradiction (a half-reversed switch;
     // `nub pm use` is the remedy in the message).
     let dir = project("lockyaml-contra", EMPTY_PNPM);
-    std::fs::write(dir.join("lock.yaml"), empty_lock).unwrap();
+    std::fs::write(dir.join("nub.lock"), empty_lock).unwrap();
     let (_, stderr, code) = run(&dir, &["install"]);
-    assert_ne!(code, 0, "declared pnpm over lock.yaml must refuse");
+    assert_ne!(code, 0, "declared pnpm over nub.lock must refuse");
     assert!(
-        stderr.contains("ERR_NUB_LOCKFILE_DECLARATION_MISMATCH") && stderr.contains("lock.yaml"),
-        "the contradiction must carry the code and name lock.yaml: {stderr}"
+        stderr.contains("ERR_NUB_LOCKFILE_DECLARATION_MISMATCH") && stderr.contains("nub.lock"),
+        "the contradiction must carry the code and name nub.lock: {stderr}"
     );
 
-    // Declared nub + lock.yaml → clean nub identity (the post-`use nub`
+    // Declared nub + nub.lock → clean nub identity (the post-`use nub`
     // state): resolves and installs.
     let dir = project(
         "lockyaml-declared",
         r#"{"name":"app","version":"1.0.0","packageManager":"nub@0.0.1"}"#,
     );
-    std::fs::write(dir.join("lock.yaml"), empty_lock).unwrap();
+    std::fs::write(dir.join("nub.lock"), empty_lock).unwrap();
     let (stdout, stderr, code) = run(&dir, &["install"]);
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(
-        dir.join("lock.yaml").is_file() && !dir.join("pnpm-lock.yaml").exists(),
-        "declared nub keeps lock.yaml: {stderr}"
+        dir.join("nub.lock").is_file() && !dir.join("pnpm-lock.yaml").exists(),
+        "declared nub keeps nub.lock: {stderr}"
     );
 }
 

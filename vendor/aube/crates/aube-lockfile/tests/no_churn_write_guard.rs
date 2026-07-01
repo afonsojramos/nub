@@ -30,6 +30,7 @@ static NO_CHURN_TOOL: Embedder = Embedder {
     self_names: &["nochurn"],
     compatible_names: &["pnpm"],
     lockfile_basename: "nochurn-lock.yaml",
+    lockfile_legacy_basenames: &[],
     workspace_yaml: Some("nochurn-workspace.yaml"),
     manifest_namespace: "nochurn",
     env_prefix: Some("NOCHURN"),
