@@ -1114,6 +1114,97 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    /// A registry-shaped ISO-8601 timestamp `days` before now. Window tests
+    /// must be relative to the wall-clock they run under, not fixed dates, so
+    /// they stay correct at any point in time.
+    fn iso_days_ago(days: u64) -> String {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_secs();
+        crate::types::format_iso8601_utc(now.saturating_sub(days * 86_400))
+    }
+
+    // nub's default `trustPolicyIgnoreAfter` (14 days, in minutes). The two
+    // tests below pin the security contract of that default: aged → exempt,
+    // fresh → still caught.
+    const NUB_IGNORE_AFTER_MIN: u64 = 14 * 24 * 60;
+
+    /// The 14-day window exempts an *aged* legitimate backport — the #270
+    /// shape. An old-major maintenance release (`tailwind-merge@2.6.1`, no
+    /// evidence) is published later in wall-clock than a newer major that
+    /// adopted trusted publishing (`3.4.0`), so the date-ordered scan finds the
+    /// stronger prior evidence and would fail. Aged well past the window, the
+    /// pick clears the check instead.
+    #[test]
+    fn ignore_after_14d_exempts_aged_backport() {
+        let prior_time = iso_days_ago(210);
+        let picked_time = iso_days_ago(150);
+        let p = packument(
+            "tailwind-merge",
+            vec![
+                (
+                    "3.4.0",
+                    &prior_time,
+                    with_trusted_publisher(version("tailwind-merge", "3.4.0")),
+                ),
+                ("2.6.1", &picked_time, version("tailwind-merge", "2.6.1")),
+            ],
+        );
+        let picked = p.versions.get("2.6.1").unwrap();
+        let result = check_no_downgrade(
+            &p,
+            "2.6.1",
+            picked,
+            &TrustExcludeRules::default(),
+            Some(NUB_IGNORE_AFTER_MIN),
+        );
+        assert!(
+            result.is_ok(),
+            "a backport aged past the 14-day window must not trip the downgrade check"
+        );
+    }
+
+    /// The window must NOT hide a *fresh* downgrade — the load-bearing security
+    /// property. A version published inside the window with weaker evidence
+    /// than a stronger earlier-published sibling is still a downgrade (the
+    /// stolen-token-into-an-old-line attack shape), and must still fail. A
+    /// regression here means the 14-day default opened the exact hole the
+    /// analysis behind #270 warned about.
+    #[test]
+    fn ignore_after_14d_still_catches_fresh_downgrade() {
+        let prior_time = iso_days_ago(2);
+        let picked_time = iso_days_ago(1);
+        let p = packument(
+            "foo",
+            vec![
+                (
+                    "2.0.0",
+                    &prior_time,
+                    with_trusted_publisher(version("foo", "2.0.0")),
+                ),
+                ("2.0.1", &picked_time, version("foo", "2.0.1")),
+            ],
+        );
+        let picked = p.versions.get("2.0.1").unwrap();
+        let err = check_no_downgrade(
+            &p,
+            "2.0.1",
+            picked,
+            &TrustExcludeRules::default(),
+            Some(NUB_IGNORE_AFTER_MIN),
+        )
+        .expect_err("a fresh weak-evidence publish inside the window must still fail");
+        match err {
+            TrustCheckError::Downgrade(d) => {
+                assert_eq!(d.prior_evidence, TrustEvidence::TrustedPublisher);
+                assert_eq!(d.prior_version, "2.0.0");
+                assert_eq!(d.current_evidence, None);
+            }
+            _ => panic!("expected Downgrade"),
+        }
+    }
+
     // ---------- TrustExcludeRules parsing ----------
 
     #[test]

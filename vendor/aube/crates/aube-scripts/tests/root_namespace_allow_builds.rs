@@ -39,6 +39,7 @@ static ROOT_TOOL: Embedder = Embedder {
     tty_progress: false,
     strict_unsupported_source: false,
     warm_trust_revalidate: true,
+    trust_policy_ignore_after_default: None,
 };
 
 fn build_decision(manifest: &PackageJson, name: &str, version: &str) -> AllowDecision {

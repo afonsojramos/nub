@@ -45,6 +45,7 @@ static STRICT: Embedder = Embedder {
     tty_progress: false,
     strict_unsupported_source: true,
     warm_trust_revalidate: true,
+    trust_policy_ignore_after_default: None,
 };
 
 fn parse(files: &[(&str, &str)]) -> Result<LockfileGraph, Error> {
