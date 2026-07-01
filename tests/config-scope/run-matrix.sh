@@ -55,7 +55,7 @@ ms_version() {
     return
   fi
   local lock
-  for lock in "$dir"/lock.yaml "$dir"/pnpm-lock.yaml "$dir"/bun.lock; do
+  for lock in "$dir"/package.lock "$dir"/lock.yaml "$dir"/pnpm-lock.yaml "$dir"/bun.lock; do
     [ -f "$lock" ] || continue
     grep -oE 'ms@2\.[0-9.]+' "$lock" | sed 's/ms@//' | sort -u | paste -sd, -
     return

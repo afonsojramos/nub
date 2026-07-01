@@ -21,7 +21,7 @@ Two dimensions. **Incumbent** (the project identity nub detects) × **surface** 
 | **env: `npm_config_*` bridge** | honored | honored | honored | honored | honored | honored | honored |
 | **env: branded gating** | no AUBE_*/pnpm_* | no pnpm_* | pnpm_* honored | pnpm_* honored | no pnpm_* | no pnpm_* | BUN_CONFIG_* honored |
 | **run/exec flags** | reporter / regex / env-file / filter (incumbent-invariant) |
-| **lockfile round-trip** | lock.yaml | package-lock | pnpm-lock v9 | pnpm-lock v9 | yarn.lock v1 | yarn.lock v2+ | bun.lock |
+| **lockfile round-trip** | package.lock | package-lock | pnpm-lock v9 | pnpm-lock v9 | yarn.lock v1 | yarn.lock v2+ | bun.lock |
 
 The run/exec-flag surface is **incumbent-invariant** (the run echo, `--env-file`, reporter, regex selection are nub's own CLI, not gated on identity), so it is asserted once rather than per-incumbent — the matrix tracks it as a single column to avoid bloat.
 

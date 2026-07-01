@@ -8,7 +8,7 @@
 //! config surface, its grammar. `pm use nub` is the explicit graduation:
 //! `packageManager: "nub@<exact>"` + `devEngines.packageManager
 //! {name:"nub", version:"^<ver>", onFail:"warn"}`, the lockfile renamed (or
-//! converted) to `lock.yaml` (pnpm-v9 bytes, generic name), and
+//! converted) to `package.lock` (pnpm-v9 bytes, generic name), and
 //! `pnpm-workspace.yaml` ALWAYS migrated and deleted:
 //!
 //! - resolution-bearing keys → `package.json` under ecosystem-standard
@@ -36,7 +36,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value, json};
 
-use super::use_align::{self, AlignPlan, NUB_LOCKFILE};
+use super::use_align::{self, AlignPlan, NUB_LEGACY_LOCKFILE, NUB_LOCKFILE};
 
 /// Yaml/settings keys whose post-migration home is `.npmrc`, per the audit
 /// table. Spellings are the camelCase yaml forms; emission converts to the
@@ -801,7 +801,7 @@ fn pnpm_vocab_precedence(root: &Path) -> VocabPrecedence {
 /// the declaration, lockfiles, yaml, and `.npmrc` live). Prints the
 /// file-by-file summary; never silent.
 pub(crate) fn run_use_nub(root: &Path) -> Result<i32> {
-    // The brand preflight registers the yaml names + lock.yaml filename the
+    // The brand preflight registers the yaml names + package.lock filename the
     // discovery below and the engine writers read.
     super::engine_brand_preflight();
 
@@ -888,11 +888,20 @@ pub(crate) fn run_use_nub(root: &Path) -> Result<i32> {
             println!("  no lockfile — the next install writes {NUB_LOCKFILE}");
         }
         AlignPlan::Keep { kept, remove } => {
-            println!(
-                "  {}: kept (already nub's lockfile)",
-                kept.file_name().unwrap_or_default().to_string_lossy()
-            );
-            remove_strays(&remove, "lock.yaml is authoritative")?;
+            let kept_name = kept.file_name().unwrap_or_default().to_string_lossy();
+            // The explicit graduation must leave the project on the current
+            // name: converge a kept LEGACY-named nub lockfile to `package.lock`
+            // (byte-identical rename), rather than reporting "kept" and leaving
+            // the old filename for a later install to migrate.
+            if kept_name == NUB_LEGACY_LOCKFILE {
+                let to = root.join(NUB_LOCKFILE);
+                std::fs::rename(&kept, &to)
+                    .with_context(|| format!("renaming {kept_name} to {NUB_LOCKFILE}"))?;
+                println!("  {NUB_LOCKFILE}: renamed from {kept_name} (bytes unchanged)");
+            } else {
+                println!("  {kept_name}: kept (already nub's lockfile)");
+            }
+            remove_strays(&remove, &format!("{NUB_LOCKFILE} is authoritative"))?;
         }
         AlignPlan::Rename { from, remove } => {
             let to = root.join(NUB_LOCKFILE);

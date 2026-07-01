@@ -19,9 +19,17 @@ use aube_lockfile::LockfileKind;
 
 /// Nub's own lockfile name under nub identity (the two-mode model): the
 /// engine's canonical-lockfile slot under a generic, deliberately unbranded
-/// filename — bytes stay pnpm-lock v9 compatible. Registered with the engine
-/// via `aube_lockfile::set_aube_lock_base_filename` in the brand preflight.
-pub(crate) const NUB_LOCKFILE: &str = "lock.yaml";
+/// filename — `package.lock` pairs with `package.json`, and its
+/// format-agnostic `.lock` extension survives a future serialization change.
+/// Bytes stay pnpm-lock v9 compatible. Carried on the NUB embedder profile's
+/// `lockfile_basename`.
+pub(crate) const NUB_LOCKFILE: &str = "package.lock";
+
+/// Nub's PRIOR canonical lockfile name, still recognized on read during the
+/// rename transition (carried on the NUB profile's `lockfile_legacy_basenames`)
+/// and migrated to [`NUB_LOCKFILE`] on the next mutating PM op. Same pnpm-lock
+/// v9 bytes — the rename is byte-identical. Sunset at the next major.
+pub(crate) const NUB_LEGACY_LOCKFILE: &str = "lock.yaml";
 
 /// The known lockfile artifacts, in the engine's candidate precedence order
 /// *within* each family (npm-shrinkwrap.json outranks package-lock.json as a
@@ -32,6 +40,8 @@ pub(crate) const NUB_LOCKFILE: &str = "lock.yaml";
 /// nor removes it).
 const LOCKFILES: &[(&str, &str)] = &[
     (NUB_LOCKFILE, "nub"),
+    // Legacy nub name (pre-rename), still nub's artifact for alignment.
+    (NUB_LEGACY_LOCKFILE, "nub"),
     ("pnpm-lock.yaml", "pnpm"),
     ("bun.lock", "bun"),
     ("bun.lockb", "bun"),
@@ -71,8 +81,8 @@ pub(crate) enum AlignPlan {
         from_kind: LockfileKind,
         remove: Vec<PathBuf>,
     },
-    /// The pnpm ↔ nub pair: same bytes (lock.yaml IS pnpm-v9 format under a
-    /// generic name), different filename — a rename, never a parse/rewrite,
+    /// The pnpm ↔ nub pair: same bytes (`package.lock` IS pnpm-v9 format under
+    /// a generic name), different filename — a rename, never a parse/rewrite,
     /// so the file stays byte-identical and the real PM's `--frozen-lockfile`
     /// acceptance is preserved exactly.
     Rename { from: PathBuf, remove: Vec<PathBuf> },
@@ -247,7 +257,7 @@ pub(crate) fn refuse_unconvertible(root: &Path, target: &str, plan: &AlignPlan) 
 /// yarn.lock, mirroring the engine's `refine_yarn_kind`).
 fn source_kind(path: &Path) -> LockfileKind {
     match path.file_name().and_then(|n| n.to_str()) {
-        Some(NUB_LOCKFILE) => LockfileKind::Aube,
+        Some(NUB_LOCKFILE) | Some(NUB_LEGACY_LOCKFILE) => LockfileKind::Aube,
         Some("pnpm-lock.yaml") => LockfileKind::Pnpm,
         Some("bun.lock") => LockfileKind::Bun,
         Some("npm-shrinkwrap.json") => LockfileKind::NpmShrinkwrap,
@@ -497,14 +507,14 @@ mod tests {
             }
         );
 
-        // lock.yaml under `use nub` is already nub's artifact: kept.
+        // package.lock under `use nub` is already nub's artifact: kept.
         let dir = root("keep-nub", &[(NUB_LOCKFILE, "lockfileVersion: '9.0'\n")]);
         assert!(matches!(
             plan_alignment(&dir, "nub").unwrap(),
             AlignPlan::Keep { .. }
         ));
 
-        // lock.yaml → npm is a real format change: converted, not renamed.
+        // package.lock → npm is a real format change: converted, not renamed.
         let dir = root("nub-to-npm", &[(NUB_LOCKFILE, "lockfileVersion: '9.0'\n")]);
         assert!(matches!(
             plan_alignment(&dir, "npm").unwrap(),
@@ -514,7 +524,7 @@ mod tests {
             }
         ));
 
-        // lock.yaml + a foreign family with neither being the target:
+        // package.lock + a foreign family with neither being the target:
         // ambiguity, loud, naming both files.
         let dir = root(
             "nub-ambig",
@@ -526,7 +536,7 @@ mod tests {
         let err = plan_alignment(&dir, "bun").unwrap_err().to_string();
         assert!(
             err.contains(NUB_LOCKFILE) && err.contains("package-lock.json"),
-            "ambiguity must name lock.yaml and package-lock.json, got: {err}"
+            "ambiguity must name package.lock and package-lock.json, got: {err}"
         );
     }
 

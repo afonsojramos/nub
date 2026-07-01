@@ -76,11 +76,11 @@ fn use_nub_migrates_a_single_package_catalog_project_offline_and_idempotently() 
     let (stdout, stderr, code) = run(&dir, &["pm", "use", "nub"]);
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
 
-    // Zero pnpm-named files; lock.yaml carries the exact prior bytes.
+    // Zero pnpm-named files; package.lock carries the exact prior bytes.
     assert!(!dir.join("pnpm-workspace.yaml").exists(), "{stdout}");
     assert!(!dir.join("pnpm-lock.yaml").exists(), "{stdout}");
     assert_eq!(
-        std::fs::read_to_string(dir.join("lock.yaml")).unwrap(),
+        std::fs::read_to_string(dir.join("package.lock")).unwrap(),
         EMPTY_LOCK,
         "the rename must be byte-identical"
     );
@@ -120,7 +120,7 @@ fn use_nub_migrates_a_single_package_catalog_project_offline_and_idempotently() 
     let (stdout2, stderr2, code2) = run(&dir, &["pm", "use", "nub"]);
     assert_eq!(code2, 0, "stdout: {stdout2}\nstderr: {stderr2}");
     assert!(
-        stdout2.contains("lock.yaml: kept"),
+        stdout2.contains("package.lock: kept"),
         "rerun must keep, not re-convert: {stdout2}"
     );
 }
@@ -151,8 +151,8 @@ fn use_nub_recovers_from_a_crash_before_the_yaml_deletion() {
                     r#""devEngines":{"packageManager":{"name":"nub","version":"^0.0.0","onFail":"warn"}},"workspaces":{"catalog":{"left-pad":"1.3.0"}}"#
                 ),
             ),
-            // The rename already happened: lock.yaml present, no pnpm-lock.yaml.
-            ("lock.yaml", EMPTY_LOCK),
+            // The rename already happened: package.lock present, no pnpm-lock.yaml.
+            ("package.lock", EMPTY_LOCK),
             // The leftover the crash never got to delete — still carrying the
             // catalog that the atomic manifest edit already preserved.
             ("pnpm-workspace.yaml", "catalog:\n  left-pad: 1.3.0\n"),
@@ -162,15 +162,15 @@ fn use_nub_recovers_from_a_crash_before_the_yaml_deletion() {
     let (stdout, stderr, code) = run(&dir, &["pm", "use", "nub"]);
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
 
-    // The leftover yaml is gone; lock.yaml is kept (not re-renamed); the
+    // The leftover yaml is gone; package.lock is kept (not re-renamed); the
     // project is now in clean, fully-migrated nub identity.
     assert!(
         !dir.join("pnpm-workspace.yaml").exists(),
         "the recovery run must delete the stray yaml: {stdout}"
     );
     assert!(
-        dir.join("lock.yaml").is_file() && !dir.join("pnpm-lock.yaml").exists(),
-        "lock.yaml stays the lockfile, untouched: {stdout}"
+        dir.join("package.lock").is_file() && !dir.join("pnpm-lock.yaml").exists(),
+        "package.lock stays the lockfile, untouched: {stdout}"
     );
 
     // The migrated data survived the half-state — never silently dropped.
@@ -211,7 +211,7 @@ fn use_nub_migrates_with_injected_deps_and_preserves_meta() {
 
     // The switch completed: yaml renamed, identity flipped, pnpm namespace gone.
     assert!(
-        dir.join("lock.yaml").is_file()
+        dir.join("package.lock").is_file()
             && !dir.join("pnpm-lock.yaml").exists()
             && !dir.join("pnpm-workspace.yaml").exists(),
         "the migration must complete the lockfile rename + yaml deletion: {stdout}"
@@ -228,7 +228,7 @@ fn use_nub_migrates_with_injected_deps_and_preserves_meta() {
 
 /// Under nub identity a stray pnpm-workspace.yaml is ignore-with-warning:
 /// exactly one warning naming it unread plus the remedies, and the install
-/// proceeds against lock.yaml.
+/// proceeds against package.lock.
 #[test]
 fn stray_workspace_yaml_under_nub_identity_warns_once_and_install_proceeds() {
     let dir = project(
@@ -238,7 +238,7 @@ fn stray_workspace_yaml_under_nub_identity_warns_once_and_install_proceeds() {
                 "package.json",
                 r#"{"name":"app","version":"1.0.0","packageManager":"nub@0.0.1"}"#,
             ),
-            ("lock.yaml", EMPTY_LOCK),
+            ("package.lock", EMPTY_LOCK),
             ("pnpm-workspace.yaml", "nodeLinker: hoisted\n"),
         ],
     );
@@ -256,8 +256,8 @@ fn stray_workspace_yaml_under_nub_identity_warns_once_and_install_proceeds() {
         "the warning must carry both remedies: {stderr}"
     );
     assert!(
-        dir.join("lock.yaml").is_file() && !dir.join("pnpm-lock.yaml").exists(),
-        "lock.yaml stays the lockfile"
+        dir.join("package.lock").is_file() && !dir.join("pnpm-lock.yaml").exists(),
+        "package.lock stays the lockfile"
     );
 }
 
@@ -299,7 +299,7 @@ fn lifecycle_ua_is_pnpm_first_in_compat_and_nub_first_under_nub_identity() {
                     r#"{{"name":"app","version":"1.0.0","packageManager":"nub@0.0.1",{postinstall}}}"#
                 ),
             ),
-            ("lock.yaml", EMPTY_LOCK),
+            ("package.lock", EMPTY_LOCK),
         ],
     );
     let (stdout, stderr, code) = run(&dir, &["install"]);
@@ -311,7 +311,7 @@ fn lifecycle_ua_is_pnpm_first_in_compat_and_nub_first_under_nub_identity() {
     );
 }
 
-/// An empty-dependency, in-sync npm v3 package-lock — converts to lock.yaml
+/// An empty-dependency, in-sync npm v3 package-lock — converts to package.lock
 /// offline (no graph to fetch), exercising the npm→nub `Convert` path.
 const EMPTY_NPM_LOCK: &str = r#"{
   "name": "app",
@@ -395,7 +395,7 @@ fn pnpmfile_ignored_silently_under_nub_identity() {
                 "package.json",
                 r#"{"name":"app","version":"1.0.0","packageManager":"nub@0.0.1"}"#,
             ),
-            ("lock.yaml", EMPTY_LOCK),
+            ("package.lock", EMPTY_LOCK),
             (".pnpmfile.cjs", hook),
         ],
     );

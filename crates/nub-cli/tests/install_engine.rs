@@ -69,7 +69,7 @@ fn registry_reachable() -> bool {
 /// Truly-fresh project (no lockfile, no PM declaration, no pnpm-named file):
 /// nub claims identity via the neutral lockfile only. The engine resolves, links
 /// the isolated (pnpm-style) layout under `node_modules/.nub`, and writes nub's
-/// neutral `lock.yaml` — the quiet identity marker. It must NOT auto-stamp
+/// neutral `package.lock` — the quiet identity marker. It must NOT auto-stamp
 /// `packageManager` / `devEngines` into `package.json`: that exclusivity claim
 /// is reserved for the explicit `nub pm use nub` command.
 #[test]
@@ -119,8 +119,8 @@ fn install_truly_fresh_project_claims_nub_identity() {
     );
 
     assert!(
-        dir.join("lock.yaml").is_file(),
-        "truly-fresh install writes nub's neutral lock.yaml"
+        dir.join("package.lock").is_file(),
+        "truly-fresh install writes nub's neutral package.lock"
     );
     assert!(
         !dir.join("pnpm-lock.yaml").exists() && !dir.join("aube-lock.yaml").exists(),
@@ -128,9 +128,9 @@ fn install_truly_fresh_project_claims_nub_identity() {
     );
 
     // A virgin install stamps `packageManager: nub@<v>` (the PM signal nub's
-    // neutral lock.yaml withholds) — only that field, never `devEngines` (the
+    // neutral package.lock withholds) — only that field, never `devEngines` (the
     // heavier exclusivity claim stays on `nub pm use nub`). Identity is also
-    // self-reinforcing via the lockfile: the next install sees lock.yaml and is
+    // self-reinforcing via the lockfile: the next install sees package.lock and is
     // no longer virgin, so it never re-stamps.
     let manifest: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(dir.join("package.json")).unwrap()).unwrap();
@@ -285,8 +285,8 @@ fn install_with_pnpm_workspace_stays_pnpm_shaped_no_stamp() {
         "a pnpm-workspace.yaml project writes pnpm-lock.yaml"
     );
     assert!(
-        !dir.join("lock.yaml").exists(),
-        "a pnpm-incumbent project must not get nub's lock.yaml"
+        !dir.join("package.lock").exists(),
+        "a pnpm-incumbent project must not get nub's package.lock"
     );
     let manifest: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(dir.join("package.json")).unwrap()).unwrap();
@@ -492,7 +492,7 @@ fn install_refuses_to_mutate_a_drifted_yarn_lock() {
 }
 
 /// A truly-fresh `nub add` claims nub identity exactly like a fresh `install`:
-/// the add resolves + writes nub's neutral `lock.yaml` and adds the dep, and —
+/// the add resolves + writes nub's neutral `package.lock` and adds the dep, and —
 /// because the project is virgin (nub is the first PM to touch it) — stamps
 /// `packageManager: nub@<v>`. Only that field; `devEngines` stays unstamped
 /// (the heavier claim is `nub pm use nub`'s). This is the common case the stamp
@@ -515,8 +515,8 @@ fn add_on_a_truly_fresh_project_claims_nub_identity() {
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
 
     assert!(
-        dir.join("lock.yaml").is_file(),
-        "a truly-fresh add writes nub's neutral lock.yaml: {stderr}"
+        dir.join("package.lock").is_file(),
+        "a truly-fresh add writes nub's neutral package.lock: {stderr}"
     );
     assert!(
         !dir.join("pnpm-lock.yaml").exists() && !dir.join("aube-lock.yaml").exists(),
