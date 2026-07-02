@@ -451,6 +451,13 @@ fn npmrc_value_in(paths: &[PathBuf], key: &str) -> Option<String> {
         .next_back()
 }
 
+/// Read a scalar `.npmrc` key across the project walk-up and, when
+/// `include_global`, the global `~/.npmrc`. The reusable entry for nub-behavior
+/// knobs read from the neutral `.npmrc` surface (the verify-deps policy).
+pub(crate) fn npmrc_scalar_value(root: &Path, key: &str, include_global: bool) -> Option<String> {
+    npmrc_value_in(&npmrc_paths_inner(root, include_global), key)
+}
+
 fn npmrc_bool_set_in(paths: &[PathBuf], key: &str) -> bool {
     npmrc_value_in(paths, key).is_some_and(|v| {
         let v = v.trim();

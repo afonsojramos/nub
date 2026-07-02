@@ -2622,6 +2622,7 @@ dependencies = [
  "libc",
  "miette",
  "mimalloc",
+ "node-semver",
  "nub-core",
  "num_cpus",
  "rayon",
