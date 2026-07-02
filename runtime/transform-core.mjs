@@ -729,13 +729,20 @@ export function maybeTranspilePlainJs(url, ext) {
     // Floor (18.19.x): a plain-JS file whose ONLY floor-incompatible construct is a
     // `with {…}` import-attribute clause still won't parse on 18.19's V8. It carries no
     // transformable syntax, so a full transpile would needlessly reformat it — instead
-    // minimal-splice just the keyword and return it. Import attributes are ESM-only, so
-    // the format is `module` (`.cjs` is skipped — it cannot legitimately carry them).
+    // minimal-splice just the keyword and return it. `.cjs` is skipped (it cannot
+    // legitimately carry import attributes). We must intercept as `module` ONLY when the
+    // file's real format actually IS module — a `.js` under `type: commonjs` resolves to
+    // commonjs, where an `import` is a SyntaxError on stock Node and off-floor nub alike;
+    // forcing it to `module` would make it RUN on the floor only, a version divergence.
+    // Fall through (null) in that case so Node's native loader errors consistently.
     // (A plain-JS file that ALSO has transformable syntax takes the transpile path
     // below, where loadTranspile's own rewriteWithForFloor handles the keyword.)
     if (NODE_NEEDS_ASSERT_KEYWORD && ext !== ".cjs") {
-      const rewritten = rewriteWithForFloor(filePath, source);
-      if (rewritten !== source) return { format: "module", source: rewritten, shortCircuit: true };
+      const pkgType = getPackageType(dirname(filePath));
+      if (moduleFormatFor(ext, pkgType, filePath, source) === "module") {
+        const rewritten = rewriteWithForFloor(filePath, source);
+        if (rewritten !== source) return { format: "module", source: rewritten, shortCircuit: true };
+      }
     }
     return null; // no-op: Node's native loader handles it, byte-identical.
   }

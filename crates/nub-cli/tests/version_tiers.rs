@@ -242,6 +242,42 @@ fn import_text_works_on_18_19_floor() {
         stdout.contains("plain-strlit-ok:true"),
         "18.19 floor: a `with {{` inside a string literal must survive the rewrite: stdout={stdout:?}"
     );
+
+    // Stderr parity with the ≥18.20 `with` path: the load hook shortCircuits before
+    // Node processes the (rewritten) `assert` attribute, so Node never emits its
+    // experimental import-assertions warning — the floor path is as silent as the
+    // native `with` path. `--disable-warning` is band-gated out below Node 20.11, so
+    // this clean-stderr property depends on the shortCircuit, not on suppression;
+    // regression-guard it (a leak here would be a floor-only UX divergence).
+    assert!(
+        !stderr.contains("Import assertions") && !stderr.contains("ExperimentalWarning"),
+        "18.19 floor: the rewritten `assert` import must not leak an experimental warning: stderr={stderr:?}"
+    );
+}
+
+/// Floor (18.19.x) format consistency: a plain `.js` under `type: commonjs` carrying an
+/// `import … with { … }` clause is genuine CommonJS, where an ESM `import` is a
+/// SyntaxError on stock Node and off-floor nub alike. The floor keyword-rewrite must NOT
+/// intercept it as `module` (which would make it RUN on the floor only — a cross-version
+/// divergence); it falls through to Node's native loader, which errors consistently.
+#[test]
+fn floor_plain_js_under_type_commonjs_stays_commonjs() {
+    let Some((stdout, _stderr, code)) =
+        run_nub_against_node((18, 19, 0), "import-text-cjs", "main.js")
+    else {
+        eprintln!(
+            "skipping: Node 18.19.0 not installed (set TEST_NODE_BIN_18_19_0 or nvm install)"
+        );
+        return;
+    };
+    assert_ne!(
+        code, 0,
+        "18.19 floor: an `import` in a `type: commonjs` .js must error, not be forced to module: stdout={stdout:?}"
+    );
+    assert!(
+        !stdout.contains("CJS-CTX-RAN:"),
+        "18.19 floor: the CJS-context file must NOT have run as module: stdout={stdout:?}"
+    );
 }
 
 /// Node 18.18.0 is one patch below the 18.19 floor — the boundary case
