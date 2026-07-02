@@ -502,6 +502,16 @@ function makeHooks(core, watchReporting) {
       } catch {}
     }
 
+    // Import Text (attribute-keyed): honor `with { type: "text" }` on ANY extension,
+    // ahead of extension dispatch so `import s from "./c.yaml" with {type:"text"}`
+    // returns raw text, not parsed YAML. Placed after watch reporting (so a text file
+    // gets the same watch treatment as any other), and before the extension/data
+    // dispatch (so the attribute wins over the `.txt`/`.yaml`/… data loaders and
+    // Node-native JSON). shortCircuits, so Node's own unknown-'text'-attribute
+    // validation never runs. Mirror of the compat-tier hook in preload-async-hooks.mjs.
+    // (Node 18.20+ parses the `with` syntax; the 18.19.x floor cannot.)
+    if (context?.importAttributes?.type === "text") return core.loadTextImport(url);
+
     // A USER resolve hook (a ts-node/tsx-style transpiler registered AFTER nub's
     // own preload hook) claimed this file with the bare 'typescript' format: defer
     // to the user's own load chain. The discriminator is `__userHooksRegistered`,

@@ -166,6 +166,36 @@ fn compat_tier_runs_ts_silently() {
     );
 }
 
+/// Import Text on the COMPAT tier (async `module.register` loader worker). The
+/// feature is served by a load-hook branch that exists in BOTH tier entrypoints
+/// (`preload.cjs`'s sync `registerHooks` and `preload-async-hooks.mjs`'s async
+/// worker); the `integration.rs` cases run on the host's fast-tier Node, so this
+/// pins the async path a modern host would otherwise mask. Node 22.13.0 is the
+/// compat-tier representative (>18.20 so `with {}` parses, <22.15 so the async
+/// worker is used).
+#[test]
+fn import_text_works_on_compat_tier() {
+    let Some((stdout, stderr, code)) = run_nub_against_node((22, 13, 0), "import-text", "main.ts")
+    else {
+        eprintln!(
+            "skipping: Node 22.13.0 not installed (set TEST_NODE_BIN_22_13_0 or nvm install)"
+        );
+        return;
+    };
+    assert_eq!(
+        code, 0,
+        "compat-tier import-text must succeed: stderr={stderr}"
+    );
+    assert!(
+        stdout.contains(r##"md:"# Release notes\n\n- first\n- second\n""##),
+        "compat tier: .md read as text via the async loader worker: stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("yaml-is-string:true") && stdout.contains("json-is-string:true"),
+        "compat tier: the attribute wins over data-loader parsing on the async path: stdout={stdout:?}"
+    );
+}
+
 /// Node 18.18.0 is one patch below the 18.19 floor — the boundary case
 /// for the hard-error tier. Contract: stderr carries the canonical
 /// refusal text, exit is non-zero, and (implicitly) Node was never

@@ -3287,6 +3287,50 @@ fn data_named_import_is_a_load_error() {
 }
 
 #[test]
+fn import_text_attribute_any_extension() {
+    // nub's Import Text: `import s from "./f" with { type: "text" }` yields the raw
+    // file contents as a default-export string, on ANY extension. The attribute is
+    // checked ahead of extension dispatch, so it wins over both nub's data loaders
+    // (a `.yaml` read as text is NOT parsed) and Node-native JSON (a `.json` read
+    // as text is the raw string). Matches Node's upstream `textStrategy` semantics.
+    let (stdout, stderr, code) = run_nub("import-text", "main.ts");
+    assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    assert!(
+        stdout.contains(r##"md:"# Release notes\n\n- first\n- second\n""##),
+        "text of a non-data extension (.md) returned verbatim as a string: {stdout}"
+    );
+    assert!(
+        stdout.contains("yaml-is-string:true") && stdout.contains("yaml-unparsed:true"),
+        "a .yaml imported with type:text is the RAW text, not the parsed object: {stdout}"
+    );
+    assert!(
+        stdout.contains("json-is-string:true")
+            && stdout.contains(r#"json-unparsed:"{\"name\":\"demo\",\"version\":2}\n""#),
+        "a .json imported with type:text is the RAW string, not Node-native JSON: {stdout}"
+    );
+}
+
+#[test]
+fn import_text_named_import_is_a_load_error() {
+    // A text import exposes ONLY a default export; a named import has no matching
+    // export and fails at module instantiation (Node SyntaxError), exactly as for
+    // the data loaders. Nothing in the importing module runs.
+    let (stdout, stderr, code) = run_nub("import-text-named", "main.ts");
+    assert_ne!(
+        code, 0,
+        "named import of a text module must fail; stdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("does not provide an export named 'heading'"),
+        "expected the missing-named-export load error; stderr: {stderr}"
+    );
+    assert!(
+        !stdout.contains("should-not-print"),
+        "the importing module must not execute when the named import fails: {stdout}"
+    );
+}
+
+#[test]
 fn env_loading_direct_file() {
     let (stdout, stderr, code) = run_nub("env-test", "main.ts");
     assert_eq!(code, 0, "stderr: {stderr}");
