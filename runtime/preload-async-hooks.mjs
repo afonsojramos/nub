@@ -29,7 +29,7 @@
 import "./floor-builtin.mjs";
 import {
   TRANSPILE_EXTS, PLAIN_JS_EXTS, DATA_EXTS,
-  extname, resolveSpec, loadTranspile, maybeTranspilePlainJs, loadData, isNodeModules,
+  extname, resolveSpec, loadTranspile, maybeTranspilePlainJs, loadData, loadTextImport, isNodeModules,
 } from "./transform-core.mjs";
 import { createRequire, isBuiltin } from "node:module";
 import { existsSync } from "node:fs";
@@ -84,6 +84,12 @@ export async function resolve(specifier, context, nextResolve) {
 
 // ── Load hook ───────────────────────────────────────────────────────
 export async function load(url, context, nextLoad) {
+  // Import Text (attribute-keyed): honor `with { type: "text" }` on ANY extension,
+  // checked BEFORE extension dispatch so `import s from "./c.yaml" with {type:"text"}`
+  // returns the raw text, not parsed YAML. shortCircuits, so Node never runs its own
+  // unknown-'text'-attribute validation. (Node 18.20+ parses the `with` syntax; the
+  // 18.19.x floor cannot parse it at all — see the import-text thread.)
+  if (context?.importAttributes?.type === "text") return loadTextImport(url);
   const ext = extname(url);
   // node_modules deps are NEVER transpiled (the byte-parity boundary). This guard is
   // make-or-break now that TRANSPILE_EXTS includes `.js`/`.mjs`/`.cjs`: without it,
