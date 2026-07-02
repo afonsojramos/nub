@@ -174,6 +174,20 @@ export const PLAIN_JS_EXTS = new Set([".js", ".mjs", ".cjs"]);
 export const DATA_EXTS = { ".jsonc": "jsonc", ".json5": "json5", ".toml": "toml", ".yaml": "yaml", ".yml": "yaml", ".txt": "txt" };
 export const TS_PARENT_EXTS = new Set([".ts", ".tsx", ".mts", ".cts"]);
 
+// Node 18.19.0 / 18.19.1 are the ONLY supported patch releases whose V8 cannot parse
+// the `with { … }` import-attribute keyword (the grammar was backported to 18.20 /
+// 20.10, never to 18.19.x). On exactly those, nub rewrites the keyword to the older
+// `assert` spelling — which that V8 parses and which surfaces the IDENTICAL
+// importAttributes to the load hook (so Import Text and native JSON attribute imports
+// work down to nub's documented 18.19 floor). `assert` is REMOVED on Node 22+, so this
+// is gated to 18.19.x alone; everything ≥18.20 (and the whole 22.15+ fast tier) is a
+// no-op. The rewrite itself is an oxc-parse-driven keyword splice — see
+// rewriteWithForFloor + nub-native's rewrite_import_attributes_keyword.
+const NODE_NEEDS_ASSERT_KEYWORD = (() => {
+  const [maj, min] = process.versions.node.split(".");
+  return maj === "18" && min === "19";
+})();
+
 // Packages resolved from Nub's distribution, not the user's.
 export const VENDORED_PACKAGES = new Set(["@oxc-project/runtime"]);
 
@@ -580,6 +594,26 @@ export function maybeSweepCache() {
     .catch(() => {});
 }
 
+// ── Floor: with{}→assert{} import-attribute rewrite (Node 18.19.x only) ──────
+// On 18.19.0/18.19.1 (NODE_NEEDS_ASSERT_KEYWORD), rewrite `with {…}` import-attribute
+// clauses to `assert {…}` so that V8 can parse them. Runs on the FINAL source Node
+// will compile — the oxc output for TS/JSX, the raw bytes for plain JS. The `/\bwith\b/`
+// pre-filter keeps the native call off the common no-clause file (a real clause always
+// contains the `with` word); the native pass is AST-driven, so a `with` in a string/
+// comment/regexp is never touched, and `rw.changed` guards a false-positive pre-filter
+// hit. A no-op on every Node ≥18.20 (flag false). See NODE_NEEDS_ASSERT_KEYWORD.
+function rewriteWithForFloor(filePath, source) {
+  if (!NODE_NEEDS_ASSERT_KEYWORD || !nubNative || !/\bwith\b/.test(source)) return source;
+  try {
+    const rw = nubNative.rewriteImportAttributesKeyword(filePath, source, "ts");
+    return rw.changed ? rw.code : source;
+  } catch {
+    // A parse hiccup → hand back the raw source; V8 surfaces the real error at the
+    // real spot, exactly as Node would for an un-intercepted file.
+    return source;
+  }
+}
+
 // ── Transpile ───────────────────────────────────────────────────────
 // Transpile a TS/JSX file to JS, returning `{ format, source, shortCircuit }` in
 // the shape both hook tiers hand back to Node. Format is detected (not derived
@@ -661,7 +695,9 @@ export function loadTranspile(url, ext) {
     const details = result.errors.map((e) => e.codeframe || e.message).join("\n\n");
     throw new Error(`Transpile error in ${filePath}:\n${details}`);
   }
-  return { format: result.format, source: result.code, shortCircuit: true };
+  // oxc emits the `with` import-attribute keyword verbatim; on the 18.19.x floor swap
+  // it to `assert` so Node's own parser can read the transpiled output (no-op elsewhere).
+  return { format: result.format, source: rewriteWithForFloor(filePath, result.code), shortCircuit: true };
 }
 
 // Project-source plain JS (`.js`/`.mjs`/`.cjs`) gate. Returns a transpiled load
@@ -690,6 +726,17 @@ export function maybeTranspilePlainJs(url, ext) {
   // lang "ts" parses all JS (a TS superset) but NOT JSX — JSX-in-.js is out of scope.
   const info = detectModuleInfo(filePath, source, "ts");
   if (!info.transformableSyntax && !info.hasDecorators) {
+    // Floor (18.19.x): a plain-JS file whose ONLY floor-incompatible construct is a
+    // `with {…}` import-attribute clause still won't parse on 18.19's V8. It carries no
+    // transformable syntax, so a full transpile would needlessly reformat it — instead
+    // minimal-splice just the keyword and return it. Import attributes are ESM-only, so
+    // the format is `module` (`.cjs` is skipped — it cannot legitimately carry them).
+    // (A plain-JS file that ALSO has transformable syntax takes the transpile path
+    // below, where loadTranspile's own rewriteWithForFloor handles the keyword.)
+    if (NODE_NEEDS_ASSERT_KEYWORD && ext !== ".cjs") {
+      const rewritten = rewriteWithForFloor(filePath, source);
+      if (rewritten !== source) return { format: "module", source: rewritten, shortCircuit: true };
+    }
     return null; // no-op: Node's native loader handles it, byte-identical.
   }
   // Transformable: run the SAME pipeline as TS/JSX (target es2022 lowering, tsconfig,

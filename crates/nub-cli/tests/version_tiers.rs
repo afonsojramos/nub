@@ -196,6 +196,54 @@ fn import_text_works_on_compat_tier() {
     );
 }
 
+/// Import Text on the Node 18.19.x FLOOR — the two patch releases (18.19.0 / 18.19.1)
+/// whose V8 cannot parse the `with {…}` import-attribute keyword at all (it landed in
+/// V8 12.3 / Node 22 and was backported to 18.20 / 20.10, never 18.19.x). nub rewrites
+/// the keyword to the older `assert` spelling before Node's parser sees the source, so
+/// the feature works down to nub's documented 18.19 floor. Covers BOTH the
+/// transpiler-output path (`main.ts` → oxc emits `with`, rewritten post-transpile) and
+/// the plain-JS path (`main-plain.mjs` → a minimal keyword splice, since a no-transform
+/// `.mjs` is not routed through oxc), plus string-literal safety.
+#[test]
+fn import_text_works_on_18_19_floor() {
+    let Some((stdout, stderr, code)) = run_nub_against_node((18, 19, 0), "import-text", "main.ts")
+    else {
+        eprintln!(
+            "skipping: Node 18.19.0 not installed (set TEST_NODE_BIN_18_19_0 or nvm install)"
+        );
+        return;
+    };
+    assert_eq!(
+        code, 0,
+        "18.19 floor import-text (TS) must succeed: stderr={stderr}"
+    );
+    assert!(
+        stdout.contains(r##"md:"# Release notes\n\n- first\n- second\n""##),
+        "18.19 floor: .md read as text after the with->assert rewrite: stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("yaml-is-string:true") && stdout.contains("json-is-string:true"),
+        "18.19 floor: the attribute wins over data-loader parsing: stdout={stdout:?}"
+    );
+
+    // Plain-JS path: a `.mjs` carrying only a `with {…}` clause is keyword-spliced (no
+    // full transpile), and a `with {` inside a string literal survives untouched.
+    let (stdout, stderr, code) = run_nub_against_node((18, 19, 0), "import-text", "main-plain.mjs")
+        .expect("18.19.0 was present for main.ts, so it is present here too");
+    assert_eq!(
+        code, 0,
+        "18.19 floor import-text (plain JS) must succeed: stderr={stderr}"
+    );
+    assert!(
+        stdout.contains(r##"plain-md:"# Release notes\n\n- first\n- second\n""##),
+        "18.19 floor plain-JS: .md read as text: stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("plain-strlit-ok:true"),
+        "18.19 floor: a `with {{` inside a string literal must survive the rewrite: stdout={stdout:?}"
+    );
+}
+
 /// Node 18.18.0 is one patch below the 18.19 floor — the boundary case
 /// for the hard-error tier. Contract: stderr carries the canonical
 /// refusal text, exit is non-zero, and (implicitly) Node was never

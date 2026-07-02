@@ -14,6 +14,7 @@
 mod cache;
 mod detect;
 mod resolve;
+mod rewrite;
 mod transform;
 mod tsconfig;
 
@@ -22,6 +23,7 @@ use napi_derive::napi;
 pub use cache::transform_cached;
 pub use detect::detect_module_info;
 pub use resolve::resolve_ts;
+pub use rewrite::rewrite_import_attributes_keyword;
 pub use transform::transform;
 pub use tsconfig::load_tsconfig;
 

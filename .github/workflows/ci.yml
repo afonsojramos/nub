@@ -641,11 +641,18 @@ jobs:
           }
           dir_22_13=$(install_node 22.13.0)
           dir_18_18=$(install_node 18.18.0)
+          # 18.19.0: exact floor patch whose V8 cannot parse the `with {…}`
+          # import-attribute keyword — pins the with->assert rewrite (import-text on the
+          # 18.19 floor). `actions/setup-node`'s "18.19" leg resolves to the latest
+          # patch, so the exact .0 is side-installed like the other tier reps.
+          dir_18_19=$(install_node 18.19.0)
           "$dir_22_13/node" --version
           "$dir_18_18/node" --version
+          "$dir_18_19/node" --version
           {
             echo "TEST_NODE_BIN_22_13_0=$dir_22_13"
             echo "TEST_NODE_BIN_18_18_0=$dir_18_18"
+            echo "TEST_NODE_BIN_18_19_0=$dir_18_19"
           } >> "$GITHUB_ENV"
       - run: pnpm install --frozen-lockfile
       # The data-format loader tests need the nub-native addon (the npm yaml/toml/
