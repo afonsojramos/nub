@@ -1,6 +1,6 @@
 ---
 title: Loaders
-description: Import JSON, JSONC, JSON5, TOML, YAML, and plain-text files directly as default exports, via an extension-keyed load hook.
+description: Import JSON, JSONC, JSON5, TOML, YAML, and plain-text files as default exports, plus any file as raw text via an import attribute.
 ---
 
 <TypesSetup>
@@ -45,3 +45,15 @@ const { host, port } = config;      // "localhost", 5432
 ```
 
 The object formats are typed `Record<string, unknown>`, so destructured keys are `unknown` — narrow or cast them at the use site. A data file whose top-level value is an array or scalar imports as that value via the default; cast it, since the wildcard type assumes an object.
+
+## Import any file as text
+
+Add the `with { type: "text" }` import attribute to read a file's raw contents as a string, whatever its extension.
+
+```ts
+import readme from "./README.md" with { type: "text" };  // string
+import query from "./query.sql" with { type: "text" };   // string
+import raw from "./config.yaml" with { type: "text" };    // the YAML source, unparsed
+```
+
+The attribute wins over parsing: a `.yaml` or `.json` file read this way is the raw text, not the parsed value. A text import is a single default export, like the data loaders — there are no named exports.
