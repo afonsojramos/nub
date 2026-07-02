@@ -360,11 +360,13 @@ fn run_add(typed: &str, args: &[String]) -> Result<i32> {
             &yarn_remedy("add", &verb.packages),
         ));
     }
+    super::min_release_age::arm();
     let code = finish_quieted(
         &globals.output,
         &session,
         aube::commands::add::run(verb, globals.effective_filter()),
     )?;
+    super::min_release_age::persist(&session.cwd, code == 0, &globals.output);
     stamp_if_virgin(&session, code);
     Ok(code)
 }
@@ -408,11 +410,13 @@ fn run_update(typed: &str, args: &[String]) -> Result<i32> {
             &yarn_remedy("upgrade", &verb.packages),
         ));
     }
+    super::min_release_age::arm();
     let code = finish_code_quieted(
         &globals.output,
         &session,
         aube::commands::update::run(verb, globals.effective_filter()),
     )?;
+    super::min_release_age::persist(&session.cwd, code == 0, &globals.output);
     stamp_if_virgin(&session, code);
     Ok(code)
 }
@@ -429,7 +433,10 @@ fn run_dedupe(typed: &str, args: &[String]) -> Result<i32> {
             "yarn dedupe",
         ));
     }
-    finish_quieted(&globals.output, &session, aube::commands::dedupe::run(verb))
+    super::min_release_age::arm();
+    let code = finish_quieted(&globals.output, &session, aube::commands::dedupe::run(verb))?;
+    super::min_release_age::persist(&session.cwd, code == 0, &globals.output);
+    Ok(code)
 }
 
 fn run_prune(typed: &str, args: &[String]) -> Result<i32> {
@@ -1056,7 +1063,9 @@ pub fn run_install(flags: InstallFlags) -> Result<i32> {
         opts.mode = FrozenMode::Frozen;
     }
 
+    super::min_release_age::arm();
     let code = run_engine(&session, opts, yarn, &flags.output)?;
+    super::min_release_age::persist(&session.cwd, code == 0, &flags.output);
     // Virgin install only: stamp a caret RANGE into `devEngines.packageManager`
     // so the project advertises nub the standard, cross-tool way WITHOUT locking
     // itself to one exact nub version. nub's canonical lockfile is deliberately

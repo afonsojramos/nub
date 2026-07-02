@@ -57,6 +57,7 @@ pub mod identity;
 pub mod info_family;
 pub mod install_family;
 pub mod log;
+pub mod min_release_age;
 pub mod output;
 pub mod present;
 pub mod publish_family;

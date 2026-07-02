@@ -1,4 +1,5 @@
 pub mod adaptive;
+pub mod age_gate;
 pub mod buf;
 pub mod cache;
 pub mod collections;
@@ -11,6 +12,13 @@ pub mod env;
 // Convenience re-exports of the diagnostics public API so binaries can
 // reference `aube_util::DiagConfig` instead of `aube_util::diag::DiagConfig`.
 pub use diag::{DiagConfig, Slot, Span, jstr};
+
+// Convenience re-exports for the age-gate fallback sink (the embedder seam the
+// resolver records immature loose-mode picks into).
+pub use age_gate::{
+    arm_age_gated_fallback_pick_collection, record_age_gated_fallback_pick,
+    take_age_gated_fallback_picks,
+};
 pub mod fs;
 pub mod fs_atomic;
 pub mod hash;
