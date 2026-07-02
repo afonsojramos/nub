@@ -256,14 +256,17 @@ fn import_text_works_on_18_19_floor() {
 }
 
 /// Floor (18.19.x) format consistency: a plain `.js` under `type: commonjs` carrying an
-/// `import … with { … }` clause is genuine CommonJS, where an ESM `import` is a
-/// SyntaxError on stock Node and off-floor nub alike. The floor keyword-rewrite must NOT
-/// intercept it as `module` (which would make it RUN on the floor only — a cross-version
-/// divergence); it falls through to Node's native loader, which errors consistently.
+/// `import … with { … }` clause is genuine CommonJS, where importing it from an ESM parent
+/// is an error on stock Node and off-floor nub alike. The floor keyword-rewrite must NOT
+/// force it to load as `module` (which would make it RUN on the floor only — a
+/// cross-version divergence); it falls through to Node's native loader, which errors
+/// consistently. Driven through an ESM parent (`parent.mjs` imports the CJS `child.js`)
+/// because that is the load-hook path where the divergence manifests — an entry-invoked
+/// CJS `.js` errors the same way pre- and post-fix, so it would not discriminate the fix.
 #[test]
-fn floor_plain_js_under_type_commonjs_stays_commonjs() {
+fn floor_type_commonjs_js_not_forced_to_module() {
     let Some((stdout, _stderr, code)) =
-        run_nub_against_node((18, 19, 0), "import-text-cjs", "main.js")
+        run_nub_against_node((18, 19, 0), "import-text-cjs", "parent.mjs")
     else {
         eprintln!(
             "skipping: Node 18.19.0 not installed (set TEST_NODE_BIN_18_19_0 or nvm install)"
@@ -272,11 +275,11 @@ fn floor_plain_js_under_type_commonjs_stays_commonjs() {
     };
     assert_ne!(
         code, 0,
-        "18.19 floor: an `import` in a `type: commonjs` .js must error, not be forced to module: stdout={stdout:?}"
+        "18.19 floor: importing a `type: commonjs` .js must error, not be forced to module: stdout={stdout:?}"
     );
     assert!(
-        !stdout.contains("CJS-CTX-RAN:"),
-        "18.19 floor: the CJS-context file must NOT have run as module: stdout={stdout:?}"
+        !stdout.contains("CJS-CHILD-RAN-AS-MODULE"),
+        "18.19 floor: the CJS-context child must NOT have loaded as module: stdout={stdout:?}"
     );
 }
 
