@@ -102,10 +102,10 @@ wiki/
 epics/
 
 # Maintainer-local agent-orientation overlay + its Claude Code loader. Neither
-# starts with a dot, so the broad `.*` rule above does not catch them. AGENTS_LOCAL.md
+# starts with a dot, so the broad `.*` rule above does not catch them. AGENTS.local.md
 # holds maintainer-specific orientation moved out of the public AGENTS.md;
-# CLAUDE.local.md is the gitignored loader that imports it (@AGENTS_LOCAL.md).
-AGENTS_LOCAL.md
+# CLAUDE.local.md is the gitignored loader that imports it (@AGENTS.local.md).
+AGENTS.local.md
 CLAUDE.local.md
 
 .vercel

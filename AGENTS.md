@@ -2,7 +2,7 @@
 
 This file is the entry point for AI coding agents working in this repository. It mirrors the [`AGENTS.md` convention](https://agents.md) used by other AI tools. [`CLAUDE.md`](CLAUDE.md) is a symlink to this file — Claude Code and the `AGENTS.md` convention read identical content.
 
-When present, `AGENTS_LOCAL.md` (gitignored, not part of a clean checkout) carries maintainer-local orientation — a personal orchestration workflow, sub-agent dispatch policy, and pointers into local-only directories that a fresh clone does not contain. It is an optional overlay; nothing in this file depends on it, and a contributor working without it has everything needed here.
+When present, `AGENTS.local.md` (gitignored, not part of a clean checkout) carries maintainer-local orientation — a personal orchestration workflow, sub-agent dispatch policy, and pointers into local-only directories that a fresh clone does not contain. It is an optional overlay; nothing in this file depends on it, and a contributor working without it has everything needed here.
 
 ## Non-negotiables — read first if you're opening a PR or editing this repo
 
