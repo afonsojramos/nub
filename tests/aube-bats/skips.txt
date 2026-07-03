@@ -70,3 +70,13 @@ update.bats|aube update --lockfile-only: refreshes lockfile without populating n
 update.bats|aube update --lockfile-only --latest: bumps direct deps without linking|fixture's committed aube-lock.yaml is invisible: nub's canonical lockfile name is lock.yaml
 update.bats|aube update preserves time: entries for direct deps (time-based mode)|fixture's committed aube-lock.yaml is invisible: nub's canonical lockfile name is lock.yaml
 update.bats|aube update drops a stray time: block under default resolution (pnpm parity)|fixture's committed aube-lock.yaml is invisible: nub's canonical lockfile name is lock.yaml
+
+# ── virgin projects self-pin nub via devEngines.packageManager ──────────────
+# On the FIRST package.json-modifying verb in a project nub is first to touch,
+# nub stamps devEngines.packageManager={name:"nub",version:"^<v>",onFail:"warn"}
+# (the non-locking cross-tool PM signal — install_family.rs stamp_if_virgin).
+# aube has no such self-pin, so these order tests see an extra top-level
+# `devEngines` key. The existing keys' ORDER is preserved (the stamp is appended
+# at the tail); the divergence is the intended extra key, not a reorder.
+add.bats|aube add: preserves existing package.json top-level order|nub-divergence: virgin add stamps devEngines.packageManager=nub (self-PM-pin); upstream asserts no extra top-level key
+remove.bats|aube remove: preserves package.json top-level key order|nub-divergence: virgin install stamps devEngines.packageManager=nub (self-PM-pin), adding a devEngines top-level key upstream doesn't expect

@@ -198,6 +198,18 @@ fn node_has_require_esm() -> bool {
     maj >= 23 || (maj == 22 && min >= 12) || (maj == 20 && min >= 19)
 }
 
+/// True when the target Node's V8 parses the `with { type: "..." }` import-attribute
+/// syntax. It rides V8 ≥ ~11.9 — Node 22+, backported to 20.10 and 18.20 — so the
+/// 18.19 support floor (V8 10.2) can NOT parse it and throws `SyntaxError: Unexpected
+/// token 'with'` at module-parse time, BEFORE any nub hook runs. nub's transpile
+/// preserves the attribute verbatim (es2022 target doesn't lower it), so this is a
+/// hard parser floor, not a nub gap — Import Text is unavailable on 18.19.x. Boundary
+/// verified empirically via `node --check` (parses 18.20/20.10/22+, fails 18.18/18.19).
+fn node_supports_import_attributes() -> bool {
+    let (maj, min, _) = target_node_version();
+    maj >= 22 || (maj == 20 && min >= 10) || (maj == 18 && min >= 20)
+}
+
 #[test]
 fn vanilla_ts_executes() {
     let (stdout, stderr, code) = run_nub("vanilla-ts", "main.ts");
@@ -3293,6 +3305,18 @@ fn import_text_attribute_any_extension() {
     // checked ahead of extension dispatch, so it wins over both nub's data loaders
     // (a `.yaml` read as text is NOT parsed) and Node-native JSON (a `.json` read
     // as text is the raw string). Matches Node's upstream `textStrategy` semantics.
+    //
+    // Requires a Node whose V8 parses the `with { type: "text" }` import-attribute
+    // syntax the fixture uses (Node 18.20+/20.10+/22+). The 18.19 support floor's V8
+    // 10.2 rejects it at parse time — a hard parser floor, not a nub gap (see #290).
+    if !node_supports_import_attributes() {
+        eprintln!(
+            "SKIP import_text_attribute_any_extension on Node {:?}: V8 can't parse the \
+             `with {{ type: \"text\" }}` import-attribute syntax below 18.20/20.10/22 (#290)",
+            target_node_version()
+        );
+        return;
+    }
     let (stdout, stderr, code) = run_nub("import-text", "main.ts");
     assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
     assert!(
@@ -3315,6 +3339,18 @@ fn import_text_named_import_is_a_load_error() {
     // A text import exposes ONLY a default export; a named import has no matching
     // export and fails at module instantiation (Node SyntaxError), exactly as for
     // the data loaders. Nothing in the importing module runs.
+    //
+    // Gated on `with`-attribute parse support: below 18.20/20.10/22 the fixture's
+    // `with { type: "text" }` is a parse-time SyntaxError, masking the named-export
+    // load error this test asserts — the same 18.19 V8 floor as above (#290).
+    if !node_supports_import_attributes() {
+        eprintln!(
+            "SKIP import_text_named_import_is_a_load_error on Node {:?}: V8 can't parse the \
+             `with {{ type: \"text\" }}` import-attribute syntax below 18.20/20.10/22 (#290)",
+            target_node_version()
+        );
+        return;
+    }
     let (stdout, stderr, code) = run_nub("import-text-named", "main.ts");
     assert_ne!(
         code, 0,

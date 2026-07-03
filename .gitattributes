@@ -1,0 +1,7 @@
+# Import Text (`import s from "./f" with { type: "text" }`) returns file bytes
+# VERBATIM, and its integration tests assert exact `\n`-delimited content. Force
+# these fixtures to check out LF on every platform so a Windows autocrlf checkout
+# doesn't turn the returned text into `\r\n` and fail the byte-exact assertions
+# (import_text_attribute_any_extension). See #290.
+tests/fixtures/import-text/*        text eol=lf
+tests/fixtures/import-text-named/*  text eol=lf
