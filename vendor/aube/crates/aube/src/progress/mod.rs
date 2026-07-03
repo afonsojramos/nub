@@ -265,18 +265,32 @@ enum Mode {
         /// joined by `finish()` / `Drop` so no late `count` write can
         /// repaint after the display is cleared.
         ticker: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
+        /// Live `InstallProgress` clone count, incremented in `Clone` and
+        /// decremented in `Drop`. The `Drop` safety net fires when this
+        /// hits 1 (the last live clone bailed without `finish()`).
+        /// `Arc::strong_count(root)` CANNOT be used for this: clx's global
+        /// `JOBS` registry keeps a permanent strong clone of `root` from
+        /// `start()`, so the count is always ≥ 2 while any clone is live —
+        /// the same reason CI mode tracks its own `CiState::alive`.
+        alive: Arc<AtomicUsize>,
     },
     Ci(Arc<CiState>),
 }
 
 impl Clone for InstallProgress {
-    /// CI mode tracks its own "alive clones" refcount instead of relying on
-    /// `Arc::strong_count`, because the heartbeat thread owns an `Arc<CiState>`
-    /// for the entire run and would otherwise pin `strong_count ≥ 2` — defeating
-    /// the `== 1` shutdown check in `Drop`.
+    /// Both modes track their own "alive clones" refcount instead of relying on
+    /// `Arc::strong_count`: CI mode's heartbeat thread owns an `Arc<CiState>`,
+    /// and clx's global `JOBS` registry owns a strong clone of the TTY `root`,
+    /// for the entire run — either would pin `strong_count ≥ 2` and defeat the
+    /// `== 1` shutdown check in `Drop`.
     fn clone(&self) -> Self {
-        if let Mode::Ci(s) = &self.mode {
-            s.alive.fetch_add(1, Ordering::Relaxed);
+        match &self.mode {
+            Mode::Ci(s) => {
+                s.alive.fetch_add(1, Ordering::Relaxed);
+            }
+            Mode::Tty { alive, .. } => {
+                alive.fetch_add(1, Ordering::Relaxed);
+            }
         }
         Self {
             mode: self.mode.clone(),
@@ -392,6 +406,7 @@ impl InstallProgress {
                 revealed,
                 wake,
                 ticker,
+                alive: Arc::new(AtomicUsize::new(1)),
             },
             unpacked_sizes: Arc::new(Mutex::new(HashMap::new())),
             files_linked,
@@ -1197,8 +1212,11 @@ struct TtyTicker {
 /// condvar, or on its own if the root job is dropped.
 ///
 /// Cosmetic, never load-bearing: on `Builder::spawn` failure (thread/PID
-/// exhaustion) the install proceeds with no live tick — the final
-/// summary still prints. Mirrors the CI heartbeat's spawn discipline.
+/// exhaustion) the install proceeds with no live tick — the spinner still
+/// animates via clx's own render thread (proof-of-life), the reveal falls
+/// to the event-driven `refresh_tty_bar` path, and the final summary still
+/// prints; only the linking file count freezes (no driver for the atomic).
+/// Mirrors the CI heartbeat's spawn discipline.
 fn spawn_tty_ticker(t: TtyTicker) -> Option<thread::JoinHandle<()>> {
     thread::Builder::new()
         .name("aube-tty-progress".into())
@@ -1217,6 +1235,15 @@ fn spawn_tty_ticker(t: TtyTicker) -> Option<thread::JoinHandle<()>> {
                 }
                 drop(root);
                 let guard = t.wake_lock.lock().unwrap();
+                // Re-check `finished` UNDER `wake_lock` before waiting.
+                // `stop_tty_ticker` sets `finished` then `notify_all`s without
+                // holding the lock, so a notify landing in the check→wait
+                // window would otherwise be lost and the ticker would sleep the
+                // full interval before noticing shutdown. Same discipline as the
+                // CI heartbeat's pre-sleep `done` re-check.
+                if t.finished.load(Ordering::Relaxed) {
+                    break;
+                }
                 let _ = t.wake.wait_timeout(guard, TTY_TICK_INTERVAL).unwrap();
             }
         })
@@ -1252,7 +1279,11 @@ fn stop_tty_ticker(
 ) {
     finished.store(true, Ordering::Relaxed);
     wake.notify_all();
-    if let Some(handle) = ticker.lock().unwrap().take() {
+    // Take the handle out from under the lock BEFORE joining — holding the
+    // `ticker` mutex across `join()` would be a latent deadlock the moment the
+    // ticker ever needs that lock to exit.
+    let handle = ticker.lock().unwrap().take();
+    if let Some(handle) = handle {
         let _ = handle.join();
     }
 }
@@ -1265,12 +1296,14 @@ impl Drop for InstallProgress {
     /// clone (e.g. the one handed to the fresh-resolve fetch coordinator)
     /// drops while the install is still in flight.
     ///
-    /// CI mode can't use `Arc::strong_count` for this check because the
-    /// heartbeat thread holds its own clone of `Arc<CiState>` for the
-    /// entire run. Instead, it tracks the live-clone count in a separate
-    /// `CiState::alive` atomic, incremented in `Clone` and decremented
-    /// here. Error paths drop without printing the `Done in Xs` summary
-    /// — the heartbeat still gets joined so no stray tick escapes.
+    /// Neither mode can use `Arc::strong_count` for this check: CI mode's
+    /// heartbeat thread holds its own `Arc<CiState>`, and clx's global `JOBS`
+    /// registry holds a permanent strong clone of the TTY `root` (from
+    /// `start()`, never removed) — either pins the count ≥ 2 for the whole run.
+    /// So both track a live-clone count in an `alive` atomic, incremented in
+    /// `Clone` and decremented here, firing teardown on `== 1`. Error paths drop
+    /// without the summary; the ticker/heartbeat still gets joined so no stray
+    /// tick escapes.
     fn drop(&mut self) {
         match &self.mode {
             Mode::Tty {
@@ -1278,13 +1311,14 @@ impl Drop for InstallProgress {
                 finished,
                 wake,
                 ticker,
+                alive,
                 ..
             } => {
-                if Arc::strong_count(root) == 1 && !finished.load(Ordering::Relaxed) {
-                    // Last live clone bailed without `finish()` (error path):
-                    // stop the ticker before clearing so a late `count` write
-                    // can't repaint. The ticker holds a `Weak<root>`, so it
-                    // never affected the `strong_count == 1` check above.
+                // Last live clone bailed without `finish()` (error path): stop
+                // the ticker before clearing so a late `count` write can't
+                // repaint. `finished` guards against re-running teardown after a
+                // normal `finish()` (which already stopped + cleared).
+                if alive.fetch_sub(1, Ordering::Relaxed) == 1 && !finished.load(Ordering::Relaxed) {
                     stop_tty_ticker(finished, wake, ticker);
                     root.set_status(ProgressStatus::Done);
                     clx::progress::stop_clear();
