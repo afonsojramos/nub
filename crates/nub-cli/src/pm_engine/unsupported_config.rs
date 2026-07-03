@@ -12,11 +12,13 @@
 //!      mode (same path `--frozen-lockfile` takes).
 //!   3. `enableScripts: false` (yarn) → force a block-all-builds policy that
 //!      overrides even nub's curated default-trust floor.
-//!   4. `dependenciesMeta.*.injected` → the carve-out from the isolated+GVS
-//!      default: nub's default flips every other non-injected project to
-//!      `hoist=false` (no hidden hoist tree, GVS on), but injected copies
-//!      materialize only with the hidden hoist tree, so an injected project
-//!      keeps the engine's isolated + `hoist=true` default (GVS off).
+//!   4. `dependenciesMeta.*.injected` → the carve-out from the GVS-aware
+//!      hoisting default: a non-injected project pushes no `hoist` (it resolves
+//!      to the default `true`, which under nub's `gvs_over_default_hoist` profile
+//!      lets GVS engage without a hidden hoist tree), but injected copies
+//!      materialize only with the hidden hoist tree on, so an injected project
+//!      pushes an EXPLICIT `hoist=true` — vetoing GVS (per-project + hidden
+//!      tree, always).
 //!
 //! (`minimumReleaseAge` from bunfig is wired in [`super::bun_config`] — it maps
 //! to a synthetic `.npmrc` entry the settings registry already reads.)
@@ -208,9 +210,10 @@ fn yarn_offline_mirror_configured(root: &Path) -> bool {
 /// Whether the root (or any workspace member) manifest declares
 /// `dependenciesMeta.<pkg>.injected: true`. aube materializes injected copies
 /// only with the hidden hoist tree on, so an injected project is the carve-out
-/// from the isolated+GVS default: instead of `hoist=false` (GVS on) it keeps
-/// the engine's isolated + `hoist=true` default (GVS off), rather than silently
-/// dropping the directive.
+/// from the GVS-aware hoisting default: instead of leaving `hoist` at its
+/// default (which lets GVS engage), it pushes an EXPLICIT `hoist=true` that
+/// vetoes GVS (per-project + hidden tree), rather than silently dropping the
+/// directive.
 pub(crate) fn injected_deps_present(root: &Path) -> bool {
     manifest_has_injected(&root.join("package.json"))
         || aube_workspace::find_workspace_packages(root)

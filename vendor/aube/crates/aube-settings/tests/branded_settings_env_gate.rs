@@ -47,6 +47,7 @@ static MYTOOL_NO_BRANDED_ENV: Embedder = Embedder {
     warm_store_verify: true,
     read_branded_settings_env: false,
     gvs_incompatible_warning: true,
+    gvs_over_default_hoist: false,
     no_churn_lockfile_write: false,
     primer_ttl: None,
     cpu_budget: None,

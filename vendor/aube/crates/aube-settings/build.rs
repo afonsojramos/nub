@@ -69,6 +69,18 @@ struct SettingDef {
     /// strings such as `ranked:off<on<required`.
     #[serde(default, rename = "managedPolicy")]
     managed_policy: String,
+    /// When `true`, emit a companion `<fn_name>_explicit(ctx) -> Option<T>`
+    /// accessor alongside the normal one. It resolves the setting through the
+    /// same source chain and managed-config finalizer but WITHOUT folding in the
+    /// built-in default, so the caller can distinguish "explicitly set at some
+    /// tier (cli/env/npmrc/yaml/embedderDefaults)" from "left at the built-in
+    /// default." Only meaningful for settings whose default is a concrete value
+    /// (the normal accessor returns `T`, not `Option<T>`); a setting with an
+    /// undefined default already exposes that distinction. Currently used by
+    /// `hoist`, whose default `true` otherwise hides whether the user (or an
+    /// embedder tier) asked for hoisting.
+    #[serde(default, rename = "explicitAccessor")]
+    explicit_accessor: bool,
     #[serde(default)]
     examples: Vec<String>,
 }
@@ -249,6 +261,17 @@ fn generate_resolved_accessors(settings: &BTreeMap<String, SettingDef>) -> Strin
             Some(_) => value_ty.clone(),
             None => format!("Option<{value_ty}>"),
         };
+        if def.explicit_accessor {
+            assert!(
+                default_expr.is_some(),
+                "{name}: explicitAccessor is redundant when the default is undefined — the \
+                 normal accessor already returns Option<T>"
+            );
+            assert!(
+                kind != Kind::Enum,
+                "{name}: explicitAccessor is not supported for enum settings"
+            );
+        }
         let (npmrc_call, ws_call, env_call, cli_call) = match kind {
             Kind::Bool => (
                 "bool_from_npmrc",
@@ -388,6 +411,30 @@ fn generate_resolved_accessors(settings: &BTreeMap<String, SettingDef>) -> Strin
             .unwrap(),
         }
         writeln!(out, "}}\n").unwrap();
+
+        // Companion `<fn_name>_explicit` accessor: the same source walk +
+        // managed finalizer, but WITHOUT `.or(Some(default))`, so it returns
+        // `None` when only the built-in default would apply. Lets a caller tell
+        // "explicitly configured (cli/env/npmrc/yaml/embedderDefaults)" from
+        // "defaulted." Guarded above to non-enum settings with a concrete
+        // default.
+        if def.explicit_accessor {
+            writeln!(
+                out,
+                "/// Resolved `{name}` WITHOUT the built-in default folded in —\n\
+                 /// `Some` iff set at some source tier, else `None`. Companion to\n\
+                 /// [`{fn_name}`] (see `explicitAccessor` in settings.toml).\n\
+                 pub fn {fn_name}_explicit(ctx: &ResolveCtx<'_>) -> Option<{value_ty}> {{"
+            )
+            .unwrap();
+            emit_resolution(&mut out, &source_exprs);
+            writeln!(
+                out,
+                "    super::{finalizer}({name:?}, value, ctx.managed_aube_config)"
+            )
+            .unwrap();
+            writeln!(out, "}}\n").unwrap();
+        }
     }
 
     out

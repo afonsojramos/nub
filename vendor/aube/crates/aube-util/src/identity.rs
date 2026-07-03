@@ -240,6 +240,25 @@ pub struct Embedder {
     /// engine log level is raised to `debug`. Gates ONLY the notice's level;
     /// the per-project fallback BEHAVIOR is identical either way. Embedder-fixed.
     pub gvs_incompatible_warning: bool,
+    /// When `false` (aube's default), a *default* `hoist` (the built-in
+    /// `hoist=true`, nobody set it) vetoes the global virtual store exactly as
+    /// upstream: `effective_gvs = planned && !hoist && Isolated`, so the shared
+    /// store engages only when `hoist` is off. When `true`, only an
+    /// *explicitly-set* `hoist=true` vetoes GVS; a DEFAULT hoist lets GVS engage
+    /// (`effective_gvs = planned && Isolated && !explicit_hoist`), and the hidden
+    /// hoist tree (`node_modules/.<store>/node_modules/`) is built only where GVS
+    /// does NOT engage (CI, per-project, an incompatible-package trigger, an
+    /// explicit `enableGlobalVirtualStore=false`, dlx).
+    ///
+    /// The embedder that pushes an isolated layout as its default (nub) needs
+    /// this so the hidden hoist tree — pnpm-parity for `hoistPattern:['*']`, which
+    /// restores ambient `@types/*` resolution for store-resident packages —
+    /// still gets built wherever the shared store isn't active, instead of being
+    /// lost for zero GVS benefit. Standalone aube keeps `false`, so its coupling
+    /// (`gvs.rs::effective_global_virtual_store` and the linker's
+    /// `use_global_virtual_store && hoist` fallback) is byte-for-byte unchanged.
+    /// Embedder-fixed: the host's layout posture, not a per-project knob.
+    pub gvs_over_default_hoist: bool,
     /// How long after the bundled primer's build date (`generated_at`) the
     /// offline metadata primer is consulted at all. `None` = unlimited (the
     /// primer never expires); `Some(d)` = consult the primer only while
@@ -378,6 +397,9 @@ pub const AUBE: Embedder = Embedder {
     no_churn_lockfile_write: false,
     read_branded_settings_env: true,
     gvs_incompatible_warning: true,
+    // Standalone aube keeps the stock GVS↔hoist coupling: a default hoist=true
+    // vetoes the shared store, so its install layout is byte-for-byte unchanged.
+    gvs_over_default_hoist: false,
     primer_ttl: None,
     cpu_budget: None,
     // Append-only by default on a TTY; the animated renderer stays an
@@ -565,6 +587,7 @@ mod tests {
         assert!(id.warm_store_verify);
         assert!(!id.no_churn_lockfile_write);
         assert!(id.read_branded_settings_env);
+        assert!(!id.gvs_over_default_hoist);
         assert_eq!(id.config_env_prefix, Some("AUBE"));
         assert_eq!(id.primer_ttl, None);
         assert!(!id.tty_progress);
