@@ -82,6 +82,26 @@ Every file written or removed is named in the output; rerunning is a no-op. The 
 
 A converting `use yarn` is otherwise fine — Nub writes a classic `yarn.lock` directly. Running `use bun` writes the pin and lockfile but doesn't provision bun.
 
+### `nub pm pin`
+
+Lock the project to an exact Nub version. Bare, it pins the Nub you're running; pass a version to pin a specific one.
+
+```bash
+nub pm pin           # pin the running Nub
+nub pm pin 0.2.10    # pin an exact version
+```
+
+```console
+$ nub pm pin
+pinned nub@0.2.10
+  package.json: packageManager = nub@0.2.10
+  package.json: devEngines.packageManager = { name: "nub", version: "^0.2.10", onFail: "warn" }
+```
+
+It writes only the identity fields — the exact `packageManager` pin and the `devEngines.packageManager` caret beside it — and nothing else: no lockfile conversion, no config migration. That fuller switch onto Nub is [`nub pm use nub`](#nub-pm-use)'s job; pin is the lightweight lock, the package-manager analog of [Nub's Node pin](/docs/node).
+
+The version must be exact — Nub is the binary you're running, not a registry package, so a range or dist-tag has nothing to resolve against.
+
 ### `nub pm update`
 
 Bump the pin: resolve the newest version satisfying the `devEngines` range (or the registry `latest` if there's no range), provision it, and rewrite `packageManager` with a fresh hash. Alias: `nub pm up`.
@@ -108,6 +128,34 @@ Versions live at `~/.cache/nub/pm/<pm>/<version>`. A cached exact pin runs fully
 ### `nub pm shim`
 
 The shims are an opt-in: run `nub pm shim` and a bare `pnpm`, `npm`, or `yarn` command routes through Nub to the pinned manager, with `nub pm unshim` to remove them. Default usage needs none of this — `nub install` and `nub run` already run the pin. See [Package-manager shims](/docs/pm-shim) for the install, the strict-by-default refusal, and the per-invocation overhead.
+
+## Pinning Nub itself
+
+The `packageManager` field can also pin Nub — `nub@X.Y.Z`. When the running Nub is a different version, it fetches that exact release, verifies it, and hands off, so a project's installs don't depend on which Nub each contributor happens to have.
+
+```json
+{
+  "packageManager": "nub@0.2.9"
+}
+```
+
+The handoff runs on the install verbs — where the result is a committed lockfile and `node_modules`:
+
+```console
+$ nub install
+nub: provisioning pinned nub@0.2.9 (darwin-arm64)...
+nub: provisioned nub@0.2.9
+```
+
+The release comes from Nub's own channel and is checksum-verified before it runs; a corrupt, missing, or wrong-version build is a hard error, never a silent fallback. The store lives at `~/.cache/nub/self/<version>`, so a pinned version runs offline once provisioned.
+
+Only the install verbs hand off. Everything else — the file runner, script running, [`nubx`](/docs/runner), version management, self-update — never reads the pin, so `nub script.ts` stays fast. A matching pin runs in place. A non-exact pin does too, with a notice: like corepack, the `packageManager` field is exact-only.
+
+To run with your installed Nub regardless of the pin, set `NUB_SELF_SHIM=0`. It disables the handoff for the whole tree:
+
+```bash
+NUB_SELF_SHIM=0 nub install
+```
 
 ## `.npmrc`
 

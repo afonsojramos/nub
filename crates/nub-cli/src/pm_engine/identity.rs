@@ -204,6 +204,18 @@ pub(crate) const NUB: aube_util::Embedder = aube_util::Embedder {
     // link); any install that does REAL work misses the short-circuit and still
     // trips the gate during resolution. Standalone aube keeps the re-validation.
     warm_trust_revalidate: false,
+    // Default `trustPolicyIgnoreAfter` to a 14-day window (in minutes) when the
+    // user hasn't set it. A legitimate maintenance backport on an old major —
+    // published later in wall-clock than a newer major that adopted OIDC
+    // provenance — trips the date-ordered downgrade scan on first resolve (the
+    // #270 false positive: `@modelcontextprotocol/inspector` → `tailwind-merge`).
+    // Once such a version has aged past the window un-yanked it is
+    // overwhelmingly a real backport and is exempted; a freshly published
+    // weak-evidence version is still scanned against the full history, so the
+    // downgrade attack (a stolen-token publish into an old line) is still caught
+    // in the window that matters. An explicit user `trustPolicyIgnoreAfter=0`
+    // opts back into the full strict check. Standalone aube keeps `None`.
+    trust_policy_ignore_after_default: Some(14 * 24 * 60),
 };
 
 /// Register [`NUB`] as the active embedder profile. Idempotent (the engine's
@@ -244,4 +256,5 @@ const _: () = {
     assert!(NUB.primer_ttl.is_none());
     assert!(NUB.tty_progress);
     assert!(!NUB.warm_trust_revalidate);
+    assert!(matches!(NUB.trust_policy_ignore_after_default, Some(20160)));
 };

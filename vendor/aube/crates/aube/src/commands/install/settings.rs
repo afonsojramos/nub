@@ -454,7 +454,12 @@ pub(crate) fn resolve_dependency_policy(
     }
     policy.trust_policy_exclude =
         aube_resolver::TrustExcludeRules::with_defaults_and_user_rules(user_rules);
-    policy.trust_policy_ignore_after = aube_settings::resolved::trust_policy_ignore_after(ctx);
+    // An explicit user `trustPolicyIgnoreAfter` wins (including `0`, which
+    // re-enables the full check); when unset, fall back to the embedder-fixed
+    // default — `None` for standalone aube (unchanged: check every version), a
+    // finite window for nub (see `Embedder::trust_policy_ignore_after_default`).
+    policy.trust_policy_ignore_after = aube_settings::resolved::trust_policy_ignore_after(ctx)
+        .or(aube_util::embedder().trust_policy_ignore_after_default);
     policy.block_exotic_subdeps = aube_settings::resolved::block_exotic_subdeps(ctx);
 
     policy

@@ -38,6 +38,10 @@ fn run_with_xdg_config(dir: &Path, xdg_config: &Path, args: &[&str]) -> (String,
         .current_dir(dir)
         .env_clear()
         .env("PATH", path)
+        // The fixture pins a differing `nub@<v>` to exercise nub identity, not the
+        // self-shim — opt out so a PM verb doesn't try to provision that nub.
+        // (env_clear above drops the ambient value, so set it explicitly.)
+        .env("NUB_SELF_SHIM", "0")
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", xdg_config)
         .env("XDG_DATA_HOME", dir.join("xdg-data"))

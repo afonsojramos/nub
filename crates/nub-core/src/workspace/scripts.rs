@@ -301,13 +301,15 @@ fn flatten_npm_package_env(
 pub fn bin_path(project_root: &Path, workspace_root: Option<&Path>) -> String {
     let mut dirs = Vec::new();
 
-    // Walk from project root up, adding each node_modules/.bin.
+    // Walk from project root up, adding each node_modules/.bin UNCONDITIONALLY —
+    // no existence check. npm (@npmcli/run-script/lib/set-path.js) and pnpm both
+    // prepend without stat'ing, so a `.bin` that a script creates mid-run (the
+    // install-then-invoke pattern, #281) is reachable. A missing PATH entry is
+    // harmless — the OS/shell silently skips it.
     let mut dir = project_root.to_path_buf();
     for _ in 0..16 {
         let bin_dir = dir.join("node_modules").join(".bin");
-        if bin_dir.is_dir() {
-            dirs.push(bin_dir.to_string_lossy().to_string());
-        }
+        dirs.push(bin_dir.to_string_lossy().to_string());
         if workspace_root.is_some() && Some(dir.as_path()) == workspace_root {
             break;
         }
@@ -394,7 +396,9 @@ pub fn script_shell(project_root: &Path) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ScriptSelection, find_bin, npm_env, npmrc_value, script_shell, select_scripts};
+    use super::{
+        ScriptSelection, bin_path, find_bin, npm_env, npmrc_value, script_shell, select_scripts,
+    };
     use std::fs;
 
     #[test]
@@ -554,5 +558,26 @@ mod tests {
         }
 
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn bin_path_includes_missing_dir() {
+        // Regression for #281: bin_path must prepend `<root>/node_modules/.bin`
+        // even when that directory does not exist at call time, so a script that
+        // creates its `.bin` mid-run (install-then-invoke) can still find it. npm
+        // and pnpm both prepend unconditionally.
+        let root = std::env::temp_dir().join(format!("nub-281-{}", std::process::id()));
+        // Deliberately do NOT create node_modules/.bin.
+        let expected = root
+            .join("node_modules")
+            .join(".bin")
+            .to_string_lossy()
+            .to_string();
+        let path = bin_path(&root, Some(&root));
+        assert!(
+            path.split(crate::PATH_LIST_SEPARATOR)
+                .any(|p| p == expected),
+            "expected PATH to contain the (non-existent) {expected:?}, got {path:?}"
+        );
     }
 }

@@ -266,3 +266,31 @@ fn filtered_remove_keeps_a_workspace_dep_resolvable() {
         "the lockfile must be updated in lockstep, not left stale"
     );
 }
+
+/// Regression for #281: a script that creates `node_modules/.bin/<tool>` and
+/// then invokes it by bare name in the same run must succeed — the install-
+/// then-invoke pattern. nub used to drop `node_modules/.bin` from the child's
+/// PATH when the directory did not exist at spawn time; npm/pnpm prepend it
+/// unconditionally. Unix-only: the fixture writes a `#!/bin/sh` shim, which is
+/// runnable on Unix but not the `.cmd`-shim shape Windows resolves.
+#[cfg(unix)]
+#[test]
+fn run_script_finds_bin_created_mid_run() {
+    let root = tmp_workspace("bin-created-mid-run");
+    write(
+        &root.join("package.json"),
+        r#"{"name":"mid-run","version":"1.0.0","scripts":{"go":"mkdir -p node_modules/.bin && printf '#!/bin/sh\nprintf IT-WORKS\n' > node_modules/.bin/mytool && chmod +x node_modules/.bin/mytool && mytool"}}"#,
+    );
+    // No node_modules/.bin exists at spawn — the script creates it, then calls
+    // `mytool` by bare name, which resolves only if `.bin` is on PATH.
+    let (stdout, stderr, code) = run_nub(&root, &["run", "go"]);
+    let combined = format!("{stdout}{stderr}");
+    assert_eq!(
+        code, 0,
+        "bare-name invocation of a mid-run-created .bin tool must succeed\n{combined}"
+    );
+    assert!(
+        stdout.contains("IT-WORKS"),
+        "the mid-run-created tool must run and print its output\n{combined}"
+    );
+}

@@ -287,8 +287,12 @@ mod tests {
             "/docs/install",
             "/docs/install/pnpm",
             "/docs/pm",
-            "/docs/nubx",
-            "/docs/run",
+            // The runner section (#224 moved `nubx.mdx` under `runner/`):
+            // `runner/index.mdx` -> `/docs/runner`, children per file.
+            "/docs/runner",
+            "/docs/runner/run",
+            "/docs/runner/exec",
+            "/docs/runner/dlx",
         ] {
             assert!(
                 slugs.contains(&expected),

@@ -21,6 +21,11 @@ const ERR_NUB_MANIFEST_PARSE: &str = "ERR_NUB_MANIFEST_PARSE";
 /// cause as a coded miette diagnostic from the engine; `nub run` reuses this code
 /// so both spellings read consistently (was a bare `Error: no package.json found`).
 const ERR_NUB_NO_MANIFEST: &str = "ERR_NUB_NO_MANIFEST";
+/// The self-shim's failure surface — provisioning or verifying the pinned nub
+/// named by `packageManager: "nub@x.y.z"` failed. Every message carrying it names
+/// the `NUB_SELF_SHIM=0` escape hatch so a bad pin someone else committed can't
+/// brick a clone.
+const ERR_NUB_SELF_SHIM: &str = "ERR_NUB_SELF_SHIM";
 
 static SHOW_WARNINGS: AtomicBool = AtomicBool::new(false);
 /// `--silent` suppresses Nub's own preamble (the `$ <command>` script echo),
@@ -493,6 +498,11 @@ pub enum Command {
         #[arg(long)]
         if_present: bool,
 
+        /// Skip the pre-run dependency-freshness check for this invocation
+        /// (`--no-install` is the alias).
+        #[arg(long = "no-check", visible_alias = "no-install")]
+        no_check: bool,
+
         /// Remaining arguments forwarded to the script.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -552,6 +562,12 @@ pub enum Command {
         /// Run the bin in all packages concurrently with no topological ordering.
         #[arg(long)]
         parallel: bool,
+
+        /// Skip the pre-run dependency-freshness check for this invocation.
+        /// (Spelled `--no-check` — `--no-install` is reserved for the npx
+        /// fetch semantics on `nubx`, so `nub exec` does not accept it.)
+        #[arg(long = "no-check")]
+        no_check: bool,
 
         /// Remaining arguments forwarded to the binary.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -635,6 +651,12 @@ pub enum Command {
         /// Accepted for `npx` parity. Removed from npm v9+; nubx warns and ignores it.
         #[arg(long = "ignore-existing")]
         ignore_existing: bool,
+
+        /// Skip the pre-run dependency-freshness check for this invocation.
+        /// (Spelled `--no-check` here — `--no-install` already means "don't
+        /// fetch a missing tool" on this surface.)
+        #[arg(long = "no-check")]
+        no_check: bool,
 
         /// Remaining arguments forwarded to the binary.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -1218,6 +1240,11 @@ fn run_nub() -> Result<i32> {
             }
             "--watch" => watch = true,
             "--node" => compat = true,
+            // The pre-run dependency-freshness opt-out on the top-level file
+            // runner (`nub --no-check foo.ts`). Consumed here so it never reaches
+            // Node as an unknown flag; after the entry point it forwards to the
+            // script (the three-position rule). `--no-install` is the alias.
+            "--no-check" | "--no-install" => crate::verify_deps::disable(),
             "--silent" | "-s" => silent = true,
             // `--verbose` is the user-facing spelling; `--show-warnings` is its
             // legacy twin. Both raise nub's diagnostic verbosity (e.g. the full
@@ -1370,6 +1397,19 @@ fn run_nub() -> Result<i32> {
             }
         }
         i += 1;
+    }
+
+    // ── nub self-shim ── honor `packageManager: "nub@x.y.z"` by provisioning that
+    // exact nub and delegating to it (crates/nub-cli/src/self_shim.rs). Gated on
+    // the resolved verb FIRST — a pure allowlist string compare, so the flagship
+    // `nub <file>` / `run` / `nubx` / `node` / `upgrade` paths pay only that and
+    // never read the manifest. Placed BEFORE the `--cwd` set_current_dir below so
+    // a delegated child re-applies `--cwd` from the original directory exactly
+    // once (delegation execs the ORIGINAL argv from the unchanged cwd).
+    if subcommand_found
+        && let Some(version) = crate::self_shim::delegate_target(&rest, cwd.as_deref())
+    {
+        return delegate_to_self(&version);
     }
 
     // Expand ${VAR} references in --env-file values now that all files have been
@@ -1845,6 +1885,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             reporter_hide_prefix,
             shell_emulator,
             if_present,
+            no_check,
             ignore_scripts,
             script_shell,
             aggregate_output,
@@ -1852,6 +1893,9 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             mut args,
         }) => {
             args.extend(suffix);
+            if no_check {
+                crate::verify_deps::disable();
+            }
             // `--reporter`: `silent` is `-s`; `ndjson` switches every output site to
             // machine JSON (set the global once, read at each emission site).
             match reporter {
@@ -1927,9 +1971,13 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             fail_if_no_match,
             workspace_concurrency,
             parallel,
+            no_check,
             mut args,
         }) => {
             args.extend(suffix);
+            if no_check {
+                crate::verify_deps::disable();
+            }
             // `--workspace <name>` desugars to a name filter, exactly as on `run`.
             filter.extend(workspace);
             // `--include-workspace-root`/`--parallel` imply a workspace run even
@@ -1993,9 +2041,13 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             quiet,
             yes,
             ignore_existing,
+            no_check,
             mut args,
         }) => {
             args.extend(suffix);
+            if no_check {
+                crate::verify_deps::disable();
+            }
             filter.extend(workspace);
             let recursive = recursive || parallel || include_workspace_root;
             let workspace_run = recursive || !filter.is_empty() || parallel;
@@ -2398,6 +2450,13 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
     // this path (pin resolution, .env, PnP), so the run silently drops the
     // project context with no diagnostic. Surface the coded cause up front.
     check_manifest_json(cwd)?;
+    // Pre-run dependency-freshness gate (#252). Fires for `nub <file>`, the
+    // hijack-descendant `node`, and node-bin launches (which reach here via
+    // `launch_bin`); the once-per-process latch keeps a bin launch that already
+    // checked at the exec entry from re-checking. Skipped in compat mode.
+    if let Some(code) = crate::verify_deps::gate(cwd, compat_mode) {
+        return Ok(code);
+    }
     // Fire point: `nub <file>` (and the hijack-descendant `node`, which routes
     // through run_as_node → run_file). A pinned-but-uncached version is downloaded
     // + installed from nodejs.org here, uv-style. (`nub run`/`nub exec` keep plain
@@ -2441,6 +2500,16 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
         env_vars.insert(
             "npm_config_user_agent".to_string(),
             exec_user_agent(cwd, &node.version.to_string()),
+        );
+    }
+
+    // Dep-check dedup across processes (#252): once this process owns the
+    // decision, mark the spawned child so a hijack-descendant `node` (a worker a
+    // test runner forks) skips re-checking and the warning appears at most once.
+    if crate::verify_deps::should_propagate_marker() {
+        env_vars.insert(
+            crate::verify_deps::CHECKED_MARKER.to_string(),
+            "1".to_string(),
         );
     }
 
@@ -2500,6 +2569,14 @@ fn run_script(
         }
         return Ok(0);
     };
+
+    // Pre-run dependency-freshness gate (#252): warn (or, per policy, abort)
+    // when node_modules looks stale, so a missing dep surfaces as a nub message
+    // rather than a raw `foo: command not found`. Cheap and once-per-process;
+    // skipped in compat mode and inside a running script (see `verify_deps`).
+    if let Some(code) = crate::verify_deps::gate(&project.root, compat_mode) {
+        return Ok(code);
+    }
 
     // Workspace-wide execution: -r, --filter, or --parallel.
     if ws.recursive || !ws.filter.is_empty() || ws.parallel {
@@ -3333,6 +3410,14 @@ fn run_single_script(
     args: &[String],
     exec: &ScriptExecOpts,
 ) -> Result<i32> {
+    // Pre-run dependency-freshness gate (#252) for direct callers that bypass
+    // `run_script` — the `nubx`/`nub x` script tier (`nubx_resolve_local`). A
+    // `nub run` already gated at `run_script`, and a workspace fan-out gated at
+    // its root, so the once-per-process latch makes this a no-op there.
+    if let Some(code) = crate::verify_deps::gate(&project.root, compat_mode) {
+        return Ok(code);
+    }
+
     // Run pre-script if it exists (unless --ignore-scripts).
     if !exec.ignore_scripts {
         let pre_name = format!("pre{script}");
@@ -4488,6 +4573,14 @@ fn run_exec_with_dlx(
 
     if !force_fetch {
         if let Some(bin_path) = nub_core::workspace::scripts::find_bin(bin, &cwd) {
+            // A local bin is about to run: gate on dependency freshness (#252).
+            // Only here — never on the registry-fetch fallback below, where the
+            // whole point is an ad-hoc tool the project need not have installed.
+            // A node bin re-enters `run_file_in_dir`, but the once-per-process
+            // latch keeps that from re-checking.
+            if let Some(code) = crate::verify_deps::gate(&cwd, compat_mode) {
+                return Ok(code);
+            }
             return launch_bin(&bin_path, args, compat_mode, &cwd);
         }
 
@@ -4639,6 +4732,11 @@ fn launch_bin(bin_path: &Path, args: &[String], compat_mode: bool, cwd: &Path) -
     apply_env_file_vars(&mut cmd);
     if !compat_mode {
         apply_exec_augmentation(&mut cmd, cwd);
+    }
+    // Dep-check dedup (#252): a non-node bin still gets nub's augmentation env, so
+    // a `node` it spawns re-enters nub — mark it so the warning isn't repeated.
+    if crate::verify_deps::should_propagate_marker() {
+        cmd.env(crate::verify_deps::CHECKED_MARKER, "1");
     }
     let status = cmd.status()?;
     Ok(nub_core::node::spawn::exit_code_from_status(&status))
@@ -4931,7 +5029,7 @@ fn detect_channel(bin_path: &Path) -> UpgradeChannel {
 /// error rather than fetching a 404). musl vs glibc on Linux is a runtime
 /// distinction install.sh makes via `ldd`/`/etc/alpine-release`; we encode the
 /// glibc default here and document musl as the known gap (see note below).
-fn platform_target() -> Option<&'static str> {
+pub(crate) fn platform_target() -> Option<&'static str> {
     // NOTE: a glibc build and a musl build of the same arch are the same Rust
     // `target_env` only under `target_env = "musl"`, so this distinguishes them
     // correctly when Nub itself is built for musl. The detection matches the
@@ -5380,6 +5478,191 @@ fn sha256_hex(bytes: &[u8]) -> String {
         let _ = write!(s, "{b:02x}");
     }
     s
+}
+
+/// The nub binary's filename inside a release archive's `bin/` dir.
+fn nub_release_bin_name() -> &'static str {
+    if cfg!(windows) { "nub.exe" } else { "nub" }
+}
+
+/// Provision an exact nub version into the version-addressed self store and return
+/// the path to its `bin/nub` — the delegated-artifact half of the self-shim
+/// (`self_shim.rs` owns the decision). Reuses the `nub upgrade` release channel:
+/// download `<base>/v<ver>/nub-<target>.tar.gz`, SHA-256-verify it against the
+/// published `.sha256` sidecar BEFORE extracting, then confirm the extracted
+/// binary reports the expected version before it is trusted for a default-on exec.
+///
+/// INTEGRITY: nub's own `packageManager` self-pin carries no `+sha512` (a
+/// pnpm/yarn pin's hash covers a platform-independent npm tarball; nub's release
+/// artifact is per-platform, so a single pin hash could not cover all 8), so this
+/// release-channel checksum is the integrity anchor. A verified store entry
+/// (`<cache>/self/<ver>/bin/nub`) IS the trust cache — a hit is network- and
+/// verification-free. Atomic: stage in a sibling temp dir, then rename into place.
+fn provision_self(version: &str) -> Result<PathBuf> {
+    let store = pm_store_root()?.join("self");
+    let final_dir = store.join(version);
+    let bin = final_dir.join("bin").join(nub_release_bin_name());
+    if bin.is_file() {
+        return Ok(bin); // verified store hit — silent, no network
+    }
+
+    // "No build for this platform" is a distinct, actionable failure — surfaced
+    // BEFORE any download so it never reads as a network error. The 8-platform
+    // release model means a pin can exist for linux-x64 and not win32-arm64.
+    let target = platform_target().ok_or_else(|| {
+        anyhow::anyhow!(
+            "{ERR_NUB_SELF_SHIM}: this project pins nub@{version}, but nub publishes no build \
+             for this platform ({}/{}). Set NUB_SELF_SHIM=0 to run with your installed nub.",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        )
+    })?;
+    let url = tarball_url(version, target);
+    let sha_url = checksum_url(version, target);
+
+    std::fs::create_dir_all(&store)
+        .with_context(|| format!("creating the nub self store at {}", store.display()))?;
+    // Defense-in-depth: the self store holds binaries this process EXECs, and a
+    // store hit skips re-verification, so restrict it to the owner (0700) — a
+    // shared/world-writable cache dir can't be used to pre-plant a binary a later
+    // run would exec unverified. Best-effort; a failure here doesn't block the
+    // provision (the verify-before-exec chain below is the real gate).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o700));
+    }
+    let staging = tempfile::Builder::new()
+        .prefix(&format!(".self-{version}-"))
+        .tempdir_in(&store)
+        .context("creating a staging dir for the pinned-nub provision")?;
+    let archive = staging.path().join("nub.tar.gz");
+
+    eprintln!("nub: provisioning pinned nub@{version} ({target})...");
+    curl_download(&url, &archive).map_err(|_| {
+        anyhow::anyhow!(
+            "{ERR_NUB_SELF_SHIM}: could not download the pinned nub@{version} from {url} — the \
+             version may not exist or may have been yanked. Set NUB_SELF_SHIM=0 to run with \
+             your installed nub."
+        )
+    })?;
+
+    // Verify BEFORE extracting — a checked digest gates the executable landing on
+    // disk, the same order `perform_selfowned_upgrade` uses.
+    let expected = fetch_expected_sha256(&sha_url).map_err(|_| {
+        anyhow::anyhow!(
+            "{ERR_NUB_SELF_SHIM}: could not fetch the checksum for nub@{version} from {sha_url}. \
+             Set NUB_SELF_SHIM=0 to run with your installed nub."
+        )
+    })?;
+    let actual = sha256_hex(&std::fs::read(&archive)?);
+    if !actual.eq_ignore_ascii_case(&expected) {
+        bail!(
+            "{ERR_NUB_SELF_SHIM}: checksum mismatch for the pinned nub@{version}\n  \
+             expected: {expected}\n  actual:   {actual}\n\
+             Refusing to run a corrupted or tampered nub binary. \
+             Set NUB_SELF_SHIM=0 to run with your installed nub."
+        );
+    }
+
+    let staged = staging.path().join("staged");
+    std::fs::create_dir_all(&staged)?;
+    let tar_status = std::process::Command::new("tar")
+        .arg("-xzf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(&staged)
+        .status()
+        .context("invoking tar to extract the pinned nub")?;
+    if !tar_status.success() {
+        bail!(
+            "{ERR_NUB_SELF_SHIM}: failed to extract the pinned nub@{version} archive. \
+             Set NUB_SELF_SHIM=0 to run with your installed nub."
+        );
+    }
+    let staged_bin = staged.join("bin").join(nub_release_bin_name());
+    if !staged_bin.is_file() {
+        bail!(
+            "{ERR_NUB_SELF_SHIM}: the pinned nub@{version} archive did not contain bin/nub. \
+             Set NUB_SELF_SHIM=0 to run with your installed nub."
+        );
+    }
+    // CI's upload/download-artifact round-trip strips +x from the archived binary
+    // (see perform_selfowned_upgrade) — re-apply it before the version probe.
+    ensure_bin_executable(&staged_bin)?;
+
+    // Provision-then-verify: a version-mismatched or corrupt artifact hard-errors
+    // HERE instead of exec-looping. The tarball was already checksum-verified and
+    // the store path is version-addressed, so this is belt-and-suspenders — but it
+    // is the last gate before a default-on exec, so it stays.
+    verify_provisioned_version(&staged_bin, version)?;
+
+    // Atomic place. A concurrent provisioner may have won the race — keep theirs.
+    if !bin.is_file() {
+        if let Err(e) = std::fs::rename(&staged, &final_dir) {
+            if !bin.is_file() {
+                return Err(e).with_context(|| {
+                    format!(
+                        "installing pinned nub@{version} into {}",
+                        final_dir.display()
+                    )
+                });
+            }
+        }
+    }
+    eprintln!("nub: provisioned nub@{version}");
+    Ok(final_dir.join("bin").join(nub_release_bin_name()))
+}
+
+/// Run the freshly-provisioned binary's `--version` and confirm it reports the
+/// expected version — the loop-safety gate before a default-on exec. `nub
+/// --version` prints a bare `v<X.Y.Z>` on its first stdout line. The probe carries
+/// the re-entry guard so it can never itself delegate (`--version` short-circuits
+/// before the dispatcher anyway, but the guard is cheap insurance).
+fn verify_provisioned_version(bin: &Path, expected: &str) -> Result<()> {
+    let out = std::process::Command::new(bin)
+        .arg("--version")
+        .env(crate::self_shim::SELF_DISPATCHED_ENV, expected)
+        .output()
+        .with_context(|| format!("probing {} --version", bin.display()))?;
+    if !out.status.success() {
+        bail!(
+            "{ERR_NUB_SELF_SHIM}: the provisioned nub@{expected} failed its --version probe. \
+             Set NUB_SELF_SHIM=0 to run with your installed nub."
+        );
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let reported = stdout
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .trim_start_matches('v');
+    if reported != expected {
+        bail!(
+            "{ERR_NUB_SELF_SHIM}: the provisioned binary reports nub@{reported}, expected \
+             nub@{expected} — refusing to run a version-mismatched artifact. \
+             Set NUB_SELF_SHIM=0 to run with your installed nub."
+        );
+    }
+    Ok(())
+}
+
+/// Provision the pinned nub and hand off to it: replace the process image (Unix
+/// `exec`) / spawn+wait (Windows) with the pinned binary, running the ORIGINAL
+/// argv so the pinned nub applies its own CLI grammar (it may accept flags this
+/// nub would reject). The child carries `__NUB_SELF_DISPATCHED=<version>`, whose
+/// presence suppresses ALL further delegation — the exec-loop guard. Never returns
+/// on success (Unix).
+fn delegate_to_self(version: &str) -> Result<i32> {
+    let bin = provision_self(version)?;
+    // The unmodified original argv (env::args is stable within the process).
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let envs = vec![(
+        crate::self_shim::SELF_DISPATCHED_ENV.to_string(),
+        version.to_string(),
+    )];
+    exec_program(&bin, &args, &envs)
 }
 
 /// Print nub's version exactly like `nub --version` (and now `nubx --version`).
@@ -6033,6 +6316,7 @@ fn run_pm(args: &[String]) -> Result<i32> {
              \x20 use <pm>[@<spec>]  declare the project's package manager (npm|pnpm|yarn|bun|nub;\n\
              \x20                    default: latest) — writes packageManager and aligns the lockfile;\n\
              \x20                    `use nub` migrates the full config surface, `use pnpm` reverses it\n\
+             \x20 pin [<version>]    lock this project to an exact nub version (default: the running nub)\n\
              \x20 update             re-resolve within the pinned range and bump the pin (alias: up)\n\
              \x20 cache [clear]      list cached package managers (or clear the cache)\n\
              \x20 shim               link npm/pnpm/yarn shims into ~/.nub/shims (re-run after `nub upgrade`)\n\
@@ -6222,18 +6506,26 @@ fn run_pm(args: &[String]) -> Result<i32> {
             }
             Ok(0)
         }
+        // Lock the project to an EXACT nub version — the sole writer of the
+        // hard `packageManager: "nub@<v>"` pin that arms nub's self-shim
+        // (provision+delegate when the pinned nub ≠ the running one). Writes only
+        // the two identity fields; the heavier into-nub migration (lockfile,
+        // pnpm-workspace.yaml, settings) is `use nub`'s job. Symmetric with
+        // `nub node pin <version>`.
+        "pin" => run_pm_pin(args.get(1).map(String::as_str), &cwd),
         // Install / remove the PM shims (spec: wiki/research/package-manager-shims.md).
         "shim" => run_pm_shim_install(),
         "unshim" => run_pm_unshim(),
-        // `pin`/`switch` were replaced by `use` (2026-06-10, identity-policy
-        // ratification) — name the successor instead of the generic unknown.
-        "pin" | "switch" => bail!(
-            "`nub pm {}` was replaced by `nub pm use <pm>[@<spec>]` — one verb declares \
-             the package manager and aligns the lockfile.",
-            verb.expect("verb present in this arm")
+        // `switch` (the old cross-PM, declaration-only verb) was replaced by
+        // `use` (2026-06-10, identity-policy ratification) — name the successor
+        // instead of the generic unknown. (`pin` is a live verb again above, with
+        // its new nub-lock meaning — not the retired incumbent-version pin.)
+        "switch" => bail!(
+            "`nub pm switch` was replaced by `nub pm use <pm>[@<spec>]` — one verb declares \
+             the package manager and aligns the lockfile."
         ),
         _ => {
-            bail!("nub pm takes a subcommand (which, use, update (up), cache, shim, unshim).")
+            bail!("nub pm takes a subcommand (which, use, pin, update (up), cache, shim, unshim).")
         }
     }
 }
@@ -6612,6 +6904,80 @@ fn run_pm_use(name: &str, spec: &str, cwd: &Path) -> Result<i32> {
         for line in crate::pm_engine::use_nub::regenerate_workspace_yaml(&root)? {
             println!("  {line}");
         }
+    }
+    Ok(0)
+}
+
+/// `nub pm pin [<version>]` — write the locked identity pin
+/// `packageManager: "nub@<exact>"` (defaulting to the running nub when no
+/// version is given). This is the SOLE deliberate lock gesture and the one
+/// thing that arms nub's self-shim: a locked exact `nub@<v>` ≠ the running nub
+/// makes the next PM command provision that version and delegate to it. It is
+/// the PM-namespace analog of `nub node pin <version>`.
+///
+/// It is DELIBERATELY lightweight — it writes only the two identity fields
+/// (via [`use_nub::write_nub_identity_fields`]) and does no lockfile conversion
+/// or `pnpm-workspace.yaml`/settings migration; that heavier into-nub switch is
+/// `nub pm use nub`'s job. It never touches the network: nub is the running
+/// binary, so the pin is a pure local declaration.
+fn run_pm_pin(arg: Option<&str>, cwd: &Path) -> Result<i32> {
+    use crate::pm_engine::use_nub;
+    use nub_core::pm::resolve;
+
+    let running = env!("CARGO_PKG_VERSION");
+
+    // Resolve the exact version to pin. Bare `nub pm pin` (and the forgiving
+    // `nub pm pin nub`) lock the running binary. An explicit version must be an
+    // EXACT semver — nub is the running binary, not a registry package, so a
+    // range/dist-tag (`^1`, `1.x`, `next`, `latest`) has nothing to resolve
+    // against and can't be pinned (the same rule `split_pm_arg` enforces for
+    // `pm use nub@<spec>`). A leading `nub@` is stripped for forgiveness so
+    // `pin nub@<v>` and `pin <v>` are the same gesture.
+    let version = match arg {
+        None => running.to_string(),
+        Some(a) => {
+            let spec = a.strip_prefix("nub@").unwrap_or(a);
+            if spec == "nub" {
+                running.to_string()
+            } else if semver::Version::parse(spec).is_ok() {
+                spec.to_string()
+            } else {
+                bail!(
+                    "`nub pm pin {spec}` needs an exact version (e.g. {running}) — nub is the \
+                     running binary, not a registry package, so a range/tag can't be pinned."
+                );
+            }
+        }
+    };
+
+    // The pin is written into the workspace-root manifest (the same home `use`
+    // targets). Surface a malformed manifest first — resolution otherwise reads
+    // it as "no project" and this would misreport a typo as a missing manifest.
+    check_manifest_json(cwd)?;
+    let Some(project) = nub_core::workspace::detect::detect_project(cwd) else {
+        bail!(
+            "no package.json found from {} — the pin is written into the project manifest",
+            cwd.display()
+        );
+    };
+    let root = project.workspace_root.unwrap_or(project.root);
+
+    resolve::edit_root_manifest(&root, |obj| {
+        use_nub::write_nub_identity_fields(obj, Some(&version), &version);
+    })?;
+
+    println!("pinned nub@{version}");
+    println!("  package.json: packageManager = nub@{version}");
+    println!(
+        "  package.json: devEngines.packageManager = {{ name: \"nub\", version: \"^{version}\", onFail: \"warn\" }}"
+    );
+    // A pin at a version other than the running nub is honored by the self-shim,
+    // not eagerly: say what happens next, download nothing now.
+    if version != running {
+        println!(
+            "  note: pinned nub@{version} (the running nub is {running}) — the next package-manager \
+             command provisions and delegates to it."
+        );
     }
     Ok(0)
 }
@@ -8931,17 +9297,16 @@ mod tests {
             run(&["use", "pnpm@"]).contains("empty version spec"),
             "a trailing @ is named, not treated as latest"
         );
-        // The removed verbs name their successor — a clean break, not an alias.
-        for verb in ["pin", "switch"] {
-            let err = run(&[verb, "pnpm@9.1.0"]);
-            assert!(
-                err.contains("replaced by `nub pm use"),
-                "`{verb}` must name the successor verb, got: {err}"
-            );
-        }
+        // `switch` (removed) names its successor — a clean break, not an alias.
+        // (`pin` is a LIVE verb again — the nub-lock gesture — so it is NOT here.)
+        let err = run(&["switch", "pnpm@9.1.0"]);
+        assert!(
+            err.contains("replaced by `nub pm use"),
+            "`switch` must name the successor verb, got: {err}"
+        );
         let err = run(&["frobnicate"]);
         assert!(
-            err.contains("which, use, update (up), cache"),
+            err.contains("which, use, pin, update (up), cache"),
             "the unknown-verb error names the full verb set, got: {err}"
         );
     }

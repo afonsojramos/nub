@@ -770,3 +770,19 @@ export function loadData(url, ext) {
   const code = `export default ${JSON.stringify(parsed)};\n`;
   return { format: "module", source: code, shortCircuit: true };
 }
+
+// Import Text: `import s from "./any.file" with { type: "text" }` → the raw file
+// contents as a default-export string, on ANY extension. This is nub's own
+// implementation of the import-attribute text feature Node standardized upstream
+// (translators.js textStrategy); it is attribute-KEYED (the load hooks call this
+// when `context.importAttributes?.type === "text"`), orthogonal to the
+// EXTENSION-keyed `.txt` data loader above. Semantics match Node's textStrategy:
+// decode via TextDecoder (UTF-8, strips a leading BOM — unlike readFileSync utf8,
+// which keeps it) and expose ONLY a `default` export (a named import errors, as on
+// Node). shortCircuit so this fully owns the module and Node's own
+// unknown-'text'-attribute validation never runs.
+const __textDecoder = new TextDecoder();
+export function loadTextImport(url) {
+  const text = __textDecoder.decode(readFileSync(fileURLToPath(url)));
+  return { format: "module", source: `export default ${JSON.stringify(text)};\n`, shortCircuit: true };
+}

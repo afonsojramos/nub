@@ -26,7 +26,8 @@ pub use config::{
     workspace_yaml_target,
 };
 pub use edits::{
-    edit_setting_map, edit_workspace_yaml, remove_map_entry, remove_setting_entry, upsert_map_entry,
+    edit_setting_map, edit_workspace_yaml, read_workspace_yaml_string_list, remove_map_entry,
+    remove_setting_entry, set_workspace_yaml_string_list, upsert_map_entry,
 };
 pub use mutations::{
     ALLOW_BUILDS_REVIEW_PLACEHOLDER, add_to_allow_builds, remove_workspace_patched_dependency,
@@ -851,6 +852,49 @@ patchedDependencies:
         assert!(
             !written.contains("a@1.0.0"),
             "removed entry still present:\n{written}"
+        );
+    }
+
+    #[test]
+    fn workspace_yaml_string_list_read_set_roundtrip_and_preserve() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pnpm-workspace.yaml");
+        std::fs::write(&path, "packages:\n  - 'src/*'\n").unwrap();
+
+        // Absent key reads empty.
+        assert!(read_workspace_yaml_string_list(&path, "minimumReleaseAgeExclude").is_empty());
+
+        // Set creates the sequence key; read returns it; unrelated keys survive.
+        set_workspace_yaml_string_list(
+            &path,
+            "minimumReleaseAgeExclude",
+            &["caniuse-lite@1.0.0".to_string(), "vite@6.0.0".to_string()],
+        )
+        .unwrap();
+        assert_eq!(
+            read_workspace_yaml_string_list(&path, "minimumReleaseAgeExclude"),
+            vec!["caniuse-lite@1.0.0", "vite@6.0.0"]
+        );
+        let cfg = WorkspaceConfig::load(dir.path()).unwrap();
+        assert_eq!(
+            cfg.minimum_release_age_exclude.as_deref(),
+            Some(["caniuse-lite@1.0.0".to_string(), "vite@6.0.0".to_string()].as_slice())
+        );
+        assert!(
+            std::fs::read_to_string(&path).unwrap().contains("src/*"),
+            "packages lost"
+        );
+
+        // Replace semantics: set overwrites the whole sequence (canonical form).
+        set_workspace_yaml_string_list(
+            &path,
+            "minimumReleaseAgeExclude",
+            &["caniuse-lite@1.0.0 || 2.0.0".to_string()],
+        )
+        .unwrap();
+        assert_eq!(
+            read_workspace_yaml_string_list(&path, "minimumReleaseAgeExclude"),
+            vec!["caniuse-lite@1.0.0 || 2.0.0"]
         );
     }
 }

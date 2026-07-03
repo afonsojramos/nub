@@ -325,6 +325,26 @@ pub struct Embedder {
     /// instant warm exit (nub) sets this `false`; standalone aube keeps `true`
     /// so its online-install behavior is byte-for-byte unchanged. Embedder-fixed.
     pub warm_trust_revalidate: bool,
+    /// Embedder-fixed default (in **minutes**) for `trustPolicyIgnoreAfter`
+    /// when the user leaves that setting unset: a picked version whose registry
+    /// publish time is older than this window is exempted from the `trustPolicy`
+    /// downgrade check. `None` (aube's default) leaves the knob unset so every
+    /// version is checked — byte-for-byte standalone behavior. An explicit user
+    /// `trustPolicyIgnoreAfter` (including `0`, which re-enables the full check)
+    /// always wins over this default via `.or()` at the resolve site.
+    ///
+    /// A finite window is the principled fix for the aged-backport false
+    /// positive (a legitimate maintenance release on an old major, published
+    /// later in wall-clock than a newer major that adopted OIDC provenance,
+    /// trips the date-ordered downgrade scan): once such a version has sat
+    /// un-yanked past the window it is overwhelmingly legitimate, so it clears
+    /// the check, while a freshly published weak-evidence version is still
+    /// scanned against the full history. The attack this guards is
+    /// time-sensitive — compromised publishes are detected and yanked within
+    /// hours-to-days — so the window trades no meaningful protection for the FP
+    /// relief, the same quarantine logic as `minimumReleaseAge`, mirrored.
+    /// Embedder-fixed: the host's supply-chain posture, not a per-project knob.
+    pub trust_policy_ignore_after_default: Option<u64>,
 }
 
 /// Standalone aube's embedder profile. Reproduces every hardcoded branding
@@ -371,6 +391,9 @@ pub const AUBE: Embedder = Embedder {
     // Standalone aube re-validates the trust posture on every online install,
     // even a fully-satisfied no-op, so its online-install behavior is unchanged.
     warm_trust_revalidate: true,
+    // Standalone aube leaves `trustPolicyIgnoreAfter` unset, so the downgrade
+    // check applies to every version — behavior byte-for-byte unchanged.
+    trust_policy_ignore_after_default: None,
 };
 
 static ACTIVE: OnceLock<&'static Embedder> = OnceLock::new();
@@ -545,6 +568,7 @@ mod tests {
         assert_eq!(id.config_env_prefix, Some("AUBE"));
         assert_eq!(id.primer_ttl, None);
         assert!(!id.tty_progress);
+        assert_eq!(id.trust_policy_ignore_after_default, None);
     }
 
     /// Under the default (AUBE) profile the source-branding helpers reproduce

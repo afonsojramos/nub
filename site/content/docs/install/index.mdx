@@ -415,6 +415,18 @@ Frozen reinstalls — `nub ci`, `--frozen-lockfile`, a teammate's clone — inhe
 
 The OS-level build jail — a network-blocked, filesystem-scoped sandbox around every build script — is compiled in but **off by default**. Opt in with the neutral `paranoid` / `npm_config_paranoid` setting, which also flips the advisory gate to fail-closed. The jail covers macOS and Linux; Windows is a passthrough.
 
+### Trust downgrades
+
+Nub also weighs trust *evidence* across a package's release history — OIDC provenance, a trusted publisher, a staged-publish approval. A resolved version that carries weaker evidence than an earlier-published version of the same package stops the install with `ERR_NUB_TRUST_DOWNGRADE`, because a maintainer's pipeline that suddenly publishes without the attestation it used to carry is the shape of a token-theft supply-chain attack.
+
+The comparison is by publish date, so a legitimate maintenance release on an older major — shipped after a newer major adopted provenance — can trip it. Nub exempts any version older than 14 days, so an aged, un-yanked backport resolves while a freshly published downgrade is still checked against the full history. Widen the window, clear a single package, or turn the check off in `.npmrc`:
+
+```ini
+trustPolicyIgnoreAfter=20160          # age exemption in minutes (default 14 days)
+trustPolicyExclude[]=tailwind-merge   # exempt one package regardless of age
+trustPolicy=off                       # disable the check entirely
+```
+
 ## Store and disk layout
 
 Regardless of the incumbent, Nub installs through a global content-addressed store and links into an isolated virtual store — aube's scheme, under Nub's own directory names.
