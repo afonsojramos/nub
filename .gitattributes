@@ -1,0 +1,6 @@
+# Import Text fixtures consumed byte-for-byte by the `import_text_*` tests
+# (crates/nub-cli/tests/integration.rs). The tests assert the raw file text,
+# including its `\n` line endings. Windows runners default to autocrlf=true,
+# which would rewrite these to CRLF on checkout and break the string match.
+tests/fixtures/import-text/* text eol=lf
+tests/fixtures/import-text-named/* text eol=lf

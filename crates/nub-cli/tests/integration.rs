@@ -3293,6 +3293,15 @@ fn import_text_attribute_any_extension() {
     // checked ahead of extension dispatch, so it wins over both nub's data loaders
     // (a `.yaml` read as text is NOT parsed) and Node-native JSON (a `.json` read
     // as text is the raw string). Matches Node's upstream `textStrategy` semantics.
+    //
+    // The fixture uses `with { type: "text" }` import-attribute syntax, which Node's
+    // parser only accepts from 18.20 onward (backported; unflagged in 20.10 / 22.0).
+    // The 18.19 CI leg is one patch below that floor, so `with` is a hard parse error
+    // there — skip rather than fail on a Node that can't parse the syntax at all.
+    if !node_at_least((18, 20, 0)) {
+        eprintln!("skipping: `with {{ type: \"text\" }}` requires Node >= 18.20");
+        return;
+    }
     let (stdout, stderr, code) = run_nub("import-text", "main.ts");
     assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
     assert!(
@@ -3315,6 +3324,13 @@ fn import_text_named_import_is_a_load_error() {
     // A text import exposes ONLY a default export; a named import has no matching
     // export and fails at module instantiation (Node SyntaxError), exactly as for
     // the data loaders. Nothing in the importing module runs.
+    //
+    // Gated like `import_text_attribute_any_extension`: the `with { type: "text" }`
+    // fixture doesn't parse below Node 18.20.
+    if !node_at_least((18, 20, 0)) {
+        eprintln!("skipping: `with {{ type: \"text\" }}` requires Node >= 18.20");
+        return;
+    }
     let (stdout, stderr, code) = run_nub("import-text-named", "main.ts");
     assert_ne!(
         code, 0,
