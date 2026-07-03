@@ -143,7 +143,12 @@ fn installed_shim_delegates_to_real_node_and_runs_it_vanilla() {
         "the shim reports the REAL node's version — it delegated"
     );
 
-    // (b) runs vanilla: a non-erasable enum is rejected by strip-only mode.
+    // (b) runs vanilla: a non-erasable enum is NOT transpiled. If nub augmented,
+    // it would transpile the enum and print "0" (exit 0); vanilla node instead
+    // rejects the file. The rejection wording is Node-version-dependent — a
+    // strip-only `TypeScript enum is not supported` on Node ≥23.6, an
+    // `ERR_UNKNOWN_FILE_EXTENSION` on the 22.x floor (which won't run `.ts` at
+    // all) — so the version-independent proof is "failed AND printed no `0`".
     let proj = tmp("vanilla-proj");
     let app = proj.join("app.ts");
     std::fs::write(&app, "enum E { A }\nconsole.log(E.A);\n").unwrap();
@@ -153,10 +158,10 @@ fn installed_shim_delegates_to_real_node_and_runs_it_vanilla() {
         Some(0),
         "the shim runs node VANILLA — a non-erasable enum is not transpiled"
     );
-    assert!(
-        String::from_utf8_lossy(&out.stderr).contains("TypeScript"),
-        "the failure is real Node's strip-only rejection, not nub's transpiler:\n{}",
-        String::from_utf8_lossy(&out.stderr)
+    assert_ne!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "0",
+        "vanilla node never produced the enum's transpiled output — no augmentation ran"
     );
 }
 
