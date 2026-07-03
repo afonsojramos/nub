@@ -280,6 +280,72 @@ fn inside_a_running_script_the_gate_does_not_re_fire() {
 }
 
 #[test]
+fn pnpm_11_incumbent_reads_the_policy_from_workspace_yaml() {
+    // pnpm 11 dropped `.npmrc` support for `verifyDepsBeforeRun` entirely — the
+    // key lives SOLELY in `pnpm-workspace.yaml` (issue #286-adjacent bug: nub
+    // never looked there at all).
+    let d = tmp("pnpm11yaml");
+    write(
+        &d.join("package.json"),
+        r#"{"name":"y","version":"1.0.0","packageManager":"pnpm@11.0.0","scripts":{"build":"echo OK"},"devDependencies":{"typescript":"^5.0.0"}}"#,
+    );
+    write(
+        &d.join("pnpm-workspace.yaml"),
+        "verifyDepsBeforeRun: false\n",
+    );
+    let out = run(&d, &["run", "build"], &[]);
+    assert!(
+        !out.stderr.contains(STALE),
+        "pnpm-workspace.yaml `verifyDepsBeforeRun: false` must silence the check under a pnpm-11 incumbent: {}",
+        out.stderr
+    );
+    assert!(out.stdout.contains("OK"));
+}
+
+#[test]
+fn pnpm_11_incumbent_workspace_yaml_wins_over_a_stale_npmrc() {
+    // Real pnpm 11 does not read `.npmrc` for this key at all, so a leftover
+    // `.npmrc` setting (e.g. from a pre-v11 migration) must never shadow the
+    // yaml value — the precedence risk this fix must get right.
+    let d = tmp("pnpm11precedence");
+    write(
+        &d.join("package.json"),
+        r#"{"name":"y2","version":"1.0.0","packageManager":"pnpm@11.2.0","scripts":{"build":"echo OK"},"devDependencies":{"typescript":"^5.0.0"}}"#,
+    );
+    write(
+        &d.join("pnpm-workspace.yaml"),
+        "verifyDepsBeforeRun: false\n",
+    );
+    write(&d.join(".npmrc"), "verify-deps-before-run=error\n");
+    let out = run(&d, &["run", "build"], &[]);
+    assert!(
+        !out.stderr.contains(STALE),
+        "the workspace-yaml value must win over a stale .npmrc under pnpm 11: {}",
+        out.stderr
+    );
+    assert_eq!(out.code, 0);
+}
+
+#[test]
+fn pnpm_10_incumbent_still_reads_the_policy_from_npmrc() {
+    // Regression guard: pnpm ≤10 (and the pnpm-unknown default) keep reading
+    // `.npmrc` — only a confirmed pnpm-11+ incumbent switches homes.
+    let d = tmp("pnpm10npmrc");
+    write(
+        &d.join("package.json"),
+        r#"{"name":"n10","version":"1.0.0","packageManager":"pnpm@10.5.0","scripts":{"build":"echo OK"},"devDependencies":{"typescript":"^5.0.0"}}"#,
+    );
+    write(&d.join(".npmrc"), "verify-deps-before-run=off\n");
+    let out = run(&d, &["run", "build"], &[]);
+    assert!(
+        !out.stderr.contains(STALE),
+        "a pnpm-10 incumbent's .npmrc setting must still be honored: {}",
+        out.stderr
+    );
+    assert!(out.stdout.contains("OK"));
+}
+
+#[test]
 fn an_inherited_checked_marker_skips_the_gate() {
     // A `nub <file>`/`nub exec` target that spawns `node` re-enters nub through
     // the PATH shim; nub sets the internal `__NUB_DEPS_CHECKED` marker on that
