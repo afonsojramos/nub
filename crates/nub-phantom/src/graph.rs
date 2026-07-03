@@ -146,6 +146,20 @@ fn add_flags(flags: &mut BTreeMap<PathBuf, u8>, path: &Path, bit: u8) -> bool {
 /// a directory's `package.json` `main`. Returns `None` (and does not escape
 /// `root`) if nothing resolves to a real JS-like file.
 fn resolve(root: &Path, from_dir: &Path, spec: &str) -> Option<PathBuf> {
+    resolve_depth(root, from_dir, spec, 0)
+}
+
+/// Bound on `main`-chasing recursion. A dir whose `package.json` `main` points
+/// back at itself (`"."`/`""`/`"./"`) or a mutual `main` cycle across dirs would
+/// otherwise recurse forever → a stack-overflow ABORT that kills the whole scan
+/// (a process abort, not a catchable panic). Such manifests occur in the wild, so
+/// the cap is a hard robustness requirement, not a nicety.
+const MAX_RESOLVE_DEPTH: u32 = 16;
+
+fn resolve_depth(root: &Path, from_dir: &Path, spec: &str, depth: u32) -> Option<PathBuf> {
+    if depth > MAX_RESOLVE_DEPTH {
+        return None;
+    }
     let joined = from_dir.join(spec);
     // Keep the walk inside the package tree (a `../../` that climbs out is not
     // part of the published surface).
@@ -174,13 +188,13 @@ fn resolve(root: &Path, from_dir: &Path, spec: &str) -> Option<PathBuf> {
             return Some(cand);
         }
     }
-    // 4. `base/package.json` → its `main`.
+    // 4. `base/package.json` → its `main` (depth-bounded; see MAX_RESOLVE_DEPTH).
     let pkg = base.join("package.json");
     if let Ok(raw) = fs::read(&pkg) {
         if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&raw)
             && let Some(main) = v.get("main").and_then(|m| m.as_str())
         {
-            return resolve(root, &base, main);
+            return resolve_depth(root, &base, main, depth + 1);
         }
         // package.json with no main → default index.js in that dir.
         for ext in exts {
@@ -270,6 +284,20 @@ mod tests {
             !pkgs.contains(&"dev-only"),
             "unreached test file must not contribute"
         );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn self_cyclic_main_does_not_stack_overflow() {
+        // A dir whose package.json `main` points back at itself would recurse
+        // forever without the depth cap → process abort, killing the whole scan.
+        let root = scratch("cycle");
+        fs::write(root.join("index.js"), "require('./lib');").unwrap();
+        fs::create_dir_all(root.join("lib")).unwrap();
+        fs::write(root.join("lib/package.json"), r#"{"main":"."}"#).unwrap();
+        // Must return (not abort); the cyclic dir simply resolves to nothing.
+        let w = walk(&root, &[main_entry("index.js")]);
+        assert_eq!(w.files_analyzed, 1); // only index.js; lib/ resolves to no file
         let _ = fs::remove_dir_all(&root);
     }
 

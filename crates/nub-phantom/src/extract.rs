@@ -12,6 +12,11 @@
 //! and would false-flag a devDep-typed package as a phantom. Dynamic specifiers
 //! (template/computed) are not recorded: they cannot be attributed to a package
 //! name, and guessing would risk a false positive.
+//!
+//! Guard-ness is LEXICAL, not control-flow: a require in a function DECLARED
+//! inside an `if`/`try` is marked soft even if that function is later called
+//! unconditionally. This only ever errs toward soft (a false negative on
+//! hardness), never toward a false phantom — safe for the never-false-flag bar.
 
 use oxc::allocator::Allocator;
 use oxc::ast::ast::{

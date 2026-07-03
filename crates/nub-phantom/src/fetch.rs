@@ -14,6 +14,9 @@ const REGISTRY: &str = "https://registry.npmjs.org";
 /// Skip a tarball larger than this — a phantom scan does not need to page in a
 /// half-gigabyte package, and it bounds a scan's disk/time.
 const MAX_TARBALL_BYTES: u64 = 64 * 1024 * 1024;
+/// Decompressed-size cap — the compressed cap can be evaded by a chunked response
+/// or a high-ratio gzip bomb, so the unpacked stream is bounded independently.
+const MAX_DECOMPRESSED_BYTES: u64 = 512 * 1024 * 1024;
 
 /// A package extracted to a temp dir; the dir is removed on drop.
 pub struct Extracted {
@@ -115,14 +118,20 @@ pub fn fetch(client: &Client, name: &str) -> Result<Extracted, String> {
     fs::create_dir_all(&tmp.0).map_err(|e| format!("mkdir tmp: {e}"))?;
 
     // Decode gzip then untar. The tarball body is gzip (a `.tgz`), independent of
-    // any HTTP transfer encoding.
-    let mut decoder = GzDecoder::new(&gz[..]);
+    // any HTTP transfer encoding. The DECOMPRESSED size is capped (a chunked
+    // response can skip the content-length check above; and a gzip bomb would
+    // otherwise OOM) via a bounded reader.
+    let mut decoder = GzDecoder::new(&gz[..]).take(MAX_DECOMPRESSED_BYTES + 1);
     let mut raw = Vec::new();
     decoder
         .read_to_end(&mut raw)
         .map_err(|e| format!("gunzip: {e}"))?;
+    if raw.len() as u64 > MAX_DECOMPRESSED_BYTES {
+        return Err("decompressed tarball too large".to_string());
+    }
     let mut archive = tar::Archive::new(&raw[..]);
-    // tar entries can carry `..` — refuse them so extraction can't escape tmp.
+    // `tar` 0.4's `unpack` sanitizes `..`/absolute members, so extraction cannot
+    // escape `tmp` — we rely on that built-in traversal protection.
     archive.unpack(&tmp.0).map_err(|e| format!("untar: {e}"))?;
 
     let root = locate_package_root(&tmp.0);

@@ -26,8 +26,6 @@ pub struct Manifest {
     pub optional_peers: BTreeSet<String>,
     /// `bundledDependencies` / `bundleDependencies` — shipped inside the tarball.
     pub bundled: BTreeSet<String>,
-    /// Subpath keys of the `imports` map (bare `#...` self references).
-    pub imports_keys: BTreeSet<String>,
     /// Published entry files (relative paths from the package root) — the roots
     /// of the reachable-module walk, each tagged by whether it is the main entry
     /// or a non-`.` `exports` subpath (the adapter surface).
@@ -82,24 +80,8 @@ impl Manifest {
         }
 
         collect_bundled(&v, &mut m.bundled);
-
-        if let Some(imports) = v.get("imports").and_then(Value::as_object) {
-            for k in imports.keys() {
-                m.imports_keys.insert(k.clone());
-            }
-        }
-
         m.entry_points = collect_entry_points(&v);
         Some(m)
-    }
-
-    /// Is `pkg` declared anywhere in the resolvable surface (dep / optional dep /
-    /// any peer / bundled)? Self-references are handled by the caller.
-    pub fn declares(&self, pkg: &str) -> bool {
-        self.deps.contains(pkg)
-            || self.required_peers.contains(pkg)
-            || self.optional_peers.contains(pkg)
-            || self.bundled.contains(pkg)
     }
 }
 
@@ -260,11 +242,11 @@ mod tests {
         }"#;
         let m = Manifest::parse(raw).unwrap();
         assert!(m.deps.contains("a"));
-        assert!(!m.declares("jest")); // devDependencies are NOT resolvable → phantom-eligible
+        // devDependencies are NOT in any resolvable set → phantom-eligible.
+        assert!(!m.deps.contains("jest") && !m.required_peers.contains("jest"));
         assert!(m.required_peers.contains("react"));
-        assert!(m.optional_peers.contains("zod"));
+        assert!(m.optional_peers.contains("zod")); // optional peer moved out of required
         assert!(!m.required_peers.contains("zod"));
-        assert!(m.declares("zod")); // optional peer is still declared
     }
 
     #[test]
