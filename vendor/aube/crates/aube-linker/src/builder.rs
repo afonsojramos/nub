@@ -42,6 +42,29 @@ impl Linker {
             modules_dir_name: "node_modules".to_string(),
             aube_dir_override: None,
             no_integrity_read_keys: std::collections::BTreeMap::new(),
+            link_progress: None,
+        }
+    }
+
+    /// Supply a shared counter the materialize pass bumps once per linked
+    /// file, so the progress UI can render a live file count during the
+    /// linking phase. The install driver hands in the progress UI's
+    /// `files_linked` atomic. Omitted by standalone callers and tests →
+    /// the pokes are no-ops and link behavior is unchanged.
+    pub fn with_link_progress(
+        mut self,
+        counter: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Self {
+        self.link_progress = Some(counter);
+        self
+    }
+
+    /// Bump the live file-linking counter by `n`, if one was installed
+    /// via [`with_link_progress`]. A no-op otherwise. Called at each
+    /// site the materialize pass credits files to `LinkStats`.
+    pub(crate) fn note_files_linked(&self, n: usize) {
+        if let Some(c) = &self.link_progress {
+            c.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
         }
     }
 

@@ -239,6 +239,17 @@ pub struct Linker {
     /// the warm classifier. Empty for callers that don't supply it
     /// (standalone-default and every existing test) → unchanged behavior.
     no_integrity_read_keys: std::collections::BTreeMap<String, String>,
+    /// Optional shared counter bumped once per linked file during the
+    /// materialize pass. The install driver hands in the progress UI's
+    /// `files_linked` atomic (via [`with_link_progress`]) so the linking
+    /// phase can surface a live, ticking file count instead of appearing
+    /// wedged on a slow filesystem. `None` for standalone callers and
+    /// tests — [`note_files_linked`] then no-ops, so link behavior is
+    /// byte-for-byte unchanged.
+    ///
+    /// [`with_link_progress`]: Linker::with_link_progress
+    /// [`note_files_linked`]: Linker::note_files_linked
+    link_progress: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
 }
 
 /// Strategy for linking files from the store to node_modules.
