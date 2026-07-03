@@ -73,6 +73,13 @@ pub(super) struct CiState {
     /// no packument fetch happens). The display gates the
     /// `/ ~13.8 MB` estimated-total segment on this being non-zero.
     pub(super) estimated_bytes: AtomicU64,
+    /// Live count of files the linker has materialized so far, bumped by
+    /// the link pass through the shared counter the install driver hands
+    /// it (see `InstallProgress::link_progress_counter`). Shared as an
+    /// `Arc` because the linker holds its own clone; the heartbeat reads
+    /// it to render the ticking `N files` count during linking so a slow
+    /// link re-emits every ~2s instead of looking wedged.
+    pub(super) files_linked: Arc<AtomicUsize>,
     /// Snapshot of `reused + downloaded` at the moment
     /// `set_phase("fetching")` first fires. Used as the baseline for
     /// the fetch-window ETA so the displayed estimate reflects
@@ -137,7 +144,7 @@ pub(super) fn term_width() -> usize {
 }
 
 impl CiState {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(files_linked: Arc<AtomicUsize>) -> Self {
         Self {
             phase: AtomicUsize::new(0),
             resolved: AtomicUsize::new(0),
@@ -146,6 +153,7 @@ impl CiState {
             downloaded: AtomicUsize::new(0),
             downloaded_bytes: AtomicU64::new(0),
             estimated_bytes: AtomicU64::new(0),
+            files_linked,
             completed_at_fetch_start: AtomicUsize::new(usize::MAX),
             start: Instant::now(),
             fetch_start: OnceLock::new(),
@@ -178,6 +186,7 @@ impl CiState {
             downloaded: self.downloaded.load(Ordering::Relaxed),
             bytes: self.downloaded_bytes.load(Ordering::Relaxed),
             estimated: self.estimated_bytes.load(Ordering::Relaxed),
+            files_linked: self.files_linked.load(Ordering::Relaxed),
             fetch_elapsed_ms,
             // `usize::MAX` means the baseline hasn't been captured yet
             // (still pre-fetching). Render layer treats that as
@@ -408,6 +417,11 @@ pub(super) struct Snap {
     pub(super) downloaded: usize,
     pub(super) bytes: u64,
     pub(super) estimated: u64,
+    /// Live count of files materialized by the link pass. Drives the
+    /// ticking `N files` count shown during the linking phase (phase 3)
+    /// when the embedder opts into the redesigned progress UX. `0` in
+    /// every other phase.
+    pub(super) files_linked: usize,
     pub(super) fetch_elapsed_ms: u64,
     /// Numerator (`reused + downloaded`) at the moment fetching
     /// started. `None` until phase=2 first fires; render layer falls

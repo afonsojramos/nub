@@ -195,6 +195,15 @@ pub(super) fn run_link_phase(input: LinkPhaseInput<'_>) -> miette::Result<LinkPh
     if let Some(enabled) = use_global_virtual_store_override {
         linker = linker.with_use_global_virtual_store(enabled);
     }
+    // Feed the progress UI its live file-linking counter so the linking
+    // phase surfaces a ticking file count. Gated on the embedder opting
+    // into the redesigned progress UX (nub); standalone aube leaves it
+    // off, so its link pass never touches the counter (byte-identical).
+    if let Some(p) = prog_ref
+        && aube_util::embedder().tty_progress
+    {
+        linker = linker.with_link_progress(p.link_progress_counter());
+    }
 
     // Patches for delta-fingerprint folding and linker injection.
     // Hoisted ahead of subtree-hash so re-patched packages land in

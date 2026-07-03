@@ -2,14 +2,18 @@
 //!
 //! Two modes live behind one API so call sites in `install::run` stay the same:
 //!
-//! * **TTY** — a single in-place animated line: header, unified bar, and the
-//!   live `cur/total · bytes · rate · ETA` label, redrawn on one row via
-//!   cursor movement. Deliberately *single-line*: there are no per-package
-//!   child rows, so the rendered region never grows or shrinks and there is no
-//!   multi-line collapse to flash. When the install completes the line is
-//!   cleared exactly once and the post-install dependency summary takes its
-//!   place — a clean handoff with no leftover bar frame and no trailing blanks,
-//!   matching pnpm / bun / cargo / uv.
+//! * **TTY** — a single in-place animated line, bun/uv-style: an animated
+//!   spinner, the phase verb (right-padded to a fixed width so nothing after
+//!   it shifts on a phase change), and a live count — `cur/total pkgs` during
+//!   resolve/fetch, a ticking `N files` during linking. NO progress bar (a bar
+//!   either lies by freezing at a fixed fill through linking or flashes a
+//!   near-full frame on a fast link — see #288); the spinner is proof-of-life
+//!   and the count carries the real state. Deliberately *single-line*: no
+//!   per-package child rows, so the region never grows/shrinks. A short
+//!   debounce keeps the line hidden until the install has run ~300ms, so a fast
+//!   install flashes nothing. When the install completes the line is cleared
+//!   exactly once and the post-install summary takes its place — a clean
+//!   handoff with no leftover frame, matching pnpm / bun / cargo / uv.
 //! * **Append-only** — lines safe for terminals, GitHub Actions, and plain
 //!   pipes: a single repeating pnpm-style `Progress:` line emitted on a ~2s
 //!   heartbeat, showing `resolved` / `reused` / `downloaded` plus the byte
@@ -40,18 +44,17 @@ use clx::style;
 use std::collections::HashMap;
 use std::io::{IsTerminal, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
+use std::thread;
 use std::time::{Duration, Instant};
 
 /// Denominator the clx `progress_current`/`progress_total` pair is held at in
-/// TTY mode. The animated bar itself is rendered by `tty_bar_field` (via
-/// `render::bar_only`) directly from the unified-progress fraction, so this
-/// pair no longer drives a `{{progress_bar}}` template — it exists only to feed
+/// TTY mode. There is no visible template bar — the pair exists only to feed
 /// clx's OSC terminal progress indicator (the iTerm2 / VS Code taskbar
 /// percentage), which reads `overall_progress()`. Encoding the
 /// unified-progress fraction as `progress_current / TTY_BAR_SCALE` gives that
-/// indicator 10 000 smooth steps; the user-facing bar and counters are owned
-/// by the `bar`/`count` props.
+/// indicator 10 000 smooth steps; the user-facing count is owned by the
+/// `count` prop.
 const TTY_BAR_SCALE: usize = 10_000;
 
 /// The phase verbs the install can emit, in their display spelling. The TTY
@@ -77,12 +80,23 @@ const TTY_PHASE_W: usize = {
     max
 };
 
-/// Fixed cell count of the animated bar (the `█`/`░` run inside the brackets).
-/// A CONSTANT width is what keeps the `]`, the counters, and the trailing
-/// segment from shifting between frames; the bar never reflows to the terminal
-/// width (a long line simply wraps in place on a narrow terminal). 20 matches
-/// the reference width and leaves room for the counters + trailer at ~80 cols.
-const TTY_BAR_CELLS: usize = 20;
+/// How long a phase must run before the animated line reveals itself.
+/// The body renders empty (via its `{% if revealed %}` guard) until the
+/// install has been going this long, so a fast install — resolve, fetch,
+/// and link all finishing inside the window — flashes nothing and only
+/// its summary prints, matching bun/uv. A slow install blows past this
+/// (during network resolve/fetch, or on the reporter's slow link) and
+/// the spinner + live count reveal.
+const TTY_REVEAL_DELAY: Duration = Duration::from_millis(300);
+
+/// Poll interval of the link-progress ticker thread. During linking the
+/// file count comes from an atomic the linker bumps directly (no clx
+/// event), so a background ticker re-reads it and repaints the `count`
+/// prop on this cadence — fast enough to read as a live tick, slow
+/// enough that the repaint cost is negligible against filesystem I/O.
+/// It also drives the reveal check so the line appears within one tick
+/// of crossing [`TTY_REVEAL_DELAY`] even when no other event fires.
+const TTY_TICK_INTERVAL: Duration = Duration::from_millis(90);
 
 /// Digit-field width for the cur/total counters. The numerator is right-aligned
 /// and the total left-aligned to this width, so `   7/331 ` and ` 577/623 `
@@ -172,6 +186,13 @@ pub struct InstallProgress {
     /// is fine: the streaming pass is the only writer and the
     /// reconcile reads once at the phase boundary.
     unpacked_sizes: Arc<Mutex<HashMap<String, u64>>>,
+    /// Shared live file-linking counter. Handed to the linker via
+    /// [`link_progress_counter`](InstallProgress::link_progress_counter)
+    /// so the materialize pass bumps it once per file; both renderers
+    /// read it to show the ticking `N files` count during linking. In CI
+    /// mode this is the same `Arc` the `CiState` holds; in TTY mode the
+    /// ticker thread reads it.
+    files_linked: Arc<AtomicUsize>,
 }
 
 #[derive(Clone)]
@@ -226,6 +247,24 @@ enum Mode {
         /// install-elapsed denominator. `usize::MAX` sentinel = "not
         /// captured yet"; render falls back to `ETA …`.
         completed_at_fetch_start: Arc<AtomicUsize>,
+        /// Install start instant — the debounce baseline. The live line
+        /// stays hidden (the body's `{% if revealed %}` guard renders
+        /// empty) until this is older than [`TTY_REVEAL_DELAY`], so a
+        /// sub-debounce install flashes nothing and only its summary
+        /// prints. Copy, so the ticker captures it by value.
+        start: Instant,
+        /// One-shot latch guarding the `revealed` prop flip so it's
+        /// pushed to clx exactly once (see [`maybe_reveal`]).
+        revealed: Arc<AtomicBool>,
+        /// Wakes the link-progress ticker for prompt shutdown at
+        /// `finish()` instead of waiting out its poll interval. Its
+        /// companion `wake_lock` lives only on the ticker (a `notify`
+        /// doesn't need the lock, so the display side never holds it).
+        wake: Arc<Condvar>,
+        /// Join handle for the link-progress ticker thread, taken and
+        /// joined by `finish()` / `Drop` so no late `count` write can
+        /// repaint after the display is cleared.
+        ticker: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
     },
     Ci(Arc<CiState>),
 }
@@ -242,6 +281,7 @@ impl Clone for InstallProgress {
         Self {
             mode: self.mode.clone(),
             unpacked_sizes: self.unpacked_sizes.clone(),
+            files_linked: self.files_linked.clone(),
         }
     }
 }
@@ -277,45 +317,39 @@ impl InstallProgress {
         // `product_banner`); an embedder drops it so the engine brand
         // never leaks into the host's install output.
         let header = product_banner("");
-        // Layout — a single line of FIXED-WIDTH columns so nothing shifts
-        // horizontally between phases or frames:
-        //   <header> <phase-field>  <bar-field>  <count-field><bytes><rate><eta>
-        // `{{phase}}`, `{{bar}}`, and `{{count}}` are custom props rendered by
-        // `tty_phase_field` / `tty_bar_field` / `tty_count_field`, each a
-        // constant display width (the verb is padded to the longest verb, the
-        // bar is a constant cell count, the counters pad to a fixed digit
-        // field). The trailing `{{bytes}}{{rate}}{{eta}}` is the only variable
-        // part and it sits last, so its content can change without moving any
-        // column before it. No `flex` filter: the line renders verbatim and the
-        // terminal wraps it in place on a narrow width. clx's
-        // `progress_current`/`progress_total` are still set (below) to feed the
-        // OSC terminal-progress indicator, but no `{{progress_bar}}` template
-        // consumes them — the visible bar is `tty_bar_field`.
+        // Layout — bun/uv-style: an animated spinner, the phase verb, and a
+        // live count. NO progress bar (a bar for the linking phase either
+        // lies by holding at a fixed fill or flashes a near-full frame on a
+        // fast link — see #288); the spinner is proof-of-life on its own and
+        // the count carries the real state.
+        //
+        //   <header>  {{spinner()}} <phase>  <count><bytes><rate><eta>
+        //
+        // The whole line is wrapped in `{% if revealed %}` so it renders
+        // EMPTY (and clx drops the row) until the debounce fires — a fast
+        // install flashes nothing. `{{phase}}` is the verb RIGHT-PADDED to
+        // the widest verb (`tty_phase_field`), so the `count` column — and
+        // everything after it — holds byte-stable when the phase word
+        // changes; only the count/spinner move, and they're the live data.
+        // `{{spinner()}}` is clx's animated glyph, which keeps the background
+        // render loop repainting (proof-of-life) even when the count is
+        // momentarily static on a stalled filesystem. `progress_current` /
+        // `progress_total` are still fed (below) for the OSC taskbar
+        // indicator; no template bar consumes them.
         let phase0 = tty_phase_field("");
-        let bar0 = tty_bar_field(
-            ci::Snap {
-                phase: 0,
-                resolved: 0,
-                target_total: 0,
-                reused: 0,
-                downloaded: 0,
-                bytes: 0,
-                estimated: 0,
-                fetch_elapsed_ms: 0,
-                completed_at_fetch_start: None,
-            },
-            0,
-        );
         let root = ProgressJobBuilder::new()
-            .body("{{aube}}{{phase}}  {{bar}}  {{count}}{{bytes}}{{rate}}{{eta}}")
+            .body(
+                "{% if revealed %}{{aube}}  {{spinner()}} {{phase}}  \
+                 {{count}}{{bytes}}{{rate}}{{eta}}{% endif %}",
+            )
             .body_text(Some("{{aube}}{{phase}} {{count}}{{bytes}}{{rate}}{{eta}}"))
             .prop("aube", &header)
             .prop("phase", &phase0)
-            .prop("bar", &bar0)
             .prop("count", "")
             .prop("bytes", "")
             .prop("rate", "")
             .prop("eta", "")
+            .prop("revealed", &false)
             .progress_current(0)
             .progress_total(TTY_BAR_SCALE)
             // Hide on done: at teardown `finish()` (and the `Drop` safety net)
@@ -324,21 +358,43 @@ impl InstallProgress {
             // `stop_clear()` alone could leave a stray frame.
             .on_done(ProgressJobDoneBehavior::Hide)
             .start();
+        let finished = Arc::new(AtomicBool::new(false));
+        let phase_num = Arc::new(AtomicUsize::new(0));
+        let files_linked = Arc::new(AtomicUsize::new(0));
+        let revealed = Arc::new(AtomicBool::new(false));
+        let wake = Arc::new(Condvar::new());
+        let wake_lock = Arc::new(Mutex::new(()));
+        let start = Instant::now();
+        let ticker = Arc::new(Mutex::new(spawn_tty_ticker(TtyTicker {
+            root: Arc::downgrade(&root),
+            phase_num: phase_num.clone(),
+            files_linked: files_linked.clone(),
+            finished: finished.clone(),
+            revealed: revealed.clone(),
+            wake: wake.clone(),
+            wake_lock: wake_lock.clone(),
+            start,
+        })));
         Self {
             mode: Mode::Tty {
                 root,
-                finished: Arc::new(AtomicBool::new(false)),
+                finished,
                 total: Arc::new(AtomicUsize::new(0)),
                 target_total: Arc::new(AtomicUsize::new(0)),
                 reused: Arc::new(AtomicUsize::new(0)),
                 downloaded: Arc::new(AtomicUsize::new(0)),
-                phase_num: Arc::new(AtomicUsize::new(0)),
+                phase_num,
                 downloaded_bytes: Arc::new(AtomicU64::new(0)),
                 estimated_bytes: Arc::new(AtomicU64::new(0)),
                 fetch_start: Arc::new(OnceLock::new()),
                 completed_at_fetch_start: Arc::new(AtomicUsize::new(usize::MAX)),
+                start,
+                revealed,
+                wake,
+                ticker,
             },
             unpacked_sizes: Arc::new(Mutex::new(HashMap::new())),
+            files_linked,
         }
     }
 
@@ -348,12 +404,22 @@ impl InstallProgress {
         // finishes before the 2s heartbeat interval therefore prints
         // nothing at all — no header, no bar, no summary — which is what
         // we want for the no-op and near-no-op cases.
-        let state = Arc::new(CiState::new());
+        let files_linked = Arc::new(AtomicUsize::new(0));
+        let state = Arc::new(CiState::new(files_linked.clone()));
         CiState::spawn_heartbeat(&state);
         Self {
             mode: Mode::Ci(state),
             unpacked_sizes: Arc::new(Mutex::new(HashMap::new())),
+            files_linked,
         }
+    }
+
+    /// A clone of the shared live file-linking counter, handed to the
+    /// linker (`Linker::with_link_progress`) so its materialize pass
+    /// bumps it once per file. Both renderers read it to show the
+    /// ticking `N files` count during linking.
+    pub fn link_progress_counter(&self) -> Arc<AtomicUsize> {
+        self.files_linked.clone()
     }
 
     /// Raise the resolving-phase denominator floor. Only ever
@@ -631,12 +697,25 @@ impl InstallProgress {
             reused,
             downloaded,
             phase_num,
+            start,
+            revealed,
             ..
         } = &self.mode
         else {
             return;
         };
-        refresh_tty_bar_from_atomics(root, total, target_total, reused, downloaded, phase_num);
+        // Reveal promptly off a resolve/fetch event once past the debounce,
+        // so the line doesn't wait on the ticker's next poll.
+        maybe_reveal(root, *start, revealed);
+        refresh_tty_bar_from_atomics(
+            root,
+            total,
+            target_total,
+            reused,
+            downloaded,
+            phase_num,
+            self.files_linked.load(Ordering::Relaxed),
+        );
     }
 
     ///   only the running total is, `~13.8 MB` when only the estimate
@@ -856,13 +935,25 @@ impl InstallProgress {
     /// [`print_install_summary`] after this clears the bar.
     pub fn finish(&self, print_ci_summary: bool) {
         match &self.mode {
-            Mode::Tty { root, finished, .. } => {
-                // Clear the bar instead of leaving a final frame: the success
+            Mode::Tty {
+                root,
+                finished,
+                wake,
+                ticker,
+                ..
+            } => {
+                // Stop the link-progress ticker FIRST (latch `finished`, wake
+                // it, join) so no late `count` write can land after the clear
+                // below and repaint a stray line. `stop_tty_ticker` also sets
+                // `finished`, which tells `Drop` the teardown already happened.
+                stop_tty_ticker(finished, wake, ticker);
+                // Clear the line instead of leaving a final frame: the success
                 // line that follows (`✓ installed N packages`) is the
-                // completion cue, so a lingering 100% bar above it would just
-                // be a redundant second `nub …` line bracketing the dependency
-                // summary. Because the renderer is a single line, the clear is
-                // a one-row erase — no multi-line region collapse, no flash.
+                // completion cue, so a lingering spinner line above it would
+                // just be a redundant second `nub …` line bracketing the
+                // dependency summary. Because the renderer is a single line,
+                // the clear is a one-row erase — no multi-line region collapse,
+                // no flash.
                 //
                 // Flip the root to `Done` (it is `on_done = Hide`, so it now
                 // renders empty) BEFORE stopping the loop. This is what makes
@@ -872,13 +963,10 @@ impl InstallProgress {
                 // is followed by an empty render that erases it. A bare
                 // `stop_clear()` takes only `TERM_LOCK` (not `REFRESH_LOCK`), so
                 // a render-thread frame could land *after* the clear and leave
-                // a stray bar; rendering the root empty closes that window —
-                // even a late frame paints nothing. `finished` tells `Drop` the
-                // teardown already happened so it doesn't repeat it, and
-                // `stop_clear` is itself idempotent (once `STOPPING` latches and
-                // `LINES` is 0 a repeat erases nothing), covering a double
-                // `finish()`.
-                finished.store(true, Ordering::Relaxed);
+                // a stray line; rendering the root empty closes that window —
+                // even a late frame paints nothing. `stop_clear` is itself
+                // idempotent (once `STOPPING` latches and `LINES` is 0 a repeat
+                // erases nothing), covering a double `finish()`.
                 root.set_status(ProgressStatus::Done);
                 clx::progress::stop_clear();
             }
@@ -962,15 +1050,17 @@ impl InstallProgress {
     }
 }
 
-/// The fixed-width phase field — ` — <verb>` with the verb right-padded to
+/// The fixed-width phase field — the `<verb>` right-padded to
 /// [`TTY_PHASE_W`], or an all-blank field of the SAME width when no phase is
-/// active. Its constant display width (`TTY_PHASE_W + 3`) is what pins the
-/// bar's `[` to one column regardless of which verb is showing. The verb takes
-/// a single cyan/dim accent so it reads as a status label, not a severity
-/// signal (yellow once flagged `resolving`, which reads like a warning).
+/// active. Padding to the widest verb is what pins the `count` column (and
+/// everything after it) to one place regardless of which verb is showing —
+/// only the count/spinner move as the phase changes, and they're the live
+/// data. The verb takes a cyan/dim accent so it reads as a status label. The
+/// spinner and the separating spaces live in the body template, not here, so
+/// the field itself is exactly [`TTY_PHASE_W`] display columns.
 fn tty_phase_field(phase: &str) -> String {
     if phase.is_empty() {
-        return " ".repeat(TTY_PHASE_W + 3);
+        return " ".repeat(TTY_PHASE_W);
     }
     let colored = match phase {
         "resolving" | "linking" => style::ecyan(phase).to_string(),
@@ -978,33 +1068,30 @@ fn tty_phase_field(phase: &str) -> String {
     };
     // Pad on the PLAIN verb width (ANSI codes carry zero display width), so the
     // trailing spaces land outside the color span and the field's visible width
-    // is exactly `TTY_PHASE_W + 3`.
+    // is exactly `TTY_PHASE_W`.
     let pad = TTY_PHASE_W.saturating_sub(phase.len());
-    format!(" {} {}{}", style::edim("—"), colored, " ".repeat(pad))
+    format!("{}{}", colored, " ".repeat(pad))
 }
 
-/// The fixed-width animated bar field: `[<cells>]`, exactly [`TTY_BAR_CELLS`]
-/// cyan/dim cells inside dim brackets. Constant display width
-/// (`TTY_BAR_CELLS + 2`) so the counters and trailer after it never move.
-fn tty_bar_field(snap: ci::Snap, completed: usize) -> String {
-    format!(
-        "{}{}{}",
-        style::edim("["),
-        render::bar_only(snap, TTY_BAR_CELLS, completed),
-        style::edim("]"),
-    )
-}
-
-/// The fixed-width counter field, e.g. ` 577/623  pkgs` / `   7      pkgs`. The
-/// numerator is right-aligned and the total left-aligned to [`TTY_COUNT_DIGITS`]
-/// with ` pkgs` after, so the field — and therefore the trailing
-/// byte/rate/ETA segment — holds a constant column for installs up to 9999
-/// packages. When resolving has no estimate yet the `/total` slot is blank-
-/// filled (not dropped) so the numerator and ` pkgs` stay put. Phase 0 (before
-/// resolving) renders empty — nothing trails it, so there is no column to hold.
-/// TTY-specific (not the shared `render::count_segment`, which the append-only
-/// CI renderer uses and does not need fixed columns).
+/// The counter field. Linking shows a live, monotonically growing file
+/// count — `12043 files` — with NO denominator (the total isn't known
+/// until the pass ends); this is the number the user watches tick up on
+/// a slow filesystem, and since bytes/rate/ETA are all cleared during
+/// linking its digit growth shifts nothing to its right. Resolving and
+/// fetching keep the fixed-column `577/623 pkgs` shape (numerator
+/// right-aligned, total left-aligned to [`TTY_COUNT_DIGITS`]) so the
+/// trailing byte/rate/ETA segment holds a constant column for installs
+/// up to 9999 packages. Phase 0 renders empty — nothing trails it.
+/// TTY-specific (not the shared `render::count_segment`, which the
+/// append-only CI renderer uses).
 fn tty_count_field(snap: ci::Snap, completed: usize) -> String {
+    if snap.phase == 3 {
+        return format!(
+            "{} {}",
+            style::ebold(snap.files_linked),
+            style::edim("files"),
+        );
+    }
     let (cur, total) = match snap.phase {
         0 => return String::new(),
         1 if snap.target_total > snap.resolved => (snap.resolved, Some(snap.target_total)),
@@ -1023,14 +1110,15 @@ fn tty_count_field(snap: ci::Snap, completed: usize) -> String {
     format!("{cur_s}{mid} {}", style::edim("pkgs"))
 }
 
-/// TTY-only bar refresh primitive. Strongly-typed `&AtomicUsize` /
+/// TTY-only count refresh primitive. Strongly-typed `&AtomicUsize` /
 /// `&ProgressJob` references so both the `InstallProgress`
 /// method (which holds Arcs) and `FetchRow::drop` (which holds
 /// Weaks and upgrades them) can share the math without duplicating
-/// the snapshot/scale/prop-set sequence. Reads the same field set
-/// as `Mode::Tty` and feeds it through the fixed-width
-/// [`tty_bar_field`] / [`tty_count_field`] builders, so a tweak to the
-/// column layout lands everywhere the bar refreshes.
+/// the snapshot/scale/prop-set sequence. Sets the user-facing `count`
+/// prop via the fixed-column [`tty_count_field`] and feeds the OSC
+/// taskbar indicator via `progress_current`. `files` is the live
+/// file-linking count (0 outside the linking phase); resolve/fetch
+/// callers pass it as 0 since only phase 3 consults it.
 fn refresh_tty_bar_from_atomics(
     root: &Arc<ProgressJob>,
     total: &AtomicUsize,
@@ -1038,6 +1126,7 @@ fn refresh_tty_bar_from_atomics(
     reused: &AtomicUsize,
     downloaded: &AtomicUsize,
     phase_num: &AtomicUsize,
+    files: usize,
 ) {
     let phase = phase_num.load(Ordering::Relaxed);
     let resolved = total.load(Ordering::Relaxed);
@@ -1046,7 +1135,7 @@ fn refresh_tty_bar_from_atomics(
     let d = downloaded.load(Ordering::Relaxed);
     // Reuse the CI-mode `Snap` shape so the shared helpers don't
     // need a TTY-specific variant. The byte/rate/ETA fields aren't
-    // consulted by `unified_progress` or `count_segment`; their
+    // consulted by `unified_progress` or `tty_count_field`; their
     // zero values are inert.
     let snap = ci::Snap {
         phase,
@@ -1056,6 +1145,7 @@ fn refresh_tty_bar_from_atomics(
         downloaded: d,
         bytes: 0,
         estimated: 0,
+        files_linked: files,
         fetch_elapsed_ms: 0,
         completed_at_fetch_start: None,
     };
@@ -1064,13 +1154,107 @@ fn refresh_tty_bar_from_atomics(
     // catch-up reorders against `set_total`.
     let completed = (r + d).min(resolved);
     let progress = render::unified_progress(snap, completed);
-    // Feed clx's OSC terminal-progress indicator (not a visible template bar).
+    // Feed clx's OSC terminal-progress indicator (the taskbar %). No
+    // visible template bar consumes this — the line is spinner + count.
     let scaled = ((progress * TTY_BAR_SCALE as f64).round() as usize).min(TTY_BAR_SCALE);
     root.progress_current(scaled);
-    // The visible bar + counters are fixed-width fields we render ourselves, so
-    // every column is byte-stable across phases and frames.
-    root.prop("bar", &tty_bar_field(snap, completed));
     root.prop("count", &tty_count_field(snap, completed));
+}
+
+/// Reveal the animated line once the debounce window has elapsed.
+/// Flips the `revealed` prop (and thus the body's `{% if revealed %}`
+/// guard) exactly once — the `swap` latch means repeated calls after
+/// the first are no-ops. Before this fires the body renders empty and
+/// clx drops the row, so a sub-debounce install shows nothing.
+fn maybe_reveal(root: &Arc<ProgressJob>, start: Instant, revealed: &AtomicBool) {
+    if start.elapsed() >= TTY_REVEAL_DELAY && !revealed.swap(true, Ordering::Relaxed) {
+        root.prop("revealed", &true);
+    }
+}
+
+/// Fields the link-progress ticker thread needs. Bundled so the spawn
+/// call site reads cleanly. All handles are weak/shared so the ticker
+/// never pins the display alive (mirrors `FetchRow`'s weak-ref
+/// discipline): it holds a `Weak<ProgressJob>` and exits when the root
+/// is gone or `finished` latches.
+struct TtyTicker {
+    root: Weak<ProgressJob>,
+    phase_num: Arc<AtomicUsize>,
+    files_linked: Arc<AtomicUsize>,
+    finished: Arc<AtomicBool>,
+    revealed: Arc<AtomicBool>,
+    wake: Arc<Condvar>,
+    wake_lock: Arc<Mutex<()>>,
+    start: Instant,
+}
+
+/// Spawn the link-progress ticker: a background thread that drives the
+/// two things the event-driven refreshers can't during linking — the
+/// debounce reveal (guaranteed within one tick of crossing the delay,
+/// even if no counter event fires) and the live file count (the linker
+/// bumps an atomic with no clx event, so the ticker re-reads it and
+/// repaints the `count` prop). It exits promptly on `finish()` via the
+/// condvar, or on its own if the root job is dropped.
+///
+/// Cosmetic, never load-bearing: on `Builder::spawn` failure (thread/PID
+/// exhaustion) the install proceeds with no live tick — the final
+/// summary still prints. Mirrors the CI heartbeat's spawn discipline.
+fn spawn_tty_ticker(t: TtyTicker) -> Option<thread::JoinHandle<()>> {
+    thread::Builder::new()
+        .name("aube-tty-progress".into())
+        .spawn(move || {
+            loop {
+                if t.finished.load(Ordering::Relaxed) {
+                    break;
+                }
+                let Some(root) = t.root.upgrade() else {
+                    break;
+                };
+                maybe_reveal(&root, t.start, &t.revealed);
+                if t.phase_num.load(Ordering::Relaxed) == 3 {
+                    let files = t.files_linked.load(Ordering::Relaxed);
+                    root.prop("count", &tty_count_field(linking_snap(files), 0));
+                }
+                drop(root);
+                let guard = t.wake_lock.lock().unwrap();
+                let _ = t.wake.wait_timeout(guard, TTY_TICK_INTERVAL).unwrap();
+            }
+        })
+        .ok()
+}
+
+/// A minimal linking-phase `Snap` carrying just the live file count —
+/// all the ticker needs to render the `N files` segment via the shared
+/// [`tty_count_field`].
+fn linking_snap(files: usize) -> ci::Snap {
+    ci::Snap {
+        phase: 3,
+        resolved: 0,
+        target_total: 0,
+        reused: 0,
+        downloaded: 0,
+        bytes: 0,
+        estimated: 0,
+        files_linked: files,
+        fetch_elapsed_ms: 0,
+        completed_at_fetch_start: None,
+    }
+}
+
+/// Stop the link-progress ticker: latch `finished`, wake it off its
+/// poll wait, and join so no late `count` write can repaint after the
+/// display is cleared. Idempotent — a second call finds the handle
+/// already taken. Shared by `finish()` and the `Drop` safety net.
+fn stop_tty_ticker(
+    finished: &AtomicBool,
+    wake: &Condvar,
+    ticker: &Mutex<Option<thread::JoinHandle<()>>>,
+) {
+    finished.store(true, Ordering::Relaxed);
+    wake.notify_all();
+    if let Some(handle) = ticker.lock().unwrap().take() {
+        let _ = handle.join();
+    }
 }
 
 impl Drop for InstallProgress {
@@ -1089,8 +1273,19 @@ impl Drop for InstallProgress {
     /// — the heartbeat still gets joined so no stray tick escapes.
     fn drop(&mut self) {
         match &self.mode {
-            Mode::Tty { root, finished, .. } => {
+            Mode::Tty {
+                root,
+                finished,
+                wake,
+                ticker,
+                ..
+            } => {
                 if Arc::strong_count(root) == 1 && !finished.load(Ordering::Relaxed) {
+                    // Last live clone bailed without `finish()` (error path):
+                    // stop the ticker before clearing so a late `count` write
+                    // can't repaint. The ticker holds a `Weak<root>`, so it
+                    // never affected the `strong_count == 1` check above.
+                    stop_tty_ticker(finished, wake, ticker);
                     root.set_status(ProgressStatus::Done);
                     clx::progress::stop_clear();
                 }
@@ -1176,6 +1371,8 @@ impl FetchRow {
                     downloaded.upgrade(),
                     phase_num.upgrade(),
                 ) {
+                    // A fetch completion is always phase 2 (fetching), where
+                    // the live file count is irrelevant — pass 0.
                     refresh_tty_bar_from_atomics(
                         &root,
                         &total,
@@ -1183,6 +1380,7 @@ impl FetchRow {
                         &reused,
                         &downloaded,
                         &phase_num,
+                        0,
                     );
                 }
             }
@@ -1355,15 +1553,18 @@ mod tests {
             downloaded: 0,
             bytes: 0,
             estimated: 0,
+            files_linked: 0,
             fetch_elapsed_ms: 0,
             completed_at_fetch_start: None,
         }
     }
 
-    /// The whole point of the fixed-column layout: the bar's `[` must sit at a
-    /// byte-identical column in every phase. That column is `header +
-    /// phase-field`, and the header is constant per run, so it reduces to: the
-    /// phase field has the same display width for every verb (and when empty).
+    /// The maintainer's no-layout-shift requirement: the phase verb is
+    /// right-padded to a fixed width so the `count` column — and everything
+    /// after it — holds byte-stable when the phase word changes. That reduces
+    /// to: `tty_phase_field` has the same display width for every verb (and
+    /// when empty), namely `TTY_PHASE_W`. The spinner + separating spaces live
+    /// in the body template, so they don't enter this measurement.
     #[test]
     fn phase_field_is_constant_width_across_verbs() {
         let widths: Vec<usize> = TTY_PHASE_VERBS
@@ -1372,39 +1573,18 @@ mod tests {
             .chain(["", "downloading-future-verb-not-in-set"]) // empty + an over-long verb
             .map(|v| vis_width(&tty_phase_field(v)))
             .collect();
-        // Every KNOWN verb + the empty field share one width = TTY_PHASE_W + 3
-        // (" — " plus the verb pad). The longest known verb sets the pad.
-        let expected = TTY_PHASE_W + 3;
+        // Every KNOWN verb + the empty field share one width — the longest
+        // known verb sets the pad. An over-long verb (not in the set) is the
+        // one case that may exceed it, which is fine: the set is exhaustive.
+        let expected = TTY_PHASE_W;
         for (v, w) in TTY_PHASE_VERBS.iter().chain(&[""]).zip(widths.iter()) {
             assert_eq!(*w, expected, "phase field width drifted for {v:?}");
         }
     }
 
-    /// The bar field is a constant `TTY_BAR_CELLS + 2` columns at any fill, so
-    /// the counters/trailer after it never move.
-    #[test]
-    fn bar_field_is_constant_width_at_any_fill() {
-        let expected = TTY_BAR_CELLS + 2; // brackets
-        for (phase, resolved, completed) in [
-            (1, 0, 0),
-            (1, 500, 0),
-            (2, 800, 1),
-            (2, 800, 800),
-            (3, 800, 800),
-        ] {
-            let w = vis_width(&tty_bar_field(
-                snap_at(phase, resolved, resolved.max(1), completed),
-                completed,
-            ));
-            assert_eq!(
-                w, expected,
-                "bar width drifted at phase {phase} completed {completed}"
-            );
-        }
-    }
-
-    /// The counter field holds one column across phases and digit counts (up to
-    /// 9999), with the numerator right-aligned — `7/331` and `577/623` line up.
+    /// Resolving/fetching hold one column across digit counts (up to 9999),
+    /// numerator right-aligned — `7/331` and `577/623` line up — so the
+    /// trailing byte/rate/ETA segment never shifts.
     #[test]
     fn count_field_is_constant_width_up_to_four_digits() {
         let expected = 2 * TTY_COUNT_DIGITS + 6; // cur(D) + "/" + total(D) + " pkgs"
@@ -1413,8 +1593,7 @@ mod tests {
             snap_at(1, 84, 84, 0),     // resolving, no estimate yet (target == resolved): bare 84
             snap_at(2, 623, 623, 7),   // fetching: 7/623
             snap_at(2, 623, 623, 577), // fetching: 577/623
-            snap_at(3, 577, 577, 577), // linking: 577/577
-            snap_at(4, 9999, 9999, 1), // huge but still 4-digit
+            snap_at(4, 9999, 9999, 1), // done summary: huge but still 4-digit
         ];
         for s in cases {
             let completed = s.reused;
@@ -1431,6 +1610,37 @@ mod tests {
         // right edge lines up with a 3-digit count.
         let one = tty_count_field(snap_at(2, 331, 331, 7), 7);
         assert!(vis_width(&one) == expected, "right-align padding lost");
+    }
+
+    /// Linking shows the live, growing file count with no denominator — the
+    /// number the user watches tick up on a slow link. It reads from
+    /// `files_linked`, not the package counters, and carries the ` files`
+    /// unit (never ` pkgs`).
+    #[test]
+    fn linking_count_shows_live_file_count() {
+        let mut s = snap_at(3, 800, 800, 800);
+        s.files_linked = 12_043;
+        let field = tty_count_field(s, 800);
+        let plain = strip_ansi_local(&field);
+        assert_eq!(plain, "12043 files", "got: {plain}");
+    }
+
+    fn strip_ansi_local(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' && chars.peek() == Some(&'[') {
+                chars.next();
+                for esc in chars.by_ref() {
+                    if esc.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+                continue;
+            }
+            out.push(c);
+        }
+        out
     }
 
     #[test]

@@ -41,6 +41,7 @@ impl Linker {
             link_concurrency: self.link_concurrency,
             virtual_store_only: self.virtual_store_only,
             no_integrity_read_keys: self.no_integrity_read_keys.clone(),
+            link_progress: self.link_progress.clone(),
         }
     }
 

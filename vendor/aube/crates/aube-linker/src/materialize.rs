@@ -614,6 +614,7 @@ impl Linker {
                 return Err(e);
             }
             stats.files_linked += 1;
+            self.note_files_linked(1);
 
             if stored.executable {
                 // `create_cas_file` writes every CAS entry as 0o644
@@ -1022,6 +1023,7 @@ impl Linker {
                     // Keep stats identical to the per-file path: every
                     // index entry is "linked", just in one syscall.
                     stats.files_linked += index.len();
+                    self.note_files_linked(index.len());
                     if let Some(t0) = aube_util::diag::enabled().then(std::time::Instant::now) {
                         aube_util::diag::event(
                             aube_util::diag::Category::Linker,

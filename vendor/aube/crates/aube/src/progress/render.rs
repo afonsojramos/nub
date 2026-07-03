@@ -133,6 +133,19 @@ pub(super) fn bar_only(snap: Snap, width: usize, completed: usize) -> String {
 /// the denominator's digit width.
 pub(super) fn count_segment(snap: Snap, completed: usize) -> String {
     match snap.phase {
+        // Linking, redesigned UX (embedder opt-in): a live, monotonically
+        // growing file count with no denominator — the total isn't known
+        // until the pass ends. This is what makes a slow link re-emit on
+        // the heartbeat (the rendered string advances every tick) instead
+        // of freezing at a static `N/N pkgs`. Standalone aube keeps the
+        // package count below, so its append-only output is unchanged.
+        3 if aube_util::embedder().tty_progress => {
+            format!(
+                "{} {}",
+                style::ebold(snap.files_linked),
+                style::edim("files"),
+            )
+        }
         1 if snap.target_total > snap.resolved => {
             let cur = pad_count(snap.resolved, snap.target_total);
             format!(
@@ -408,6 +421,7 @@ mod tests {
             downloaded: 0,
             bytes,
             estimated,
+            files_linked: 0,
             fetch_elapsed_ms: 3_000,
             // Tests model an install where fetching started at zero
             // completions; the eta_segment then derives its rate from

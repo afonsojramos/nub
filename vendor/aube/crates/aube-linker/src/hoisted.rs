@@ -615,6 +615,7 @@ fn materialize_hoisted_node(
                 return Err(e);
             }
             stats.files_linked += 1;
+            linker.note_files_linked(1);
             if stored.executable {
                 #[cfg(unix)]
                 xx::file::make_executable(&target).map_err(|e| Error::Xx(e.to_string()))?;
