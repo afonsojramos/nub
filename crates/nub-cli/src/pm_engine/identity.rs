@@ -182,6 +182,16 @@ pub(crate) const NUB: aube_util::Embedder = aube_util::Embedder {
     // `--loglevel debug` / `RUST_LOG`. The per-project fallback behavior itself
     // is unchanged; only the notice is silenced.
     gvs_incompatible_warning: false,
+    // GVS-precedence hoisting (#286): a DEFAULT hoist no longer vetoes the
+    // shared virtual store, so GVS engages wherever it's active (off-CI, no
+    // trigger, no explicit opt-out) with no hidden tree, and the pnpm-parity
+    // hidden hoist tree is built wherever GVS is OFF (CI, `nub ci`, a
+    // next/nuxt/parcel trigger, an explicit `enableGlobalVirtualStore=false`,
+    // dlx) — restoring ambient `@types/*` resolution for store-resident
+    // packages. Only an EXPLICIT `hoist=true` (nub's injected-deps push, or a
+    // user setting) vetoes GVS. Nub therefore no longer pushes `hoist=false`;
+    // see `nub_setting_defaults`.
+    gvs_over_default_hoist: true,
     primer_ttl: None,
     // Cap aube's CPU-bound pools (linker rayon pool, tokio worker seed) to the
     // real cgroup CFS-CPU-quota budget on a constrained box; `None` on an
@@ -253,6 +263,7 @@ const _: () = {
     assert!(NUB.no_churn_lockfile_write);
     assert!(!NUB.read_branded_settings_env);
     assert!(!NUB.gvs_incompatible_warning);
+    assert!(NUB.gvs_over_default_hoist);
     assert!(NUB.primer_ttl.is_none());
     assert!(NUB.tty_progress);
     assert!(!NUB.warm_trust_revalidate);

@@ -454,6 +454,18 @@ node-linker=hoisted
 
 The `--node-linker hoisted` flag does the same for a single command. When an undeclared package fails to resolve at runtime, Nub's error names it and points at this opt-out.
 
+### Shared vs per-project store
+
+Outside CI, the isolated virtual store is shared across projects: a package version materializes once per machine and every project links to that copy. It is fast and disk-cheap, but machine-local — the links reach outside the project, so a `node_modules` copied to another machine won't resolve.
+
+In CI, and under `nub ci`, each project gets its own self-contained virtual store instead — real directories and relative links, nothing shared. That tree survives a Docker `COPY --from` into a fresh image, where the shared store wouldn't exist. Force it for any install with one line in `.npmrc`:
+
+```ini
+enableGlobalVirtualStore=false
+```
+
+Either layout resolves the same packages — including type packages (`@types/*`) pulled in transitively but not declared, which stay reachable in both.
+
 ### Offline installs
 
 Like pnpm, Nub relinks files from the global store into `node_modules` via reflink (APFS/btrfs) or hardlink (ext4) when the store already holds every package — no re-download, no byte-for-byte copy. The benchmark below measures the warm reinstall case: `node_modules` is removed, packages are already on disk, and the installer rebuilds the project layout.

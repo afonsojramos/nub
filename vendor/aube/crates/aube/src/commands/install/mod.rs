@@ -939,11 +939,32 @@ pub async fn run(opts: InstallOptions) -> miette::Result<()> {
     // transition and wipe `node_modules` (issue #71). `resolve_node_linker`
     // is the same resolver the link phase uses, so the two stay in lockstep.
     let resolved_node_linker = link::resolve_node_linker(&settings_ctx)?;
+    let resolved_hoist = aube_settings::resolved::hoist(&settings_ctx);
+    // `hoist_explicit` is `Some` only when hoist was set at some tier above the
+    // built-in default (embedder defaults COUNT); under the
+    // `gvs_over_default_hoist` profile only an explicit `hoist=true` vetoes GVS.
+    let hoist_explicit = aube_settings::resolved::hoist_explicit(&settings_ctx);
     let effective_gvs = gvs::effective_global_virtual_store(
         planned_gvs,
-        aube_settings::resolved::hoist(&settings_ctx),
+        resolved_hoist,
+        hoist_explicit,
         resolved_node_linker,
     );
+    // Under the `gvs_over_default_hoist` embedder profile, pre-fold the
+    // (effective GVS, hidden-tree) decision ONCE here and hand it to the link
+    // phase, so the mode-change reset, the prewarm, and the linker all act on
+    // the same values (issue #71 lockstep) and the linker's own
+    // `use_global_virtual_store && hoist` fallback is never reached. `None` on
+    // standalone aube's default path — the link phase then resolves hoist itself
+    // and passes the raw override, and the linker re-derives, byte-for-byte
+    // unchanged.
+    let gvs_hoist_decision =
+        aube_util::embedder()
+            .gvs_over_default_hoist
+            .then(|| link::GvsHoistDecision {
+                effective_gvs,
+                build_hidden_tree: gvs::build_hidden_tree(resolved_hoist, effective_gvs),
+            });
     gvs::reset_on_mode_change(&cwd, &aube_dir, &modules_dir_name, effective_gvs)?;
 
     // The fetch-pipelined materializer (`spawn_gvs_prewarm`) must target the
@@ -2656,6 +2677,7 @@ pub async fn run(opts: InstallOptions) -> miette::Result<()> {
         link_concurrency_setting,
         use_global_virtual_store_override,
         planned_gvs,
+        gvs_hoist_decision,
         has_workspace,
         dep_selection_filtered: opts.dep_selection.is_filtered(),
         workspace_filter_empty: opts.workspace_filter.is_empty(),

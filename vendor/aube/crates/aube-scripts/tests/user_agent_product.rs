@@ -33,6 +33,7 @@ static MYTOOL: Embedder = Embedder {
     no_churn_lockfile_write: false,
     read_branded_settings_env: true,
     gvs_incompatible_warning: true,
+    gvs_over_default_hoist: false,
     primer_ttl: None,
     cpu_budget: None,
     tty_progress: false,

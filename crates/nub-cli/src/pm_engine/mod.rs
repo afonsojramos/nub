@@ -2006,18 +2006,22 @@ fn strip_yarnrc_value(rest: &str) -> &str {
     rest.split('#').next().map(str::trim).unwrap_or(rest)
 }
 
-/// - Layout policy: EVERY non-injected project — every incumbent
-///   (npm/yarn/bun/pnpm) and a fresh nub-identity project — defaults to the
-///   isolated layout with the hidden hoist tree OFF (`nodeLinker=isolated` +
-///   `hoist=false`), the config that engages the global virtual store since
-///   aube's `effective_gvs = planned_gvs && !hoist && Isolated`. This is the
-///   greenlit compat→correctness shift (2026-06-28): isolated is strict (no
-///   phantom deps) and GVS-fast across every project; a project that relies on
-///   phantom deps opts back into the flat tree with one `.npmrc` line
-///   (`node-linker=hoisted`). The ONLY carve-out is injected deps
-///   (`dependenciesMeta.*.injected`), which need the hidden hoist tree and so
-///   keep the engine's isolated + hoist=true default (GVS off). A user-set
-///   `nodeLinker`/`hoist` (env/.npmrc/yaml) still wins — embedder-tier default.
+/// - Layout policy: EVERY project defaults to the isolated layout
+///   (`nodeLinker=isolated`) — strict (no phantom deps) and GVS-fast; a project
+///   that relies on phantom deps opts back into the flat tree with one `.npmrc`
+///   line (`node-linker=hoisted`). Hoisting is left GVS-AWARE via the engine's
+///   `gvs_over_default_hoist` profile: a NON-injected project leaves `hoist` at
+///   the built-in default (`true`), and under that profile a DEFAULT hoist no
+///   longer vetoes the shared store — so the global virtual store engages
+///   wherever it's active (off-CI, no next/nuxt/parcel trigger, no explicit
+///   `enableGlobalVirtualStore=false`) with NO hidden tree, and the pnpm-parity
+///   hidden hoist tree (`node_modules/.nub/node_modules/`) is built wherever GVS
+///   is OFF (CI, `nub ci`, a trigger, an explicit GVS opt-out, dlx), restoring
+///   ambient `@types/*` resolution for store-resident packages (#286). The ONE
+///   carve-out is injected deps (`dependenciesMeta.*.injected`): they need the
+///   hidden tree unconditionally, so nub pushes an EXPLICIT `hoist=true`, which
+///   DOES veto GVS under the profile (per-project + hidden tree, always). A
+///   user-set `nodeLinker`/`hoist` (env/.npmrc/yaml) still wins — embedder-tier.
 /// - Fresh-write lockfile format: a TRULY-fresh project (no PM-preference
 ///   signal of any kind — `truly_fresh`) writes nub's neutral `lock.yaml`
 ///   (`defaultLockfileFormat=aube`, which under the nub embedder resolves to
@@ -2059,30 +2063,32 @@ fn nub_setting_defaults(
     // is still excluded from the GVS default below if it declares injected deps.
     let injected_root = detected.map(|d| d.dir.as_path()).unwrap_or(cwd);
     let injected = unsupported_config::injected_deps_present(injected_root);
-    // GREENLIT 2026-06-28 compat→correctness flip: EVERY non-injected project —
-    // any incumbent (npm/yarn/bun/pnpm) and a fresh nub-identity project —
-    // defaults to isolated with the hidden hoist tree OFF. Pushing `hoist=false`
-    // under the engine's isolated default is what engages the global virtual
-    // store (aube gvs.rs: `effective_gvs = planned_gvs && !hoist && Isolated`);
-    // `nodeLinker=isolated` is pushed explicitly so the layout intent reads at
-    // this call site even though it equals the engine default. Injected deps
+    // EVERY project defaults to isolated. Hoisting is left GVS-AWARE via the
+    // engine's `gvs_over_default_hoist` profile (nub's identity sets it): a
+    // NON-injected project pushes NO `hoist`, so it resolves to the built-in
+    // default (true) which — under the profile — does NOT veto the shared store,
+    // so GVS engages wherever active (no hidden tree) and the pnpm-parity hidden
+    // hoist tree is built by the linker wherever GVS is off (CI/`nub ci`/a
+    // next/nuxt/parcel trigger/explicit GVS opt-out/dlx) — restoring ambient
+    // `@types/*` for store-resident packages (#286). Injected deps
     // (`dependenciesMeta.*.injected`) are the ONE carve-out: they need the
-    // hidden tree to sibling-link packed copies, so they keep stock-aube
-    // isolated+hoist=true (GVS off) — proven, where injected-under-GVS is not.
-    // A user-set `nodeLinker`/`hoist` (env/.npmrc/yaml) still wins.
-    if !injected {
-        defaults.push(("nodeLinker".to_string(), "isolated".to_string()));
-        defaults.push(("hoist".to_string(), "false".to_string()));
+    // hidden tree unconditionally, so nub pushes an EXPLICIT `hoist=true`, which
+    // DOES veto GVS under the profile (per-project + hidden tree, always) —
+    // proven, where injected-under-GVS is not. A user-set `nodeLinker`/`hoist`
+    // (env/.npmrc/yaml) still wins.
+    defaults.push(("nodeLinker".to_string(), "isolated".to_string()));
+    if injected {
+        defaults.push(("hoist".to_string(), "true".to_string()));
     }
-    // `nub ci` forces the virtual store PROJECT-LOCAL (GVS off). Combined with
-    // the isolated+hoist=false layout above, this yields real `node_modules/
-    // .nub/<dep>` dirs + relative symlinks (aube: `effective_gvs = planned_gvs
-    // && !hoist && Isolated`, and `planned_gvs = override ?? !$CI`) — a self-
-    // contained tree that survives a multi-stage-Docker `COPY --from`, unlike
-    // the machine-global store the default install engages (#241). Isolation
-    // (phantom-dep protection) is unchanged; only the store LOCATION moves.
-    // Embedder-tier, so an explicit user `enableGlobalVirtualStore`/`nodeLinker`
-    // still wins.
+    // `nub ci` forces the virtual store PROJECT-LOCAL by pushing an explicit
+    // `enableGlobalVirtualStore=false` (GVS off). With GVS off and the default
+    // `hoist=true`, the isolated linker yields real `node_modules/.nub/<dep>`
+    // dirs + relative symlinks AND the pnpm-parity hidden hoist tree
+    // (`node_modules/.nub/node_modules/`) — a self-contained tree that survives a
+    // multi-stage-Docker `COPY --from`, unlike the machine-global store the
+    // default install engages (#241). Isolation (phantom-dep protection) is
+    // unchanged; only the store LOCATION moves. Embedder-tier, so an explicit
+    // user `enableGlobalVirtualStore`/`nodeLinker` still wins.
     if store_locality == VirtualStoreLocality::ProjectLocal {
         defaults.push(("enableGlobalVirtualStore".to_string(), "false".to_string()));
     }
@@ -2564,8 +2570,10 @@ mod tests {
         };
 
         // Every non-injected incumbent kind AND a fresh project default to
-        // isolated + hoist=false (the GVS-engaging config: aube's effective_gvs
-        // needs `!hoist && Isolated`). The tempdir has no injected manifest.
+        // isolated with NO `hoist` push: hoist resolves to the built-in default
+        // (true), which under nub's `gvs_over_default_hoist` profile lets GVS
+        // engage while the linker builds the hidden tree only where GVS is off.
+        // The tempdir has no injected manifest.
         for kind in [
             LockfileKind::Npm,
             LockfileKind::NpmShrinkwrap,
@@ -2588,8 +2596,8 @@ mod tests {
             );
             assert_eq!(
                 get(&defaults, "hoist"),
-                Some("false"),
-                "{kind:?} must turn the hidden hoist tree off so GVS engages"
+                None,
+                "{kind:?} must NOT push hoist — a default hoist keeps GVS engaged"
             );
         }
 
@@ -2602,17 +2610,18 @@ mod tests {
         );
         assert_eq!(
             get(&fresh, "hoist"),
-            Some("false"),
-            "fresh ⇒ hoist off (GVS)"
+            None,
+            "fresh ⇒ no hoist push (GVS engages by default)"
         );
     }
 
     #[test]
     fn injected_deps_keep_the_hidden_hoist_tree_and_opt_out_of_gvs() {
         // The ONE carve-out: a project declaring `dependenciesMeta.*.injected`
-        // needs the hidden hoist tree, so it keeps the engine's isolated +
-        // hoist=true default (no nodeLinker/hoist pushed) — GVS off. Covered for
-        // both a detected incumbent and a fresh project rooted at cwd.
+        // needs the hidden hoist tree unconditionally, so nub pushes an EXPLICIT
+        // `hoist=true` — which vetoes GVS under the `gvs_over_default_hoist`
+        // profile (per-project + hidden tree, always). Covered for both a
+        // detected incumbent and a fresh project rooted at cwd.
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("package.json"),
@@ -2635,13 +2644,13 @@ mod tests {
         ] {
             assert_eq!(
                 get(&defaults, "nodeLinker"),
-                None,
-                "injected ⇒ no nodeLinker push"
+                Some("isolated"),
+                "injected ⇒ isolated (like every project)"
             );
             assert_eq!(
                 get(&defaults, "hoist"),
-                None,
-                "injected ⇒ no hoist push (GVS off)"
+                Some("true"),
+                "injected ⇒ explicit hoist=true (vetoes GVS, forces the hidden tree)"
             );
         }
     }
@@ -2650,8 +2659,10 @@ mod tests {
     fn ci_forces_project_local_store_but_keeps_isolation() {
         // `nub ci` (VirtualStoreLocality::ProjectLocal) pushes
         // `enableGlobalVirtualStore=false` so the frozen node_modules is
-        // COPY-relocatable (#241), while keeping the isolated+hoist=false layout
-        // (phantom-dep protection). A plain install (Default) leaves GVS on.
+        // COPY-relocatable (#241), while keeping the isolated layout (phantom-dep
+        // protection). It pushes NO `hoist`: with GVS off the default hoist=true
+        // makes the linker build the pnpm-parity hidden tree. A plain install
+        // (Default) leaves GVS on.
         let dir = tempfile::tempdir().unwrap();
         let detected = DetectedLockfile {
             kind: LockfileKind::Npm,
@@ -2675,7 +2686,11 @@ mod tests {
             Some("isolated"),
             "ci keeps the isolated layout"
         );
-        assert_eq!(get(&ci, "hoist"), Some("false"), "ci keeps hoist off");
+        assert_eq!(
+            get(&ci, "hoist"),
+            None,
+            "ci pushes no hoist — the default builds the hidden tree with GVS off"
+        );
 
         let plain = nub_setting_defaults(
             Some(&detected),

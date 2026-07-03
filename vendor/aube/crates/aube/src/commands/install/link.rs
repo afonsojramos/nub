@@ -41,6 +41,19 @@ pub(super) fn resolve_node_linker(
     }
 }
 
+/// Pre-folded (effective GVS, hidden-tree) decision computed once in the
+/// command layer under the `gvs_over_default_hoist` embedder profile. When
+/// present, `run_link_phase` hands the linker `use_global_virtual_store =
+/// effective_gvs` and `hoist = build_hidden_tree` directly, so the linker's own
+/// `use_global_virtual_store && hoist` fallback (which bakes in the stock
+/// coupling) is never reached. `None` on standalone aube's default path, where
+/// the linker re-derives from the raw override + resolved hoist unchanged.
+#[derive(Clone, Copy)]
+pub(super) struct GvsHoistDecision {
+    pub(super) effective_gvs: bool,
+    pub(super) build_hidden_tree: bool,
+}
+
 pub(super) struct LinkPhaseInput<'a> {
     pub(super) cwd: &'a std::path::Path,
     pub(super) settings_ctx: &'a aube_settings::ResolveCtx<'a>,
@@ -60,6 +73,7 @@ pub(super) struct LinkPhaseInput<'a> {
     pub(super) link_concurrency_setting: Option<usize>,
     pub(super) use_global_virtual_store_override: Option<bool>,
     pub(super) planned_gvs: bool,
+    pub(super) gvs_hoist_decision: Option<GvsHoistDecision>,
     pub(super) has_workspace: bool,
     pub(super) dep_selection_filtered: bool,
     pub(super) workspace_filter_empty: bool,
@@ -102,6 +116,7 @@ pub(super) fn run_link_phase(input: LinkPhaseInput<'_>) -> miette::Result<LinkPh
         link_concurrency_setting,
         use_global_virtual_store_override,
         planned_gvs,
+        gvs_hoist_decision,
         has_workspace,
         dep_selection_filtered,
         workspace_filter_empty,
@@ -127,7 +142,22 @@ pub(super) fn run_link_phase(input: LinkPhaseInput<'_>) -> miette::Result<LinkPh
 
     let shamefully_hoist = aube_settings::resolved::shamefully_hoist(settings_ctx);
     let public_hoist_pattern = aube_settings::resolved::public_hoist_pattern(settings_ctx);
-    let hoist = aube_settings::resolved::hoist(settings_ctx);
+    // Under the `gvs_over_default_hoist` profile the command layer pre-folded the
+    // (effective GVS, hidden-tree) decision: `hoist` becomes "build the hidden
+    // tree" and the GVS override becomes the effective mode, so the linker's own
+    // `use_global_virtual_store && hoist` fallback is never reached. Standalone
+    // aube (`None`) resolves hoist and keeps the raw override — the linker
+    // re-derives, byte-for-byte unchanged.
+    let (hoist, use_global_virtual_store_override) = match gvs_hoist_decision {
+        Some(GvsHoistDecision {
+            effective_gvs,
+            build_hidden_tree,
+        }) => (build_hidden_tree, Some(effective_gvs)),
+        None => (
+            aube_settings::resolved::hoist(settings_ctx),
+            use_global_virtual_store_override,
+        ),
+    };
     let hoist_pattern = aube_settings::resolved::hoist_pattern(settings_ctx);
     let hoist_workspace_packages = aube_settings::resolved::hoist_workspace_packages(settings_ctx);
     let hoisting_limits = crate::commands::settings_hoisting_limits_to_linker(

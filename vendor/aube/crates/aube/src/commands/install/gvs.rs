@@ -72,12 +72,59 @@ pub(super) fn planned_global_virtual_store(
 /// (`hoist=true`) project see a spurious `disabled → enabled` transition
 /// and wipe `node_modules` (issue #71 — `aube add` in a workspace member,
 /// which always bypasses the fast path).
+///
+/// Under the [`gvs_over_default_hoist`] embedder profile the coupling changes:
+/// only an EXPLICITLY-set `hoist=true` (`hoist_explicit == Some(true)`) vetoes
+/// the shared store, so a DEFAULT hoist lets GVS engage and the hidden hoist
+/// tree is built only where GVS is off ([`build_hidden_tree`]). Standalone aube
+/// (`gvs_over_default_hoist == false`) keeps the stock formula byte-for-byte, so
+/// its lockstep with the linker's own `use_global_virtual_store && hoist`
+/// fallback is preserved. Under the embedder profile the linker is instead
+/// handed the pre-folded (effective GVS, hidden-tree) pair so that fallback is
+/// never reached — see `run_link_phase`.
+///
+/// [`gvs_over_default_hoist`]: aube_util::Embedder::gvs_over_default_hoist
 pub(super) fn effective_global_virtual_store(
     planned_gvs: bool,
     hoist: bool,
+    hoist_explicit: Option<bool>,
     node_linker: aube_linker::NodeLinker,
 ) -> bool {
-    planned_gvs && !hoist && matches!(node_linker, aube_linker::NodeLinker::Isolated)
+    effective_gvs_impl(
+        aube_util::embedder().gvs_over_default_hoist,
+        planned_gvs,
+        hoist,
+        hoist_explicit,
+        node_linker,
+    )
+}
+
+/// Pure core of [`effective_global_virtual_store`], the embedder flag passed
+/// explicitly so both coupling regimes are unit-testable without registering a
+/// process-global profile.
+fn effective_gvs_impl(
+    gvs_over_default_hoist: bool,
+    planned_gvs: bool,
+    hoist: bool,
+    hoist_explicit: Option<bool>,
+    node_linker: aube_linker::NodeLinker,
+) -> bool {
+    let isolated = matches!(node_linker, aube_linker::NodeLinker::Isolated);
+    if gvs_over_default_hoist {
+        planned_gvs && isolated && !hoist_explicit.unwrap_or(false)
+    } else {
+        planned_gvs && !hoist && isolated
+    }
+}
+
+/// Whether the isolated linker should build the hidden hoist tree
+/// (`node_modules/.<store>/node_modules/`). It exists ONLY where the shared
+/// global virtual store is NOT active: a bare-name alias inside the SHARED
+/// store is cross-project-mutable state (aube issue #6), so a live GVS must
+/// never carry one. `resolved_hoist` is the resolved `hoist` setting (default
+/// `true`); `effective_gvs` is [`effective_global_virtual_store`].
+pub(super) fn build_hidden_tree(resolved_hoist: bool, effective_gvs: bool) -> bool {
+    resolved_hoist && !effective_gvs
 }
 
 /// The global-virtual-store decision the fetch-pipelined materializer
@@ -170,6 +217,10 @@ mod tests {
     // every non-fast-path install (e.g. `add` in a workspace member),
     // wiping node_modules each time.
 
+    // The stock (flag-off) coupling. Tests run with no embedder registered, so
+    // `effective_global_virtual_store` reads `AUBE` (`gvs_over_default_hoist ==
+    // false`) and a default hoist=true still vetoes the shared store.
+
     #[test]
     fn default_project_predicts_per_project_so_no_spurious_reset() {
         // hoist=true (default), isolated (default), GVS requested on (off-CI):
@@ -177,6 +228,7 @@ mod tests {
         assert!(!effective_global_virtual_store(
             true,
             true,
+            None,
             NodeLinker::Isolated
         ));
     }
@@ -186,6 +238,7 @@ mod tests {
         assert!(effective_global_virtual_store(
             true,
             false,
+            Some(false),
             NodeLinker::Isolated
         ));
     }
@@ -195,11 +248,13 @@ mod tests {
         assert!(!effective_global_virtual_store(
             true,
             false,
+            Some(false),
             NodeLinker::Hoisted
         ));
         assert!(!effective_global_virtual_store(
             true,
             true,
+            None,
             NodeLinker::Hoisted
         ));
     }
@@ -209,13 +264,86 @@ mod tests {
         assert!(!effective_global_virtual_store(
             false,
             false,
+            Some(false),
             NodeLinker::Isolated
         ));
         assert!(!effective_global_virtual_store(
             false,
             true,
+            None,
             NodeLinker::Isolated
         ));
+    }
+
+    // The `gvs_over_default_hoist` (nub) coupling, exercised through the pure
+    // `effective_gvs_impl` so the flag is set explicitly (no process-global
+    // embedder registration). Only an EXPLICIT hoist=true vetoes GVS.
+
+    #[test]
+    fn flag_default_hoist_lets_gvs_engage() {
+        // hoist resolves to the default `true` but was never explicitly set:
+        // GVS engages off-CI on the isolated layout.
+        assert!(effective_gvs_impl(
+            true,
+            true,
+            true,
+            None,
+            NodeLinker::Isolated
+        ));
+    }
+
+    #[test]
+    fn flag_explicit_hoist_true_vetoes_gvs() {
+        // An explicit hoist=true (e.g. nub's injected-deps embedder push) keeps
+        // per-project + hidden tree, even off-CI.
+        assert!(!effective_gvs_impl(
+            true,
+            true,
+            true,
+            Some(true),
+            NodeLinker::Isolated
+        ));
+    }
+
+    #[test]
+    fn flag_explicit_hoist_false_keeps_gvs_on() {
+        assert!(effective_gvs_impl(
+            true,
+            true,
+            false,
+            Some(false),
+            NodeLinker::Isolated
+        ));
+    }
+
+    #[test]
+    fn flag_ci_and_hoisted_stay_off() {
+        // planned off (CI) ⇒ off regardless of hoist explicitness.
+        assert!(!effective_gvs_impl(
+            true,
+            false,
+            true,
+            None,
+            NodeLinker::Isolated
+        ));
+        // hoisted layout never engages the shared store.
+        assert!(!effective_gvs_impl(
+            true,
+            true,
+            true,
+            None,
+            NodeLinker::Hoisted
+        ));
+    }
+
+    #[test]
+    fn hidden_tree_is_built_only_when_gvs_is_off() {
+        // Default hoist, GVS on ⇒ no hidden tree (can't live in a shared store).
+        assert!(!build_hidden_tree(true, true));
+        // Default hoist, GVS off (CI / per-project) ⇒ hidden tree built.
+        assert!(build_hidden_tree(true, false));
+        // Explicit hoist=false ⇒ never a hidden tree.
+        assert!(!build_hidden_tree(false, false));
     }
 
     // The prewarm materializer must mirror the link phase's *effective*

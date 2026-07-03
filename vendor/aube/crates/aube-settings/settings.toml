@@ -672,6 +672,10 @@ npmShared = true
 description = "Hoist all dependencies to the hidden modules directory."
 type = "bool"
 default = "true"
+# Emit `hoist_explicit(ctx) -> Option<bool>`: the GVS-precedence layout
+# (embedder `gvs_over_default_hoist`) must distinguish an EXPLICIT hoist=true
+# (vetoes the shared store) from the built-in default (lets GVS engage).
+explicitAccessor = true
 docs = """
 Controls whether aube populates `node_modules/.aube/node_modules/` —
 the *hidden* hoist tree that lives inside the private virtual store.

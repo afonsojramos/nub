@@ -178,10 +178,10 @@ fn nub_identity_does_not_read_project_or_global_bunfig() {
         "https://registry.npmjs.org/"
     );
     // The bunfig's `linker = "hoisted"` must NOT be read under nub identity:
-    // nodeLinker resolves to nub's own default (isolated, with hoist=false for
-    // GVS), not the bunfig's `hoisted`. Asserting the NON-bunfig value is what
-    // proves the bunfig was ignored — the project still gets nub's isolated+GVS
-    // default like any other non-injected project.
+    // nodeLinker resolves to nub's own default (isolated), not the bunfig's
+    // `hoisted`. Asserting the NON-bunfig value is what proves the bunfig was
+    // ignored — the project still gets nub's isolated + GVS-aware default like
+    // any other non-injected project.
     assert_eq!(config_get(&dir, &xdg_config, "nodeLinker"), "isolated");
 }
 
