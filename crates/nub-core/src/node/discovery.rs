@@ -732,12 +732,36 @@ fn shell_path_node(pin_source: Option<String>) -> Result<ResolvedNode, Discovery
 
 /// Find `node` on PATH, skipping nub's own PATH shim directories.
 fn which_node() -> Result<PathBuf, DiscoveryError> {
-    let path_var = env::var_os("PATH").unwrap_or_default();
+    // The persistent global `node` shim (`~/.nub/node-shim`, `nub node shim`) is
+    // a `node` hardlink to nub sitting on PATH. When nub-as-node resolves the
+    // REAL node it must skip that dir, or it would find its own shim first →
+    // infinite recursion. Canonicalized so a symlinked `~/.nub` still matches.
+    let persistent_shim = crate::node::shim::node_shim_dir()
+        .ok()
+        .and_then(|d| d.canonicalize().ok());
+    which_node_in(
+        &env::var_os("PATH").unwrap_or_default(),
+        persistent_shim.as_deref(),
+    )
+}
 
-    for dir in env::split_paths(&path_var) {
-        // Skip our own PATH shim directories.
+/// [`which_node`] against an explicit PATH + persistent-shim dir — the testable
+/// body. Two recursion guards: the per-invocation temp dirs (skipped by their
+/// `nub-node-shim-<pid>` name prefix) and the persistent global shim dir
+/// (skipped by CANONICAL-PATH equality, since it's a fixed possibly-symlinked
+/// path a name prefix can't catch).
+fn which_node_in(
+    path_var: &std::ffi::OsStr,
+    persistent_shim: Option<&Path>,
+) -> Result<PathBuf, DiscoveryError> {
+    for dir in env::split_paths(path_var) {
         if let Some(name) = dir.file_name()
             && name.to_string_lossy().starts_with("nub-node-shim-")
+        {
+            continue;
+        }
+        if let Some(skip) = persistent_shim
+            && dir.canonicalize().ok().as_deref() == Some(skip)
         {
             continue;
         }
@@ -1197,6 +1221,66 @@ mod tests {
             }
             Err(e) => panic!("unexpected error: {e}"),
         }
+    }
+
+    #[test]
+    fn which_node_skips_the_persistent_shim_dir() {
+        // A real `node` in the persistent shim dir must be SKIPPED (it's nub's
+        // own hardlink — following it would recurse), and resolution falls
+        // through to a later PATH dir holding the genuine node.
+        let tmp = unique_tmp("which-skip");
+        let shim = tmp.join("node-shim");
+        let real = tmp.join("real-bin");
+        std::fs::create_dir_all(&shim).unwrap();
+        std::fs::create_dir_all(&real).unwrap();
+        write_fake_node(&shim.join("node"));
+        write_fake_node(&real.join("node"));
+
+        let path_var = env::join_paths([&shim, &real]).unwrap();
+        let canon_shim = shim.canonicalize().unwrap();
+        let got = which_node_in(&path_var, Some(&canon_shim)).unwrap();
+        assert_eq!(
+            got.canonicalize().unwrap(),
+            real.join("node").canonicalize().unwrap(),
+            "the shim dir's node is skipped; the later real node wins"
+        );
+
+        // With the shim dir the ONLY PATH entry, skipping it means no node — the
+        // recursion guard never resolves back to the shim.
+        let only_shim = env::join_paths([&shim]).unwrap();
+        assert!(matches!(
+            which_node_in(&only_shim, Some(&canon_shim)),
+            Err(DiscoveryError::NoNodeOnPath)
+        ));
+    }
+
+    #[cfg(unix)]
+    fn write_fake_node(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, b"#!/bin/sh\necho v0.0.0\n").unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    #[cfg(windows)]
+    fn write_fake_node(path: &Path) {
+        std::fs::write(path, b"").unwrap();
+    }
+
+    /// A unique throwaway dir under the system temp root (nub-core has no
+    /// `tempfile` dev-dep; this mirrors the `pm::shim` tests' `tmpdir`).
+    fn unique_tmp(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!(
+            "nub-whichnode-{tag}-{}-{nanos:x}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 
     #[test]

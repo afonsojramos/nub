@@ -2335,7 +2335,14 @@ fn run_as_node() -> Result<i32> {
     // like `nub --node`/`nub run --node`. Version resolution/pinning stays on in
     // BOTH cases — that's the legitimate job of the hijack.
     let args: Vec<String> = env::args().skip(1).collect();
-    let (compat, forwarded) = scan_node_compat_flag(&args);
+    let (compat_flag, forwarded) = scan_node_compat_flag(&args);
+    // The PERSISTENT global `node` shim (`nub node shim`, ~/.nub/node-shim) runs
+    // VANILLA by default (maintainer, 2026-07-03): a bare-shell `node` must
+    // respect node semantics — version resolution/provisioning is the shim's
+    // job, augmentation belongs to `nub`/`nubx`. The per-invocation hijack
+    // (temp-dir shim, inside a `nub …` subtree the user opted into) keeps
+    // augment-by-default. `--node`/`NODE_COMPAT` force vanilla in either case.
+    let compat = compat_flag || nub_core::node::shim::invoked_as_persistent_node_shim();
     if compat {
         run_file_with_compat(&forwarded, true)
     } else {
@@ -6056,7 +6063,9 @@ fn run_node(args: &[String]) -> Result<i32> {
          \x20 install [<version>...]   provision version(s) into nub's cache (bare: the project pin)\n\
          \x20 ls                       list versions in nub's cache\n\
          \x20 uninstall <version>      remove a version from nub's cache\n\
-         \x20 pin <version>            write the project's Node pin";
+         \x20 pin <version>            write the project's Node pin\n\
+         \x20 shim                     make `node` on PATH resolve through nub (re-run after `nub upgrade`)\n\
+         \x20 unshim                   remove the `node` shim and its PATH block";
 
     // `nub node --help`/`-h`/`help`: short usage listing the verbs.
     let verb = args.first().map(String::as_str);
@@ -6152,6 +6161,8 @@ fn run_node(args: &[String]) -> Result<i32> {
             println!("pinned Node {} → {}", result.spec, result.path.display());
             Ok(0)
         }
+        "shim" => run_node_shim_install(),
+        "unshim" => run_node_unshim(),
         // `nub node <file>` (or any non-verb positional) is an error, NOT a
         // passthrough — the exact wording is locked by the spec
         // (node-versions.md line 25). The literal `<file>` placeholder is part of
@@ -6159,7 +6170,7 @@ fn run_node(args: &[String]) -> Result<i32> {
         // drop trailing args and diverge from the spec).
         _ => {
             bail!(
-                "nub node takes a subcommand (which, install, ls, uninstall, pin). \
+                "nub node takes a subcommand (which, install, ls, uninstall, pin, shim, unshim). \
                  To run a file, use 'nub <file>'."
             );
         }
@@ -7256,6 +7267,119 @@ fn run_pm_unshim() -> Result<i32> {
     Ok(0)
 }
 
+/// `nub node shim`: hardlink the running nub as `node` in `~/.nub/node-shim`,
+/// wire that dir onto PATH, and verify reachability — so a bare-shell `node`
+/// resolves through nub. Idempotent; re-run to refresh after `nub upgrade`.
+/// Mirrors [`run_pm_shim_install`] for the single `node` entry; the shim runs
+/// the resolved Node VANILLA (version management only — augmentation is `nub`).
+fn run_node_shim_install() -> Result<i32> {
+    use nub_core::node::shim;
+    use nub_core::pm::shim::{ProfileOutcome, ShimAction};
+
+    let nub_binary = nub_core::node::spawn::current_nub_binary()?;
+    let dir = shim::node_shim_dir()?;
+    let entry = shim::install_node_shim(&nub_binary)?;
+
+    let state = match entry.action {
+        ShimAction::Created => "created",
+        ShimAction::Relinked => "re-linked",
+        ShimAction::Current => "already current",
+    };
+    println!("node shim in {} ({state})", dir.display());
+    if entry.copied {
+        println!(
+            "  note: {} is on a different filesystem than the nub binary — \
+             a copy was made instead of a hardlink",
+            dir.display()
+        );
+    }
+    // The shim runs the resolved Node VANILLA — state it so nobody expects
+    // TypeScript / `.env` loading from a bare `node`; that's what `nub` is for.
+    println!(
+        "  `node` now resolves through nub (version management only — no augmentation; run `nub` for that)"
+    );
+
+    if shim::check_node_shim_noexec(&dir) {
+        eprintln!(
+            "warning: {} is on a filesystem mounted noexec — the shim is installed but every \
+             invocation will fail with \"Permission denied\". Remount without noexec, or use a \
+             HOME on an exec-allowed filesystem.",
+            dir.display()
+        );
+    }
+
+    // Windows profile editing is out of scope for v0 — print the dir to add.
+    if cfg!(windows) {
+        println!(
+            "  PATH: add {} to your PATH (PATH editing isn't automated on Windows yet)",
+            dir.display()
+        );
+        return Ok(0);
+    }
+    match shim::add_node_path_block()? {
+        ProfileOutcome::Added(profile) => println!(
+            "  added {} to PATH in {}\n  restart your shell, or run: source {}",
+            dir.display(),
+            profile.display(),
+            profile.display()
+        ),
+        ProfileOutcome::AlreadyPresent(profile) => {
+            println!("  PATH: already present in {}", profile.display())
+        }
+        ProfileOutcome::Manual { line } => println!(
+            "  PATH: no known shell profile to edit — add this line to your shell config:\n    {line}"
+        ),
+    }
+
+    // Reachability check is meaningful only once the dir is on THIS process's
+    // PATH (right after a fresh install the block isn't sourced yet — the source
+    // hint above already covers that).
+    if path_contains_dir(&dir) {
+        let r = shim::check_node_shim_reachable(&dir);
+        if !r.ok {
+            match &r.first_hit {
+                Some(hit) => eprintln!(
+                    "warning: node resolves to {} which shadows the shim — move {} earlier \
+                     in PATH, or remove that binary",
+                    hit.display(),
+                    dir.display()
+                ),
+                None => eprintln!(
+                    "warning: node resolves to nothing on PATH even though {} is on it — \
+                     is the shim dir readable?",
+                    dir.display()
+                ),
+            }
+        }
+    }
+    Ok(0)
+}
+
+/// `nub node unshim`: delete `~/.nub/node-shim` and strip its PATH block from
+/// every profile. Touches only the dedicated dir + profiles, so it works from
+/// any nub still on PATH. Mirrors [`run_pm_unshim`]. Idempotent.
+fn run_node_unshim() -> Result<i32> {
+    use nub_core::node::shim;
+
+    let dir = shim::node_shim_dir()?;
+    let (existed, changed) = shim::remove_node_shim()?;
+    if existed {
+        println!("removed {}", dir.display());
+    } else {
+        println!("{} was already gone", dir.display());
+    }
+    for profile in &changed {
+        println!(
+            "  PATH: removed the node-shim block from {}",
+            profile.display()
+        );
+    }
+    if changed.is_empty() {
+        println!("  PATH: no profile carried the node-shim block");
+    }
+    Ok(0)
+}
+
 /// Whether `dir` is one of the current process's `PATH` entries (compared
 /// canonicalized, so a symlinked entry still counts).
 fn path_contains_dir(dir: &Path) -> bool {
@@ -7707,29 +7831,40 @@ fn exec_program(program: &Path, args: &[String], envs: &[(String, String)]) -> R
 /// homebrew), existing shims still hardlink the PRE-upgrade inode — remind the
 /// user to re-link. `None` when no shim dir exists (nothing to remind about).
 fn shim_relink_reminder() -> Option<String> {
-    let dir = nub_core::pm::shim::shim_dir().ok()?;
-    dir.is_dir().then(|| {
+    let mut notes = Vec::new();
+    if nub_core::pm::shim::shim_dir().is_ok_and(|d| d.is_dir()) {
+        notes.push("`nub pm shim`");
+    }
+    if nub_core::node::shim::node_shim_dir().is_ok_and(|d| d.is_dir()) {
+        notes.push("`nub node shim`");
+    }
+    (!notes.is_empty()).then(|| {
         format!(
-            "note: the PM shims in {} still run the previous nub until re-linked — run `nub pm shim`.",
-            dir.display()
+            "note: existing shims still run the previous nub until re-linked — run {}.",
+            notes.join(" and ")
         )
     })
 }
 
-/// The self-owned channel owns the new binary's path, so re-link in place
-/// right after the swap (best-effort: a failure downgrades to the reminder).
+/// The self-owned channel owns the new binary's path, so re-link every installed
+/// shim family in place right after the swap (best-effort: a failure downgrades
+/// to the reminder). Covers both the PM shims and the persistent `node` shim.
 fn relink_shims_after_selfowned(install_dir: &Path) {
-    let Ok(dir) = nub_core::pm::shim::shim_dir() else {
-        return;
-    };
-    if !dir.is_dir() {
-        return;
-    }
     let new_bin = install_dir.join("bin").join("nub");
-    match nub_core::pm::shim::install_shims(&new_bin) {
-        Ok(_) => println!("re-linked the PM shims in {}", dir.display()),
-        Err(e) => {
-            eprintln!("could not re-link the PM shims: {e:#} — run `nub pm shim`.")
+    if let Ok(dir) = nub_core::pm::shim::shim_dir()
+        && dir.is_dir()
+    {
+        match nub_core::pm::shim::install_shims(&new_bin) {
+            Ok(_) => println!("re-linked the PM shims in {}", dir.display()),
+            Err(e) => eprintln!("could not re-link the PM shims: {e:#} — run `nub pm shim`."),
+        }
+    }
+    if let Ok(dir) = nub_core::node::shim::node_shim_dir()
+        && dir.is_dir()
+    {
+        match nub_core::node::shim::install_node_shim(&new_bin) {
+            Ok(_) => println!("re-linked the node shim in {}", dir.display()),
+            Err(e) => eprintln!("could not re-link the node shim: {e:#} — run `nub node shim`."),
         }
     }
 }

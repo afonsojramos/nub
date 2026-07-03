@@ -518,12 +518,24 @@ pub fn install_shims(nub_binary: &Path) -> Result<Vec<InstalledShim>> {
 /// NOT cover: replacing a RUNNING shim `.exe` fails (the OS locks executing
 /// images) — still unverified, no test swaps a live image.
 pub fn install_shims_into(dir: &Path, nub_binary: &Path) -> Result<Vec<InstalledShim>> {
+    install_named_shims(dir, &SHIM_NAMES, nub_binary)
+}
+
+/// Link an explicit set of names in `dir` to `nub_binary` — the generalized body
+/// of [`install_shims_into`]. The PM shim installs all six [`SHIM_NAMES`]; the
+/// persistent `node` shim (`crate::node::shim`) installs the single `["node"]`
+/// through the SAME lock + hardlink-then-copy + same-inode-idempotency path.
+pub fn install_named_shims(
+    dir: &Path,
+    names: &[&'static str],
+    nub_binary: &Path,
+) -> Result<Vec<InstalledShim>> {
     // Serialize concurrent writers (a re-link racing a `pnpm -r` shim storm) on
     // a best-effort advisory lock — see [`ShimLock`]. Held until this returns.
     let _lock = ShimLock::acquire(dir);
     std::fs::create_dir_all(dir).with_context(|| format!("creating shim dir {}", dir.display()))?;
-    let mut report = Vec::with_capacity(SHIM_NAMES.len());
-    for name in SHIM_NAMES {
+    let mut report = Vec::with_capacity(names.len());
+    for name in names.iter().copied() {
         let target = dir.join(shim_file_name(name));
         // Already a hardlink of these exact bytes (same device + inode) — leave
         // it in place and skip the remove-then-link window entirely. This is the
@@ -693,6 +705,32 @@ pub const SHIMS_FISH_PATH_LINE: &str = "set -gx PATH $HOME/.nub/shims $PATH";
 /// shims block and never the installer's.
 const BLOCK_MARKER: &str = "# nub shims";
 
+/// Descriptor for one shim family's shell-profile PATH block, so the intricate
+/// all-shells add/strip engine ([`add_path_block_for`] /
+/// [`remove_path_block_from_profiles`]) serves BOTH the PM shims and the
+/// persistent `node` shim (`crate::node::shim`) without duplicating it. Each
+/// family carries a DISTINCT marker so an unshim strips exactly its own block —
+/// never a sibling's, never install.sh's `# nub` block.
+pub struct ShimBlock {
+    /// The marker comment written on its own line above the PATH line.
+    pub marker: &'static str,
+    /// The POSIX (bash/zsh) `export PATH="…:$PATH"` line.
+    pub posix_line: &'static str,
+    /// The fish `set -gx PATH … $PATH` line.
+    pub fish_line: &'static str,
+    /// A substring the PATH line must contain for [`strip_block`]'s defensive
+    /// "is this really our line" guard — the `$HOME`-relative dir (`.nub/shims`).
+    pub dir_marker: &'static str,
+}
+
+/// The PM shims' block (`~/.nub/shims`, `# nub shims`).
+pub const PM_SHIM_BLOCK: ShimBlock = ShimBlock {
+    marker: BLOCK_MARKER,
+    posix_line: SHIMS_POSIX_PATH_LINE,
+    fish_line: SHIMS_FISH_PATH_LINE,
+    dir_marker: ".nub/shims",
+};
+
 /// Outcome of [`add_path_block`], for the CLI's "what changed" report.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProfileOutcome {
@@ -736,7 +774,7 @@ pub fn add_path_block() -> Result<ProfileOutcome> {
     let xdg = std::env::var_os("XDG_CONFIG_HOME")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from);
-    add_path_block_for(&shell, &home, xdg.as_deref())
+    add_path_block_for(&shell, &home, xdg.as_deref(), &PM_SHIM_BLOCK)
 }
 
 /// [`add_path_block`] with the environment made explicit (the testable body).
@@ -753,17 +791,18 @@ pub fn add_path_block_for(
     shell: &str,
     home: &Path,
     xdg_config: Option<&Path>,
+    block: &ShimBlock,
 ) -> Result<ProfileOutcome> {
-    let targets = shell_profiles(shell, home, xdg_config);
+    let targets = shell_profiles(shell, home, xdg_config, block);
     if targets.is_empty() {
         return Ok(ProfileOutcome::Manual {
-            line: SHIMS_POSIX_PATH_LINE,
+            line: block.posix_line,
         });
     }
     let mut first_added: Option<PathBuf> = None;
     let mut first_present: Option<PathBuf> = None;
     for target in &targets {
-        match append_block(target)? {
+        match append_block(target, block.marker)? {
             ProfileOutcome::Added(p) => {
                 first_added.get_or_insert(p);
             }
@@ -780,7 +819,7 @@ pub fn add_path_block_for(
         (Some(p), _) => ProfileOutcome::Added(p),
         (None, Some(p)) => ProfileOutcome::AlreadyPresent(p),
         (None, None) => ProfileOutcome::Manual {
-            line: SHIMS_POSIX_PATH_LINE,
+            line: block.posix_line,
         },
     })
 }
@@ -797,10 +836,15 @@ struct ProfileTarget {
 /// [`add_path_block`] for the per-shell rationale. Empty = unknown shell
 /// (Manual). The order matters: the first element is the one cli.rs reports as
 /// the "source this" file, so it must be the interactive rc.
-fn shell_profiles(shell: &str, home: &Path, xdg_config: Option<&Path>) -> Vec<ProfileTarget> {
+fn shell_profiles(
+    shell: &str,
+    home: &Path,
+    xdg_config: Option<&Path>,
+    block: &ShimBlock,
+) -> Vec<ProfileTarget> {
     let posix = |path: PathBuf, may_create: bool| ProfileTarget {
         path,
-        line: SHIMS_POSIX_PATH_LINE,
+        line: block.posix_line,
         may_create,
     };
     match shell {
@@ -841,7 +885,7 @@ fn shell_profiles(shell: &str, home: &Path, xdg_config: Option<&Path>) -> Vec<Pr
                 .unwrap_or_else(|| home.join(".config"));
             vec![ProfileTarget {
                 path: base.join("fish").join("config.fish"),
-                line: SHIMS_FISH_PATH_LINE,
+                line: block.fish_line,
                 may_create: true,
             }]
         }
@@ -858,7 +902,7 @@ fn appendable(path: &Path) -> bool {
 /// `echo`s produce for its own block. Idempotency keys on the PATH line itself
 /// (trimmed line equality), so a hand-added identical line also counts as
 /// present — and is then deliberately NOT ours to remove.
-fn append_block(target: &ProfileTarget) -> Result<ProfileOutcome> {
+fn append_block(target: &ProfileTarget, marker: &str) -> Result<ProfileOutcome> {
     let existing = match std::fs::read_to_string(&target.path) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -892,7 +936,7 @@ fn append_block(target: &ProfileTarget) -> Result<ProfileOutcome> {
         }
         Err(e) => return Err(e).with_context(|| format!("opening {}", target.path.display())),
     };
-    write!(file, "\n{BLOCK_MARKER}\n{}\n", target.line)
+    write!(file, "\n{marker}\n{}\n", target.line)
         .with_context(|| format!("appending to {}", target.path.display()))?;
     Ok(ProfileOutcome::Added(target.path.clone()))
 }
@@ -909,13 +953,14 @@ pub fn remove_path_block() -> Result<Vec<PathBuf>> {
     let xdg = std::env::var_os("XDG_CONFIG_HOME")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from);
-    remove_path_block_from_profiles(&home, xdg.as_deref())
+    remove_path_block_from_profiles(&home, xdg.as_deref(), &PM_SHIM_BLOCK)
 }
 
 /// [`remove_path_block`] with the environment made explicit (the testable body).
 pub fn remove_path_block_from_profiles(
     home: &Path,
     xdg_config: Option<&Path>,
+    block: &ShimBlock,
 ) -> Result<Vec<PathBuf>> {
     let fish_base = xdg_config
         .map(Path::to_path_buf)
@@ -936,7 +981,7 @@ pub fn remove_path_block_from_profiles(
         let Ok(content) = std::fs::read_to_string(&path) else {
             continue;
         };
-        let Some(stripped) = strip_block(&content) else {
+        let Some(stripped) = strip_block(&content, block) else {
             continue;
         };
         // Temp + rename: a torn write must never truncate a shell profile.
@@ -975,16 +1020,17 @@ pub fn remove_path_block_from_profiles(
 /// nit). The block carries its own leading `\n` separator and a trailing `\n`
 /// after the path line; we excise that whole span, so whatever surrounded it —
 /// including "the file ended right here, no newline" — is restored verbatim.
-fn strip_block(content: &str) -> Option<String> {
+fn strip_block(content: &str, block: &ShimBlock) -> Option<String> {
+    let marker = block.marker;
     // The marker as it sits on its own line: find a line whose trimmed text is
-    // exactly BLOCK_MARKER. We scan line starts so an in-prose mention of the
-    // string can't be mistaken for the marker.
+    // exactly the block's marker. We scan line starts so an in-prose mention of
+    // the string can't be mistaken for the marker.
     let marker_line_start = content
-        .match_indices(BLOCK_MARKER)
+        .match_indices(marker)
         .map(|(idx, _)| idx)
         .find(|&idx| {
             let at_line_start = idx == 0 || content.as_bytes()[idx - 1] == b'\n';
-            let rest = &content[idx + BLOCK_MARKER.len()..];
+            let rest = &content[idx + marker.len()..];
             let to_eol_blank = rest.starts_with('\n') || rest.is_empty();
             at_line_start && to_eol_blank
         })?;
@@ -1002,7 +1048,7 @@ fn strip_block(content: &str) -> Option<String> {
     // newline — but only consume that next line when it really names
     // `.nub/shims` (defensive: a malformed half-block without the line stops at
     // the marker rather than eating an unrelated following line).
-    let after_marker = marker_line_start + BLOCK_MARKER.len();
+    let after_marker = marker_line_start + marker.len();
     let mut block_end = after_marker;
     if content.as_bytes().get(block_end) == Some(&b'\n') {
         block_end += 1; // the marker's trailing newline
@@ -1010,7 +1056,7 @@ fn strip_block(content: &str) -> Option<String> {
             .find('\n')
             .map(|n| block_end + n + 1)
             .unwrap_or(content.len());
-        if content[block_end..path_line_end].contains(".nub/shims") {
+        if content[block_end..path_line_end].contains(block.dir_marker) {
             block_end = path_line_end; // our PATH line + its newline
         }
     }
@@ -1046,24 +1092,39 @@ pub fn check_shims_reachable(shim_dir: &Path) -> Vec<ShimReachability> {
 
 /// [`check_shims_reachable`] against an explicit PATH (the testable body).
 fn check_shims_reachable_in(shim_dir: &Path, path_var: &OsStr) -> Vec<ShimReachability> {
-    let canon_shim = shim_dir.canonicalize().ok();
     PM_SHIM_NAMES
         .into_iter()
-        .map(|name| {
-            let first_hit = scan_path(name, path_var, None, None);
-            let ok = first_hit
-                .as_ref()
-                .zip(canon_shim.as_deref())
-                .is_some_and(|(hit, shim)| {
-                    hit.parent().and_then(|p| p.canonicalize().ok()).as_deref() == Some(shim)
-                });
-            ShimReachability {
-                name,
-                first_hit,
-                ok,
-            }
-        })
+        .map(|name| shim_reachability_in(shim_dir, name, path_var))
         .collect()
+}
+
+/// One shim name's which-style reachability against the current `PATH` — is the
+/// first PATH hit for `name` the entry in `shim_dir`? The single-name check the
+/// persistent `node` shim's post-install warning uses (parity with the PM
+/// sweep's per-name diagnosis).
+pub fn check_shim_reachable(shim_dir: &Path, name: &'static str) -> ShimReachability {
+    shim_reachability_in(
+        shim_dir,
+        name,
+        &std::env::var_os("PATH").unwrap_or_default(),
+    )
+}
+
+/// [`check_shim_reachable`] against an explicit PATH (the shared per-name body).
+fn shim_reachability_in(shim_dir: &Path, name: &'static str, path_var: &OsStr) -> ShimReachability {
+    let canon_shim = shim_dir.canonicalize().ok();
+    let first_hit = scan_path(name, path_var, None, None);
+    let ok = first_hit
+        .as_ref()
+        .zip(canon_shim.as_deref())
+        .is_some_and(|(hit, shim)| {
+            hit.parent().and_then(|p| p.canonicalize().ok()).as_deref() == Some(shim)
+        });
+    ShimReachability {
+        name,
+        first_hit,
+        ok,
+    }
 }
 
 /// The unpinned/transparent fall-through: the first executable `invoked` on
@@ -1894,7 +1955,7 @@ mod tests {
         // file every zsh invocation reads — the non-interactive coverage). The
         // reported outcome is the interactive rc, the file the user sources.
         assert_eq!(
-            add_path_block_for("zsh", &home, None).unwrap(),
+            add_path_block_for("zsh", &home, None, &PM_SHIM_BLOCK).unwrap(),
             ProfileOutcome::Added(zshrc.clone()),
             "the headline outcome names the interactive rc the user sources"
         );
@@ -1914,14 +1975,14 @@ mod tests {
 
         // Adding twice is a no-op on every target.
         assert_eq!(
-            add_path_block_for("zsh", &home, None).unwrap(),
+            add_path_block_for("zsh", &home, None, &PM_SHIM_BLOCK).unwrap(),
             ProfileOutcome::AlreadyPresent(zshrc.clone())
         );
         assert_eq!(std::fs::read_to_string(&zshrc).unwrap(), with_block);
 
         // Removal strips BOTH files and restores the rc byte-for-byte — the
         // installer's `# nub` bin block left intact.
-        let mut changed = remove_path_block_from_profiles(&home, None).unwrap();
+        let mut changed = remove_path_block_from_profiles(&home, None, &PM_SHIM_BLOCK).unwrap();
         changed.sort();
         let mut want = vec![zshrc.clone(), zshenv.clone()];
         want.sort();
@@ -1935,9 +1996,51 @@ mod tests {
 
         // Removing again: no block left, no files changed.
         assert!(
-            remove_path_block_from_profiles(&home, None)
+            remove_path_block_from_profiles(&home, None, &PM_SHIM_BLOCK)
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    // A second, distinct ShimBlock standing in for the node shim's — kept local
+    // so the test asserts the ENGINE's block-independence without depending on
+    // `node::shim`'s constant (this is the pm layer's own test).
+    const TEST_NODE_BLOCK: ShimBlock = ShimBlock {
+        marker: "# nub node shim",
+        posix_line: r#"export PATH="$HOME/.nub/node-shim:$PATH""#,
+        fish_line: "set -gx PATH $HOME/.nub/node-shim $PATH",
+        dir_marker: ".nub/node-shim",
+    };
+
+    #[test]
+    fn two_shim_blocks_coexist_and_unshim_strips_only_its_own() {
+        // The dedicated-marker design's load-bearing property: `nub pm shim` and
+        // `nub node shim` write DISTINCT blocks to the same profiles, and
+        // unshimming one must leave the other (and install.sh's `# nub`) intact.
+        let home = tmpdir("two-blocks");
+        let zshrc = home.join(".zshrc");
+        std::fs::write(&zshrc, "# nub\nexport PATH=\"$HOME/.nub/bin:$PATH\"\n").unwrap();
+
+        add_path_block_for("zsh", &home, None, &PM_SHIM_BLOCK).unwrap();
+        add_path_block_for("zsh", &home, None, &TEST_NODE_BLOCK).unwrap();
+        let both = std::fs::read_to_string(&zshrc).unwrap();
+        assert!(both.contains("# nub shims") && both.contains("# nub node shim"));
+
+        // Strip the node block: the PM block and the installer block survive.
+        remove_path_block_from_profiles(&home, None, &TEST_NODE_BLOCK).unwrap();
+        let after = std::fs::read_to_string(&zshrc).unwrap();
+        assert!(after.contains("# nub shims"), "PM block survives");
+        assert!(
+            after.contains(".nub/bin"),
+            "install.sh's bin block survives"
+        );
+        assert!(!after.contains("# nub node shim"), "the node block is gone");
+
+        // Strip the PM block too: back to exactly the original installer block.
+        remove_path_block_from_profiles(&home, None, &PM_SHIM_BLOCK).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&zshrc).unwrap(),
+            "# nub\nexport PATH=\"$HOME/.nub/bin:$PATH\"\n"
         );
     }
 
@@ -1947,7 +2050,7 @@ mod tests {
 
         // zsh: both .zshrc (interactive) and .zshenv (all invocations) are
         // created; the headline outcome is the interactive rc.
-        let outcome = add_path_block_for("zsh", &home, None).unwrap();
+        let outcome = add_path_block_for("zsh", &home, None, &PM_SHIM_BLOCK).unwrap();
         assert_eq!(outcome, ProfileOutcome::Added(home.join(".zshrc")));
         let zsh_block = format!("\n# nub shims\n{SHIMS_POSIX_PATH_LINE}\n");
         assert_eq!(
@@ -1964,7 +2067,7 @@ mod tests {
         let xdg = home.join("xdg");
         let fish_config = xdg.join("fish").join("config.fish");
         assert_eq!(
-            add_path_block_for("fish", &home, Some(&xdg)).unwrap(),
+            add_path_block_for("fish", &home, Some(&xdg), &PM_SHIM_BLOCK).unwrap(),
             ProfileOutcome::Added(fish_config.clone())
         );
         let fish_content = std::fs::read_to_string(&fish_config).unwrap();
@@ -1975,7 +2078,7 @@ mod tests {
 
         // An unknown shell still can only be handled manually.
         assert_eq!(
-            add_path_block_for("tcsh", &home, None).unwrap(),
+            add_path_block_for("tcsh", &home, None, &PM_SHIM_BLOCK).unwrap(),
             ProfileOutcome::Manual {
                 line: SHIMS_POSIX_PATH_LINE
             }
@@ -1991,7 +2094,7 @@ mod tests {
         // actually work.
         let home = tmpdir("fresh-bash");
         assert_eq!(
-            add_path_block_for("bash", &home, None).unwrap(),
+            add_path_block_for("bash", &home, None, &PM_SHIM_BLOCK).unwrap(),
             ProfileOutcome::Added(home.join(".profile")),
             "a fresh bash HOME must get a created+wired login profile, not Manual"
         );
@@ -2011,7 +2114,7 @@ mod tests {
         let home = tmpdir("bash-with-rc");
         std::fs::write(home.join(".bashrc"), "# rc\n").unwrap();
         assert_eq!(
-            add_path_block_for("bash", &home, None).unwrap(),
+            add_path_block_for("bash", &home, None, &PM_SHIM_BLOCK).unwrap(),
             ProfileOutcome::Added(home.join(".bashrc"))
         );
         assert!(
@@ -2031,7 +2134,7 @@ mod tests {
         let home = tmpdir("bash-with-profile");
         std::fs::write(home.join(".bash_profile"), "# hello\n").unwrap();
         assert_eq!(
-            add_path_block_for("bash", &home, None).unwrap(),
+            add_path_block_for("bash", &home, None, &PM_SHIM_BLOCK).unwrap(),
             ProfileOutcome::Added(home.join(".bash_profile")),
             "an existing .bash_profile is preferred as the login target"
         );
@@ -2049,12 +2152,13 @@ mod tests {
         let home = tmpdir("sweep");
         let xdg = home.join("xdg");
 
-        add_path_block_for("zsh", &home, None).unwrap(); // .zshrc + .zshenv
-        add_path_block_for("fish", &home, Some(&xdg)).unwrap(); // config.fish
+        add_path_block_for("zsh", &home, None, &PM_SHIM_BLOCK).unwrap(); // .zshrc + .zshenv
+        add_path_block_for("fish", &home, Some(&xdg), &PM_SHIM_BLOCK).unwrap(); // config.fish
         std::fs::write(home.join(".bashrc"), "# rc\n").unwrap();
-        add_path_block_for("bash", &home, None).unwrap(); // .bashrc + .profile
+        add_path_block_for("bash", &home, None, &PM_SHIM_BLOCK).unwrap(); // .bashrc + .profile
 
-        let mut changed = remove_path_block_from_profiles(&home, Some(&xdg)).unwrap();
+        let mut changed =
+            remove_path_block_from_profiles(&home, Some(&xdg), &PM_SHIM_BLOCK).unwrap();
         changed.sort();
         let mut want = vec![
             home.join(".zshrc"),
@@ -2070,7 +2174,7 @@ mod tests {
         );
         // A second sweep is a clean no-op.
         assert!(
-            remove_path_block_from_profiles(&home, Some(&xdg))
+            remove_path_block_from_profiles(&home, Some(&xdg), &PM_SHIM_BLOCK)
                 .unwrap()
                 .is_empty()
         );
@@ -2086,14 +2190,14 @@ mod tests {
         let original = "export EDITOR=vi"; // deliberately no trailing newline
         std::fs::write(&zshrc, original).unwrap();
 
-        add_path_block_for("zsh", &home, None).unwrap();
+        add_path_block_for("zsh", &home, None, &PM_SHIM_BLOCK).unwrap();
         // Sanity: the block landed after the original's last byte.
         assert_eq!(
             std::fs::read_to_string(&zshrc).unwrap(),
             format!("{original}\n# nub shims\n{SHIMS_POSIX_PATH_LINE}\n")
         );
 
-        remove_path_block_from_profiles(&home, None).unwrap();
+        remove_path_block_from_profiles(&home, None, &PM_SHIM_BLOCK).unwrap();
         assert_eq!(
             std::fs::read_to_string(&zshrc).unwrap(),
             original,
@@ -2107,37 +2211,40 @@ mod tests {
         let block = format!("\n# nub shims\n{line}\n");
 
         // No block present → None, file untouched.
-        assert_eq!(strip_block("just some config\n"), None);
+        assert_eq!(strip_block("just some config\n", &PM_SHIM_BLOCK), None);
         // A `# nub` (installer) block is NOT our `# nub shims` marker → untouched.
         assert_eq!(
-            strip_block("# nub\nexport PATH=\"$HOME/.nub/bin:$PATH\"\n"),
+            strip_block(
+                "# nub\nexport PATH=\"$HOME/.nub/bin:$PATH\"\n",
+                &PM_SHIM_BLOCK
+            ),
             None
         );
 
         // Original with trailing newline: restored exactly.
         let orig = "a\nb\n";
         assert_eq!(
-            strip_block(&format!("{orig}{block}")).as_deref(),
+            strip_block(&format!("{orig}{block}"), &PM_SHIM_BLOCK).as_deref(),
             Some(orig)
         );
         // Original without trailing newline: restored exactly (no NL gained).
         let orig = "a\nb";
         assert_eq!(
-            strip_block(&format!("{orig}{block}")).as_deref(),
+            strip_block(&format!("{orig}{block}"), &PM_SHIM_BLOCK).as_deref(),
             Some(orig)
         );
         // Empty original (a file we created solely for the block): back to empty.
-        assert_eq!(strip_block(&block).as_deref(), Some(""));
+        assert_eq!(strip_block(&block, &PM_SHIM_BLOCK).as_deref(), Some(""));
         // Block followed by later user content: only our bytes are excised.
         assert_eq!(
-            strip_block(&format!("a\n{block}c\n")).as_deref(),
+            strip_block(&format!("a\n{block}c\n"), &PM_SHIM_BLOCK).as_deref(),
             Some("a\nc\n"),
             "content appended after our block survives the strip"
         );
         // A half-block (marker but the line was hand-deleted) stops at the
         // marker rather than eating the unrelated next line.
         assert_eq!(
-            strip_block("a\n\n# nub shims\nunrelated line\n").as_deref(),
+            strip_block("a\n\n# nub shims\nunrelated line\n", &PM_SHIM_BLOCK).as_deref(),
             Some("a\nunrelated line\n"),
             "a marker without our PATH line must not consume the following line"
         );
@@ -2228,7 +2335,7 @@ mod tests {
         .unwrap();
         std::os::unix::fs::symlink(&real, home.join(".zshrc")).unwrap();
 
-        let changed = remove_path_block_from_profiles(&home, None).unwrap();
+        let changed = remove_path_block_from_profiles(&home, None, &PM_SHIM_BLOCK).unwrap();
         assert_eq!(changed, vec![home.join(".zshrc")]);
         assert!(
             home.join(".zshrc").symlink_metadata().unwrap().is_symlink(),
