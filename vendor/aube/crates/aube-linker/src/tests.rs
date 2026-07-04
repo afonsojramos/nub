@@ -524,6 +524,65 @@ fn force_materialize_makes_only_listed_package_a_real_dir_under_gvs() {
 }
 
 #[test]
+fn force_materialize_keeps_store_copy_so_store_resident_dependents_dont_orphan() {
+    // Orphan-safety regression (the shipped @storybook/builder-webpack5 ←
+    // @storybook/react-webpack5 class). The graph is root → foo → bar; here bar
+    // is force-materialized while foo stays a store symlink. foo reaches bar
+    // through its store entry's sibling symlink, which targets
+    // `<store>/<subdir(bar)>/node_modules/bar`. If the force-materialize branch
+    // only wrote bar's project-local real dir and skipped bar's store copy, that
+    // sibling would dangle — the exact orphan the builder-webpack5 case hit. The
+    // fix keeps bar's store copy at its subdir IN ADDITION to the project-local
+    // dir; assert BOTH the store copy and the dependent's resolved sibling.
+    let dir = tempfile::tempdir().unwrap();
+    let project_dir = dir.path().join("project");
+    std::fs::create_dir_all(&project_dir).unwrap();
+
+    let (store, indices) = setup_store_with_files(dir.path());
+    let linker = Linker::new_with_gvs(&store, LinkStrategy::Copy, true)
+        .with_hoist(false)
+        .with_force_materialize(&["bar".to_string()]);
+    let graph = make_graph(); // root -> foo -> bar
+
+    linker.link_all(&project_dir, &graph, &indices).unwrap();
+
+    // bar is force-materialized: a real project-local dir.
+    let aube_bar = project_dir.join("node_modules/.aube/bar@2.0.0");
+    assert!(
+        !aube_bar
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "force-materialized bar must be a real project-local dir"
+    );
+
+    // The orphan-safety invariant: bar's store copy still exists at exactly the
+    // subdir a store-resident dependent's sibling symlink points at.
+    let bar_store_copy = store
+        .virtual_store_dir()
+        .join(linker.virtual_store_subdir("bar@2.0.0"))
+        .join("node_modules/bar/index.js");
+    assert_eq!(
+        std::fs::read_to_string(&bar_store_copy).unwrap(),
+        "module.exports = 'bar';",
+        "force-materialized bar's store copy must remain at its subdir so a \
+         store-resident dependent's sibling symlink still resolves"
+    );
+
+    // End-to-end: foo (store-resident) resolves bar through its sibling symlink.
+    // `.aube/foo@1.0.0` is a store symlink; its `node_modules/bar` sibling must
+    // resolve all the way to bar's content — not dangle.
+    let foo_sibling_bar =
+        project_dir.join("node_modules/.aube/foo@1.0.0/node_modules/bar/index.js");
+    assert_eq!(
+        std::fs::read_to_string(&foo_sibling_bar).unwrap(),
+        "module.exports = 'bar';",
+        "store-resident foo's sibling to force-materialized bar must resolve (no orphan)"
+    );
+}
+
+#[test]
 fn test_link_file_fresh_reports_missing_cas_shard_and_invalidates_cache() {
     // Reproduces jdx/aube#393: a partially corrupt CAS leaves the
     // cached package index pointing at a missing shard. Materialize

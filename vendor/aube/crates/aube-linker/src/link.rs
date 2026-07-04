@@ -325,19 +325,46 @@ impl Linker {
                             // on a real directory — the same signal `classify_entry_state`
                             // and `detect_aube_dir_gvs_mode` rely on.
                             if self.force_materialize_matches(&pkg.name) {
-                                match std::fs::read_link(&local_aube_entry) {
-                                    Ok(_) => {
-                                        // Stale shared-store symlink / junction — drop it.
-                                        let _ = std::fs::remove_dir(&local_aube_entry)
-                                            .or_else(|_| std::fs::remove_file(&local_aube_entry));
-                                    }
-                                    Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => {
-                                        // Already a real project-local directory.
-                                        local_stats.packages_cached += 1;
-                                        return Ok(local_stats);
-                                    }
-                                    // Missing (`NotFound`) or any other error → materialize below.
-                                    Err(_) => {}
+                                // Orphan-safety invariant: force-materialize gives X
+                                // a real project-local dir so X's OWN undeclared
+                                // consumer-provided import resolves via the project
+                                // root — but every STORE-RESIDENT dependent of X
+                                // still reaches X through a sibling symlink into the
+                                // shared store at `virtual_store_subdir(X)` (==
+                                // `subdir`). The project-local dir alone does NOT
+                                // satisfy those siblings, and X's store copy is NOT
+                                // guaranteed to exist at THIS `subdir`: the fetch
+                                // prewarm materializes X under its own subtree hash,
+                                // which can differ from the link-phase `subdir` a
+                                // dependent's sibling points at (they diverge
+                                // whenever the link phase folds a fingerprint the
+                                // prewarm didn't). A non-force-materialized install
+                                // would still WRITE X's store copy at `subdir` here
+                                // (the normal branch below), keeping every dependent
+                                // resolvable; the pre-fix force-materialize branch
+                                // skipped that write, dangling the sibling — the
+                                // `@storybook/builder-webpack5` ← `react-webpack5`
+                                // regression. So ALWAYS keep X's store copy at
+                                // `subdir` IN ADDITION to the project-local dir. The
+                                // store copy is reflinked/CoW and is exactly what a
+                                // non-force-materialized install writes, so this only
+                                // RESTORES it — it is not a second full byte copy.
+                                let store_pkg_dir = self
+                                    .virtual_store
+                                    .join(subdir)
+                                    .join("node_modules")
+                                    .join(&pkg.name);
+                                // `InvalidInput` from `read_link` == a real dir (not
+                                // a symlink/junction). See the classification note
+                                // above for why this beats `is_symlink()`.
+                                let local_is_real_dir = matches!(
+                                    std::fs::read_link(&local_aube_entry),
+                                    Err(e) if e.kind() == std::io::ErrorKind::InvalidInput
+                                );
+                                if store_pkg_dir.exists() && local_is_real_dir {
+                                    // Both placements already correct.
+                                    local_stats.packages_cached += 1;
+                                    return Ok(local_stats);
                                 }
                                 let owned_index;
                                 let index = match package_indices.get(dep_path) {
@@ -356,6 +383,36 @@ impl Linker {
                                         &owned_index
                                     }
                                 };
+                                // Keep the shared-store copy at the exact `subdir`
+                                // every dependent's sibling targets. Idempotent (a
+                                // cache hit when already placed there). Stats land in
+                                // a throwaway sink so this belt-and-suspenders write
+                                // does not double-count the package — the
+                                // project-local `materialize_into` below is the one
+                                // that counts, matching a normal single-placement
+                                // install's package tally.
+                                let mut store_stats = LinkStats::default();
+                                self.ensure_in_virtual_store_with_subdir(
+                                    dep_path,
+                                    subdir,
+                                    pkg,
+                                    index,
+                                    &mut store_stats,
+                                    nested_link_targets.as_ref(),
+                                )?;
+                                if local_is_real_dir {
+                                    // Project-local dir was already correct; only the
+                                    // store copy needed (re)placing, done above.
+                                    local_stats.packages_cached += 1;
+                                    return Ok(local_stats);
+                                }
+                                // Drop a stale shared-store symlink/junction left by
+                                // a prior GVS install or the fetch prewarm before
+                                // materializing the real project-local dir.
+                                if std::fs::read_link(&local_aube_entry).is_ok() {
+                                    let _ = std::fs::remove_dir(&local_aube_entry)
+                                        .or_else(|_| std::fs::remove_file(&local_aube_entry));
+                                }
                                 self.materialize_into(
                                     &aube_dir,
                                     &aube_dir,
