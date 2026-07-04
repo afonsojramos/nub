@@ -476,6 +476,12 @@ Add your own with one line in `.npmrc`:
 forceMaterializePackages[]=my-adapter
 ```
 
+A bundler that resolves modules by their real path — Metro (bare React Native), Next.js, Nuxt, Parcel — only crawls the project directory, so it can't see the shared store. Nub gives those projects a self-contained, project-local store automatically. Extend the list in `.npmrc`:
+
+```ini
+disableGlobalVirtualStoreForPackages[]=my-bundler
+```
+
 ### Offline installs
 
 Like pnpm, Nub relinks files from the global store into `node_modules` via reflink (APFS/btrfs) or hardlink (ext4) when the store already holds every package — no re-download, no byte-for-byte copy. The benchmark below measures the warm reinstall case: `node_modules` is removed, packages are already on disk, and the installer rebuilds the project layout.
