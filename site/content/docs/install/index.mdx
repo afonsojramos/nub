@@ -466,7 +466,11 @@ enableGlobalVirtualStore=false
 
 Either layout resolves the same packages — including type packages (`@types/*`) pulled in transitively but not declared, which stay reachable in both.
 
-A few packages statically import a backend you pick at runtime — `@hookform/resolvers/zod` imports the `zod` your app installs, without declaring it. Under the shared store the adapter's real path sits outside the project, so Node's directory walk can't reach that backend and the import throws. Nub materializes those adapters into the project automatically so they resolve, while the rest of the tree keeps sharing. Add your own with one line in `.npmrc`:
+A few packages statically import a backend you pick at runtime — `@hookform/resolvers/zod` imports the `zod` your app installs, without declaring it. Under the shared store the adapter's real path sits outside the project, so Node's directory walk can't reach that backend and the import throws. Nub materializes those adapters into the project automatically so they resolve, while the rest of the tree keeps sharing.
+
+The same treatment covers packages that write generated code back into their own install directory. Prisma's postinstall runs `prisma generate`, which writes the generated client next to `@prisma/client` on disk — and under the shared store that spot is machine-global, keyed by version rather than by project or schema. Two projects with different Prisma schemas would otherwise share one generated client and silently overwrite each other's models. Nub materializes `@prisma/client` into each project so `generate` stays project-local, matching pnpm.
+
+Add your own with one line in `.npmrc`:
 
 ```ini
 forceMaterializePackages[]=my-adapter

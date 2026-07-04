@@ -2104,10 +2104,25 @@ fn strip_yarnrc_value(rest: &str) -> &str {
 /// its declared dependent `@storybook/react-webpack5` (not on this list) stays
 /// store-resident and can no longer find its own dependency once pulled out, turning a
 /// passing `storybook build` into `Cannot find module '@storybook/builder-webpack5'`.
+///
+/// A THIRD offender class: postinstall codegen that writes generated output back into
+/// its own installed directory via realpath. `@prisma/client`'s postinstall runs
+/// `prisma generate`, which resolves the default output dir relative to the package's
+/// realpath and writes the generated client (`.prisma/client`) into the enclosing
+/// `node_modules`. Under GVS that realpath is the machine-global shared store, whose
+/// entry key is package-identity-scoped, NOT project- or schema-scoped — so two
+/// projects with different Prisma schemas share ONE mutable generated client and
+/// silently corrupt each other (last-writer-wins; #286-shape data corruption).
+/// Force-materialize makes the entry project-local, so `generate` writes into the
+/// project's own tree, matching pnpm's isolated virtual store. Orphan-safety verified:
+/// `@prisma/client` is a leaf runtime consumed by the app root (adapters like
+/// `@auth/prisma-adapter` take it as a peer, satisfied at the top level), so pulling it
+/// project-local orphans no store-resident dependent (the builder-webpack5 failure mode
+/// above does not apply).
 const NUB_FORCE_MATERIALIZE_PACKAGES: &str = "@hookform/resolvers,cypress,langsmith,\
 @testing-library/jest-dom,drizzle-orm,swiper,@angular/common,@angular/router,\
 @apollo/client,@vercel/analytics,preact,next-themes,\
-@react-pdf/renderer";
+@react-pdf/renderer,@prisma/client";
 
 /// - Layout policy: EVERY project defaults to the isolated layout
 ///   (`nodeLinker=isolated`) — strict (no phantom deps) and GVS-fast; a project
@@ -2771,6 +2786,14 @@ mod tests {
                 "{types_consumer} (#286 ambient-@types class) must be on the list: {list}"
             );
         }
+        // The postinstall-codegen class: `@prisma/client`'s `prisma generate`
+        // writes the generated client into its own realpath, which under GVS is
+        // the machine-global store — two projects with different schemas then
+        // corrupt each other. Force-materialize keeps `generate` project-local.
+        assert!(
+            names.contains(&"@prisma/client"),
+            "@prisma/client (postinstall-codegen class) must be on the list: {list}"
+        );
         for excluded in ["ox", "event-target-shim", "@nestjs/swagger"] {
             assert!(
                 !names.contains(&excluded),
