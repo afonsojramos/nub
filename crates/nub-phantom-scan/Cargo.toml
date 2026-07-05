@@ -1,0 +1,29 @@
+# nub-phantom-scan — the reachable-graph phantom SCANNER, lifted out of the
+# excluded `nub-phantom` eval tool into a shared workspace crate so the shipped
+# `nub` CLI's dynamic per-version scan-on-link can drive package ejection from
+# the SAME graph-walk + classify pipeline the eval tool uses.
+#
+# LEAN by construction: graph.rs / classify.rs / manifest.rs import ZERO oxc
+# directly — they are pure Rust + serde_json over `nub-phantom-core`'s parser
+# subset. So linking this into the CLI costs only what `nub-phantom-core` already
+# costs (the oxc parser subset `verify_deps` already links), NOT the registry
+# fetch stack (reqwest/tar/flate2) that keeps `nub-phantom` excluded.
+[package]
+name = "nub-phantom-scan"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "nub_phantom_scan"
+path = "src/lib.rs"
+
+[dependencies]
+nub-phantom-core = { path = "../nub-phantom-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[lints]
+workspace = true

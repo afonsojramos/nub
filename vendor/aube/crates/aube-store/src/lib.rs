@@ -7,6 +7,7 @@ mod cas;
 mod git;
 mod index;
 mod integrity;
+mod phantom_hook;
 mod tarball;
 
 pub use git::{
@@ -28,6 +29,8 @@ pub use integrity::{
     validate_and_encode_name, validate_pkg_content, validate_version, verify_integrity,
     verify_precomputed_sha512,
 };
+pub(crate) use phantom_hook::run_extract_hook;
+pub use phantom_hook::set_extract_hook;
 #[cfg(test)]
 pub(crate) use tarball::normalize_tar_entry_path;
 pub(crate) use tarball::{
