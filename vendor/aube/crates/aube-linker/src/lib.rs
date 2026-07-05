@@ -12,6 +12,7 @@ use std::path::Path;
 mod builder;
 mod clonedir;
 mod error;
+mod force_materialize;
 mod hoisted;
 mod link;
 mod materialize;
@@ -26,6 +27,9 @@ mod public_hoist_tests;
 mod tests;
 
 pub use error::Error;
+pub use force_materialize::{
+    ForceMaterializePlan, expand_force_materialize, set_force_materialize_expand_hook,
+};
 pub use hoisted::HoistedPlacements;
 pub use link::build_nested_link_targets;
 pub(crate) use materialize::{
@@ -262,6 +266,19 @@ pub struct Linker {
     /// callers and every existing test → the GVS pass is byte-for-byte
     /// unchanged.
     force_materialize: std::collections::HashSet<String>,
+    /// Rung 2 of selective-subtree materialization: undeclared phantom targets
+    /// to HOIST-WITHIN a force-materialized package's own `node_modules`, keyed
+    /// by the importer's dep_path → the target dep_paths. A transitively-phantom
+    /// package (`@nuxt/devtools` → the undeclared `unstorage`, `vue-router` →
+    /// the optional-peer-but-unlinked `@vue/compiler-sfc`) doesn't declare the
+    /// import, so once it's force-materialized its own `node_modules` has no
+    /// sibling for it and Node's walk still 404s. Injecting the target as an
+    /// extra sibling (reusing the materialize sibling-wiring, so the target
+    /// resolves through its existing `.aube/<entry>`) makes the walk succeed.
+    /// The target must already be resolved in the graph (this is reachability,
+    /// not install). Empty for standalone callers and every existing test → the
+    /// materialize pass is byte-for-byte unchanged.
+    phantom_hoist: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 /// Strategy for linking files from the store to node_modules.

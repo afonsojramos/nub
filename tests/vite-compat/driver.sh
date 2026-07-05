@@ -36,6 +36,17 @@ name="$(basename "$proj")"
 
 fail() { echo "FAIL[$name]: $*" >&2; }
 
+# Kill a process AND all its descendants. A bare `kill $pid` / the old
+# `pkill -f "vite.*--port"` misses the child processes an `astro dev` / `nuxt dev`
+# / `vite` parent spawns, so a server LEAKS onto the port; the next run then binds
+# a DIFFERENT port while the harness curls the stale (unpatched) server → false
+# 403s. Recursing children-first (pgrep -P) tears the whole tree down.
+kill_tree() {
+  local p="$1" c
+  for c in $(pgrep -P "$p" 2>/dev/null); do kill_tree "$c"; done
+  kill -TERM "$p" 2>/dev/null
+}
+
 cd "$proj" || { fail "no dir"; exit 2; }
 
 # ── 1. install ──────────────────────────────────────────────────────────────
@@ -91,24 +102,33 @@ if [ -n "$store" ]; then
   target=$(node -e "const fs=require('fs'),p=require('path');const s=process.argv[1];let hit='';for(const d of (fs.existsSync(s)?fs.readdirSync(s):[])){const nm=p.join(s,d,'node_modules');if(fs.existsSync(nm)){for(const m of fs.readdirSync(nm)){const f=p.join(nm,m,'package.json');if(fs.existsSync(f)){hit=fs.realpathSync(f);break}}}if(hit)break}console.log(hit)" "$store")
 fi
 if [ -n "$dev_cmd" ] && [ "$dev_cmd" != "-" ]; then
-  ( cd "$proj" && eval "$dev_cmd" ) >/tmp/vc-$name-dev.log 2>&1 &
+  devlog=/tmp/vc-$name-dev.log
+  : >"$devlog"
+  # `exec` so devpid IS the dev process (astro/nuxt/vite), not a wrapper subshell,
+  # making kill_tree reach the real tree.
+  ( cd "$proj" && exec $dev_cmd ) >"$devlog" 2>&1 &
   devpid=$!
-  up=""
-  for i in $(seq 1 40); do
+  # Parse the ACTUAL bound port from the dev log — a framework re-picks a free
+  # port if the requested one is taken (e.g. after a prior leak), so curling the
+  # requested port would hit the wrong/stale server. Fall back to the requested.
+  bound="$port"; up=""
+  for i in $(seq 1 60); do
     sleep 0.5
-    curl -s -o /dev/null "http://127.0.0.1:$port/" 2>/dev/null && { up=1; break; }
+    pp=$(grep -oE 'https?://(localhost|127\.0\.0\.1|\[::1\]):[0-9]+' "$devlog" 2>/dev/null \
+           | grep -oE '[0-9]+$' | head -1)
+    [ -n "$pp" ] && bound="$pp"
+    curl -s -o /dev/null "http://127.0.0.1:$bound/" 2>/dev/null && { up=1; break; }
   done
   if [ -n "$up" ] && [ -n "$target" ]; then
-    served_code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/@fs$target")
+    served_code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$bound/@fs$target")
   fi
   # scan for the literal Vite 403 line
-  if grep -q "outside of Vite serving allow list\|is not allowed" /tmp/vc-$name-dev.log 2>/dev/null; then
+  if grep -q "outside of Vite serving allow list\|is not allowed" "$devlog" 2>/dev/null; then
     log_403="403-in-log"
   else
     log_403="no-403"
   fi
-  kill $devpid 2>/dev/null; wait $devpid 2>/dev/null
-  pkill -f "vite.*--port $port" 2>/dev/null
+  kill_tree "$devpid"; sleep 0.3; kill -KILL "$devpid" 2>/dev/null; wait "$devpid" 2>/dev/null
 fi
 
 # ── 5. build ────────────────────────────────────────────────────────────────

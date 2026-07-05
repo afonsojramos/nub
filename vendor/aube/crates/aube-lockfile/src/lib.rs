@@ -731,6 +731,79 @@ impl LockfileGraph {
         reachable
     }
 
+    /// Reverse ("ancestor") closure: the seed dep_paths UNION every package
+    /// that transitively IMPORTS a seed. The mirror image of
+    /// [`transitive_closure`], which walks child edges (what a package depends
+    /// on); this walks importer edges (what depends on a package).
+    ///
+    /// Bounded to the affected subtree BY CONSTRUCTION: a package that does not
+    /// transitively import a seed is never reached, so unrelated top-level
+    /// subtrees are excluded no matter how large the tree — a project with one
+    /// phantom-breaker plus 10k unrelated deps yields a closure of just the
+    /// breaker's importer subtree. The only way this approaches the whole tree
+    /// is a *foundational* seed (everything imports it); phantom breakers are
+    /// empirically never foundational, so a large closure is a signal, not a norm.
+    ///
+    /// Why the closure and not the package alone: force-materializing only a
+    /// transitively-consumed package leaves every store-resident importer
+    /// resolving the un-materialized shared-store copy — a silent singleton
+    /// split (two realpaths, two module instances). Materializing the whole
+    /// importer closure makes every consumer load the one project-local copy.
+    ///
+    /// The project root is the natural top boundary: root importers are the
+    /// project itself, not a materializable package, so the walk stops at the
+    /// `packages` it can reach. Missing seeds are treated as leaves (skipped),
+    /// matching `transitive_closure`.
+    ///
+    /// Registry-only edge caveat (same as `transitive_closure`): the child key is
+    /// rebuilt as the plain `{name}@{tail}`, NOT the `name@git+<hash>` /
+    /// `name@url+<hash>` form a git/tarball dep carries, so an importer reached
+    /// ONLY through a git/tarball intermediary is not walked. This does not weaken
+    /// the force-materialize soundness in practice: force-materialize is
+    /// registry-only, so such an intermediary could not materialize anyway — the
+    /// split it would cause is a boundary of registry-only materialization, not a
+    /// missed closure member.
+    pub fn importer_closure<'a>(
+        &self,
+        seeds: impl IntoIterator<Item = &'a str>,
+    ) -> std::collections::HashSet<String> {
+        use std::collections::{HashMap, HashSet, VecDeque};
+
+        // Invert every forward edge once into child_dep_path → [importer
+        // dep_paths]. Keyed by the reconstructed child key (`{name}@{tail}`,
+        // identical to `transitive_closure`'s reconstruction) so it lines up
+        // with `packages` keys and the seed dep_paths. Importer values borrow
+        // the `packages` keys (live for `&self`), so only the child keys allocate.
+        let mut importers_of: HashMap<String, Vec<&str>> = HashMap::new();
+        for (parent_dep_path, pkg) in &self.packages {
+            for (child_name, child_tail) in &pkg.dependencies {
+                importers_of
+                    .entry(format!("{child_name}@{child_tail}"))
+                    .or_default()
+                    .push(parent_dep_path.as_str());
+            }
+        }
+
+        let mut closure: HashSet<String> = HashSet::new();
+        let mut queue: VecDeque<String> = VecDeque::new();
+        for seed in seeds {
+            if closure.insert(seed.to_string()) {
+                queue.push_back(seed.to_string());
+            }
+        }
+        while let Some(dep_path) = queue.pop_front() {
+            let Some(importers) = importers_of.get(&dep_path) else {
+                continue;
+            };
+            for importer in importers {
+                if closure.insert((*importer).to_string()) {
+                    queue.push_back((*importer).to_string());
+                }
+            }
+        }
+        closure
+    }
+
     /// Clone only the `packages` entries whose keys are in `reachable`.
     /// Paired with `transitive_closure` to produce the pruned
     /// `LockfileGraph.packages` for `filter_deps` / `subset_to_importer`.
@@ -965,5 +1038,145 @@ impl LockfileGraph {
         if self.workspace_extra_fields.is_empty() {
             self.workspace_extra_fields = prior.workspace_extra_fields.clone();
         }
+    }
+}
+
+#[cfg(test)]
+mod importer_closure_tests {
+    use super::*;
+
+    /// Build a graph from `(dep_path, [(child_name, child_tail)])` edges. The
+    /// package name is parsed off the dep_path (the part before the last `@`,
+    /// handling `@scope/name`), matching how real dep_paths encode identity.
+    fn graph(edges: &[(&str, &[(&str, &str)])]) -> LockfileGraph {
+        let mut g = LockfileGraph::default();
+        for (dep_path, deps) in edges {
+            let name = dep_path_name(dep_path);
+            let mut pkg = LockedPackage {
+                name: name.to_string(),
+                dep_path: dep_path.to_string(),
+                ..Default::default()
+            };
+            for (child_name, child_tail) in *deps {
+                pkg.dependencies
+                    .insert(child_name.to_string(), child_tail.to_string());
+            }
+            g.packages.insert(dep_path.to_string(), pkg);
+        }
+        g
+    }
+
+    /// Package name from a dep_path: everything before the version's `@`
+    /// (the LAST `@` for a scoped `@scope/name@1.0.0`).
+    fn dep_path_name(dep_path: &str) -> &str {
+        let core = dep_path.split(['(']).next().unwrap_or(dep_path);
+        match core.rfind('@') {
+            Some(0) | None => core,
+            Some(i) => &core[..i],
+        }
+    }
+
+    fn closure_of(g: &LockfileGraph, seeds: &[&str]) -> std::collections::BTreeSet<String> {
+        g.importer_closure(seeds.iter().copied())
+            .into_iter()
+            .collect()
+    }
+
+    #[test]
+    fn linear_chain_walks_up_to_every_ancestor() {
+        // a → b → c ; seed c ⇒ {a, b, c}. The root importer (project) is not a
+        // package, so the walk stops at `a`.
+        let g = graph(&[
+            ("a@1.0.0", &[("b", "1.0.0")]),
+            ("b@1.0.0", &[("c", "1.0.0")]),
+            ("c@1.0.0", &[]),
+        ]);
+        assert_eq!(
+            closure_of(&g, &["c@1.0.0"]),
+            ["a@1.0.0", "b@1.0.0", "c@1.0.0"].map(String::from).into()
+        );
+    }
+
+    #[test]
+    fn diamond_collects_all_importer_paths() {
+        // a → b, a → c, b → d, c → d ; seed d ⇒ {a, b, c, d} (both paths).
+        let g = graph(&[
+            ("a@1.0.0", &[("b", "1.0.0"), ("c", "1.0.0")]),
+            ("b@1.0.0", &[("d", "1.0.0")]),
+            ("c@1.0.0", &[("d", "1.0.0")]),
+            ("d@1.0.0", &[]),
+        ]);
+        assert_eq!(
+            closure_of(&g, &["d@1.0.0"]),
+            ["a@1.0.0", "b@1.0.0", "c@1.0.0", "d@1.0.0"]
+                .map(String::from)
+                .into()
+        );
+    }
+
+    #[test]
+    fn unrelated_subtree_is_excluded_the_bounded_invariant() {
+        // The load-bearing property: a seed's closure is its importer subtree
+        // ONLY. An unrelated tree (q → r) sharing no path to the seed stays out,
+        // no matter how large — so a big project's unrelated deps keep symlink
+        // speed.
+        let g = graph(&[
+            ("root-a@1.0.0", &[("x", "1.0.0")]),
+            ("x@1.0.0", &[]),               // the phantom breaker (seed)
+            ("q@1.0.0", &[("r", "1.0.0")]), // unrelated top-level subtree
+            ("r@1.0.0", &[]),
+        ]);
+        let closure = closure_of(&g, &["x@1.0.0"]);
+        assert_eq!(
+            closure,
+            ["root-a@1.0.0", "x@1.0.0"].map(String::from).into()
+        );
+        assert!(!closure.contains("q@1.0.0"));
+        assert!(!closure.contains("r@1.0.0"));
+    }
+
+    #[test]
+    fn cycles_terminate() {
+        // a ↔ b mutual dep; seed b ⇒ {a, b}, no infinite loop.
+        let g = graph(&[
+            ("a@1.0.0", &[("b", "1.0.0")]),
+            ("b@1.0.0", &[("a", "1.0.0")]),
+        ]);
+        assert_eq!(
+            closure_of(&g, &["b@1.0.0"]),
+            ["a@1.0.0", "b@1.0.0"].map(String::from).into()
+        );
+    }
+
+    #[test]
+    fn leaf_and_missing_seeds_yield_just_the_seed() {
+        let g = graph(&[("a@1.0.0", &[("b", "1.0.0")]), ("b@1.0.0", &[])]);
+        // `a` has no importer ⇒ closure is just itself.
+        assert_eq!(
+            closure_of(&g, &["a@1.0.0"]),
+            ["a@1.0.0"].map(String::from).into()
+        );
+        // A seed absent from `packages` is treated as a leaf (matches
+        // `transitive_closure`): present in the closure, no importers.
+        assert_eq!(
+            closure_of(&g, &["ghost@9.9.9"]),
+            ["ghost@9.9.9"].map(String::from).into()
+        );
+    }
+
+    #[test]
+    fn scoped_peer_suffixed_dep_paths_reconstruct_correctly() {
+        // The child edge value is the dep_path TAIL, so `@scope/pkg`'s importer
+        // edge reconstructs as `@scope/pkg@<tail>` — including a peer suffix.
+        let g = graph(&[
+            ("firebase@10.0.0", &[("@firebase/database", "1.0.0")]),
+            ("@firebase/database@1.0.0", &[]),
+        ]);
+        assert_eq!(
+            closure_of(&g, &["@firebase/database@1.0.0"]),
+            ["@firebase/database@1.0.0", "firebase@10.0.0"]
+                .map(String::from)
+                .into()
+        );
     }
 }

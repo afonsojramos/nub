@@ -21,6 +21,17 @@ Two units, both in `crates/nub-cli/src/pm_engine/vite_compat.rs`, default-on
   for v5). The sniff is YAML-tolerant + PM-agnostic (reads whatever
   `virtualStoreDir` any tool wrote — never hardcodes nub's path).
 
+Unit B as shipped force-materializes vite ONLY when it is a **direct** dep — a
+raw `vite dev` app. A framework that embeds vite **transitively** (Astro 5 pins
+`vite@^6`, `< 8.1`) loads its vite from a store-to-store sibling symlink, so the
+direct-dep eject never reaches it and the store `/@fs` stays 403 (the #315
+residual). Behind the default-off `NUB_DYNAMIC_PHANTOM_EJECT` flag, nub now
+auto-detects an embedded vite `< 8.1` and force-materializes its
+`[framework … vite]` **ancestor closure** (measured 5 packages for Astro 5,
+`~1.5%` of the tree — everything else stays symlinked), so the framework loads a
+project-local vite that Unit B patches. With the flag OFF the behavior is
+byte-for-byte the shipped Unit B.
+
 Because the fix lives in `node_modules` on disk (`.modules.yaml` + the patched
 vite dist) and nothing is injected at runtime, it works regardless of whether
 nub is in the process.
@@ -80,11 +91,36 @@ island/route hydrates and is interactive, read the console for 403s) is a
 stronger check and SHOULD be run for the flagship Astro+React case when that MCP
 is available; the HTTP + log-scan floor here is the CI-portable substitute.
 
-## The Nuxt note
+## The closure acceptance cases (behind `NUB_DYNAMIC_PHANTOM_EJECT=1`)
 
-`nuxt` is currently on nub's `disableGlobalVirtualStoreForPackages` trigger
-(installs all-disk, project-local), so it does NOT run symlink-GVS and this fix
-does not apply to it as shipped. Nuxt IS Vite-based, so it is a candidate to
-REMOVE from the trigger once this fix lets it work under symlink-GVS — see the
-thread's `impl.md` sidecar for the finding. Changing the trigger default is a
-maintainer decision, not part of this PR.
+The two cases the selective-subtree closure must satisfy. Run the driver with the
+flag armed:
+
+```sh
+NUB_DYNAMIC_PHANTOM_EJECT=1 tests/vite-compat/driver.sh <dir> "<dev-cmd>" "<build-cmd>" <port>
+```
+
+- **Astro 5 (rung 1 — the vite closure).** `astro@^5` pins `vite@6.4.3` (`< 8.1`),
+  loaded library-embedded. The flag force-materializes the `[astro, vite, …]`
+  closure → the ejected vite gets Unit B's sniff → a bare `astro dev` (no nub in
+  the process) serves a store-resident `/@fs` module `200` (was `403`).
+  Acceptance: `/@fs=200`, `log=no-403`, `patched>=1`, and only the framework
+  closure ejected (the rest of the tree stays symlinked).
+- **Nuxt 4 (both rungs).** `nuxt@^4` embeds `vite@7.3.6` (`< 8.1`) AND breaks on
+  transitive undeclared imports the closure alone can't place. The flag
+  force-materializes the `[nuxt, @nuxt/vite-builder, vite, vue-router,
+  @nuxt/devtools]` closure (rung 1) and hoists the two already-resolved phantom
+  targets within their importers — `@vue/compiler-sfc` into `vue-router`,
+  `unstorage` into `@nuxt/devtools` (rung 2). Acceptance: `nuxt prepare` →
+  "Types generated", `nuxt dev` page `200` with SSR-rendered markup, store
+  `/@fs=200`, `0` errors, bare `nuxt dev` (no nub in the process). The closure is
+  bounded to the Nuxt subtree (`~2.1%` of a realistic 1200-package project), so a
+  large app's unrelated deps keep symlink speed.
+
+## The Nuxt trigger note
+
+`nuxt` is on nub's `disableGlobalVirtualStoreForPackages` trigger (installs
+all-disk, project-local), so as shipped it does NOT run symlink-GVS. The closure
+above lets Nuxt work UNDER symlink-GVS (both its vite gap and its phantom class),
+which makes removing it from the trigger a candidate — but the flag is default-off
+and changing the trigger default is a maintainer decision, not part of this PR.

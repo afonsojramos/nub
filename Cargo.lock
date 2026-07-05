@@ -2663,6 +2663,7 @@ dependencies = [
  "anyhow",
  "aube",
  "aube-codes",
+ "aube-linker",
  "aube-lockfile",
  "aube-manifest",
  "aube-registry",

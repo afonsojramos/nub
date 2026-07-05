@@ -198,8 +198,10 @@ pub(crate) fn manifest_declares_vite(root: &Path) -> bool {
 /// Whether a semver version string is below 8.1.0 (the floor at which Vite's
 /// native `.modules.yaml` sniff exists). Parses only major.minor; a malformed
 /// version conservatively returns `false` (assume modern → skip the patch, Unit
-/// A still covers it).
-fn vite_lt_8_1(version: &str) -> bool {
+/// A still covers it). `pub(crate)` so the selective-subtree closure policy
+/// ([`super::phantom_closure`]) can auto-detect an embedded vite<8.1 seed with
+/// the identical version rule.
+pub(crate) fn vite_lt_8_1(version: &str) -> bool {
     let core = version.split(['-', '+']).next().unwrap_or(version);
     let mut it = core.split('.');
     let (Some(major), minor) = (it.next(), it.next()) else {
