@@ -2167,16 +2167,21 @@ fn nub_setting_defaults(
         ("stateDir".to_string(), "node_modules/.nub".to_string()),
         (
             "disableGlobalVirtualStoreForPackages".to_string(),
-            // `react-native` joins next/nuxt/parcel: bare RN's Metro bundler
-            // (`@react-native/metro-config`) crawls by realpath and only sees
-            // its project root, so the machine-global GVS store is out of scope
-            // and even DECLARED deps (`@babel/runtime`) report unresolved. A
-            // whole-install GVS-off puts the store project-local, back in
-            // Metro's crawl scope. Expo's `@expo/metro-config` is store-aware so
-            // it works either way; this only flips Expo to project-local
-            // (harmless, small dedup regression). A store-LOCALITY break, not a
-            // phantom-dep class, so force-materialize is the wrong lever.
-            "next,nuxt,parcel,react-native".to_string(),
+            // Two store-LOCALITY-break classes (force-materialize is the wrong
+            // lever for both). (1) next/nuxt/vite/vitepress/parcel — dev-server
+            // and bundler resolvers canonicalize through symlinks and walk up
+            // for config/root discovery, so a machine-global GVS realpath falls
+            // outside the project; Vite/Astro additionally reject it via their
+            // `server.fs.allow` serving allow-list (#315). This mirrors upstream
+            // aube's default; nub keeps `vite`/`vitepress` rather than dropping
+            // them, at the cost of project-local materialization for Vite
+            // projects (no cross-project store sharing) pending an upstream fix.
+            // (2) react-native — bare RN's Metro (`@react-native/metro-config`)
+            // crawls by realpath and only sees its project root, so even
+            // DECLARED deps (`@babel/runtime`) report unresolved (Expo's
+            // `@expo/metro-config` is store-aware, only flips to project-local).
+            // Whole-install GVS-off puts the store project-local, back in scope.
+            "next,nuxt,vite,vitepress,parcel,react-native".to_string(),
         ),
         (
             "forceMaterializePackages".to_string(),
@@ -2809,29 +2814,35 @@ mod tests {
                 "{excluded} is a build-time/helper import and must be excluded"
             );
         }
-        // List-1 (whole-install GVS-off): the validated-clean trio plus
-        // `react-native` (bare-RN Metro store-locality break).
+        // List-1 (whole-install GVS-off): the dev-server/bundler realpath
+        // walk-up class (next/nuxt/vite/vitepress/parcel — vite/vitepress per
+        // #315) plus `react-native` (bare-RN Metro store-locality break).
         assert_eq!(
             get(&fresh, "disableGlobalVirtualStoreForPackages"),
-            Some("next,nuxt,parcel,react-native"),
+            Some("next,nuxt,vite,vitepress,parcel,react-native"),
         );
     }
 
     #[test]
-    fn react_native_is_on_the_disable_gvs_default() {
-        // Bare React-Native's Metro bundler crawls by realpath from the project
-        // root and can't see the machine-global GVS store, so DECLARED deps
-        // (`@babel/runtime`) report unresolved. `react-native` on the
-        // whole-install GVS-off list forces the store project-local (back in
-        // Metro's scope). Same lever/precedent as next/nuxt/parcel.
+    fn disable_gvs_default_covers_the_walkup_and_metro_classes() {
+        // The GVS-off trigger list must carry both store-locality-break classes:
+        // the dev-server/bundler realpath walk-up class (`vite`/`vitepress`
+        // restored per #315 — Vite/Astro dev servers reject the global-store
+        // realpath via `server.fs.allow`) and bare React-Native's Metro (crawls
+        // by realpath from the project root, can't see the machine-global store,
+        // so declared deps like `@babel/runtime` report unresolved). Matching is
+        // an exact dep-name lookup in aube, so each entry is a literal contract.
         let dir = tempfile::tempdir().unwrap();
         let fresh = nub_setting_defaults(None, true, dir.path(), VirtualStoreLocality::Default);
         let list = get(&fresh, "disableGlobalVirtualStoreForPackages")
             .expect("nub must seed disableGlobalVirtualStoreForPackages");
-        assert!(
-            list.split(',').any(|p| p == "react-native"),
-            "react-native must be on the GVS-off list: {list}"
-        );
+        let names: Vec<&str> = list.split(',').collect();
+        for required in ["vite", "vitepress", "react-native"] {
+            assert!(
+                names.contains(&required),
+                "{required} must be on the GVS-off list: {list}"
+            );
+        }
     }
 
     #[test]
