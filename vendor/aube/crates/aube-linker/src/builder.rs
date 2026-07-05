@@ -44,6 +44,7 @@ impl Linker {
             no_integrity_read_keys: std::collections::BTreeMap::new(),
             link_progress: None,
             force_materialize: std::collections::HashSet::new(),
+            phantom_hoist: std::collections::BTreeMap::new(),
         }
     }
 
@@ -60,6 +61,29 @@ impl Linker {
     /// the global-virtual-store link pass; always false when the list is empty.
     pub(crate) fn force_materialize_matches(&self, pkg_name: &str) -> bool {
         !self.force_materialize.is_empty() && self.force_materialize.contains(pkg_name)
+    }
+
+    /// Rung 2 of selective-subtree materialization: the undeclared phantom
+    /// targets to hoist-within each force-materialized package's `node_modules`,
+    /// keyed by importer dep_path → already-resolved target dep_paths (see the
+    /// `phantom_hoist` field docs on [`Linker`]). Standalone aube and every test
+    /// omit this → the map is empty and the materialize pass is unchanged.
+    pub fn with_phantom_hoist(
+        mut self,
+        map: std::collections::BTreeMap<String, Vec<String>>,
+    ) -> Self {
+        self.phantom_hoist = map;
+        self
+    }
+
+    /// The phantom-hoist targets for the package at `dep_path`, if any. Consulted
+    /// only in the force-materialize branch of the GVS link pass; `None` when the
+    /// map is empty (the standalone/default path) or the dep_path has no entry.
+    pub(crate) fn phantom_hoist_for(&self, dep_path: &str) -> Option<&[String]> {
+        if self.phantom_hoist.is_empty() {
+            return None;
+        }
+        self.phantom_hoist.get(dep_path).map(Vec::as_slice)
     }
 
     /// Supply a shared counter the materialize pass bumps once per linked

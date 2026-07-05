@@ -59,6 +59,7 @@ pub mod install_family;
 pub mod log;
 pub mod min_release_age;
 pub mod output;
+pub mod phantom_closure;
 pub mod present;
 pub mod publish_family;
 mod resource_limits;
@@ -765,6 +766,12 @@ fn engine_session_inner(
     // (which calls it again as its first step, alongside the project-state-
     // dependent config surface) is a no-op for the registration.
     identity::register();
+    // Install nub's selective-subtree force-materialize expansion hook (behind
+    // the default-off `NUB_DYNAMIC_PHANTOM_EJECT` flag). No-op when the flag is
+    // off, so the default install path is byte-identical; when armed it expands
+    // the force-materialize seed to its ancestor-closure + phantom-target hoists
+    // at link time. Idempotent set-once, like `identity::register()`.
+    phantom_closure::register();
     // Initialize the diagnostics recorder from NUB_DIAG_* env vars so that
     // `NUB_DIAG_SUMMARY=1 nub install` surfaces the same per-phase/per-op
     // spans + summary table that `AUBE_DIAG_SUMMARY=1 aube install` does. The

@@ -174,6 +174,15 @@ pub(super) fn run_link_phase(input: LinkPhaseInput<'_>) -> miette::Result<LinkPh
     // default. Consulted by the linker only in the GVS pass.
     let force_materialize_packages =
         aube_settings::resolved::force_materialize_packages(settings_ctx);
+    // Embedder-pluggable expansion (selective-subtree materialization): a host
+    // (nub) installs a hook that expands the flat seed into a graph-aware plan —
+    // rung 1 grows each seed to its ancestor-closure so a transitively-consumed
+    // package materializes with its importers (no store-resident-consumer split);
+    // rung 2 adds per-package undeclared-phantom-target hoists. Standalone aube
+    // installs no hook, so the plan is the seed verbatim with no hoist —
+    // byte-for-byte the prior behavior.
+    let fm_plan =
+        aube_linker::expand_force_materialize(graph_for_link, &force_materialize_packages);
 
     let mut linker = aube_linker::Linker::new(store, strategy)
         .with_shamefully_hoist(shamefully_hoist)
@@ -199,7 +208,8 @@ pub(super) fn run_link_phase(input: LinkPhaseInput<'_>) -> miette::Result<LinkPh
             cwd,
             graph_for_link.packages.values(),
         ))
-        .with_force_materialize(&force_materialize_packages);
+        .with_force_materialize(&fm_plan.names)
+        .with_phantom_hoist(fm_plan.hoist_within);
     if let Some(enabled) = use_global_virtual_store_override {
         linker = linker.with_use_global_virtual_store(enabled);
     }
