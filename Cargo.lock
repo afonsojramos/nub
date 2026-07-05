@@ -2685,6 +2685,7 @@ dependencies = [
  "node-semver",
  "nub-core",
  "nub-phantom-core",
+ "nub-phantom-scan",
  "num_cpus",
  "rayon",
  "rustc-hash",
@@ -2741,6 +2742,15 @@ dependencies = [
  "oxc_ast_visit",
  "oxc_parser",
  "oxc_span",
+]
+
+[[package]]
+name = "nub-phantom-scan"
+version = "0.2.10"
+dependencies = [
+ "nub-phantom-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

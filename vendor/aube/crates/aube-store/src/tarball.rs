@@ -324,6 +324,11 @@ impl Store {
                 )
             },
         );
+        // Extract point: the index is fully built, its CAS blobs are fresh and
+        // page-cache hot, and we're on the fetch/blocking fan-out thread — so an
+        // embedder-registered scanner overlaps ongoing downloads. No-op (one
+        // atomic load) for standalone aube, which never registers a hook.
+        crate::run_extract_hook(&index);
         Ok(index)
     }
 }

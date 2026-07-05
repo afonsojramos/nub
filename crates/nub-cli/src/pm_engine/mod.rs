@@ -772,6 +772,12 @@ fn engine_session_inner(
     // the force-materialize seed to its ancestor-closure + phantom-target hoists
     // at link time. Idempotent set-once, like `identity::register()`.
     phantom_closure::register();
+    // Arm the dynamic per-version phantom PRODUCER: an extract-time store hook
+    // that scans each fetched package and writes a per-content verdict sidecar
+    // (`phantom_closure`, above, is the CONSUMER that reads those sidecars to seed
+    // the closure). No-op unless the same default-off `NUB_DYNAMIC_PHANTOM_EJECT`
+    // flag is set, so the default path is unchanged. Idempotent set-once.
+    crate::dynamic_phantom::register();
     // Initialize the diagnostics recorder from NUB_DIAG_* env vars so that
     // `NUB_DIAG_SUMMARY=1 nub install` surfaces the same per-phase/per-op
     // spans + summary table that `AUBE_DIAG_SUMMARY=1 aube install` does. The
@@ -2279,7 +2285,7 @@ fn is_truly_fresh_project(cwd: &Path, detected: Option<&DetectedLockfile>) -> bo
 
 /// Nub's XDG data root (`$XDG_DATA_HOME/nub` or `~/.local/share/nub`), the
 /// data-dir sibling of `nub_core::node::discovery::cache_dir`.
-fn nub_data_dir() -> Option<PathBuf> {
+pub(crate) fn nub_data_dir() -> Option<PathBuf> {
     let base = std::env::var("XDG_DATA_HOME")
         .ok()
         .filter(|v| !v.is_empty())

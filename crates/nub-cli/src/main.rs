@@ -6,6 +6,7 @@
 mod agent;
 mod cli;
 mod config;
+mod dynamic_phantom;
 mod nubx_consent;
 mod nubx_resolve;
 mod phantom_scan;
