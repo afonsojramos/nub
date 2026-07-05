@@ -985,13 +985,23 @@ impl Linker {
             if index.is_empty() {
                 return Ok(false);
             }
-            // `pkg_nm_parent` is created by the caller's parent batch
-            // AFTER this returns, so it may not exist yet — create it
-            // now so the same-volume probe has a real dir to stat and
-            // the clone has somewhere to land. `create_dir_all` is
-            // idempotent with the later batch.
-            std::fs::create_dir_all(pkg_nm_parent)
-                .map_err(|e| Error::Io(pkg_nm_parent.to_path_buf(), e))?;
+            // Create the clone destination's IMMEDIATE parent, not just
+            // `pkg_nm_parent`. `clonefile(2)` ENOENTs unless the dst's
+            // direct parent exists; for a SCOPED package the dst is
+            // `<node_modules>/@scope/<name>`, so that parent is the
+            // `@scope` dir — `pkg_nm_parent` (`<node_modules>` itself) is
+            // one level too shallow. Creating only `pkg_nm_parent` left
+            // `@scope` absent, so every scoped package's clone ENOENT'd and
+            // silently fell to the per-file path — the whole-dir clone fast
+            // path never fired for `@babel/*`/`@types/*`/`@firebase/*`/…,
+            // the bulk of a modern tree. `pkg_nm_dir.parent()` is
+            // `pkg_nm_parent` for unscoped (unchanged) and its `@scope`
+            // child for scoped; `create_dir_all` still makes `pkg_nm_parent`
+            // (the same-volume probe target below) as an ancestor.
+            // Idempotent with the caller's later parent batch.
+            let clone_parent = pkg_nm_dir.parent().unwrap_or(pkg_nm_parent);
+            std::fs::create_dir_all(clone_parent)
+                .map_err(|e| Error::Io(clone_parent.to_path_buf(), e))?;
 
             // Volume/fs probe against `trees/` (created lazily if this
             // is the first clonedir attempt of the install) vs the
