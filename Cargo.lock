@@ -2668,6 +2668,7 @@ dependencies = [
  "aube-registry",
  "aube-scripts",
  "aube-settings",
+ "aube-store",
  "aube-util",
  "aube-workspace",
  "base64",

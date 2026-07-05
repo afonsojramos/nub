@@ -43,11 +43,27 @@ cd "$proj" || { fail "no dir"; exit 2; }
 inst=$?
 [ $inst -eq 0 ] || { fail "nub install exit $inst"; tail -5 /tmp/vc-$name-install.log >&2; exit 2; }
 
-vite_pkg="node_modules/vite/package.json"
-[ -f "$vite_pkg" ] || { echo "SKIP[$name]: no vite in graph"; exit 0; }
-vite_ver=$(node -p "require('./$vite_pkg').version" 2>/dev/null)
-
-realpath_vite=$(node -e "console.log(require('fs').realpathSync('node_modules/vite'))")
+# Vite reaches the graph as a direct dep (top-level node_modules/vite) OR
+# transitively as a framework's embedded engine (only .nub/vite@* entries, no
+# top-level symlink). Detect + resolve the LOADED vite either way: prefer what
+# the framework/CLI actually imports (node resolution), else the first .nub entry.
+read -r vite_ver realpath_vite < <(node -e '
+const fs=require("fs"),p=require("path");
+function ver(d){try{return require(p.join(d,"package.json")).version}catch{return null}}
+let dir=null;
+try{ // what would `vite dev` / the framework load?
+  dir=p.dirname(fs.realpathSync(require.resolve("vite/package.json",{paths:[process.cwd()]})));
+}catch{}
+if(!dir){ // transitive-only: scan .nub/vite@*
+  const nb=p.join("node_modules",".nub");
+  for(const e of (fs.existsSync(nb)?fs.readdirSync(nb):[])){
+    if(e.startsWith("vite@")){const c=p.join(nb,e,"node_modules","vite");if(fs.existsSync(c)){dir=fs.realpathSync(c);break}}
+  }
+}
+if(!dir){console.log("- -");process.exit(0)}
+console.log((ver(dir)||"?")+" "+dir);
+')
+[ "$vite_ver" = "-" ] && { echo "SKIP[$name]: no vite in graph"; exit 0; }
 case "$realpath_vite" in
   "$proj"/*) eject="ejected-local" ;;
   *)         eject="in-store" ;;
@@ -57,9 +73,13 @@ esac
 modules_yaml="absent"; store=""
 if [ -f node_modules/.modules.yaml ]; then
   modules_yaml="present"
-  store=$(node -p "require('./node_modules/.modules.yaml').virtualStoreDir" 2>/dev/null)
+  # NOT require() — Node has no loader for a .yaml extension (falls to the .js
+  # handler and throws on the JSON body). Parse the bytes directly.
+  store=$(node -e "console.log(JSON.parse(require('fs').readFileSync('node_modules/.modules.yaml','utf8')).virtualStoreDir)" 2>/dev/null)
 fi
-patched=$(grep -rl '__nubRfs' node_modules/vite/dist/node/ 2>/dev/null | wc -l | tr -d ' ')
+# Patch count on the ACTUALLY-LOADED vite (realpath) — the ejected project-local
+# copy for a direct dep; the store copy (never patched) for library-embedded.
+patched=$(grep -rl '__nubRfs' "$realpath_vite/dist/node/" 2>/dev/null | wc -l | tr -d ' ')
 
 # Version tier: < 8.1 exercises the BACKPORT; >= 8.1 the NATIVE sniff.
 tier=$(node -e "const[a,b]=process.argv[1].split('.').map(Number);console.log(a>8||(a===8&&b>=1)?'native>=8.1':'backport<8.1')" "$vite_ver")

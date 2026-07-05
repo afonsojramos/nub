@@ -57,40 +57,117 @@ pub(crate) fn enabled() -> bool {
     }
 }
 
-/// Post-install entry: write `.modules.yaml` and, for Vite < 8.1, patch the
-/// ejected copy. `root` is the install/workspace root (where the hoisted/GVS
+/// Post-install entry: write `.modules.yaml` for every install that has Vite
+/// anywhere in the graph, and patch each project-local (ejected) Vite < 8.1
+/// copy. `root` is the install/workspace root (where the hoisted/GVS
 /// `node_modules` lives). Best-effort — a successful install must never fail on
 /// a compat step, so every fallible step degrades to a no-op.
+///
+/// Vite reaches the graph two ways, and both are handled: as a DIRECT dep (a raw
+/// `vite` app / a `vite dev` CLI project — the top-level `node_modules/vite`),
+/// and TRANSITIVELY as a framework's embedded engine (Astro/SvelteKit/VitePress
+/// — the `.nub/vite@*` isolated-store entries, no top-level symlink). A
+/// library-embedded framework is itself store-resident and loads ITS Vite via a
+/// store-to-store sibling symlink (the shared virtual-store copy, NOT the
+/// project-local ejected copy), so the dist backport cannot reach it CAS-safely
+/// — but Unit A (`.modules.yaml`) fixes it for Vite ≥ 8.1 (the framework's
+/// store Vite reads the file natively). Direct-dep Vite IS loaded from the
+/// force-materialized project-local copy, so the < 8.1 backport reaches it.
 pub(crate) fn apply(root: &Path) {
     if !enabled() {
         return;
     }
     let node_modules = root.join("node_modules");
-    let Some(version) = installed_vite_version(&node_modules) else {
-        return; // vite not in the graph — nothing to do
-    };
+    let copies = discover_vite(&node_modules);
+    if copies.is_empty() {
+        return; // no Vite in the graph — nothing to do
+    }
     let Some(store) = global_virtual_store_dir() else {
         return;
     };
-    // Unit A — always when vite is present. `.modules.yaml` at the workspace
-    // root's node_modules; Vite ≥ 8.1 reads it natively, the < 8.1 backport
-    // reads it too. Canonicalize the store so the path Vite prefix-matches its
-    // realpath'd module ids against has symlinks in `~/.cache` already resolved.
+    // Unit A — Vite present anywhere ⇒ write `.modules.yaml` at the workspace
+    // root's node_modules (the path Vite resolves via `searchForWorkspaceRoot`).
+    // Covers the native sniff (≥ 8.1) for both direct and library-embedded Vite,
+    // and feeds the < 8.1 backport. Canonicalize the store so the allow-list
+    // path already has any `~/.cache` symlinks resolved, matching Vite's
+    // realpath'd module ids.
     let store = std::fs::canonicalize(&store).unwrap_or(store);
     write_modules_yaml(&node_modules, &store);
 
-    // Unit B — only Vite < 8.1 needs the backport (≥ 8.1 has the native sniff).
-    if vite_lt_8_1(&version) {
-        patch_ejected_vite(&node_modules);
+    // Unit B — patch only project-local (ejected) copies below 8.1. The store
+    // copies a framework loads via sibling symlink are shared across projects, so
+    // patching them would corrupt the CAS and leak across projects — left to
+    // Unit A (≥ 8.1) / docs (< 8.1 library-embedded, the documented gap).
+    for c in &copies {
+        if c.project_local && vite_lt_8_1(&c.version) {
+            patch_vite_dist(&c.dir);
+        }
     }
 }
 
-/// Read the installed Vite's version from `node_modules/vite/package.json`.
-/// `None` when vite is not installed or the manifest is unreadable/malformed.
-fn installed_vite_version(node_modules: &Path) -> Option<String> {
-    let raw = std::fs::read_to_string(node_modules.join("vite/package.json")).ok()?;
-    // Minimal extraction — avoid a serde_json dep here; the field is a plain
-    // quoted string in every published vite manifest.
+/// One resolved Vite package present in the install.
+struct ViteCopy {
+    /// Canonical (realpath) package dir — the `dist/node` patch target.
+    dir: PathBuf,
+    version: String,
+    /// Whether the realpath lives inside the project (an ejected, patch-safe
+    /// copy) vs. the shared machine-global store (never patched).
+    project_local: bool,
+}
+
+/// Enumerate every distinct Vite package in the install: the top-level
+/// `node_modules/vite` (direct dep) plus each `node_modules/.nub/vite@*`
+/// isolated-store entry (transitive/library-embedded). Deduplicated by realpath;
+/// each entry carries its version and whether it is project-local.
+fn discover_vite(node_modules: &Path) -> Vec<ViteCopy> {
+    let project_root = node_modules.parent().map(Path::to_path_buf);
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    consider_vite(
+        &node_modules.join("vite"),
+        &project_root,
+        &mut seen,
+        &mut out,
+    );
+    if let Ok(entries) = std::fs::read_dir(node_modules.join(".nub")) {
+        for e in entries.flatten() {
+            if e.file_name().to_string_lossy().starts_with("vite@") {
+                let pkg = e.path().join("node_modules").join("vite");
+                consider_vite(&pkg, &project_root, &mut seen, &mut out);
+            }
+        }
+    }
+    out
+}
+
+fn consider_vite(
+    pkg_dir: &Path,
+    project_root: &Option<PathBuf>,
+    seen: &mut std::collections::HashSet<PathBuf>,
+    out: &mut Vec<ViteCopy>,
+) {
+    let Ok(real) = std::fs::canonicalize(pkg_dir) else {
+        return;
+    };
+    if !seen.insert(real.clone()) {
+        return;
+    }
+    let Some(version) = read_vite_version(&real) else {
+        return;
+    };
+    let project_local = project_root.as_ref().is_some_and(|r| real.starts_with(r));
+    out.push(ViteCopy {
+        dir: real,
+        version,
+        project_local,
+    });
+}
+
+/// Read a Vite package dir's `version`. Minimal string extraction — avoids a
+/// serde_json round-trip; the field is a plain quoted string in every published
+/// vite manifest.
+fn read_vite_version(pkg_dir: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(pkg_dir.join("package.json")).ok()?;
     let key = raw.find("\"version\"")?;
     let after = &raw[key + "\"version\"".len()..];
     let colon = after.find(':')?;
@@ -98,6 +175,24 @@ fn installed_vite_version(node_modules: &Path) -> Option<String> {
     let start = rest.find('"')? + 1;
     let end = rest[start..].find('"')? + start;
     Some(rest[start..end].to_string())
+}
+
+/// Whether the project manifest at `root` declares `vite` as a DIRECT dependency
+/// (any of dependencies / devDependencies / optionalDependencies). Drives the
+/// force-materialize decision: only a direct-dep Vite is loaded from the ejected
+/// project-local copy the backport patches, so ejecting for a library-embedded
+/// Vite (which loads its store copy) would be wasted dedup. Best-effort — an
+/// unreadable/absent manifest ⇒ `false`.
+pub(crate) fn manifest_declares_vite(root: &Path) -> bool {
+    let Ok(raw) = std::fs::read_to_string(root.join("package.json")) else {
+        return false;
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    ["dependencies", "devDependencies", "optionalDependencies"]
+        .iter()
+        .any(|field| json.get(field).and_then(|v| v.get("vite")).is_some())
 }
 
 /// Whether a semver version string is below 8.1.0 (the floor at which Vite's
@@ -180,25 +275,16 @@ const ANCHORS: &[&str] = &[
 /// making the whole pass idempotent across re-installs.
 const MARKER: &str = "__nubRfs(__nubJoin";
 
-/// Force-materialize + patch. Resolves the ejected local vite dir via the
-/// realpath of `node_modules/vite` (project-local after the linker's
-/// force-materialize), REFUSES to touch anything under the shared global store
-/// (CAS-safety invariant — if the eject did not happen, patching in place would
-/// corrupt the store shared across every project), then scans `dist/node/**.js`
-/// for the anchor and inserts the sniff. Fail-open at every step.
-fn patch_ejected_vite(node_modules: &Path) {
-    let vite_link = node_modules.join("vite");
-    let Ok(vite_dir) = std::fs::canonicalize(&vite_link) else {
-        return;
-    };
-    // CAS-safety: only patch a project-local ejected copy. If the realpath still
-    // points into the machine-global store (force-materialize did not run, e.g.
-    // a store this exact peer-hash is shared with another project), skip — never
-    // mutate the shared CAS-backed store.
+/// Patch an ejected, project-local Vite package's `dist/node/**.js` with the
+/// backported sniff. `vite_dir` is the CANONICAL package dir (from
+/// [`discover_vite`], already classified project-local). A defensive CAS-safety
+/// re-check refuses anything under the shared global store — patching there
+/// would corrupt the store shared across every project. Fail-open at every step.
+fn patch_vite_dist(vite_dir: &Path) {
     if let Some(store) = global_virtual_store_dir() {
         let store = std::fs::canonicalize(&store).unwrap_or(store);
         if vite_dir.starts_with(&store) {
-            return;
+            return; // never mutate the shared CAS-backed store
         }
     }
     let dist_node = vite_dir.join("dist").join("node");
@@ -296,19 +382,38 @@ mod tests {
     }
 
     #[test]
-    fn version_extraction_from_manifest() {
+    fn version_extraction_from_pkg_dir() {
         let dir = std::env::temp_dir().join(format!("nub-vite-ver-{}", std::process::id()));
-        let nm = dir.join("node_modules").join("vite");
-        std::fs::create_dir_all(&nm).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
-            nm.join("package.json"),
+            dir.join("package.json"),
             r#"{"name":"vite","version":"7.3.6","type":"module"}"#,
         )
         .unwrap();
-        assert_eq!(
-            installed_vite_version(&dir.join("node_modules")).as_deref(),
-            Some("7.3.6")
+        assert_eq!(read_vite_version(&dir).as_deref(), Some("7.3.6"));
+        assert_eq!(read_vite_version(&dir.join("nope")), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_declares_vite_scans_all_dep_fields() {
+        let dir = std::env::temp_dir().join(format!("nub-vite-decl-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |body: &str| std::fs::write(dir.join("package.json"), body).unwrap();
+
+        write(r#"{"devDependencies":{"vite":"^7"}}"#);
+        assert!(manifest_declares_vite(&dir), "devDependencies");
+        write(r#"{"dependencies":{"vite":"7"}}"#);
+        assert!(manifest_declares_vite(&dir), "dependencies");
+        // Library-embedded: framework declared, Vite only transitive ⇒ not direct.
+        write(r#"{"dependencies":{"astro":"^7","@astrojs/react":"^4"}}"#);
+        assert!(
+            !manifest_declares_vite(&dir),
+            "transitive vite is not a direct dep"
         );
+        // No manifest ⇒ false, no panic.
+        std::fs::remove_file(dir.join("package.json")).unwrap();
+        assert!(!manifest_declares_vite(&dir));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

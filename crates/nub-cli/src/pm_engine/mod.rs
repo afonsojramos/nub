@@ -2157,17 +2157,24 @@ fn nub_setting_defaults(
     let fresh_format = if truly_fresh { "aube" } else { "pnpm" };
     // Vite symlink-GVS compat (#315): eject the `vite` package project-local so
     // its dist can be patched with the backported fs.allow sniff (< 8.1) without
-    // touching the shared CAS store. Only under the machine-global store
-    // (`Default`) — `nub ci`'s project-local store is already under the
+    // touching the shared CAS store. Scoped to a DIRECT-dep vite (a raw `vite`
+    // app / `vite dev` CLI project) — that is the only shape whose loaded Vite is
+    // the ejected project-local copy the backport reaches; a library-embedded
+    // framework (Astro/SvelteKit) loads its Vite from the shared store via a
+    // sibling symlink, so ejecting for it would be wasted dedup (Unit A's
+    // `.modules.yaml` covers those for Vite ≥ 8.1). Only under the machine-global
+    // store (`Default`) — `nub ci`'s project-local store is already under the
     // workspace root, so Vite serves it with no override. The post-install
     // writer/patcher lives in [`vite_compat`]; this is its materialization half.
     // A user-set `forceMaterializePackages` still wins (embedder-tier).
-    let force_materialize =
-        if store_locality == VirtualStoreLocality::Default && vite_compat::enabled() {
-            format!("{NUB_FORCE_MATERIALIZE_PACKAGES},vite")
-        } else {
-            NUB_FORCE_MATERIALIZE_PACKAGES.to_string()
-        };
+    let force_materialize = if store_locality == VirtualStoreLocality::Default
+        && vite_compat::enabled()
+        && vite_compat::manifest_declares_vite(detected.map(|d| d.dir.as_path()).unwrap_or(cwd))
+    {
+        format!("{NUB_FORCE_MATERIALIZE_PACKAGES},vite")
+    } else {
+        NUB_FORCE_MATERIALIZE_PACKAGES.to_string()
+    };
     let mut defaults = vec![
         (
             "defaultLockfileFormat".to_string(),
