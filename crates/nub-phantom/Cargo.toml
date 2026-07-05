@@ -33,11 +33,12 @@ name = "nub-phantom"
 path = "src/main.rs"
 
 [dependencies]
-# Specifier extraction + classification (builtins/specifier/extract) live in the
-# shared, lean-oxc crate so the shipped `nub` CLI and this eval tool can't
-# diverge. This crate no longer depends on `oxc` directly — the parser subset is
-# pulled transitively through nub-phantom-core.
-nub-phantom-core = { path = "../nub-phantom-core" }
+# The reachable-graph walk + classifier + manifest parser are shared with the
+# shipped `nub` CLI via nub-phantom-scan (single source of truth — this eval tool
+# must not re-diverge its own copies). It pulls the specifier/extraction
+# primitives (nub-phantom-core) and the lean-oxc parser subset transitively, so
+# this crate depends on neither `oxc` nor nub-phantom-core directly.
+nub-phantom-scan = { path = "../nub-phantom-scan" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # HTTP fetch of registry metadata + tarballs. Mirrors the main workspace's

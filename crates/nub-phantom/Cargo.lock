@@ -592,7 +592,7 @@ name = "nub-phantom"
 version = "0.1.0"
 dependencies = [
  "flate2",
- "nub-phantom-core",
+ "nub-phantom-scan",
  "reqwest",
  "serde",
  "serde_json",
@@ -608,6 +608,15 @@ dependencies = [
  "oxc_ast_visit",
  "oxc_parser",
  "oxc_span",
+]
+
+[[package]]
+name = "nub-phantom-scan"
+version = "0.2.10"
+dependencies = [
+ "nub-phantom-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

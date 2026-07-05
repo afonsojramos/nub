@@ -13,17 +13,16 @@
 //! so the emitted phantom set is trustworthy enough to drive the vendored
 //! `packageExtensions`/force-materialize list.
 
-pub mod classify;
 pub mod fetch;
-pub mod graph;
-pub mod manifest;
 
-// The specifier-extraction + classification primitives are shared with the
-// shipped `nub` CLI via `nub-phantom-core` (single source of truth — the guard
-// modeling and builtin/name classification live there, not duplicated here).
-// Re-exported so the in-crate `crate::builtins` / `crate::extract` /
-// `crate::specifier` paths resolve unchanged.
-pub use nub_phantom_core::{builtins, extract, specifier};
+// The reachable-graph walk, classifier, and manifest parser are shared with the
+// shipped `nub` CLI via `nub-phantom-scan` (single source of truth). This eval
+// tool once carried its own byte-identical copies of these modules, which could
+// silently diverge from the shipped scan; re-exporting keeps the in-crate
+// `crate::classify` / `crate::graph` / `crate::manifest` paths resolving to the
+// one implementation. The specifier/extraction primitives underneath come from
+// `nub-phantom-core`, which `nub-phantom-scan` depends on transitively.
+pub use nub_phantom_scan::{classify, graph, manifest};
 
 use std::path::Path;
 
