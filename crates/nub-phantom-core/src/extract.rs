@@ -9,9 +9,11 @@
 //! spec classifies soft (e.g. `if (typeof phantom !== 'undefined') require('system')`,
 //! or `try { require('opt') } catch {}`). A top-level, unconditional require is
 //! hard. Type-only imports/exports are dropped — they are erased before runtime
-//! and would false-flag a devDep-typed package as a phantom. Dynamic specifiers
-//! (template/computed) are not recorded: they cannot be attributed to a package
-//! name, and guessing would risk a false positive.
+//! and would false-flag a devDep-typed package as a phantom. A dynamic
+//! `import(...)`/`require(...)`/`createRequire(...)(...)` is recorded only when
+//! its argument is a STATIC string (a literal, or a no-substitution template);
+//! a substituted-template or computed specifier cannot be attributed to a
+//! package name and is skipped — guessing would risk a false positive.
 //!
 //! Guard-ness is LEXICAL, not control-flow: a require in a function DECLARED
 //! inside an `if`/`try` is marked soft even if that function is later called
@@ -159,14 +161,15 @@ impl<'a> Visit<'a> for SpecVisitor {
 
     fn visit_expression(&mut self, it: &Expression<'a>) {
         match it {
-            // Dynamic `import("x")` — only a string-literal argument is
-            // attributable to a package; template/computed sources are skipped.
+            // Dynamic `import(...)` — attributable when the source is a static
+            // string: a literal, or a no-substitution template (`import(`react`)`).
+            // A substituted template / computed source is skipped.
             Expression::ImportExpression(imp) => {
-                if let Expression::StringLiteral(s) = &imp.source {
-                    self.record(&s.value, RefKind::DynamicImport);
+                if let Some(spec) = static_string(&imp.source) {
+                    self.record(spec, RefKind::DynamicImport);
                 }
             }
-            // `require("x")` / `require.resolve("x")`.
+            // `require("x")` / `require.resolve("x")` / `createRequire(...)("x")`.
             Expression::CallExpression(call) => {
                 if let Some((spec, kind)) = require_call(call) {
                     self.record(spec, kind);
@@ -198,8 +201,9 @@ fn export_named_has_value(decl: &oxc_ast::ast::ExportNamedDeclaration<'_>) -> bo
     decl.specifiers.is_empty() || decl.specifiers.iter().any(|s| !s.export_kind.is_type())
 }
 
-/// If `call` is `require("lit")` or `require.resolve("lit")`, return the literal
-/// specifier and which. Any non-string-literal argument yields `None`.
+/// If `call` is `require("lit")`, `require.resolve("lit")`, or the immediately-
+/// invoked `createRequire(...)("lit")`, return the literal specifier and which.
+/// Any non-string-literal argument yields `None`.
 fn require_call<'a>(call: &'a oxc_ast::ast::CallExpression<'a>) -> Option<(&'a str, RefKind)> {
     let kind = match &call.callee {
         Expression::Identifier(id) if id.name == "require" => RefKind::Require,
@@ -209,10 +213,41 @@ fn require_call<'a>(call: &'a oxc_ast::ast::CallExpression<'a>) -> Option<(&'a s
             }
             _ => return None,
         },
+        // `createRequire(import.meta.url)("lit")` — the immediately-invoked form:
+        // the callee is itself a `createRequire(...)` call whose result is a
+        // require function, so a string-literal outer argument is a real edge.
+        // ONLY the direct IIFE is handled; a name bound to `createRequire(...)`
+        // and called later needs dataflow and stays skipped (no false positives).
+        Expression::CallExpression(inner) if is_create_require(&inner.callee) => RefKind::Require,
         _ => return None,
     };
     match call.arguments.first() {
         Some(Argument::StringLiteral(s)) => Some((&s.value, kind)),
+        _ => None,
+    }
+}
+
+/// True if `callee` names `createRequire` — bare (`createRequire(...)`) or a
+/// member (`module.createRequire(...)`). The receiver is not checked: only Node's
+/// `createRequire` uses this name, and the outer call's argument must still be a
+/// string literal for anything to be recorded.
+fn is_create_require(callee: &Expression<'_>) -> bool {
+    match callee {
+        Expression::Identifier(id) => id.name == "createRequire",
+        Expression::StaticMemberExpression(m) => m.property.name == "createRequire",
+        _ => false,
+    }
+}
+
+/// The statically-known string value of `expr`: a string literal, or a template
+/// literal with no substitutions (a single quasi with a cooked value). A
+/// substituted template or any computed expression has no attributable value.
+fn static_string<'a>(expr: &'a Expression<'a>) -> Option<&'a str> {
+    match expr {
+        Expression::StringLiteral(s) => Some(&s.value),
+        Expression::TemplateLiteral(t) if t.expressions.is_empty() => {
+            t.quasis.first().and_then(|q| q.value.cooked.as_deref())
+        }
         _ => None,
     }
 }
@@ -320,4 +355,43 @@ mod tests {
         assert!(got.is_empty(), "no attributable string literal → skip");
     }
 
+    #[test]
+    fn createrequire_iife_and_no_substitution_template_are_caught() {
+        // R3: two analyzable dynamic forms previously dropped as false negatives —
+        // both carry a static string target. Guard-aware, like a bare require().
+        let got = specs(
+            r#"
+            const a = createRequire(import.meta.url)("cr-dep");
+            const b = module.createRequire(import.meta.url)("cr-member-dep");
+            const c = await import(`tpl-lit`);
+            let g;
+            if (cond) { g = createRequire(import.meta.url)("cr-guarded"); }
+            "#,
+        );
+        let has = |n: &str| got.iter().any(|(s, _, _)| s == n);
+        assert!(has("cr-dep"), "createRequire(...)('lit') is a require edge");
+        assert!(has("cr-member-dep"), "module.createRequire(...)('lit') too");
+        assert!(
+            has("tpl-lit"),
+            "no-substitution import(`lit`) is analyzable"
+        );
+        let soft = |n: &str| got.iter().find(|(s, _, _)| s == n).unwrap().1;
+        assert!(!soft("cr-dep"), "top-level createRequire require is hard");
+        assert!(soft("cr-guarded"), "createRequire in an if-branch is soft");
+
+        // Boundary — no new false positives: a createRequire result bound to a
+        // name and called later (needs dataflow) and a SUBSTITUTED template both
+        // stay skipped.
+        let neg = specs(
+            r#"
+            const r = createRequire(import.meta.url);
+            r("bound-later");
+            const d = import(`pre-${x}`);
+            "#,
+        );
+        assert!(
+            neg.is_empty(),
+            "bound-then-called createRequire + substituted template stay skipped"
+        );
+    }
 }
