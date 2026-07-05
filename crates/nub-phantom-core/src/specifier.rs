@@ -61,16 +61,19 @@ pub fn classify(spec: &str) -> SpecKind {
 /// be one is a framework virtual (`$app`), a bundler/AMD placeholder or virtual id
 /// (`{{x}}`, `env!env`, `tanstack-manifest:v`), or another runtime's internal
 /// (`_http_common`) — never a phantom. The npm grammar allows only
-/// `[A-Za-z0-9._~-]` in the name (plus `@`/`/` for a scope) and forbids a leading
-/// `_`/`.` (`$` never appears). Legacy uppercase (`JSONStream`) is allowed; any
-/// out-of-grammar character (`:`/`!`/`{`/whitespace/…) rejects. Deliberately
-/// permissive on the character SET so no real dependency is dropped.
+/// `[A-Za-z0-9._~-]` in the name (plus `@`/`/` for a scope); npm itself forbids a
+/// leading `_`/`.`, and this classifier additionally rejects a leading `$` (a
+/// framework virtual like `$app`) and `~` (a bundler `~/…` src-root alias like
+/// `~/components`) — neither begins a real npm package. Legacy uppercase
+/// (`JSONStream`) is allowed; any out-of-grammar character (`:`/`!`/`{`/
+/// whitespace/…) rejects. Deliberately permissive on the character SET so no real
+/// dependency is dropped.
 fn is_npm_name(name: &str) -> bool {
     let head = name.strip_prefix('@').unwrap_or(name);
     let Some(first) = head.chars().next() else {
         return false;
     };
-    if matches!(first, '_' | '.' | '$') {
+    if matches!(first, '_' | '.' | '$' | '~') {
         return false;
     }
     name.chars()
@@ -132,6 +135,8 @@ mod tests {
         assert_eq!(classify("_http_common"), SpecKind::NonPackage);
         assert_eq!(classify("env!env"), SpecKind::NonPackage); // AMD plugin id
         assert_eq!(classify("tanstack-manifest:v"), SpecKind::NonPackage); // virtual id
+        // Bundler `~/…` src-root alias — project-local, not an npm package.
+        assert_eq!(classify("~/components/Button"), SpecKind::NonPackage);
         // A legacy uppercase name is still a real package.
         assert_eq!(classify("JSONStream"), SpecKind::Bare("JSONStream".into()));
     }
