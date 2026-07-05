@@ -1,0 +1,354 @@
+//! Vite symlink-GVS serving compat (issue #315).
+//!
+//! Under nub's default global virtual store a package's realpath is the
+//! machine-global store (`~/.cache/nub/pm/virtual-store/…`), OUTSIDE the project
+//! root. Vite's dev server realpath-checks every `/@fs`-served module against
+//! `server.fs.allow` (default `[workspaceRoot]`), so a store-resident dep served
+//! raw (framework client entries, dev-toolbar modules, SSR/optimizeDeps-excluded
+//! deps) is rejected `403 … outside of Vite serving allow list`. pnpm never hits
+//! this — its virtual store is project-local (`node_modules/.pnpm`, under the
+//! workspace root). nub's external store needs Vite told about it.
+//!
+//! ONE mechanism, PM-agnostic, works-without-nub, zero lock-in — two units:
+//!
+//! - **Unit A (all Vite versions): write `node_modules/.modules.yaml`.** JSON
+//!   `{"virtualStoreDir":"<abs store>"}`. Vite ≥ 8.1 reads it natively
+//!   (`server/index.ts`, PR vitejs/vite#22415) and pushes the path onto
+//!   `fs.allow`. Additive (nub's own state lives in `.aube-state`), idempotent,
+//!   plain data — read regardless of whether nub is in the process.
+//!
+//! - **Unit B (Vite < 8.1): backport Vite's own 8.1 sniff.** The sniff predates
+//!   the majority of installed Vite, so for < 8.1 nub force-materializes just the
+//!   `vite` package project-local (the linker's `forceMaterializePackages` path —
+//!   the shared CAS store stays pristine, only the local ejected copy is touched)
+//!   and codegen-inserts the sniff at Vite's own `fs.allow`-default computation
+//!   site in the bundled (non-minified) dist. That site is upstream of
+//!   `createServer`, so it covers a bare `vite dev` CLI as well as
+//!   library-embedded Vite (Astro/SvelteKit/Nuxt). The inserted sniff is
+//!   YAML-tolerant (JSON first, block-YAML regex fallback) and reads whatever
+//!   `virtualStoreDir` any PM wrote — nub's store path lives ONLY in the
+//!   `.modules.yaml` data file, never hardcoded into the patch.
+//!
+//! Both units are gated on `vite` being in the installed graph and on the
+//! `NUB_VITE_COMPAT` opt-out (a falsey value disables both). The materialization
+//! decision lives in [`super::mod`]'s setting defaults; this module writes the
+//! file and patches the ejected copy post-install. Fail-open throughout: a
+//! missing anchor / unwritable copy is a no-op, never a corrupt Vite.
+
+use std::path::{Path, PathBuf};
+
+/// User-facing opt-out. Default-on (nub's goal is Vite just-working under the
+/// global store); a falsey value disables BOTH units. `NUB_*` is a sanctioned PM
+/// knob. Read at the setting-defaults site (materialize decision) and here (the
+/// post-install writer/patcher) so the two stay in lockstep.
+pub(crate) const VITE_COMPAT_ENV: &str = "NUB_VITE_COMPAT";
+
+/// Whether the Vite compat behavior is enabled. Disabled only by an explicit
+/// falsey `NUB_VITE_COMPAT` (`0`/`false`/`no`/`off`, case-insensitive); unset or
+/// any other value keeps it on. Same spelling as nub's other positive-default
+/// knobs (`NUB_SELF_SHIM`).
+pub(crate) fn enabled() -> bool {
+    match std::env::var(VITE_COMPAT_ENV) {
+        Ok(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        ),
+        Err(_) => true,
+    }
+}
+
+/// Post-install entry: write `.modules.yaml` and, for Vite < 8.1, patch the
+/// ejected copy. `root` is the install/workspace root (where the hoisted/GVS
+/// `node_modules` lives). Best-effort — a successful install must never fail on
+/// a compat step, so every fallible step degrades to a no-op.
+pub(crate) fn apply(root: &Path) {
+    if !enabled() {
+        return;
+    }
+    let node_modules = root.join("node_modules");
+    let Some(version) = installed_vite_version(&node_modules) else {
+        return; // vite not in the graph — nothing to do
+    };
+    let Some(store) = global_virtual_store_dir() else {
+        return;
+    };
+    // Unit A — always when vite is present. `.modules.yaml` at the workspace
+    // root's node_modules; Vite ≥ 8.1 reads it natively, the < 8.1 backport
+    // reads it too. Canonicalize the store so the path Vite prefix-matches its
+    // realpath'd module ids against has symlinks in `~/.cache` already resolved.
+    let store = std::fs::canonicalize(&store).unwrap_or(store);
+    write_modules_yaml(&node_modules, &store);
+
+    // Unit B — only Vite < 8.1 needs the backport (≥ 8.1 has the native sniff).
+    if vite_lt_8_1(&version) {
+        patch_ejected_vite(&node_modules);
+    }
+}
+
+/// Read the installed Vite's version from `node_modules/vite/package.json`.
+/// `None` when vite is not installed or the manifest is unreadable/malformed.
+fn installed_vite_version(node_modules: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(node_modules.join("vite/package.json")).ok()?;
+    // Minimal extraction — avoid a serde_json dep here; the field is a plain
+    // quoted string in every published vite manifest.
+    let key = raw.find("\"version\"")?;
+    let after = &raw[key + "\"version\"".len()..];
+    let colon = after.find(':')?;
+    let rest = &after[colon + 1..];
+    let start = rest.find('"')? + 1;
+    let end = rest[start..].find('"')? + start;
+    Some(rest[start..end].to_string())
+}
+
+/// Whether a semver version string is below 8.1.0 (the floor at which Vite's
+/// native `.modules.yaml` sniff exists). Parses only major.minor; a malformed
+/// version conservatively returns `false` (assume modern → skip the patch, Unit
+/// A still covers it).
+fn vite_lt_8_1(version: &str) -> bool {
+    let core = version.split(['-', '+']).next().unwrap_or(version);
+    let mut it = core.split('.');
+    let (Some(major), minor) = (it.next(), it.next()) else {
+        return false;
+    };
+    let Ok(major) = major.parse::<u32>() else {
+        return false;
+    };
+    if major != 8 {
+        return major < 8;
+    }
+    minor.and_then(|m| m.parse::<u32>().ok()).unwrap_or(0) < 1
+}
+
+/// nub's global virtual-store directory (`<cache>/virtual-store`, where `<cache>`
+/// is embedder-namespaced to `~/.cache/nub/pm`). This is the realpath prefix of
+/// every store-resident served module, so it is the value Vite must allow. The
+/// embedder profile is registered by the time install runs, so
+/// `aube_store::dirs::cache_dir()` resolves the nub namespace.
+fn global_virtual_store_dir() -> Option<PathBuf> {
+    aube_store::dirs::cache_dir().map(|c| c.join(aube_store::VIRTUAL_STORE_SUBDIR))
+}
+
+/// Unit A. Write `<node_modules>/.modules.yaml` as JSON `{"virtualStoreDir":…}`.
+/// MUST be JSON-flow (Vite ≤ 8.1.x's native sniff parses with `JSON.parse`;
+/// block YAML would throw and skip the store). JSON-flow is also valid YAML, so
+/// it survives a future YAML-parser upstream fix and the backported regex
+/// fallback. Idempotent (unconditional rewrite). Best-effort.
+fn write_modules_yaml(node_modules: &Path, store: &Path) {
+    if !node_modules.is_dir() {
+        return;
+    }
+    // JSON string-escape the path (Windows backslashes, spaces). serde_json is a
+    // nub-cli dep already.
+    let value = serde_json::to_string(&store.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| "\"\"".to_string());
+    let body = format!("{{\"virtualStoreDir\":{value}}}\n");
+    let _ = std::fs::write(node_modules.join(".modules.yaml"), body);
+}
+
+// ───────────────────────── Unit B: the < 8.1 dist backport ─────────────────
+
+/// The bindings Vite's own fs/path are hash-suffixed per build (`path$b`,
+/// `fs__default`), so the insert cannot reference them — it brings its own,
+/// prepended under mangled names that cannot collide.
+const PREPEND: &str = "import{readFileSync as __nubRfs}from\"node:fs\";\
+import{join as __nubJoin,isAbsolute as __nubIsAbs,resolve as __nubResolve}from\"node:path\";\n";
+
+/// The sniff, inserted immediately after the anchor (where `allowDirs` is a live
+/// array and `searchForWorkspaceRoot`/`root` are in scope). YAML-tolerant
+/// (JSON.parse → block-YAML regex fallback) and PM-agnostic: appends whatever
+/// `virtualStoreDir` any PM wrote. Strictly better than upstream 8.1's
+/// JSON-only sniff (which silently no-ops on real pnpm's block YAML).
+const INSERT: &str = ";try{const __wr=searchForWorkspaceRoot(root);\
+const __c=__nubRfs(__nubJoin(__wr,\"node_modules\",\".modules.yaml\"),\"utf-8\");\
+let __v;try{__v=JSON.parse(__c).virtualStoreDir;}\
+catch{const __m=__c.match(/^\\s*virtualStoreDir:\\s*(.+?)\\s*$/m);__v=__m&&__m[1].replace(/^['\"]|['\"]$/g,\"\");}\
+if(__v){if(__nubIsAbs(__v))allowDirs.push(__v);\
+else if(__v.startsWith(\"..\"))allowDirs.push(__nubResolve(__nubJoin(__wr,\"node_modules\"),__v));}}catch{}";
+
+/// The fs.allow-default computation anchors, in Vite's own bundled-but-not-
+/// minified source. `let allowDirs = server.fs.allow;` is identical across
+/// Vite 6 and 7; the `[searchForWorkspaceRoot(root)]` form is Vite 5's. The
+/// insert goes immediately AFTER the anchor. Vite ≥ 8.1 needs no patch (native
+/// sniff), so a new major only needs a one-line anchor check — if it ever stops
+/// matching, nothing is patched (fail-open; Unit A still covers ≥ 8.1).
+const ANCHORS: &[&str] = &[
+    "let allowDirs = server.fs.allow;",            // Vite 6 & 7
+    "allowDirs = [searchForWorkspaceRoot(root)];", // Vite 5
+];
+
+/// A marker unique to the insert; its presence means a file is already patched,
+/// making the whole pass idempotent across re-installs.
+const MARKER: &str = "__nubRfs(__nubJoin";
+
+/// Force-materialize + patch. Resolves the ejected local vite dir via the
+/// realpath of `node_modules/vite` (project-local after the linker's
+/// force-materialize), REFUSES to touch anything under the shared global store
+/// (CAS-safety invariant — if the eject did not happen, patching in place would
+/// corrupt the store shared across every project), then scans `dist/node/**.js`
+/// for the anchor and inserts the sniff. Fail-open at every step.
+fn patch_ejected_vite(node_modules: &Path) {
+    let vite_link = node_modules.join("vite");
+    let Ok(vite_dir) = std::fs::canonicalize(&vite_link) else {
+        return;
+    };
+    // CAS-safety: only patch a project-local ejected copy. If the realpath still
+    // points into the machine-global store (force-materialize did not run, e.g.
+    // a store this exact peer-hash is shared with another project), skip — never
+    // mutate the shared CAS-backed store.
+    if let Some(store) = global_virtual_store_dir() {
+        let store = std::fs::canonicalize(&store).unwrap_or(store);
+        if vite_dir.starts_with(&store) {
+            return;
+        }
+    }
+    let dist_node = vite_dir.join("dist").join("node");
+    if !dist_node.is_dir() {
+        return;
+    }
+    let mut files = Vec::new();
+    collect_js(&dist_node, &mut files);
+    for f in files {
+        patch_one(&f);
+    }
+}
+
+/// Recursively collect `.js` files under `dir` (Vite's dist chunk filenames are
+/// hash-suffixed, so the anchor is scanned for, not a filename hardcoded).
+/// Depth-capped defensively.
+fn collect_js(dir: &Path, out: &mut Vec<PathBuf>) {
+    collect_js_depth(dir, out, 0);
+}
+
+fn collect_js_depth(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
+    if depth > 8 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        match entry.file_type() {
+            Ok(t) if t.is_dir() => collect_js_depth(&path, out, depth + 1),
+            Ok(t) if t.is_file() && path.extension().is_some_and(|e| e == "js") => {
+                out.push(path);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Patch one dist file if it carries an anchor and is not already patched.
+/// Prepends the import and inserts the sniff after the first matching anchor.
+/// The write is best-effort; a read/anchor miss is a no-op.
+fn patch_one(file: &Path) {
+    let Ok(src) = std::fs::read_to_string(file) else {
+        return;
+    };
+    if src.contains(MARKER) {
+        return; // already patched
+    }
+    let Some(anchor) = ANCHORS.iter().find(|a| src.contains(**a)) else {
+        return;
+    };
+    // Insert AFTER the first anchor occurrence, then prepend the import.
+    let patched = src.replacen(anchor, &format!("{anchor}{INSERT}"), 1);
+    let patched = format!("{PREPEND}{patched}");
+    let _ = std::fs::write(file, patched);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opt_out_only_on_explicit_falsey() {
+        // Default-on when unset; the test mutates process env, so it is the sole
+        // reader in-process (serialized by cargo per-test-binary is not enough —
+        // keep the assertions in one test to avoid cross-test env races).
+        let key = VITE_COMPAT_ENV;
+        // SAFETY: single-threaded test body; restored at the end.
+        unsafe { std::env::remove_var(key) };
+        assert!(enabled(), "unset ⇒ on");
+        for falsey in ["0", "false", "FALSE", "no", "Off", " off "] {
+            unsafe { std::env::set_var(key, falsey) };
+            assert!(!enabled(), "{falsey:?} ⇒ off");
+        }
+        for truthy in ["1", "true", "yes", "anything"] {
+            unsafe { std::env::set_var(key, truthy) };
+            assert!(enabled(), "{truthy:?} ⇒ on");
+        }
+        unsafe { std::env::remove_var(key) };
+    }
+
+    #[test]
+    fn version_floor_is_8_1_0() {
+        for v in ["5.4.21", "6.4.3", "7.3.6", "8.0.9", "8.0.0", "0.4.0"] {
+            assert!(vite_lt_8_1(v), "{v} is < 8.1");
+        }
+        // 8.1.0-beta.0 is where the native sniff landed — its core is 8.1.0, so
+        // it (and any 8.1 prerelease) reads as >= 8.1 and needs no patch.
+        for v in ["8.1.0", "8.1.3", "8.2.0", "9.0.0", "10.1.1", "8.1.0-beta.0"] {
+            assert!(!vite_lt_8_1(v), "{v} is >= 8.1");
+        }
+        // Malformed ⇒ treat as modern (skip patch; Unit A still applies).
+        assert!(!vite_lt_8_1("not-a-version"));
+    }
+
+    #[test]
+    fn version_extraction_from_manifest() {
+        let dir = std::env::temp_dir().join(format!("nub-vite-ver-{}", std::process::id()));
+        let nm = dir.join("node_modules").join("vite");
+        std::fs::create_dir_all(&nm).unwrap();
+        std::fs::write(
+            nm.join("package.json"),
+            r#"{"name":"vite","version":"7.3.6","type":"module"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            installed_vite_version(&dir.join("node_modules")).as_deref(),
+            Some("7.3.6")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The codegen patch is anchor-driven, idempotent, and inserts after the
+    /// anchor with the import prepended. Exercised on a synthetic chunk carrying
+    /// the Vite-6/7 anchor.
+    #[test]
+    fn patch_is_anchored_and_idempotent() {
+        let dir = std::env::temp_dir().join(format!("nub-vite-patch-{}", std::process::id()));
+        let dn = dir.join("dist").join("node").join("chunks");
+        std::fs::create_dir_all(&dn).unwrap();
+        let chunk = dn.join("config.js");
+        std::fs::write(
+            &chunk,
+            "import x from 'y';\nlet allowDirs = server.fs.allow;\nif (x) {}\n",
+        )
+        .unwrap();
+
+        patch_one(&chunk);
+        let after = std::fs::read_to_string(&chunk).unwrap();
+        assert!(after.starts_with(PREPEND), "import prepended");
+        assert!(after.contains(MARKER), "sniff inserted");
+        assert!(
+            after.contains("let allowDirs = server.fs.allow;;try{"),
+            "insert lands immediately after the anchor"
+        );
+
+        patch_one(&chunk);
+        let twice = std::fs::read_to_string(&chunk).unwrap();
+        assert_eq!(after, twice, "second pass is a no-op (marker guard)");
+        assert_eq!(twice.matches(MARKER).count(), 1, "no double insert");
+
+        // A file with no anchor is untouched.
+        let plain = dn.join("plain.js");
+        std::fs::write(&plain, "export const a = 1;\n").unwrap();
+        patch_one(&plain);
+        assert_eq!(
+            std::fs::read_to_string(&plain).unwrap(),
+            "export const a = 1;\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

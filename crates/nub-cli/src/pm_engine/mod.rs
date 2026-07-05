@@ -66,6 +66,7 @@ pub mod store_config_family;
 pub mod unsupported_config;
 pub mod use_align;
 pub mod use_nub;
+pub mod vite_compat;
 
 pub use install_family::{
     CiFlags, InstallFlags, WorkspaceFilterFlags, run_ci, run_dlx_for_nubx, run_install,
@@ -2154,6 +2155,19 @@ fn nub_setting_defaults(
     store_locality: VirtualStoreLocality,
 ) -> Vec<(String, String)> {
     let fresh_format = if truly_fresh { "aube" } else { "pnpm" };
+    // Vite symlink-GVS compat (#315): eject the `vite` package project-local so
+    // its dist can be patched with the backported fs.allow sniff (< 8.1) without
+    // touching the shared CAS store. Only under the machine-global store
+    // (`Default`) — `nub ci`'s project-local store is already under the
+    // workspace root, so Vite serves it with no override. The post-install
+    // writer/patcher lives in [`vite_compat`]; this is its materialization half.
+    // A user-set `forceMaterializePackages` still wins (embedder-tier).
+    let force_materialize =
+        if store_locality == VirtualStoreLocality::Default && vite_compat::enabled() {
+            format!("{NUB_FORCE_MATERIALIZE_PACKAGES},vite")
+        } else {
+            NUB_FORCE_MATERIALIZE_PACKAGES.to_string()
+        };
     let mut defaults = vec![
         (
             "defaultLockfileFormat".to_string(),
@@ -2178,10 +2192,7 @@ fn nub_setting_defaults(
             // phantom-dep class, so force-materialize is the wrong lever.
             "next,nuxt,parcel,react-native".to_string(),
         ),
-        (
-            "forceMaterializePackages".to_string(),
-            NUB_FORCE_MATERIALIZE_PACKAGES.to_string(),
-        ),
+        ("forceMaterializePackages".to_string(), force_materialize),
     ];
     if let Some(data) = nub_data_dir() {
         defaults.push((

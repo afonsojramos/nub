@@ -61,6 +61,10 @@ aube-scripts = { path = "../../vendor/aube/crates/aube-scripts" }
 # Diagnostics / critical-path recorder: nub's engine_session calls diag::init()
 # so AUBE_DIAG_* env vars work when nub install runs the embedded aube engine.
 aube-util = { path = "../../vendor/aube/crates/aube-util" }
+# Store dir resolution: the Vite compat post-install step (pm_engine/vite_compat.rs)
+# reads the global virtual-store path via `aube_store::dirs::cache_dir()` (embedder
+# cache_namespace-aware) to write it into `.modules.yaml`. Already a transitive dep.
+aube-store = { path = "../../vendor/aube/crates/aube-store" }
 # Same major + `fancy` as vendor/aube — present.rs renders the engine's
 # miette::Report exactly as aube's own cli_main would, then rewrites it.
 miette = { version = "7", features = ["fancy"] }

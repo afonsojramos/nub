@@ -1066,6 +1066,20 @@ pub fn run_install(flags: InstallFlags) -> Result<i32> {
     super::min_release_age::arm();
     let code = run_engine(&session, opts, yarn, &flags.output)?;
     super::min_release_age::persist(&session.cwd, code == 0, &flags.output);
+    // Vite symlink-GVS serving compat (#315): after a successful install, write
+    // `node_modules/.modules.yaml` and (for Vite < 8.1) patch the ejected vite
+    // dist so its dev server serves the machine-global store. Gated internally on
+    // vite-in-graph + the `NUB_VITE_COMPAT` opt-out; best-effort, never fails the
+    // install. The root is where the (hoisted/GVS) node_modules lives.
+    if code == 0 {
+        let root = session
+            .detected
+            .as_ref()
+            .map(|d| d.dir.clone())
+            .or_else(|| find_manifest_root(&session.cwd))
+            .unwrap_or_else(|| session.cwd.clone());
+        super::vite_compat::apply(&root);
+    }
     // Virgin install only: stamp a caret RANGE into `devEngines.packageManager`
     // so the project advertises nub the standard, cross-tool way WITHOUT locking
     // itself to one exact nub version. nub's canonical lockfile is deliberately
