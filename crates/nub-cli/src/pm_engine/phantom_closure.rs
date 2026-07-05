@@ -1,5 +1,5 @@
 //! Selective-subtree force-materialization policy — nub's force-materialize
-//! expansion hook (behind the default-off `NUB_DYNAMIC_PHANTOM_EJECT` flag).
+//! expansion hook (the default; disabled by `NUB_DYNAMIC_PHANTOM_EJECT=0`).
 //!
 //! Force-materializing a package project-local is only SOUND for a
 //! transitively-consumed package if its whole ancestor-closure materializes with
@@ -31,10 +31,10 @@
 //! are all already reachable inside its own subtree and absent from the project
 //! top level, so a transitively-satisfied over-flag never ejects.
 //!
-//! Flag OFF ⇒ no hook installed ⇒ aube's `expand_force_materialize` returns the
-//! seed verbatim ⇒ the force-materialize pass is byte-for-byte the shipped
-//! behavior. All policy lives here; aube owns only the neutral seam + the graph
-//! primitive.
+//! Opt-out (`NUB_DYNAMIC_PHANTOM_EJECT=0`) ⇒ no hook installed ⇒ aube's
+//! `expand_force_materialize` returns the seed verbatim ⇒ the force-materialize
+//! pass is byte-for-byte the pre-productionization pure-symlink behavior. All
+//! policy lives here; aube owns only the neutral seam + the graph primitive.
 
 use std::collections::{BTreeMap, HashSet, VecDeque};
 
@@ -43,35 +43,23 @@ use aube_lockfile::{LockedPackage, LockfileGraph};
 use nub_phantom_scan::ScanResult;
 use rayon::prelude::*;
 
-/// Whether selective-subtree force-materialization is armed. Truthy
-/// `NUB_DYNAMIC_PHANTOM_EJECT` (`1`/`true`/`yes`, or any non-falsey value) arms
-/// it; unset or a falsey value (`0`/`false`/`no`/`off`/empty) is off — the
-/// default. The SAME flag the extract-time producer (`crate::dynamic_phantom`)
-/// gates on, so the scanner (detection) and this closure (transitive soundness)
-/// share one arm.
-///
-/// LIMITATION (experimental-flag scope): the flag is NOT folded into the
-/// install-state fingerprint, which hashes only the raw `forceMaterializePackages`
-/// setting + the lockfile. So flipping this flag on an ALREADY-installed tree
-/// (unchanged lockfile) is a no-op — the link phase is skipped as "up to date". A
-/// clean install (or one whose lockfile changed) picks it up. Acceptable for a
-/// default-off experimental flag; folding the flag into the fingerprint is the
-/// productionization fix (an aube `state.rs` change, kept default-preserving).
+/// The SINGLE phantom-eject arm — [`crate::dynamic_phantom::enabled`] — shared
+/// with the extract-time producer so detection (the scanner), transitive
+/// soundness (this closure), and warm-tree invalidation (the fingerprint) can
+/// never disagree. On by DEFAULT; `NUB_DYNAMIC_PHANTOM_EJECT=0` is the opt-out.
+/// The flag IS now folded into the install-state fingerprint (via the embedder
+/// `extra_settings_fingerprint` hook; see [`crate::dynamic_phantom::settings_fingerprint`]),
+/// so flipping it on an already-installed tree re-links to the new
+/// materialization shape rather than accepting a stale node_modules.
 fn enabled() -> bool {
-    match std::env::var("NUB_DYNAMIC_PHANTOM_EJECT") {
-        Ok(v) => !matches!(
-            v.trim().to_ascii_lowercase().as_str(),
-            "" | "0" | "false" | "no" | "off"
-        ),
-        Err(_) => false,
-    }
+    crate::dynamic_phantom::enabled()
 }
 
 /// Register nub's force-materialize expansion hook with the embedded engine.
-/// No-op unless `NUB_DYNAMIC_PHANTOM_EJECT` is armed, so the default path installs
-/// nothing and `aube_linker::expand_force_materialize` stays the identity —
-/// byte-for-byte the shipped force-materialize behavior. Set-once (idempotent);
-/// safe to call once per engine-session build.
+/// No-op only under the `NUB_DYNAMIC_PHANTOM_EJECT=0` opt-out, in which case
+/// `aube_linker::expand_force_materialize` stays the identity — byte-for-byte the
+/// pure-symlink force-materialize behavior. Set-once (idempotent); safe to call
+/// once per engine-session build.
 pub(crate) fn register() {
     if !enabled() {
         return;
@@ -79,9 +67,24 @@ pub(crate) fn register() {
     aube_linker::set_force_materialize_expand_hook(Box::new(expand));
 }
 
-/// The hook body: resolved graph + flat seed → graph-aware materialization plan.
-/// See the module docs for the two rungs.
+/// The hook entry: read the per-version scanner's sidecars (the store-IO half)
+/// then hand off to the pure planner. Split so [`plan_from_flags`] — all the
+/// closure/seed policy — is unit-tested with injected flags and never touches
+/// the host store.
 fn expand(graph: &LockfileGraph, seed_names: &[String]) -> ForceMaterializePlan {
+    plan_from_flags(graph, seed_names, &dynamic_phantom_flags(graph))
+}
+
+/// Pure planner: resolved graph + flat seed + dynamic phantom flags → graph-aware
+/// materialization plan. See the module docs for the two rungs. `flags` is each
+/// surviving-candidate importer's `(dep_path, name, undeclared-target-names)`,
+/// supplied by [`dynamic_phantom_flags`] in production and injected directly in
+/// tests.
+fn plan_from_flags(
+    graph: &LockfileGraph,
+    seed_names: &[String],
+    flags: &[(String, String, Vec<String>)],
+) -> ForceMaterializePlan {
     // Top-level presence: default-hoist top level = the importer DIRECT deps. See
     // `should_seed` for why this gate is load-bearing and its non-default-hoist
     // scope caveat.
@@ -102,9 +105,8 @@ fn expand(graph: &LockfileGraph, seed_names: &[String]) -> ForceMaterializePlan 
     // importer's undeclared targets keyed by dep_path, for the rung-2 hoist; only
     // survivors are kept, so a hoist only ever lands in a package the seed actually
     // materializes.
-    let flags = dynamic_phantom_flags(graph);
     let mut dynamic_targets: BTreeMap<&str, &[String]> = BTreeMap::new();
-    for (dep_path, name, targets) in &flags {
+    for (dep_path, name, targets) in flags {
         if should_seed(targets, &reachable_dep_names(dep_path, graph), is_top_level) {
             seed_names_set.insert(name.as_str());
             dynamic_targets.insert(dep_path.as_str(), targets.as_slice());
@@ -192,10 +194,10 @@ fn expand(graph: &LockfileGraph, seed_names: &[String]) -> ForceMaterializePlan 
 /// rayon; the backfill already warmed the sidecars, so each item is a small
 /// cached-JSON index load + a blake3 fingerprint + a small sidecar read.
 ///
-/// Flag-gated to empty unless armed. In production `expand` is only installed when
-/// armed, so this is belt-and-suspenders; the gate also keeps the pure vite/empty
-/// unit tests hermetic — they call `expand` directly with the flag off and must
-/// not touch the host's real store.
+/// Empty under the `NUB_DYNAMIC_PHANTOM_EJECT=0` opt-out. In production `expand`
+/// installs the hook only when armed, so this gate is belt-and-suspenders; the
+/// pure planning logic is tested through [`plan_from_flags`] with injected flags,
+/// so the unit tests never reach this store-IO path.
 fn dynamic_phantom_flags(graph: &LockfileGraph) -> Vec<(String, String, Vec<String>)> {
     if !enabled() {
         return Vec::new();
@@ -381,8 +383,9 @@ mod tests {
         xs.iter().map(|s| s.to_string()).collect()
     }
 
-    // Rung-1 vite seeding is independent of the dynamic source (a flag-off unit
-    // test sees no dynamic flags), so these exercise the closure end to end.
+    // Rung-1 vite seeding is independent of the dynamic source, so these inject
+    // an EMPTY flag set and exercise the pure planner (`plan_from_flags`) end to
+    // end — no host-store IO.
 
     #[test]
     fn embedded_vite_lt_8_1_seeds_its_framework_closure() {
@@ -394,7 +397,7 @@ mod tests {
             // an unrelated modern vite direct dep must NOT drag anything in
             ("lodash@4.17.21", "lodash", &[]),
         ]);
-        let plan = expand(&g, &[]);
+        let plan = plan_from_flags(&g, &[], &[]);
         let plan_names: HashSet<&str> = plan.names.iter().map(String::as_str).collect();
         assert!(plan_names.contains("vite"), "embedded vite<8.1 seeded");
         assert!(plan_names.contains("astro"), "framework in the closure");
@@ -410,7 +413,7 @@ mod tests {
             ("app@1.0.0", "app", &[("vite", "8.1.3")]),
             ("vite@8.1.3", "vite", &[]),
         ]);
-        let plan = expand(&g, &[]);
+        let plan = plan_from_flags(&g, &[], &[]);
         assert!(
             plan.names.is_empty(),
             "vite>=8.1 needs no eject (Unit A covers it)"
@@ -420,8 +423,39 @@ mod tests {
     #[test]
     fn no_seeds_yields_empty_plan() {
         let g = graph(&[("lodash@4.17.21", "lodash", &[])]);
-        let plan = expand(&g, &[]);
+        let plan = plan_from_flags(&g, &[], &[]);
         assert!(plan.names.is_empty() && plan.hoist_within.is_empty());
+    }
+
+    #[test]
+    fn dynamic_flag_seeds_importer_and_records_hoist() {
+        // The now-default path: a phantom adapter (`@hookform/resolvers`)
+        // statically imports an undeclared `zod`. The target isn't reachable
+        // within the adapter's own subtree, so `should_seed` SEEDS it; rung-2
+        // resolves `zod` to its dep_path and records the hoist into the adapter's
+        // materialized `node_modules`.
+        let g = graph(&[
+            ("@hookform/resolvers@1.0.0", "@hookform/resolvers", &[]),
+            ("zod@3.0.0", "zod", &[]),
+        ]);
+        let flags = vec![(
+            "@hookform/resolvers@1.0.0".to_string(),
+            "@hookform/resolvers".to_string(),
+            vec!["zod".to_string()],
+        )];
+        let plan = plan_from_flags(&g, &[], &flags);
+        let names: HashSet<&str> = plan.names.iter().map(String::as_str).collect();
+        assert!(
+            names.contains("@hookform/resolvers"),
+            "the flagged phantom importer is seeded"
+        );
+        assert_eq!(
+            plan.hoist_within
+                .get("@hookform/resolvers@1.0.0")
+                .map(Vec::as_slice),
+            Some(["zod@3.0.0".to_string()].as_slice()),
+            "rung-2 records the undeclared target's hoist"
+        );
     }
 
     // Precision seed-selection (`should_seed`) — the port of the retired link-time

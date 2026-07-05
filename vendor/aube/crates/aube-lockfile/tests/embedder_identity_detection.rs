@@ -50,6 +50,7 @@ static MYTOOL: Embedder = Embedder {
     strict_unsupported_source: false,
     warm_trust_revalidate: true,
     trust_policy_ignore_after_default: None,
+    extra_settings_fingerprint: None,
 };
 
 fn project(files: &[(&str, &str)]) -> tempfile::TempDir {

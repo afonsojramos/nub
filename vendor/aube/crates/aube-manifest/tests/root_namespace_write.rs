@@ -50,6 +50,7 @@ static ROOT_TOOL: Embedder = Embedder {
     strict_unsupported_source: false,
     warm_trust_revalidate: true,
     trust_policy_ignore_after_default: None,
+    extra_settings_fingerprint: None,
 };
 
 fn read_manifest(dir: &std::path::Path) -> serde_json::Value {

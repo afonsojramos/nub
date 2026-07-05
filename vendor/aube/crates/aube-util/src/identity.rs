@@ -364,6 +364,18 @@ pub struct Embedder {
     /// relief, the same quarantine logic as `minimumReleaseAge`, mirrored.
     /// Embedder-fixed: the host's supply-chain posture, not a per-project knob.
     pub trust_policy_ignore_after_default: Option<u64>,
+    /// Optional hook contributing extra bytes to the install-state
+    /// `settings_hash` (see `crate::state::hash_settings` in the `aube` crate)
+    /// for a host that shapes the installed tree through an input aube's
+    /// resolved settings don't capture. `None` (aube's default) ⇒ the fold is
+    /// skipped entirely, so the hash is byte-for-byte unchanged for standalone
+    /// aube. A host returns a stable token for its own install-shape input so
+    /// flipping that input invalidates the warm tree and forces a re-link
+    /// instead of trusting a now-stale `node_modules`. nub folds in its
+    /// phantom-eject flag here — it shapes which packages materialize but rides
+    /// no aube setting. Same function-pointer hook shape as
+    /// [`cpu_budget`](Self::cpu_budget); embedder-fixed pluggability.
+    pub extra_settings_fingerprint: Option<fn() -> String>,
 }
 
 /// Standalone aube's embedder profile. Reproduces every hardcoded branding
@@ -416,6 +428,9 @@ pub const AUBE: Embedder = Embedder {
     // Standalone aube leaves `trustPolicyIgnoreAfter` unset, so the downgrade
     // check applies to every version — behavior byte-for-byte unchanged.
     trust_policy_ignore_after_default: None,
+    // No extra settings-fingerprint fold: standalone aube's `settings_hash` is
+    // byte-for-byte unchanged (the hook block is skipped when `None`).
+    extra_settings_fingerprint: None,
 };
 
 static ACTIVE: OnceLock<&'static Embedder> = OnceLock::new();
@@ -592,6 +607,7 @@ mod tests {
         assert_eq!(id.primer_ttl, None);
         assert!(!id.tty_progress);
         assert_eq!(id.trust_policy_ignore_after_default, None);
+        assert!(id.extra_settings_fingerprint.is_none());
     }
 
     /// Under the default (AUBE) profile the source-branding helpers reproduce
