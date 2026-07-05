@@ -368,6 +368,12 @@ fn run_add(typed: &str, args: &[String]) -> Result<i32> {
     )?;
     super::min_release_age::persist(&session.cwd, code == 0, &globals.output);
     stamp_if_virgin(&session, code);
+    // `nub add vite` (or adding any dep to a vite project) changes the graph;
+    // refresh `.modules.yaml` + the < 8.1 patch. Note: a FIRST `nub add vite`
+    // can't have force-materialized vite yet (the manifest didn't declare it at
+    // settings time), so Unit A applies immediately (≥ 8.1) and the < 8.1 dist
+    // patch lands on the next `nub install` once vite is a declared direct dep.
+    apply_vite_compat(&session, code);
     Ok(code)
 }
 
@@ -418,6 +424,9 @@ fn run_update(typed: &str, args: &[String]) -> Result<i32> {
     )?;
     super::min_release_age::persist(&session.cwd, code == 0, &globals.output);
     stamp_if_virgin(&session, code);
+    // `nub update` re-resolves; a vite bump can cross the 8.1 boundary, so
+    // refresh `.modules.yaml` + the < 8.1 patch to match the new graph.
+    apply_vite_compat(&session, code);
     Ok(code)
 }
 
@@ -844,6 +853,29 @@ fn import_to_pnpm_lock(force: bool) -> miette::Result<String> {
 /// `super::detect_lockfile_walk_up`. Approximation of aube's
 /// `dirs::project_root` (which is crate-private); the home-dir boundary is
 /// not enforced here.
+/// Run the Vite symlink-GVS compat post-step ([`super::vite_compat::apply`]) for
+/// a successful engine verb (`install`/`add`/`update`). Resolves the root where
+/// the install's `node_modules` actually lives: the identity walk-up dir
+/// (`detected.dir` — the workspace root for a monorepo member) when IT holds the
+/// tree, else the cwd, so a stray ancestor lockfile can't point the writer at a
+/// `node_modules`-less parent. `nub ci` (project-local store) does not call this
+/// — its store is already under the workspace root, so Vite serves it unchanged.
+fn apply_vite_compat(session: &EngineSession, code: i32) {
+    if code != 0 {
+        return;
+    }
+    let has_node_modules = |d: &Path| d.join("node_modules").is_dir();
+    let root = session
+        .detected
+        .as_ref()
+        .map(|d| d.dir.clone())
+        .filter(|d| has_node_modules(d))
+        .or_else(|| has_node_modules(&session.cwd).then(|| session.cwd.clone()))
+        .or_else(|| find_manifest_root(&session.cwd))
+        .unwrap_or_else(|| session.cwd.clone());
+    super::vite_compat::apply(&root);
+}
+
 fn find_manifest_root(cwd: &Path) -> Option<PathBuf> {
     let mut dir = cwd.to_path_buf();
     for _ in 0..16 {
@@ -1070,16 +1102,8 @@ pub fn run_install(flags: InstallFlags) -> Result<i32> {
     // `node_modules/.modules.yaml` and (for Vite < 8.1) patch the ejected vite
     // dist so its dev server serves the machine-global store. Gated internally on
     // vite-in-graph + the `NUB_VITE_COMPAT` opt-out; best-effort, never fails the
-    // install. The root is where the (hoisted/GVS) node_modules lives.
-    if code == 0 {
-        let root = session
-            .detected
-            .as_ref()
-            .map(|d| d.dir.clone())
-            .or_else(|| find_manifest_root(&session.cwd))
-            .unwrap_or_else(|| session.cwd.clone());
-        super::vite_compat::apply(&root);
-    }
+    // install.
+    apply_vite_compat(&session, code);
     // Virgin install only: stamp a caret RANGE into `devEngines.packageManager`
     // so the project advertises nub the standard, cross-tool way WITHOUT locking
     // itself to one exact nub version. nub's canonical lockfile is deliberately

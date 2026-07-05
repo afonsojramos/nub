@@ -227,17 +227,44 @@ fn global_virtual_store_dir() -> Option<PathBuf> {
 /// MUST be JSON-flow (Vite ≤ 8.1.x's native sniff parses with `JSON.parse`;
 /// block YAML would throw and skip the store). JSON-flow is also valid YAML, so
 /// it survives a future YAML-parser upstream fix and the backported regex
-/// fallback. Idempotent (unconditional rewrite). Best-effort.
+/// fallback. Best-effort.
+///
+/// `.modules.yaml` is also pnpm's OWN install-state file (block YAML, many keys:
+/// `hoistPattern`, `packageManager`, …). nub must not clobber a real pnpm state
+/// file — so write ONLY when the file is absent or is already nub's own
+/// single-key JSON stub. A foreign (pnpm) state file is left untouched (that
+/// project's Vite compat is forgone rather than corrupt pnpm's round-trip); the
+/// common nub-identity case has no such file and writes freely.
 fn write_modules_yaml(node_modules: &Path, store: &Path) {
     if !node_modules.is_dir() {
         return;
+    }
+    let path = node_modules.join(".modules.yaml");
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        if !is_nub_modules_yaml(&existing) {
+            return; // foreign (pnpm) state file — never clobber
+        }
     }
     // JSON string-escape the path (Windows backslashes, spaces). serde_json is a
     // nub-cli dep already.
     let value = serde_json::to_string(&store.to_string_lossy().into_owned())
         .unwrap_or_else(|_| "\"\"".to_string());
     let body = format!("{{\"virtualStoreDir\":{value}}}\n");
-    let _ = std::fs::write(node_modules.join(".modules.yaml"), body);
+    let _ = std::fs::write(&path, body);
+}
+
+/// Whether a `.modules.yaml` body is nub's own stub (a JSON object whose only
+/// key is `virtualStoreDir`) rather than a foreign PM's richer state file. A
+/// pnpm state file is block YAML / carries other keys, so it fails to parse as a
+/// single-key JSON object and is left alone.
+fn is_nub_modules_yaml(body: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| {
+            v.as_object()
+                .map(|o| o.len() == 1 && o.contains_key("virtualStoreDir"))
+        })
+        .unwrap_or(false)
 }
 
 // ───────────────────────── Unit B: the < 8.1 dist backport ─────────────────
@@ -327,6 +354,15 @@ fn collect_js_depth(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
 /// Patch one dist file if it carries an anchor and is not already patched.
 /// Prepends the import and inserts the sniff after the first matching anchor.
 /// The write is best-effort; a read/anchor miss is a no-op.
+///
+/// CAS-safety, CRITICAL: the ejected copy's files are created by the linker via
+/// `hard_link` on non-macOS same-FS targets (macOS clones), so each dist file
+/// SHARES its inode with the content-addressed store blob every project
+/// hardlinks to. A truncate-in-place write (`fs::write` = `O_TRUNC`) would edit
+/// that shared inode and corrupt the global CAS. So write a fresh sibling file
+/// and atomically `rename` over the target — the rename repoints the directory
+/// entry to a NEW inode, leaving the CAS-shared blob untouched. This also makes
+/// the patch atomic (no truncated/half-written chunk on an interrupted write).
 fn patch_one(file: &Path) {
     let Ok(src) = std::fs::read_to_string(file) else {
         return;
@@ -340,7 +376,27 @@ fn patch_one(file: &Path) {
     // Insert AFTER the first anchor occurrence, then prepend the import.
     let patched = src.replacen(anchor, &format!("{anchor}{INSERT}"), 1);
     let patched = format!("{PREPEND}{patched}");
-    let _ = std::fs::write(file, patched);
+    write_breaking_hardlink(file, patched.as_bytes());
+}
+
+/// Replace `file`'s contents WITHOUT truncating its (possibly CAS-hardlinked)
+/// inode: write a temp sibling in the same directory, then atomically rename it
+/// over `file`. Same-dir keeps the rename on one filesystem (atomic); the temp
+/// name is process- + path-unique. Best-effort — a failure cleans up the temp
+/// and leaves the original untouched.
+fn write_breaking_hardlink(file: &Path, bytes: &[u8]) {
+    let Some(dir) = file.parent() else {
+        return;
+    };
+    let stem = file.file_name().and_then(|n| n.to_str()).unwrap_or("chunk");
+    let tmp = dir.join(format!(".{stem}.nub-{}.tmp", std::process::id()));
+    if std::fs::write(&tmp, bytes).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return;
+    }
+    if std::fs::rename(&tmp, file).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
 }
 
 #[cfg(test)]
@@ -392,6 +448,74 @@ mod tests {
         .unwrap();
         assert_eq!(read_vite_version(&dir).as_deref(), Some("7.3.6"));
         assert_eq!(read_vite_version(&dir.join("nope")), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_nub_shaped_modules_yaml_is_overwritable() {
+        // nub's own stub — overwritable.
+        assert!(is_nub_modules_yaml(r#"{"virtualStoreDir":"/abs"}"#));
+        assert!(is_nub_modules_yaml("{\"virtualStoreDir\":\"/abs\"}\n"));
+        // pnpm's real state file (block YAML, many keys) — never clobber.
+        assert!(!is_nub_modules_yaml(
+            "hoistPattern:\n  - '*'\nvirtualStoreDir: node_modules/.pnpm\npackageManager: pnpm@9\n"
+        ));
+        // A JSON object with extra keys is foreign too (not the single-key stub).
+        assert!(!is_nub_modules_yaml(
+            r#"{"virtualStoreDir":"/abs","hoistPattern":["*"]}"#
+        ));
+        assert!(!is_nub_modules_yaml("not json at all"));
+    }
+
+    /// write_modules_yaml refuses to clobber a foreign (pnpm) state file but
+    /// freely writes when absent or over its own stub.
+    #[test]
+    fn write_modules_yaml_preserves_foreign_state() {
+        let nm = std::env::temp_dir().join(format!("nub-vite-my-{}", std::process::id()));
+        std::fs::create_dir_all(&nm).unwrap();
+        let f = nm.join(".modules.yaml");
+        let store = Path::new("/store/virtual-store");
+
+        // absent → writes nub stub
+        write_modules_yaml(&nm, store);
+        assert!(is_nub_modules_yaml(&std::fs::read_to_string(&f).unwrap()));
+
+        // over its own stub → rewrites
+        write_modules_yaml(&nm, Path::new("/store2"));
+        assert!(std::fs::read_to_string(&f).unwrap().contains("/store2"));
+
+        // foreign pnpm file → left untouched
+        let pnpm = "hoistPattern:\n  - '*'\nvirtualStoreDir: node_modules/.pnpm\n";
+        std::fs::write(&f, pnpm).unwrap();
+        write_modules_yaml(&nm, store);
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), pnpm);
+
+        let _ = std::fs::remove_dir_all(&nm);
+    }
+
+    /// CAS-safety regression guard: the ejected dist files are HARDLINKS to the
+    /// content-addressed store on Linux, so the patch write MUST NOT truncate the
+    /// shared inode in place. This proves the write severs the link — the sibling
+    /// hardlink keeps its original bytes. Fails loudly if `patch_one` ever reverts
+    /// to `fs::write` (which is invisible on macOS's copy-on-write link strategy).
+    #[test]
+    fn patch_write_does_not_mutate_a_hardlinked_sibling() {
+        let dir = std::env::temp_dir().join(format!("nub-vite-hl-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cas = dir.join("cas-blob.js"); // stands in for the shared store blob
+        let ejected = dir.join("ejected.js"); // the project-local hardlink to it
+        let original = "let allowDirs = server.fs.allow;\n";
+        std::fs::write(&cas, original).unwrap();
+        std::fs::hard_link(&cas, &ejected).unwrap();
+
+        write_breaking_hardlink(&ejected, b"PATCHED");
+
+        assert_eq!(std::fs::read_to_string(&ejected).unwrap(), "PATCHED");
+        assert_eq!(
+            std::fs::read_to_string(&cas).unwrap(),
+            original,
+            "the CAS-shared inode must be untouched — the write broke the hardlink"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
