@@ -19,32 +19,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::manifest::{Entry, EntryKind};
-use nub_phantom_core::extract::{Occurrence, extract, extract_optimized};
+use nub_phantom_core::extract::{Occurrence, extract};
 use nub_phantom_core::specifier::{self, SpecKind};
-
-/// Extract one file's specifiers.
-///
-/// PRODUCTION DEFAULT is the BASELINE full-AST-visit `extract`, NOT the
-/// static-imports-only `extract_optimized` ladder. This is the measured outcome
-/// of the extraction-optimization investigation (the maintainer's ask): the
-/// ladder was built, proven output-identical (see `extract_optimized`'s parity
-/// test), and benchmarked inline over real trees — and it REGRESSES the scan
-/// ~3-13% rather than helping. The scan cost is dominated by the oxc PARSE (which
-/// builds the full AST to recover specifiers regardless — the deep-visit depth
-/// the ladder skips is cheap next to it) and by fs I/O + the graph walk, not by
-/// AST traversal; and reachable published npm code is CJS/`require`-heavy, so the
-/// ladder's guard-aware full path is the COMMON case, not the exception it
-/// assumed. So production stays on the simpler, marginally-faster baseline. The
-/// `NUB_PHANTOM_EXTRACT_MODE=optimized` toggle re-enables the ladder for A/B
-/// reproduction (scan-bench). Reading one env var per file is negligible next to
-/// a parse; it is a pure measurement seam.
-fn extract_file(rel: &str, source: &str) -> Vec<Occurrence> {
-    if std::env::var_os("NUB_PHANTOM_EXTRACT_MODE").is_some_and(|v| v == "optimized") {
-        extract_optimized(rel, source)
-    } else {
-        extract(rel, source)
-    }
-}
 
 /// Provenance bit: reached from the main surface (`main`/`bin`/`exports."."`).
 const FROM_MAIN: u8 = 0b01;
@@ -138,10 +114,7 @@ fn walk_generic<S: FileSource>(source: &S, entry_points: &[Entry]) -> Walk {
                 continue;
             };
             let rel = source.rel_path(&file);
-            // Extract via the BASELINE full-AST path by default (the optimized
-            // ladder was measured to regress; `NUB_PHANTOM_EXTRACT_MODE=optimized`
-            // re-enables it for A/B). See `extract_file`.
-            parsed.insert(file.clone(), extract_file(&rel, &text));
+            parsed.insert(file.clone(), extract(&rel, &text));
         }
         // Collect relative edges first (immutable borrow of the cache) then
         // propagate — avoids holding a borrow across the flags mutation.

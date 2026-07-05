@@ -10,10 +10,6 @@
 //!   specifiers (via `nub-phantom-core`'s oxc parser) → classify each against the
 //!   declared surface.
 //!
-//! (The `extract_optimized` static-imports-only ladder was investigated + proven
-//! output-identical but MEASURED to regress the scan — production uses the
-//! baseline extractor; see `graph::extract_file` for the finding.)
-//!
 //! For the dynamic detector the actionable output is [`ScanResult`]: a single
 //! `has_unguarded_phantom` boolean (does this version statically, unguardedly
 //! import a package it does not declare?) plus the offending target set with
