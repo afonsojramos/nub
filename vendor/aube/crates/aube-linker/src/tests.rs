@@ -1283,6 +1283,122 @@ fn gvs_shareable_source_dep_without_index_errors_loudly() {
     );
 }
 
+/// Regression (#341): with the global virtual store OFF, the source-dep
+/// pass keyed its "already materialized?" check on the raw `dep_path`
+/// (`@scope/name@url+<hash>`, still containing `/`) instead of the
+/// flattened `.aube/` entry name (`@scope+name@url+<hash>`). For a
+/// SCOPED git/url source the raw path resolves to a nested dir that
+/// never exists, so a relink re-ran `materialize_into` over the already
+/// populated entry and its transitive-dep sibling symlink collided with
+/// EEXIST. The second `link_all` must be a clean cache hit.
+#[test]
+fn gvs_off_relinks_scoped_git_source_without_eexist() {
+    use aube_lockfile::{GitSource, LocalSource};
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::at(dir.path().join("store/files"));
+
+    let git = LocalSource::Git(GitSource {
+        url: "https://github.com/lishid/cm-language".to_string(),
+        committish: None,
+        resolved: "0123456789abcdef0123456789abcdef01234567".to_string(),
+        integrity: None,
+        subpath: None,
+    });
+    let lang_dep_path = git.dep_path("@codemirror/language");
+    assert!(
+        lang_dep_path.starts_with("@codemirror/language@url+"),
+        "fixture must exercise a scoped url source: {lang_dep_path}"
+    );
+
+    // The scoped git source declares one transitive dep, so
+    // `materialize_into` creates a sibling symlink under the entry's
+    // `node_modules/@codemirror/` — exactly the collision site.
+    let mut lang_deps = BTreeMap::new();
+    lang_deps.insert("@codemirror/state".to_string(), "6.0.0".to_string());
+
+    let mut packages = BTreeMap::new();
+    packages.insert(
+        lang_dep_path.clone(),
+        LockedPackage {
+            name: "@codemirror/language".to_string(),
+            version: "0.0.0".to_string(),
+            dependencies: lang_deps,
+            dep_path: lang_dep_path.clone(),
+            local_source: Some(git),
+            ..Default::default()
+        },
+    );
+    packages.insert(
+        "@codemirror/state@6.0.0".to_string(),
+        LockedPackage {
+            name: "@codemirror/state".to_string(),
+            version: "6.0.0".to_string(),
+            dep_path: "@codemirror/state@6.0.0".to_string(),
+            ..Default::default()
+        },
+    );
+
+    let mut importers = BTreeMap::new();
+    importers.insert(
+        ".".to_string(),
+        vec![DirectDep {
+            name: "@codemirror/language".to_string(),
+            dep_path: lang_dep_path.clone(),
+            dep_type: DepType::Production,
+            specifier: None,
+        }],
+    );
+    let graph = LockfileGraph {
+        importers,
+        packages,
+        ..Default::default()
+    };
+
+    let mut indices = BTreeMap::new();
+    indices.insert(
+        lang_dep_path.clone(),
+        package_index(
+            &store,
+            "{\"name\":\"@codemirror/language\",\"version\":\"0.0.0\"}",
+            "module.exports = 'language';",
+        ),
+    );
+    indices.insert(
+        "@codemirror/state@6.0.0".to_string(),
+        package_index(
+            &store,
+            "{\"name\":\"@codemirror/state\",\"version\":\"6.0.0\"}",
+            "module.exports = 'state';",
+        ),
+    );
+
+    let project_dir = dir.path().join("project");
+    std::fs::create_dir_all(&project_dir).unwrap();
+    // GVS off — the branch the bug lives in.
+    let linker = Linker::new_with_gvs(&store, LinkStrategy::Copy, false).with_hoist(false);
+
+    linker
+        .link_all(&project_dir, &graph, &indices)
+        .expect("fresh install of a scoped git source must succeed");
+
+    let entry_name = dep_path_to_filename(&lang_dep_path, DEFAULT_VIRTUAL_STORE_DIR_MAX_LENGTH);
+    let sibling = project_dir
+        .join("node_modules/.aube")
+        .join(&entry_name)
+        .join("node_modules/@codemirror/state");
+    assert!(
+        sibling.symlink_metadata().unwrap().is_symlink(),
+        "the transitive-dep sibling symlink must exist after the fresh install"
+    );
+
+    // Relink over the populated entry: pre-fix this hit EEXIST creating
+    // the sibling symlink because the entry-existence check missed.
+    linker
+        .link_all(&project_dir, &graph, &indices)
+        .expect("relinking an existing scoped git source entry must not fail with EEXIST");
+}
+
 /// Regression: a version bump keeps the same top-level name
 /// (`foo`) but must repoint `node_modules/foo` at the new
 /// `.aube/foo@<new>` entry. The old `.aube/foo@<old>/` is left

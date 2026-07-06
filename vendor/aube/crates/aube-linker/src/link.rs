@@ -238,7 +238,7 @@ impl Linker {
             let Some(index) = package_indices.get(dep_path) else {
                 continue;
             };
-            let aube_entry = aube_dir.join(dep_path);
+            let aube_entry = aube_dir.join(self.aube_dir_entry_name(dep_path));
             if !aube_entry.exists() {
                 self.materialize_into(
                     &aube_dir,
