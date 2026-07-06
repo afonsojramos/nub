@@ -36,15 +36,32 @@ name="$(basename "$proj")"
 
 fail() { echo "FAIL[$name]: $*" >&2; }
 
-# Kill a process AND all its descendants. A bare `kill $pid` / the old
-# `pkill -f "vite.*--port"` misses the child processes an `astro dev` / `nuxt dev`
-# / `vite` parent spawns, so a server LEAKS onto the port; the next run then binds
-# a DIFFERENT port while the harness curls the stale (unpatched) server → false
-# 403s. Recursing children-first (pgrep -P) tears the whole tree down.
+# Kill a dev server AND its whole descendant tree. A dev server (`astro dev`,
+# `nuxt dev`, `vite`) forks workers (the optimizer, Nitro, an esbuild/SWC service)
+# that a bare `kill $pid` — and even a `pgrep -P` walk — miss once a grandchild
+# reparents to init before the walk snapshots it, so a worker LEAKS onto the port;
+# the next run then binds a DIFFERENT port while the harness curls the stale
+# (unpatched) server → false 403s. The robust fix is a process GROUP: the dev
+# server is launched as its own group leader (via `set -m`, so PGID == the job
+# pid), and `kill -SIGNAL -PGID` signals the ENTIRE group atomically — no
+# reparenting race, no missed grandchild. `pgrep -P` recursion remains only as a
+# best-effort fallback for a process that somehow escaped the group.
 kill_tree() {
   local p="$1" c
   for c in $(pgrep -P "$p" 2>/dev/null); do kill_tree "$c"; done
   kill -TERM "$p" 2>/dev/null
+}
+
+# Tear down the dev server's process group, then KILL-sweep, then fall back to the
+# pgrep walk. `-$pgid` (negative) targets the group; a leading `kill 0`-style
+# guard is unnecessary because $pgid is a real job-leader pid captured under -m.
+kill_group() {
+  local pgid="$1"
+  kill -TERM -"$pgid" 2>/dev/null
+  sleep 0.3
+  kill -KILL -"$pgid" 2>/dev/null
+  kill_tree "$pgid"
+  kill -KILL "$pgid" 2>/dev/null
 }
 
 cd "$proj" || { fail "no dir"; exit 2; }
@@ -104,10 +121,14 @@ fi
 if [ -n "$dev_cmd" ] && [ "$dev_cmd" != "-" ]; then
   devlog=/tmp/vc-$name-dev.log
   : >"$devlog"
-  # `exec` so devpid IS the dev process (astro/nuxt/vite), not a wrapper subshell,
-  # making kill_tree reach the real tree.
+  # `set -m` (job control) makes this background job its OWN process-group leader,
+  # so `devpid` is both the group leader PID and the PGID — `kill_group` can then
+  # tear down the whole tree via `-$devpid`. `exec` keeps devpid pinned to the real
+  # dev process (astro/nuxt/vite), not a wrapper subshell.
+  set -m
   ( cd "$proj" && exec $dev_cmd ) >"$devlog" 2>&1 &
   devpid=$!
+  set +m
   # Parse the ACTUAL bound port from the dev log — a framework re-picks a free
   # port if the requested one is taken (e.g. after a prior leak), so curling the
   # requested port would hit the wrong/stale server. Fall back to the requested.
@@ -128,7 +149,7 @@ if [ -n "$dev_cmd" ] && [ "$dev_cmd" != "-" ]; then
   else
     log_403="no-403"
   fi
-  kill_tree "$devpid"; sleep 0.3; kill -KILL "$devpid" 2>/dev/null; wait "$devpid" 2>/dev/null
+  kill_group "$devpid"; wait "$devpid" 2>/dev/null
 fi
 
 # ── 5. build ────────────────────────────────────────────────────────────────
