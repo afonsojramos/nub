@@ -2120,7 +2120,7 @@ fn nub_setting_defaults(
     // const (incl. the singleton-hazard adapters the closure now makes sound). So
     // this embedder default carries ONLY the #315 vite eject; empty otherwise
     // (aube's `parse_string_list` drops the empty entry). A user's own
-    // `diskMaterializePackages`/`diskMaterializePackages` still wins — the
+    // `diskMaterializePackages` still wins — the
     // embedder default is the lowest precedence tier — so the additive escape
     // hatch is intact.
     //
