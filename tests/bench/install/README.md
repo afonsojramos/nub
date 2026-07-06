@@ -44,7 +44,7 @@ The older `run.sh` matrix covers frozen/offline warm and cold installs across th
 | `simple` | ~342 | Single-package project: express, react, typescript, vite, lodash, axios, zod, … |
 | `monorepo` | ~407 | Four-workspace monorepo using `workspace:*`; npm is skipped. |
 | `t3` | ~222 | Bun's create-t3-app benchmark fixture (Next — GVS auto-disables). |
-| `vitesse-lite` | ~685 | Real antfu/vitesse-lite Vite starter; GVS stays on. See `fixtures/vitesse-lite/README.md`. |
+| `tanstack-start` | ~313 | Real TanStack Start (Vite + React) starter; GVS stays on. See `fixtures/tanstack-start/README.md`. |
 | `large` | ~1168 | React + MUI + webpack + Babel + TypeScript + ESLint. |
 
 ```bash

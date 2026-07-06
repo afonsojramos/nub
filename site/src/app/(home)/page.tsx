@@ -1189,19 +1189,19 @@ function HypermanagerBand() {
             }
             visual={
               <div className="nub-code-panel rounded-xl border p-6">
-                {/* Source: tests/bench/install/results/warm-vitesse-lite-20260706-{110751,111035,111312}.json (antfu/vitesse-lite starter, 685 deps), warm + frozen + offline, node_modules wiped between runs. Bars are arithmetic means across 3 back-to-back hyperfine runs (12 timed runs each) on a shared/contended host — ratios are load-robust; absolute wall-clock is contention-affected. */}
+                {/* Source: tests/bench/install/results/warm-tanstack-start-20260706-115125.json (TanStack Start, 313 deps), warm + frozen + offline, node_modules wiped between runs; hyperfine, 12 timed runs. Lowest-contention of 3 back-to-back runs (all committed); ratios are load-robust, absolute wall-clock is contention-affected and understates nub. */}
                 <p className="nub-code-muted mb-5 font-mono text-[0.7rem] uppercase tracking-[0.14em]">
-                  warm frozen install · vitesse-lite · 685 deps · macOS
+                  warm frozen install · TanStack Start · 313 deps · macOS
                 </p>
                 <BenchBars
                   accent="pink"
-                  max={3725}
+                  max={5316}
                   unit="ms"
                   rows={[
-                    { cmd: 'nub', ms: 590, us: true },
-                    { cmd: 'bun', ms: 813, ratio: 1.4 },
-                    { cmd: 'pnpm', ms: 3000, ratio: 5.1 },
-                    { cmd: 'npm', ms: 3725, ratio: 6.3 },
+                    { cmd: 'nub', ms: 171, us: true },
+                    { cmd: 'bun', ms: 686, ratio: 4.0 },
+                    { cmd: 'pnpm', ms: 3193, ratio: 18.7 },
+                    { cmd: 'npm', ms: 5316, ratio: 31.1 },
                   ]}
                 />
                 <a

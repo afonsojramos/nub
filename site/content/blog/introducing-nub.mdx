@@ -439,18 +439,18 @@ Second, on a pnpm project, support is complete: Nub reads and honors every confi
 
 ### Performance
 
-Like pnpm, Nub keeps package files in a global content-addressed store and links them into `node_modules` with reflinks or hardlinks when the filesystem supports them. The benchmark below is the warm path for a Vite app (antfu's vitesse-lite starter): packages are already on disk, `node_modules` is removed, and the installer rebuilds the project layout.
+Like pnpm, Nub keeps package files in a global content-addressed store and links them into `node_modules` with reflinks or hardlinks when the filesystem supports them. The benchmark below is the warm path for a TanStack Start app: packages are already on disk, `node_modules` is removed, and the installer rebuilds the project layout.
 
 <Bench
-  label="warm frozen install · vitesse-lite · 685 deps · macOS"
+  label="warm frozen install · TanStack Start · 313 deps · macOS"
   source="https://github.com/nubjs/nub/tree/main/tests/bench/install"
   accent="pink"
-  max={3725}
+  max={5316}
   rows={[
-    { cmd: 'nub', ms: 590, us: true },
-    { cmd: 'bun', ms: 813, ratio: 1.4 },
-    { cmd: 'pnpm', ms: 3000, ratio: 5.1 },
-    { cmd: 'npm', ms: 3725, ratio: 6.3 },
+    { cmd: 'nub', ms: 171, us: true },
+    { cmd: 'bun', ms: 686, ratio: 4.0 },
+    { cmd: 'pnpm', ms: 3193, ratio: 18.7 },
+    { cmd: 'npm', ms: 5316, ratio: 31.1 },
   ]}
 />
 
