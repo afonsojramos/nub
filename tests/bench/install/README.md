@@ -37,13 +37,14 @@ NUB=/path/to/target/release/nub bash tests/bench/install/run-warm-gvs.sh --fixtu
 
 ## Older install matrix
 
-The older `run.sh` matrix covers frozen/offline warm and cold installs across four fixtures.
+The older `run.sh` matrix covers frozen/offline warm and cold installs across these fixtures.
 
 | Fixture | Packages | Description |
 |---------|----------|-------------|
 | `simple` | ~342 | Single-package project: express, react, typescript, vite, lodash, axios, zod, … |
 | `monorepo` | ~407 | Four-workspace monorepo using `workspace:*`; npm is skipped. |
-| `t3` | ~222 | Bun's create-t3-app benchmark fixture. |
+| `t3` | ~222 | Bun's create-t3-app benchmark fixture (Next — GVS auto-disables). |
+| `vitesse-lite` | ~685 | Real antfu/vitesse-lite Vite starter; GVS stays on. See `fixtures/vitesse-lite/README.md`. |
 | `large` | ~1168 | React + MUI + webpack + Babel + TypeScript + ESLint. |
 
 ```bash
