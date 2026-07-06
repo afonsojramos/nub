@@ -64,8 +64,22 @@ pub(crate) fn enabled() -> bool {
 /// default moving across an upgrade, or a user's `NUB_DYNAMIC_PHANTOM_EJECT=0`
 /// opt-out, changes this token, so the link phase re-runs and converts the tree
 /// to the new materialization shape instead of trusting a stale node_modules.
+///
+/// When ENABLED the token also folds [`PHANTOM_SCANNER_VERSION`], which is what
+/// makes a scanner-logic bump COMPLETE rather than a half-fix: the version bump
+/// re-scans content into a new sidecar path, but on a warm tree with an unchanged
+/// lockfile + flag aube would SKIP the link phase and never apply the improved
+/// verdict — folding the version here changes the token, so the link re-runs and
+/// the consumer picks up the new-version sidecars. The fold is inside the enabled
+/// branch ONLY: the opt-out's token stays byte-identical to a build without the
+/// scanner (`dynamic_phantom_eject=false`), preserving the strict no-op install
+/// path (a scanner version can't matter when nothing scans).
 pub(crate) fn settings_fingerprint() -> String {
-    format!("dynamic_phantom_eject={}", enabled())
+    if enabled() {
+        format!("dynamic_phantom_eject=true;phantom_scanner={PHANTOM_SCANNER_VERSION}")
+    } else {
+        "dynamic_phantom_eject=false".to_string()
+    }
 }
 
 /// Register the extract-time scan hook with the embedded engine. Called once at
@@ -191,15 +205,16 @@ pub(crate) fn phantom_cache_dir() -> Option<PathBuf> {
 /// into ephemeral dev/CI caches — the eject default has not shipped in a release)
 /// is unreachable from the `s<N>/` path, so it is ignored and simply re-scanned.
 ///
-/// WHEN YOU BUMP THIS: a bump re-scans and re-writes sidecars, but on a WARM tree
-/// with an unchanged lockfile + flag the link phase is skipped unless the
-/// install-state token changes — so the improved verdict is written but not
-/// APPLIED to `node_modules` until an unrelated relink. To make a bump actually
-/// re-materialize, fold this constant into [`settings_fingerprint`] (which today
-/// folds only the on/off flag) so the bump invalidates the warm tree. That fold
-/// forces a one-time global relink on upgrade — a user-visible behavior call
-/// deferred to the bump PR (out of scope for the version-1 scaffold, whose logic
-/// is unchanged so no warm tree needs re-materializing).
+/// Bumping this is a COMPLETE forward-compat fix, not a half one: it is folded
+/// into [`settings_fingerprint`] (the install-state token), so a bump both
+/// re-scans content into a new sidecar path AND invalidates the warm tree — the
+/// link phase re-runs and the consumer applies the new-version verdicts. Without
+/// that fold a bump would re-scan but never re-materialize a warm tree (aube
+/// skips link on an unchanged lockfile + flag), silently no-op'ing the
+/// improvement. The relink a bump forces is a one-time cost on the next install
+/// after upgrade; harmless and expected (the whole point is to pick up the better
+/// verdict). Just bump the number when the scanner logic changes — the coupling
+/// is structural, nothing else to remember.
 pub(crate) const PHANTOM_SCANNER_VERSION: u32 = 1;
 
 /// THE single source of truth for a phantom sidecar's location: the versioned
