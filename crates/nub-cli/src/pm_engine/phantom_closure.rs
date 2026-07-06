@@ -1,5 +1,6 @@
 //! Selective-subtree disk-materialization policy — nub's disk-materialize
-//! expansion hook (the default; disabled by `NUB_DYNAMIC_PHANTOM_EJECT=0`).
+//! expansion hook. Unconditionally on for users; off only under the internal A/B
+//! seam ([`crate::dynamic_phantom::enabled`]).
 //!
 //! Disk-materializing a package project-local is only SOUND for a
 //! transitively-consumed package if its whole ancestor-closure materializes with
@@ -31,10 +32,10 @@
 //! are all already resolvable as its own DIRECT (depth-1) siblings and absent from
 //! the project top level, so a directly-satisfied over-flag never ejects.
 //!
-//! Opt-out (`NUB_DYNAMIC_PHANTOM_EJECT=0`) ⇒ no hook installed ⇒ aube's
-//! `expand_disk_materialize` returns the seed verbatim ⇒ the disk-materialize
-//! pass is byte-for-byte the pre-productionization pure-symlink behavior. All
-//! policy lives here; aube owns only the neutral seam + the graph primitive.
+//! Internal A/B seam off ⇒ no hook installed ⇒ aube's `expand_disk_materialize`
+//! returns the seed verbatim ⇒ the disk-materialize pass is byte-for-byte the
+//! pre-productionization pure-symlink behavior. All policy lives here; aube owns
+//! only the neutral seam + the graph primitive.
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -46,17 +47,17 @@ use rayon::prelude::*;
 /// The SINGLE phantom-eject arm — [`crate::dynamic_phantom::enabled`] — shared
 /// with the extract-time producer so detection (the scanner), transitive
 /// soundness (this closure), and warm-tree invalidation (the fingerprint) can
-/// never disagree. On by DEFAULT; `NUB_DYNAMIC_PHANTOM_EJECT=0` is the opt-out.
-/// The flag IS now folded into the install-state fingerprint (via the embedder
+/// never disagree. Unconditionally on for users; off only under the internal A/B
+/// seam. The arm IS folded into the install-state fingerprint (via the embedder
 /// `extra_settings_fingerprint` hook; see [`crate::dynamic_phantom::settings_fingerprint`]),
-/// so flipping it on an already-installed tree re-links to the new
-/// materialization shape rather than accepting a stale node_modules.
+/// so flipping the seam on an already-installed tree re-links to the pure-symlink
+/// shape rather than accepting a stale node_modules.
 fn enabled() -> bool {
     crate::dynamic_phantom::enabled()
 }
 
 /// Register nub's disk-materialize expansion hook with the embedded engine.
-/// No-op only under the `NUB_DYNAMIC_PHANTOM_EJECT=0` opt-out, in which case
+/// No-op only under the internal A/B seam ([`enabled`] false), in which case
 /// `aube_linker::expand_disk_materialize` stays the identity — byte-for-byte the
 /// pure-symlink disk-materialize behavior. Set-once (idempotent); safe to call
 /// once per engine-session build.
@@ -94,9 +95,9 @@ fn plan_from_flags(
     // `vite_lt_8_1` check), which fires for every < 8.1 copy the name-seed caught,
     // so pruning the name-seed loses nothing for < 8.1 and stops the ≥ 8.1
     // over-eject. This is the ONLY version-aware chokepoint: the mod.rs seed runs
-    // pre-resolve and can't see the concrete version. (The
-    // `NUB_DYNAMIC_PHANTOM_EJECT=0` opt-out installs no hook, so its raw name-seed
-    // still over-ejects vite ≥ 8.1 — an accepted cost of that rare opt-out path.)
+    // pre-resolve and can't see the concrete version. (Under the internal A/B seam
+    // no hook installs, so the raw name-seed still over-ejects vite ≥ 8.1 — an
+    // accepted cost of that internal-only path.)
     // Provenance-blind: this also strips a user's explicit `vite` in
     // `diskMaterializePackages`, which is fine — vite ≥ 8.1 works symlinked and
     // vite < 8.1 is re-seeded below regardless of source, so a working vite is
@@ -216,7 +217,7 @@ fn plan_from_flags(
 /// rayon; the backfill already warmed the sidecars, so each item is a small
 /// cached-JSON index load + a blake3 fingerprint + a small sidecar read.
 ///
-/// Empty under the `NUB_DYNAMIC_PHANTOM_EJECT=0` opt-out. In production `expand`
+/// Empty under the internal A/B seam ([`enabled`] false). In production `expand`
 /// installs the hook only when armed, so this gate is belt-and-suspenders; the
 /// pure planning logic is tested through [`plan_from_flags`] with injected flags,
 /// so the unit tests never reach this store-IO path.

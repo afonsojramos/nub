@@ -226,11 +226,10 @@ pub(crate) const NUB: aube_util::Embedder = aube_util::Embedder {
     // in the window that matters. An explicit user `trustPolicyIgnoreAfter=0`
     // opts back into the full strict check. Standalone aube keeps `None`.
     trust_policy_ignore_after_default: Some(14 * 24 * 60),
-    // Fold nub's phantom-eject flag (`NUB_DYNAMIC_PHANTOM_EJECT`) into aube's
-    // install-state `settings_hash`: it shapes which packages materialize but
-    // rides no aube setting, so without this a flag flip (the default moving
-    // across an upgrade, or a user opt-out) would leave a warm tree stale. The
-    // hook returns a stable on/off token; standalone aube's `None` skips the fold.
+    // Fold nub's phantom-eject state into aube's install-state `settings_hash`: it
+    // shapes which packages materialize but rides no aube setting. For users the
+    // token is constant-on and folds the scanner version, so a scanner-logic bump
+    // invalidates a warm tree and re-links; standalone aube's `None` skips the fold.
     extra_settings_fingerprint: Some(crate::dynamic_phantom::settings_fingerprint),
 };
 

@@ -1,5 +1,11 @@
-//! Dynamic per-version phantom scan → disk-eject (the default; the
-//! `NUB_DYNAMIC_PHANTOM_EJECT=0` opt-out disables it).
+//! Dynamic per-version phantom scan → disk-eject. Unconditionally ON for users
+//! (maintainer decision 2026-07-06): there is no user-facing opt-out. The one
+//! escape hatch for a suspected eject bug is disabling the global virtual store
+//! entirely (full disk materialization via `node-linker`/`disableGlobalVirtualStore`),
+//! which sidesteps the whole symlink+eject machinery. [`enabled`] carries the sole
+//! remaining off-switch: an INTERNAL, undocumented `__NUB_*` test seam the phantom
+//! test suite + framework/verify agents use to reproduce the pre-eject break as an
+//! A/B control.
 //!
 //! This REPLACES the old hand-curated static disk-materialize list (capped at a
 //! corpus, stale on new versions) by SCANNING each installed dependency
@@ -28,7 +34,7 @@
 //! cached content instead of serving the stale verdict its immutable bytes would
 //! otherwise key forever.
 //!
-//! With the opt-out set (`NUB_DYNAMIC_PHANTOM_EJECT=0`) this module registers
+//! Under the internal A/B seam ([`enabled`] returns false) this module registers
 //! nothing — no extract hook — so the install path is byte-identical to a build
 //! without the scanner (a pure-symlink tree).
 
@@ -38,59 +44,72 @@ use aube_store::{PackageIndex, index_content_fingerprint};
 use nub_phantom_scan::scan_index;
 use rayon::prelude::*;
 
-/// Whether dynamic phantom detection + ancestor-closure eject is armed — the
-/// DEFAULT. Unset (or empty, or any non-falsey value) is ON; only an explicit
-/// falsey `NUB_DYNAMIC_PHANTOM_EJECT` (`0`/`false`/`no`/`off`) is the opt-out to
-/// a pure-symlink tree. This is the SINGLE arm both halves gate on — the
+/// Whether dynamic phantom detection + ancestor-closure eject is armed.
+/// Unconditionally ON for users — there is NO user-facing opt-out (the removed
+/// `NUB_DYNAMIC_PHANTOM_EJECT` user knob is dead and ignored). Off only under the
+/// internal A/B seam below. This is the SINGLE arm both halves gate on — the
 /// extract-time PRODUCER here and the link-time CONSUMER
 /// ([`crate::pm_engine::phantom_closure`]) call this one function, and the
 /// install-state fingerprint ([`settings_fingerprint`]) folds THIS value, so
 /// detection, closure, and warm-tree invalidation can never drift.
 pub(crate) fn enabled() -> bool {
-    match std::env::var("NUB_DYNAMIC_PHANTOM_EJECT") {
-        Ok(v) => !matches!(
-            v.trim().to_ascii_lowercase().as_str(),
-            "0" | "false" | "no" | "off"
-        ),
-        Err(_) => true,
-    }
+    !eject_disabled(std::env::var(INTERNAL_EJECT_DISABLE_VAR).ok().as_deref())
+}
+
+/// INTERNAL, UNDOCUMENTED test seam — NOT a user knob. Truthy turns phantom-eject
+/// OFF so the phantom test suite + framework/verify agents can reproduce the
+/// pre-eject break as an A/B control against a real built binary (the `cfg(test)`
+/// route can't, since those agents run `target/fast/nub`, not a test build). The
+/// `__NUB_` double-underscore prefix marks internal plumbing — the brand boundary
+/// exempts internal `__NUB_*` sentinels; this one is never documented and users
+/// must not rely on it. Deliberately distinct from the removed public var so a
+/// stale `NUB_DYNAMIC_PHANTOM_EJECT=0` in a user's env has zero effect.
+const INTERNAL_EJECT_DISABLE_VAR: &str = "__NUB_PHANTOM_EJECT_DISABLE";
+
+/// Pure predicate for the internal disable seam, split from the env read so its
+/// truthiness contract is testable without mutating the process-global env. A
+/// truthy value disables; unset / empty / any other value keeps eject ON.
+fn eject_disabled(raw: Option<&str>) -> bool {
+    matches!(
+        raw.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
 }
 
 /// The effective phantom-eject setting as a stable token, folded into aube's
 /// install-state `settings_hash` through the embedder `extra_settings_fingerprint`
 /// hook (nub's [`crate::pm_engine::identity::NUB`] profile points that hook here).
-/// The flag is nub's, not an aube setting, so it can't ride the resolved-settings
-/// hash — this seam is what makes flipping it invalidate the warm tree: nub's
-/// default moving across an upgrade, or a user's `NUB_DYNAMIC_PHANTOM_EJECT=0`
-/// opt-out, changes this token, so the link phase re-runs and converts the tree
-/// to the new materialization shape instead of trusting a stale node_modules.
+/// The setting is nub's, not an aube setting, so it can't ride the resolved-settings
+/// hash — this seam is what makes it invalidate the warm tree.
 ///
-/// When ENABLED the token also folds [`PHANTOM_SCANNER_VERSION`], which is what
-/// makes a scanner-logic bump COMPLETE rather than a half-fix: the version bump
-/// re-scans content into a new sidecar path, but on a warm tree with an unchanged
-/// lockfile + flag aube would SKIP the link phase and never apply the improved
-/// verdict — folding the version here changes the token, so the link re-runs and
-/// the consumer picks up the new-version sidecars. The fold is inside the enabled
-/// branch ONLY: the opt-out's token stays byte-identical to a build without the
-/// scanner (`dynamic_phantom_eject=false`), preserving the strict no-op install
-/// path (a scanner version can't matter when nothing scans).
+/// For users the token is CONSTANT-ON: the dead on/off toggle is gone, so it folds
+/// only [`PHANTOM_SCANNER_VERSION`]. That fold is what makes a scanner-logic bump
+/// COMPLETE rather than a half-fix — the bump re-scans content into a new sidecar
+/// path, but on a warm tree with an unchanged lockfile aube would SKIP the link
+/// phase and never apply the improved verdict; changing this token forces the link
+/// to re-run so the consumer picks up the new-version sidecars.
+///
+/// The token still branches on [`enabled`] SOLELY for the internal A/B seam: when
+/// an agent flips [`INTERNAL_EJECT_DISABLE_VAR`] the token changes, so a warm tree
+/// re-links to the pure-symlink shape and the pre-eject break reproduces. Users
+/// never reach that branch (the seam is undocumented internal plumbing).
 pub(crate) fn settings_fingerprint() -> String {
     settings_token(enabled())
 }
 
-/// Pure token builder, split from [`settings_fingerprint`] so the byte-identity
-/// contract is testable without mutating the process-global `enabled()` env.
+/// Pure token builder, split from [`settings_fingerprint`] so the fold contract is
+/// testable without mutating the process-global `enabled()` env.
 fn settings_token(enabled: bool) -> String {
     if enabled {
-        format!("dynamic_phantom_eject=true;phantom_scanner={PHANTOM_SCANNER_VERSION}")
+        format!("phantom_scanner={PHANTOM_SCANNER_VERSION}")
     } else {
-        "dynamic_phantom_eject=false".to_string()
+        "phantom_eject=disabled".to_string()
     }
 }
 
 /// Register the extract-time scan hook with the embedded engine. Called once at
-/// engine-session build. No-op only under the `NUB_DYNAMIC_PHANTOM_EJECT=0`
-/// opt-out, in which case the path pulls in nothing and stays byte-identical.
+/// engine-session build. No-op only under the internal A/B seam ([`enabled`]
+/// false), in which case the path pulls in nothing and stays byte-identical.
 /// The registration is process-global set-once; a second call is ignored. The
 /// link-time consumption of the sidecars this writes lives in
 /// [`crate::pm_engine::phantom_closure`], not here.
@@ -255,7 +274,7 @@ pub(crate) fn sidecar_path(base: &Path, fingerprint: &str) -> PathBuf {
 /// fingerprint keying, sidecar-hit skip, panic-guard, and atomic write are one
 /// implementation.
 ///
-/// The `NUB_DYNAMIC_PHANTOM_EJECT=0` opt-out is a STRICT no-op: it returns
+/// The internal A/B seam ([`enabled`] false) is a STRICT no-op: it returns
 /// before any lockfile parse, store access, or fs touch, so that install path is
 /// byte-identical. No lockfile / an unparseable one is also a no-op — a fresh
 /// install has nothing
@@ -326,16 +345,39 @@ mod tests {
         );
     }
 
-    /// The opt-out's install-state token must never carry the scanner version, so
-    /// `NUB_DYNAMIC_PHANTOM_EJECT=0` keeps a byte-identical `settings_hash` (the
-    /// strict no-op). The enabled token folds the version so a bump invalidates
-    /// the warm tree. Pins both against a future refactor.
+    /// The user (enabled) token folds the scanner version so a bump invalidates a
+    /// warm tree and forces a re-scan/relink; the dead on/off toggle is gone, so the
+    /// token is just the scanner segment. The disabled token (reachable only via the
+    /// internal A/B seam) is version-free and distinct, so flipping the seam still
+    /// re-links to the pure-symlink shape. Pins both against a future refactor.
     #[test]
-    fn disabled_token_stays_version_free_enabled_folds_version() {
-        assert_eq!(settings_token(false), "dynamic_phantom_eject=false");
+    fn enabled_token_folds_version_disabled_seam_token_is_distinct() {
         assert_eq!(
             settings_token(true),
-            format!("dynamic_phantom_eject=true;phantom_scanner={PHANTOM_SCANNER_VERSION}")
+            format!("phantom_scanner={PHANTOM_SCANNER_VERSION}")
         );
+        assert_eq!(settings_token(false), "phantom_eject=disabled");
+        assert_ne!(settings_token(true), settings_token(false));
+    }
+
+    /// The internal disable seam's truthiness contract: only an explicit truthy
+    /// value turns eject off; unset, empty, `0`, and any other string keep it ON.
+    /// This is the sole off-switch — there is no user knob — so a wrong parse here
+    /// would either strand the A/B control or hand users a hidden opt-out.
+    #[test]
+    fn internal_seam_only_truthy_disables_eject() {
+        for on in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("false"),
+            Some("no"),
+            Some("off"),
+        ] {
+            assert!(!eject_disabled(on), "eject must stay ON for {on:?}");
+        }
+        for off in [Some("1"), Some("true"), Some("YES"), Some(" on ")] {
+            assert!(eject_disabled(off), "internal seam disables for {off:?}");
+        }
     }
 }

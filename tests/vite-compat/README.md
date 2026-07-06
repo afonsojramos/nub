@@ -25,12 +25,13 @@ Unit B as shipped disk-materializes vite ONLY when it is a **direct** dep — a
 raw `vite dev` app. A framework that embeds vite **transitively** (Astro 5 pins
 `vite@^6`, `< 8.1`) loads its vite from a store-to-store sibling symlink, so the
 direct-dep eject never reaches it and the store `/@fs` stays 403 (the #315
-residual). Behind the default-off `NUB_DYNAMIC_PHANTOM_EJECT` flag, nub now
-auto-detects an embedded vite `< 8.1` and disk-materializes its
-`[framework … vite]` **ancestor closure** (measured 5 packages for Astro 5,
-`~1.5%` of the tree — everything else stays symlinked), so the framework loads a
-project-local vite that Unit B patches. With the flag OFF the behavior is
-byte-for-byte the shipped Unit B.
+residual). Phantom-eject (unconditionally on for users) auto-detects an embedded
+vite `< 8.1` and disk-materializes its `[framework … vite]` **ancestor closure**
+(measured 5 packages for Astro 5, `~1.5%` of the tree — everything else stays
+symlinked), so the framework loads a project-local vite that Unit B patches. The
+pre-eject baseline (byte-for-byte the shipped Unit B) is reproducible via the
+internal test seam `__NUB_PHANTOM_EJECT_DISABLE=1` — an undocumented A/B control,
+not a user knob.
 
 Because the fix lives in `node_modules` on disk (`.modules.yaml` + the patched
 vite dist) and nothing is injected at runtime, it works regardless of whether
@@ -91,13 +92,13 @@ island/route hydrates and is interactive, read the console for 403s) is a
 stronger check and SHOULD be run for the flagship Astro+React case when that MCP
 is available; the HTTP + log-scan floor here is the CI-portable substitute.
 
-## The closure acceptance cases (behind `NUB_DYNAMIC_PHANTOM_EJECT=1`)
+## The closure acceptance cases
 
-The two cases the selective-subtree closure must satisfy. Run the driver with the
-flag armed:
+The two cases the selective-subtree closure must satisfy. Eject is on by default,
+so just run the driver:
 
 ```sh
-NUB_DYNAMIC_PHANTOM_EJECT=1 tests/vite-compat/driver.sh <dir> "<dev-cmd>" "<build-cmd>" <port>
+tests/vite-compat/driver.sh <dir> "<dev-cmd>" "<build-cmd>" <port>
 ```
 
 - **Astro 5 (rung 1 — the vite closure).** `astro@^5` pins `vite@6.4.3` (`< 8.1`),

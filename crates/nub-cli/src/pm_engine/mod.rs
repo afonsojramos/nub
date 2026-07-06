@@ -766,18 +766,17 @@ fn engine_session_inner(
     // (which calls it again as its first step, alongside the project-state-
     // dependent config surface) is a no-op for the registration.
     identity::register();
-    // Install nub's selective-subtree disk-materialize expansion hook (the
-    // DEFAULT; the `NUB_DYNAMIC_PHANTOM_EJECT=0` opt-out disables it). When armed
-    // it expands the disk-materialize seed to its ancestor-closure +
-    // phantom-target hoists at link time; under the opt-out it's a no-op and the
-    // install path is byte-identical (pure symlink). Idempotent set-once, like
-    // `identity::register()`.
+    // Install nub's selective-subtree disk-materialize expansion hook
+    // (unconditionally on for users). It expands the disk-materialize seed to its
+    // ancestor-closure + phantom-target hoists at link time; under the internal A/B
+    // seam it's a no-op and the install path is byte-identical (pure symlink).
+    // Idempotent set-once, like `identity::register()`.
     phantom_closure::register();
     // Arm the dynamic per-version phantom PRODUCER: an extract-time store hook
     // that scans each fetched package and writes a per-content verdict sidecar
     // (`phantom_closure`, above, is the CONSUMER that reads those sidecars to seed
-    // the closure). On by default; a no-op only under the same
-    // `NUB_DYNAMIC_PHANTOM_EJECT=0` opt-out. Idempotent set-once.
+    // the closure). On for users; a no-op only under the same internal A/B seam.
+    // Idempotent set-once.
     crate::dynamic_phantom::register();
     // Initialize the diagnostics recorder from NUB_DIAG_* env vars so that
     // `NUB_DIAG_SUMMARY=1 nub install` surfaces the same per-phase/per-op
