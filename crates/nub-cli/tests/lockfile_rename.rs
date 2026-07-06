@@ -309,7 +309,10 @@ fn filtered_no_save_add_restores_legacy_lock_yaml() {
                 r#"{"name":"root","version":"1.0.0","private":true,"workspaces":["packages/*"]}"#,
             ),
             ("lock.yaml", EMPTY_LOCK),
-            ("packages/a/package.json", r#"{"name":"a","version":"1.0.0"}"#),
+            (
+                "packages/a/package.json",
+                r#"{"name":"a","version":"1.0.0"}"#,
+            ),
             ("localdep/package.json", LOCALDEP_PKG),
         ],
     );
