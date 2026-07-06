@@ -97,6 +97,10 @@ fn plan_from_flags(
     // pre-resolve and can't see the concrete version. (The
     // `NUB_DYNAMIC_PHANTOM_EJECT=0` opt-out installs no hook, so its raw name-seed
     // still over-ejects vite ≥ 8.1 — an accepted cost of that rare opt-out path.)
+    // Provenance-blind: this also strips a user's explicit `vite` in
+    // `diskMaterializePackages`, which is fine — vite ≥ 8.1 works symlinked and
+    // vite < 8.1 is re-seeded below regardless of source, so a working vite is
+    // served either way.
     let seed_names: Vec<&str> = seed_names
         .iter()
         .map(String::as_str)
@@ -470,6 +474,25 @@ mod tests {
             names.contains("app"),
             "its importer closure ejects with it: {names:?}"
         );
+    }
+
+    #[test]
+    fn mixed_embedded_lt_and_direct_ge_vite_is_not_worse_than_pre_fix() {
+        // Embedded vite<8.1 (astro→6.4.3) + a direct vite>=8.1 in one graph. The
+        // <8.1 copy seeds its closure via `vite_lt_8_1`, which re-adds "vite" to
+        // `names`; because the executor is NAME-keyed, "vite" materializes BOTH
+        // copies — identical to pre-fix (which ejected every vite too). Locks in
+        // that the prune never regresses the mixed case.
+        let g = graph(&[
+            ("astro@5.0.0", "astro", &[("vite", "6.4.3")]),
+            ("vite@6.4.3", "vite", &[]),
+            ("app@1.0.0", "app", &[("vite", "8.1.3")]),
+            ("vite@8.1.3", "vite", &[]),
+        ]);
+        let plan = plan_from_flags(&g, &["vite".to_string()], &[]);
+        let names: HashSet<&str> = plan.names.iter().map(String::as_str).collect();
+        assert!(names.contains("vite"), "name-keyed vite still materializes");
+        assert!(names.contains("astro"), "the <8.1 framework closure ejects");
     }
 
     #[test]
