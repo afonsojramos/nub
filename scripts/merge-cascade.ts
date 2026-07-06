@@ -38,6 +38,11 @@ import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { dirname, resolve, join } from "node:path";
 import { fileURLToPath } from "node:url";
+// The #327 ghost-carve-out classifier is shared with scripts/ci-watch.ts — one
+// source of truth for "is this check a ghost / are the required checks green,
+// ignoring ghosts" so the merger and the watcher never diverge on merge-safety.
+import { classifyRollup, verdictForBuckets } from "./lib/ci-rollup.ts";
+import type { RollupItem } from "./lib/ci-rollup.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, "..");
@@ -143,13 +148,6 @@ function holdReason(e: QueueEntry): string | null {
 
 // ---- CI status --------------------------------------------------------------
 
-type RollupItem = {
-  name?: string;
-  status?: string; // CheckRun: QUEUED | IN_PROGRESS | COMPLETED
-  conclusion?: string; // CheckRun: SUCCESS | FAILURE | NEUTRAL | SKIPPED | CANCELLED | TIMED_OUT | ...
-  state?: string; // StatusContext: SUCCESS | PENDING | FAILURE | ERROR
-};
-
 function prState(pr: number): { state: string; mergeable: string; rollup: RollupItem[] } {
   const json = gh([
     "pr",
@@ -164,41 +162,15 @@ function prState(pr: number): { state: string; mergeable: string; rollup: Rollup
   return { state: d.state, mergeable: d.mergeable, rollup: d.statusCheckRollup || [] };
 }
 
-// Classify a rollup into pending / failed / all-green.
-function classifyRollup(rollup: RollupItem[]): {
-  pending: string[];
-  failed: string[];
-} {
-  const pending: string[] = [];
-  const failed: string[] = [];
-  for (const it of rollup) {
-    const name = it.name || "(unnamed)";
-    if (it.status !== undefined) {
-      // CheckRun
-      if (it.status !== "COMPLETED") {
-        pending.push(name);
-      } else {
-        const c = (it.conclusion || "").toUpperCase();
-        if (c === "SUCCESS" || c === "NEUTRAL" || c === "SKIPPED") {
-          /* ok */
-        } else {
-          failed.push(`${name} (${c || "no-conclusion"})`);
-        }
-      }
-    } else if (it.state !== undefined) {
-      // StatusContext (legacy commit status)
-      const s = (it.state || "").toUpperCase();
-      if (s === "PENDING" || s === "") pending.push(name);
-      else if (s !== "SUCCESS") failed.push(`${name} (${s})`);
-    }
-  }
-  return { pending, failed };
-}
-
-// The single required branch-protection check for this repo — the aggregator
-// gate that `needs:` every conditional job and registers LAST. Merging before
-// it is present + green can merge a PR whose heavy matrix never ran.
+// The required branch-protection check(s) for this repo — the aggregator gate
+// that `needs:` every conditional job and registers LAST. It is the ONLY thing
+// branch protection gates on; passing it as the required set to the shared
+// classifier makes the #327 ghost-immunity fall out for free (a nameless ghost,
+// or a non-required check like the workflow_dispatch-only Pullfrog leg, is never
+// one of these names, so it lands in the non-blocking ghost bucket). Merging
+// before the gate is present + green would merge a PR whose heavy matrix never ran.
 const REQUIRED_GATE = "CI gate";
+const REQUIRED_CHECKS = new Set([REQUIRED_GATE]);
 
 // THE single source of truth for "may this PR be merged right now?" — used by
 // the watch loop, the dry-run preview, and the pre-merge re-read, so the gating
@@ -206,9 +178,19 @@ const REQUIRED_GATE = "CI gate";
 //
 // Verdicts:
 //   merge   — safe to merge NOW.
-//   wait    — not ready yet; keep polling (no checks, pending checks, mergeable
-//             still UNKNOWN, or the required gate not yet present/green).
-//   block   — terminal NOT-mergeable; do not merge (failing check or conflict).
+//   wait    — not ready yet; keep polling (no checks, the required gate not yet
+//             present/green, or mergeable still UNKNOWN).
+//   block   — terminal NOT-mergeable; do not merge (required check failed, or
+//             the PR is closed / conflicting).
+//
+// #327 ghost-immunity: the rollup verdict comes from the SHARED classifier gated
+// on REQUIRED_CHECKS, so a nameless/never-terminating ghost — or any non-required
+// check, pending OR failed — is non-blocking (branch protection doesn't gate on
+// it, and --admin bypasses it regardless). The merge fires the instant every
+// occurrence of the required gate is terminal+green and the PR is MERGEABLE; a
+// still-running or failed REQUIRED gate always holds/blocks, so a red PR is never
+// mis-merged. This replaces the old "wait for LITERALLY every check terminal"
+// gate that parked forever on the #327 ghost.
 function mergeDecision(st: {
   state: string;
   mergeable: string;
@@ -216,42 +198,22 @@ function mergeDecision(st: {
 }): { verdict: "merge" | "wait" | "block"; reason: string } {
   if (st.state !== "OPEN") return { verdict: "block", reason: `PR is ${st.state}, not OPEN` };
 
-  const { pending, failed } = classifyRollup(st.rollup);
-  if (failed.length > 0) return { verdict: "block", reason: `failing checks: ${failed.join(", ")}` };
+  const v = verdictForBuckets(classifyRollup(st.rollup, REQUIRED_CHECKS), true);
+  // A required check concluded bad → hard block. A required check absent/pending,
+  // or no checks yet → keep polling. (verdictForBuckets in required mode returns
+  // success ONLY when every occurrence of the gate is terminal+green.)
+  if (v.kind === "failure") return { verdict: "block", reason: v.reason };
+  if (v.kind === "pending") return { verdict: "wait", reason: v.reason };
 
-  if (st.rollup.length === 0) return { verdict: "wait", reason: "no checks registered yet" };
-  if (pending.length > 0) {
-    return {
-      verdict: "wait",
-      reason: `${pending.length} check(s) pending: ${pending.slice(0, 4).join(", ")}${pending.length > 4 ? " …" : ""}`,
-    };
-  }
-
-  // BLOCK 2 fix: the registered checks being all-green is NOT sufficient — the
-  // required aggregator gate must be PRESENT and SUCCESS. A partial rollup
-  // (a few fast jobs green, the matrix + `CI gate` not yet registered) has
-  // zero pending but is not actually done. Require the gate explicitly.
-  const gate = st.rollup.find((it) => (it.name || "") === REQUIRED_GATE);
-  if (!gate) {
-    return { verdict: "wait", reason: `required "${REQUIRED_GATE}" check not present yet (rollup still filling in)` };
-  }
-  const gateOk =
-    gate.status !== undefined
-      ? gate.status === "COMPLETED" && (gate.conclusion || "").toUpperCase() === "SUCCESS"
-      : (gate.state || "").toUpperCase() === "SUCCESS";
-  if (!gateOk) {
-    return { verdict: "wait", reason: `"${REQUIRED_GATE}" not green yet (${gate.status || gate.state || "?"}/${gate.conclusion || ""})` };
-  }
-
-  // BLOCK 1 fix: gate POSITIVELY on mergeability. GitHub returns UNKNOWN while
-  // it lazily computes mergeability (and the poll itself nudges the compute) —
-  // UNKNOWN is NOT green. Only MERGEABLE proceeds; CONFLICTING blocks; anything
-  // else (UNKNOWN, "") is wait-and-repoll.
+  // Required gate green, ghosts ignored. Now gate POSITIVELY on mergeability:
+  // GitHub returns UNKNOWN while it lazily computes it (and the poll itself nudges
+  // the compute) — UNKNOWN is NOT green. Only MERGEABLE proceeds; CONFLICTING
+  // blocks; anything else (UNKNOWN, "") is wait-and-repoll.
   const m = (st.mergeable || "").toUpperCase();
   if (m === "CONFLICTING") return { verdict: "block", reason: "merge conflict (CONFLICTING)" };
   if (m !== "MERGEABLE") return { verdict: "wait", reason: `mergeability ${m || "unknown"} (GitHub still computing)` };
 
-  return { verdict: "merge", reason: "all green + gate passed + mergeable" };
+  return { verdict: "merge", reason: `${v.reason}; mergeable` };
 }
 
 // ---- thread flip ------------------------------------------------------------
@@ -432,4 +394,9 @@ async function main() {
   console.log(`\nmerge-cascade: merged ${merged}, skipped ${skipped}.`);
 }
 
-main();
+// Run main() only when invoked directly; when imported by a test, expose the pure
+// mergeDecision (+ the required-gate name) without draining any real queue.
+const isMain = process.argv[1] !== undefined && fileURLToPath(import.meta.url) === process.argv[1];
+if (isMain) main();
+
+export { mergeDecision, REQUIRED_GATE };

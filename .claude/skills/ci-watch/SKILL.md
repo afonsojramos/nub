@@ -81,7 +81,7 @@ What stranded EVERY merge in the v0.2.2 floor-fix batch (#163/#164) was NOT back
 
 Recipe:
 1. **Enqueue:** append `{"pr":N,"branch":"…","thread":"…","note":"…"}` (optional `"hold":true`) to `.fray/merge-queue.jsonl`. Enqueue UNHELD only once the PR's FINAL head is pushed — a stale head can be green-but-wrong, so verify the head/rebase before it's mergeable.
-2. **Watch:** the ORCHESTRATOR runs `node scripts/merge-cascade.ts --max-minutes 40` with `run_in_background: true`. It gates positively (every check SUCCESS/NEUTRAL/SKIPPED + `CI gate` present+SUCCESS + mergeable), merges `--squash --admin`, ff-pulls, dequeues, exits → re-invokes the orchestrator.
+2. **Watch:** the ORCHESTRATOR runs `node scripts/merge-cascade.ts --max-minutes 40` with `run_in_background: true`. It gates positively on the required `CI gate` (present + SUCCESS) + mergeable, merges `--squash --admin`, ff-pulls, dequeues, exits → re-invokes the orchestrator. It shares ci-watch's #327 ghost carve-out (`scripts/lib/ci-rollup.ts`): a nameless/never-terminating ghost — or any non-required check, pending OR failed — is non-blocking, so the drain can't hang the way #327 stranded a merge; a still-running or failed REQUIRED gate always holds/blocks, so a red PR is never mis-merged.
 3. **Landing agents PUSH-THEN-EXIT** — they never watch; they report `pushed <sha>, queued`. The orchestrator's background watcher owns merge-on-green.
 
 A `CronCreate` heartbeat (every ~4 min, one non-blocking `gh pr view` poll per queued PR, merge-on-green) is a FALLBACK only if a background shell ever proves unreliable — the orchestrator background shell above is the default and what historically worked. Reach for the blocking `ci-watch.ts` directly only for a single-run gate you observe synchronously.

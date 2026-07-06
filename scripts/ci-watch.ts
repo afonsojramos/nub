@@ -55,6 +55,10 @@
 
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+// The #327 ghost-carve-out classifier is shared with scripts/merge-cascade.ts so
+// the two tools cannot drift on the merge-safety verdict — one source of truth.
+import { FAILURE_CONCLUSIONS, OK_CONCLUSIONS, classifyRollup, joinCapped, verdictForBuckets } from "./lib/ci-rollup.ts";
+import type { RollupItem, Buckets, Verdict } from "./lib/ci-rollup.ts";
 
 // ---- args -------------------------------------------------------------------
 
@@ -213,125 +217,11 @@ function hasAuthToken(): boolean {
 }
 
 // ---- terminal-state classification ------------------------------------------
-
-const FAILURE_CONCLUSIONS = new Set(["FAILURE", "CANCELLED", "TIMED_OUT", "STARTUP_FAILURE", "ACTION_REQUIRED", "STALE"]);
-const OK_CONCLUSIONS = new Set(["SUCCESS", "NEUTRAL", "SKIPPED"]);
-
-type RollupItem = { name?: string; context?: string; status?: string; conclusion?: string; state?: string; startedAt?: string };
-
-// A rollup item is either a CheckRun (name/status/conclusion) or a StatusContext
-// (context/state) — distinguished by which fields gh populated, and their display
-// names live in DIFFERENT fields: CheckRun.name vs StatusContext.context. Reading
-// only `.name` (the pre-hardening bug) rendered every legacy status as "(unnamed)".
-function itemName(it: RollupItem): string {
-  if (it.name) return it.name;
-  if (it.context) return it.context;
-  return "";
-}
-
-// { terminal, failed } for one item. A non-terminal item is neither. A COMPLETED
-// CheckRun with an empty conclusion is treated as non-failing (matches the prior
-// classifier: only a KNOWN-bad conclusion fails); an item with neither status nor
-// state is treated as a non-terminal ghost rather than a failure.
-function itemState(it: RollupItem): { terminal: boolean; failed: boolean } {
-  if (it.status !== undefined) {
-    if ((it.status || "").toUpperCase() !== "COMPLETED") return { terminal: false, failed: false };
-    const c = (it.conclusion || "").toUpperCase();
-    if (c === "" || OK_CONCLUSIONS.has(c)) return { terminal: true, failed: false };
-    return { terminal: true, failed: true };
-  }
-  if (it.state !== undefined) {
-    const s = (it.state || "").toUpperCase();
-    if (s === "" || s === "PENDING") return { terminal: false, failed: false };
-    if (s === "SUCCESS") return { terminal: true, failed: false };
-    return { terminal: true, failed: true };
-  }
-  return { terminal: false, failed: false };
-}
-
-// The partition that drives every verdict. GHOSTS are the never-hang carve-out:
-// a non-terminal check that either has NO NAME (the #327 ghost) or — when a
-// --required set is supplied — is simply not one of the required checks. Neither
-// blocks a green verdict; both are surfaced, never waited on forever. REAL-
-// PENDING are the named checks that genuinely gate (in --required mode, only the
-// required ones), and DO block until terminal.
-type Buckets = {
-  failures: string[];
-  realPending: string[];
-  ghosts: string[];
-  greenNamed: number;
-  total: number;
-  requiredMissing: string[]; // populated only in --required mode
-};
-
-function classifyRollup(rollup: RollupItem[], required: Set<string>): Buckets {
-  const scoped = required.size > 0;
-  const failures: string[] = [];
-  const realPending: string[] = [];
-  const ghosts: string[] = [];
-  let greenNamed = 0;
-  for (const it of rollup) {
-    const name = itemName(it);
-    const st = itemState(it);
-    // In --required mode a NON-required check never blocks — pass OR fail. Branch
-    // protection doesn't gate on it, so a red optional check must not report
-    // FAILURE (that would refuse to merge a mergeable PR). It is non-blocking;
-    // a non-terminal one is surfaced as a ghost, a terminal one is ignored.
-    if (scoped && !required.has(name)) {
-      if (!st.terminal) ghosts.push(name || "(unnamed)");
-      continue;
-    }
-    if (st.terminal) {
-      if (st.failed) failures.push(name || "(unnamed)");
-      else if (name) greenNamed++;
-      continue;
-    }
-    // Non-terminal required-or-any check. Nameless → ghost (the #327 ghost);
-    // named → a real pending check that genuinely gates.
-    if (name === "") ghosts.push("(unnamed)");
-    else realPending.push(name);
-  }
-  // A required check is satisfied only when EVERY occurrence of its name is
-  // terminal+green — a matrix / re-run can list the same name twice, and branch
-  // protection keys on the latest, so the first-match `find` would green-light a
-  // still-pending same-named check.
-  const requiredMissing: string[] = [];
-  if (scoped) {
-    for (const rname of required) {
-      const matches = rollup.filter((it) => itemName(it) === rname);
-      const allGreen = matches.length > 0 && matches.every((it) => { const st = itemState(it); return st.terminal && !st.failed; });
-      if (!allGreen) requiredMissing.push(rname);
-    }
-  }
-  return { failures, realPending, ghosts, greenNamed, total: rollup.length, requiredMissing };
-}
-
-// ghostsOnly marks the STUCK-but-safe shape: no real/required check is pending,
-// yet a ghost remains non-terminal. The loop converts a persistent ghostsOnly
-// state into exit 4 rather than waiting forever.
-type Verdict =
-  | { kind: "pending"; reason: string; ghostsOnly: boolean; realPending: string[]; ghosts: string[]; greenNamed: number }
-  | { kind: "success"; reason: string }
-  | { kind: "failure"; reason: string };
-
-function joinCapped(names: string[], n: number): string {
-  return `${names.slice(0, n).join(", ")}${names.length > n ? " …" : ""}`;
-}
-
-function verdictForBuckets(b: Buckets, hasRequired: boolean): Verdict {
-  if (b.failures.length > 0) return { kind: "failure", reason: `failing check(s): ${joinCapped(b.failures, 4)}` };
-  if (b.total === 0) return { kind: "pending", reason: "no checks registered yet", ghostsOnly: false, realPending: [], ghosts: [], greenNamed: 0 };
-  if (hasRequired) {
-    if (b.requiredMissing.length > 0)
-      return { kind: "pending", reason: `required check(s) not green: ${joinCapped(b.requiredMissing, 4)}`, ghostsOnly: false, realPending: b.requiredMissing, ghosts: b.ghosts, greenNamed: b.greenNamed };
-    return { kind: "success", reason: `all ${b.greenNamed} required check(s) green (of ${b.total} total; non-required checks non-blocking)` };
-  }
-  if (b.realPending.length > 0)
-    return { kind: "pending", reason: `${b.realPending.length} check(s) pending: ${joinCapped(b.realPending, 4)}`, ghostsOnly: false, realPending: b.realPending, ghosts: b.ghosts, greenNamed: b.greenNamed };
-  if (b.ghosts.length > 0)
-    return { kind: "pending", reason: `${b.greenNamed} named check(s) green; ${b.ghosts.length} non-terminal ghost check(s) that may never report: ${joinCapped(b.ghosts, 4)}`, ghostsOnly: true, realPending: [], ghosts: b.ghosts, greenNamed: b.greenNamed };
-  return { kind: "success", reason: `${b.total} check(s) green` };
-}
+//
+// The rollup classifier (itemName/itemState/classifyRollup → Buckets →
+// verdictForBuckets) lives in ./lib/ci-rollup.ts, shared with merge-cascade.ts.
+// This file keeps only the single-PR-watcher concerns: PR/run JSON parsing, the
+// pending-state timing (signatureOf/resolvePendingExit), and the poll loop.
 
 function classifyPr(json: string, required: Set<string>): Verdict {
   let d: { statusCheckRollup?: RollupItem[] };
@@ -519,5 +409,7 @@ async function main(): Promise<void> {
 const isMain = process.argv[1] !== undefined && fileURLToPath(import.meta.url) === process.argv[1];
 if (isMain) main();
 
+// Re-export the shared classifier alongside the watcher-local symbols so existing
+// importers (scripts/ci-watch.test.mjs) keep their `from "./ci-watch.ts"` path.
 export { classifyRollup, verdictForBuckets, classifyPr, classifyRun, signatureOf, resolvePendingExit };
 export type { Buckets, Verdict, RollupItem, Timing };
