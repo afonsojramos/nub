@@ -59,72 +59,115 @@ pub(super) fn planned_global_virtual_store(
         .unwrap_or_else(|| !env_snapshot.iter().any(|(k, _)| k == "CI"))
 }
 
-/// The global virtual store mode the linker will *actually* materialize.
+/// How each isolated-layout `.aube/<dep_path>` entry is materialized on disk.
 ///
-/// `planned_global_virtual_store` is the requested mode (override, else
-/// `!CI`), but the linker forces per-project materialization whenever the
-/// hidden hoist tree is enabled (`hoist=true`, the default) or the layout
-/// is `hoisted` — see `Linker::link_all`/`link_workspace`, both of which
-/// fall back to `without_global_virtual_store()` under those conditions.
-/// `reset_on_mode_change` compares this against the existing `.aube/` tree,
-/// so it MUST predict the same value the linker writes; using the raw
-/// `planned_gvs` instead made every non-fast-path install on a default
-/// (`hoist=true`) project see a spurious `disabled → enabled` transition
-/// and wipe `node_modules` (issue #71 — `aube add` in a workspace member,
-/// which always bypasses the fast path).
+/// Makes the "hidden hoist tree inside the SHARED global store" state
+/// UNREPRESENTABLE (aube issue #6: a bare-name alias inside the shared store is
+/// cross-project-mutable, so a live shared store must never carry one). The
+/// hidden tree is a field only of [`Disk`](Materialization::Disk) — the
+/// project-local real-directory materialization; [`Symlink`](Materialization::Symlink),
+/// which points into the shared store, carries none by construction. This
+/// replaces the former loose `(effective_gvs, build_hidden_tree)` bool pair,
+/// whose `(true, true)` combination was a representable contradiction.
 ///
-/// Under the [`gvs_over_default_hoist`] embedder profile the coupling changes:
-/// only an EXPLICITLY-set `hoist=true` (`hoist_explicit == Some(true)`) vetoes
-/// the shared store, so a DEFAULT hoist lets GVS engage and the hidden hoist
-/// tree is built only where GVS is off ([`build_hidden_tree`]). Standalone aube
-/// (`gvs_over_default_hoist == false`) keeps the stock formula byte-for-byte, so
-/// its lockstep with the linker's own `use_global_virtual_store && hoist`
-/// fallback is preserved. Under the embedder profile the linker is instead
-/// handed the pre-folded (effective GVS, hidden-tree) pair so that fallback is
-/// never reached — see `run_link_phase`.
-///
-/// [`gvs_over_default_hoist`]: aube_util::Embedder::gvs_over_default_hoist
-pub(super) fn effective_global_virtual_store(
-    planned_gvs: bool,
-    hoist: bool,
-    hoist_explicit: Option<bool>,
-    node_linker: aube_linker::NodeLinker,
-) -> bool {
-    effective_gvs_impl(
-        aube_util::embedder().gvs_over_default_hoist,
-        planned_gvs,
-        hoist,
-        hoist_explicit,
-        node_linker,
-    )
+/// The write METHOD ([`aube_linker::LinkStrategy`] = `package-import-method`)
+/// and the LAYOUT ([`aube_linker::NodeLinker`] = `node-linker`) are separate,
+/// already-orthogonal axes resolved independently — this type is only the
+/// symlink-vs-disk × hidden-tree decision the `gvs_over_default_hoist` +
+/// `hoist` + `enableGlobalVirtualStore` tangle used to fold into two bools.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Materialization {
+    /// Symlink into the shared global virtual store; files live machine-global.
+    /// A hidden hoist tree can't live in a shared store, so there is none.
+    Symlink,
+    /// Project-local real directories (reflink/hardlink/copy from the CAS).
+    /// `hidden_tree` builds the pnpm-parity `node_modules/.<store>/node_modules/`
+    /// hidden hoist fallback.
+    Disk { hidden_tree: bool },
 }
 
-/// Pure core of [`effective_global_virtual_store`], the embedder flag passed
-/// explicitly so both coupling regimes are unit-testable without registering a
-/// process-global profile.
-fn effective_gvs_impl(
-    gvs_over_default_hoist: bool,
-    planned_gvs: bool,
-    hoist: bool,
-    hoist_explicit: Option<bool>,
-    node_linker: aube_linker::NodeLinker,
-) -> bool {
-    let isolated = matches!(node_linker, aube_linker::NodeLinker::Isolated);
-    if gvs_over_default_hoist {
-        planned_gvs && isolated && !hoist_explicit.unwrap_or(false)
-    } else {
-        planned_gvs && !hoist && isolated
+impl Materialization {
+    /// Resolve the materialization from the coupling inputs, folding the former
+    /// `effective_global_virtual_store` + `build_hidden_tree` computation into
+    /// one sound value.
+    ///
+    /// The shared store engages only on the ISOLATED layout with the requested
+    /// mode on and nothing vetoing it: upstream (`gvs_over_default_hoist ==
+    /// false`) ANY resolved `hoist=true` (the default) vetoes it; under the
+    /// embedder profile (`true`) only an EXPLICITLY-set `hoist=true` does, so a
+    /// DEFAULT hoist lets the store engage while the hidden hoist tree is built
+    /// wherever it does not (CI, per-project, an incompatible-package trigger,
+    /// an explicit opt-out, dlx). The `hoisted` layout discards `.aube`, so it
+    /// never uses the shared store. `reset_on_mode_change` compares this
+    /// against the existing `.aube/` tree, so it MUST predict the same value
+    /// the linker writes (issue #71): a mismatch wipes `node_modules` on every
+    /// non-fast-path install.
+    pub(super) fn resolve(
+        gvs_over_default_hoist: bool,
+        planned_gvs: bool,
+        resolved_hoist: bool,
+        hoist_explicit: Option<bool>,
+        node_linker: aube_linker::NodeLinker,
+    ) -> Self {
+        let isolated = matches!(node_linker, aube_linker::NodeLinker::Isolated);
+        let hoist_vetoes_store = if gvs_over_default_hoist {
+            hoist_explicit.unwrap_or(false)
+        } else {
+            resolved_hoist
+        };
+        if isolated && planned_gvs && !hoist_vetoes_store {
+            Self::Symlink
+        } else {
+            Self::Disk {
+                hidden_tree: resolved_hoist,
+            }
+        }
+    }
+
+    /// Whether the linker materializes `.aube/<dep>` as symlinks into the
+    /// shared global virtual store (the former `effective_gvs`).
+    pub(super) fn uses_shared_store(self) -> bool {
+        matches!(self, Self::Symlink)
+    }
+
+    /// Whether the isolated linker builds the hidden hoist tree. Never true
+    /// under [`Symlink`](Self::Symlink) — the constraint that motivates the type.
+    pub(super) fn build_hidden_tree(self) -> bool {
+        matches!(self, Self::Disk { hidden_tree: true })
     }
 }
 
-/// Whether the isolated linker should build the hidden hoist tree
-/// (`node_modules/.<store>/node_modules/`). It exists ONLY where the shared
-/// global virtual store is NOT active: a bare-name alias inside the SHARED
-/// store is cross-project-mutable state (aube issue #6), so a live GVS must
-/// never carry one. `resolved_hoist` is the resolved `hoist` setting (default
-/// `true`); `effective_gvs` is [`effective_global_virtual_store`].
-pub(super) fn build_hidden_tree(resolved_hoist: bool, effective_gvs: bool) -> bool {
-    resolved_hoist && !effective_gvs
+/// Reject the contradictory explicit request `enableGlobalVirtualStore=true`
+/// together with a layout that structurally excludes the shared store — an
+/// explicit `hoist=true` (which needs the project-local hidden tree) or
+/// `node-linker=hoisted` (which discards `.aube` entirely). The old coupling
+/// resolved this SILENTLY by dropping the shared-store request (hoist/hoisted
+/// won); a two-sided explicit request is genuinely contradictory, so it is a
+/// loud error at the config boundary instead. Codeless miette, matching the
+/// adjacent `node-linker=pnp` rejection in `resolve_node_linker`. A DEFAULT
+/// `hoist=true` is not a conflict — under the embedder profile it lets the
+/// store engage — so only `hoist_explicit == Some(true)` triggers this.
+pub(super) fn reject_gvs_layout_contradiction(
+    enable_gvs_explicit: Option<bool>,
+    hoist_explicit: Option<bool>,
+    node_linker: aube_linker::NodeLinker,
+) -> miette::Result<()> {
+    if enable_gvs_explicit != Some(true) {
+        return Ok(());
+    }
+    let conflicting = if matches!(node_linker, aube_linker::NodeLinker::Hoisted) {
+        "node-linker=hoisted"
+    } else if hoist_explicit == Some(true) {
+        "hoist=true"
+    } else {
+        return Ok(());
+    };
+    Err(miette!(
+        "enableGlobalVirtualStore=true conflicts with {conflicting}: the shared \
+         global virtual store needs the isolated layout with no hidden hoist tree \
+         (a shared-store bare-name alias would be cross-project-mutable state). \
+         Set one, not both."
+    ))
 }
 
 /// The global-virtual-store decision the fetch-pipelined materializer
@@ -132,7 +175,7 @@ pub(super) fn build_hidden_tree(resolved_hoist: bool, effective_gvs: bool) -> bo
 /// exactly where the link phase later reads it.
 ///
 /// For the isolated linker this is the *effective* mode
-/// ([`effective_global_virtual_store`]), which folds in `hoist`: under the
+/// ([`Materialization::uses_shared_store`]), which folds in `hoist`: under the
 /// default `hoist=true` layout `Linker::link_all` recurses to
 /// `without_global_virtual_store` and materializes per-project, so the
 /// prewarm must too. Feeding the prewarm the raw (hoist-unaware) override
@@ -217,133 +260,174 @@ mod tests {
     // every non-fast-path install (e.g. `add` in a workspace member),
     // wiping node_modules each time.
 
-    // The stock (flag-off) coupling. Tests run with no embedder registered, so
-    // `effective_global_virtual_store` reads `AUBE` (`gvs_over_default_hoist ==
-    // false`) and a default hoist=true still vetoes the shared store.
+    // The stock (upstream) coupling: `gvs_over_default_hoist == false`, where a
+    // default hoist=true still vetoes the shared store. Passing the flag
+    // explicitly keeps these hermetic (no reliance on a process-global embedder).
 
     #[test]
     fn default_project_predicts_per_project_so_no_spurious_reset() {
-        // hoist=true (default), isolated (default), GVS requested on (off-CI):
+        // hoist=true (default), isolated (default), store requested on (off-CI):
         // the linker writes per-project, so the effective mode is `false`.
-        assert!(!effective_global_virtual_store(
-            true,
-            true,
-            None,
-            NodeLinker::Isolated
-        ));
+        assert!(
+            !Materialization::resolve(false, true, true, None, NodeLinker::Isolated)
+                .uses_shared_store()
+        );
     }
 
     #[test]
-    fn gvs_active_only_when_hoist_off_and_isolated() {
-        assert!(effective_global_virtual_store(
-            true,
-            false,
-            Some(false),
-            NodeLinker::Isolated
-        ));
+    fn store_active_only_when_hoist_off_and_isolated() {
+        assert!(
+            Materialization::resolve(false, true, false, Some(false), NodeLinker::Isolated)
+                .uses_shared_store()
+        );
     }
 
     #[test]
-    fn hoisted_layout_never_uses_global_virtual_store() {
-        assert!(!effective_global_virtual_store(
-            true,
-            false,
-            Some(false),
-            NodeLinker::Hoisted
-        ));
-        assert!(!effective_global_virtual_store(
-            true,
-            true,
-            None,
-            NodeLinker::Hoisted
-        ));
+    fn hoisted_layout_never_uses_shared_store() {
+        assert!(
+            !Materialization::resolve(false, true, false, Some(false), NodeLinker::Hoisted)
+                .uses_shared_store()
+        );
+        assert!(
+            !Materialization::resolve(false, true, true, None, NodeLinker::Hoisted)
+                .uses_shared_store()
+        );
     }
 
     #[test]
     fn requested_off_stays_off_regardless_of_hoist() {
-        assert!(!effective_global_virtual_store(
-            false,
-            false,
-            Some(false),
-            NodeLinker::Isolated
-        ));
-        assert!(!effective_global_virtual_store(
-            false,
-            true,
-            None,
-            NodeLinker::Isolated
-        ));
+        assert!(
+            !Materialization::resolve(false, false, false, Some(false), NodeLinker::Isolated)
+                .uses_shared_store()
+        );
+        assert!(
+            !Materialization::resolve(false, false, true, None, NodeLinker::Isolated)
+                .uses_shared_store()
+        );
     }
 
-    // The `gvs_over_default_hoist` (nub) coupling, exercised through the pure
-    // `effective_gvs_impl` so the flag is set explicitly (no process-global
-    // embedder registration). Only an EXPLICIT hoist=true vetoes GVS.
+    // The `gvs_over_default_hoist` (nub) coupling, exercised through
+    // `Materialization::resolve` with the flag passed explicitly (no
+    // process-global embedder registration). Only an EXPLICIT hoist=true vetoes
+    // the shared store. The asserted `uses_shared_store()` values are identical
+    // to the former `effective_gvs_impl` outputs — behavior is preserved; the
+    // enum only makes the illegal shared-store-plus-hidden-tree state
+    // unrepresentable.
 
     #[test]
-    fn flag_default_hoist_lets_gvs_engage() {
+    fn flag_default_hoist_lets_store_engage() {
         // hoist resolves to the default `true` but was never explicitly set:
-        // GVS engages off-CI on the isolated layout.
-        assert!(effective_gvs_impl(
-            true,
-            true,
-            true,
-            None,
-            NodeLinker::Isolated
-        ));
+        // the shared store engages off-CI on the isolated layout.
+        assert_eq!(
+            Materialization::resolve(true, true, true, None, NodeLinker::Isolated),
+            Materialization::Symlink
+        );
     }
 
     #[test]
-    fn flag_explicit_hoist_true_vetoes_gvs() {
+    fn flag_explicit_hoist_true_vetoes_store() {
         // An explicit hoist=true (e.g. nub's injected-deps embedder push) keeps
         // per-project + hidden tree, even off-CI.
-        assert!(!effective_gvs_impl(
-            true,
-            true,
-            true,
-            Some(true),
-            NodeLinker::Isolated
-        ));
+        assert_eq!(
+            Materialization::resolve(true, true, true, Some(true), NodeLinker::Isolated),
+            Materialization::Disk { hidden_tree: true }
+        );
     }
 
     #[test]
-    fn flag_explicit_hoist_false_keeps_gvs_on() {
-        assert!(effective_gvs_impl(
-            true,
-            true,
-            false,
-            Some(false),
-            NodeLinker::Isolated
-        ));
+    fn flag_explicit_hoist_false_keeps_store_on() {
+        assert_eq!(
+            Materialization::resolve(true, true, false, Some(false), NodeLinker::Isolated),
+            Materialization::Symlink
+        );
     }
 
     #[test]
     fn flag_ci_and_hoisted_stay_off() {
         // planned off (CI) ⇒ off regardless of hoist explicitness.
-        assert!(!effective_gvs_impl(
-            true,
-            false,
-            true,
-            None,
-            NodeLinker::Isolated
-        ));
+        assert!(
+            !Materialization::resolve(true, false, true, None, NodeLinker::Isolated)
+                .uses_shared_store()
+        );
         // hoisted layout never engages the shared store.
-        assert!(!effective_gvs_impl(
-            true,
-            true,
-            true,
-            None,
-            NodeLinker::Hoisted
-        ));
+        assert!(
+            !Materialization::resolve(true, true, true, None, NodeLinker::Hoisted)
+                .uses_shared_store()
+        );
     }
 
     #[test]
-    fn hidden_tree_is_built_only_when_gvs_is_off() {
-        // Default hoist, GVS on ⇒ no hidden tree (can't live in a shared store).
-        assert!(!build_hidden_tree(true, true));
-        // Default hoist, GVS off (CI / per-project) ⇒ hidden tree built.
-        assert!(build_hidden_tree(true, false));
+    fn hidden_tree_is_built_only_when_store_is_off() {
+        // Default hoist, store on ⇒ no hidden tree (can't live in a shared store).
+        assert!(
+            !Materialization::resolve(true, true, true, None, NodeLinker::Isolated)
+                .build_hidden_tree()
+        );
+        // Default hoist, store off (CI / per-project) ⇒ hidden tree built.
+        assert!(
+            Materialization::resolve(true, false, true, None, NodeLinker::Isolated)
+                .build_hidden_tree()
+        );
         // Explicit hoist=false ⇒ never a hidden tree.
-        assert!(!build_hidden_tree(false, false));
+        assert!(
+            !Materialization::resolve(true, false, false, Some(false), NodeLinker::Isolated)
+                .build_hidden_tree()
+        );
+    }
+
+    #[test]
+    fn symlink_never_builds_a_hidden_tree() {
+        // The soundness invariant the type enforces: whenever the shared store
+        // is live, no hidden tree — across every combination of inputs.
+        for gvs_over_default_hoist in [false, true] {
+            for planned_gvs in [false, true] {
+                for resolved_hoist in [false, true] {
+                    for hoist_explicit in [None, Some(false), Some(true)] {
+                        for node_linker in [NodeLinker::Isolated, NodeLinker::Hoisted] {
+                            let m = Materialization::resolve(
+                                gvs_over_default_hoist,
+                                planned_gvs,
+                                resolved_hoist,
+                                hoist_explicit,
+                                node_linker,
+                            );
+                            assert!(
+                                !(m.uses_shared_store() && m.build_hidden_tree()),
+                                "shared store must never carry a hidden tree: {m:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // The previously-SILENT contradiction (explicit enableGlobalVirtualStore=true
+    // + a layout that structurally excludes the shared store) is now a loud
+    // error at the config boundary.
+
+    #[test]
+    fn explicit_store_plus_explicit_hoist_is_a_loud_error() {
+        assert!(
+            reject_gvs_layout_contradiction(Some(true), Some(true), NodeLinker::Isolated).is_err()
+        );
+    }
+
+    #[test]
+    fn explicit_store_plus_hoisted_layout_is_a_loud_error() {
+        assert!(reject_gvs_layout_contradiction(Some(true), None, NodeLinker::Hoisted).is_err());
+    }
+
+    #[test]
+    fn store_with_default_hoist_or_no_explicit_request_is_not_a_conflict() {
+        // Default hoist (None) + explicit store request: no conflict — the
+        // profile lets a default hoist engage the store.
+        assert!(reject_gvs_layout_contradiction(Some(true), None, NodeLinker::Isolated).is_ok());
+        // No explicit store request: never a conflict, whatever the layout.
+        assert!(reject_gvs_layout_contradiction(None, Some(true), NodeLinker::Isolated).is_ok());
+        assert!(
+            reject_gvs_layout_contradiction(Some(false), Some(true), NodeLinker::Hoisted).is_ok()
+        );
     }
 
     // The prewarm materializer must mirror the link phase's *effective*
