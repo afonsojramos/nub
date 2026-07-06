@@ -942,29 +942,38 @@ pub async fn run(opts: InstallOptions) -> miette::Result<()> {
     let resolved_hoist = aube_settings::resolved::hoist(&settings_ctx);
     // `hoist_explicit` is `Some` only when hoist was set at some tier above the
     // built-in default (embedder defaults COUNT); under the
-    // `gvs_over_default_hoist` profile only an explicit `hoist=true` vetoes GVS.
+    // `gvs_over_default_hoist` profile only an explicit `hoist=true` vetoes the
+    // shared store.
     let hoist_explicit = aube_settings::resolved::hoist_explicit(&settings_ctx);
-    let effective_gvs = gvs::effective_global_virtual_store(
+    // An explicit `enableGlobalVirtualStore=true` alongside a layout that
+    // structurally excludes the shared store (explicit `hoist=true`, or
+    // `node-linker=hoisted`) is contradictory. The old coupling dropped the
+    // shared-store request SILENTLY; reject it loudly at the config boundary.
+    gvs::reject_gvs_layout_contradiction(
+        aube_settings::resolved::enable_global_virtual_store(&settings_ctx),
+        hoist_explicit,
+        resolved_node_linker,
+    )?;
+    // Resolve the (symlink-vs-disk × hidden-tree) materialization once, soundly:
+    // the illegal shared-store-with-hidden-tree state is unrepresentable. Feeds
+    // the mode-change reset, the prewarm, and (under the embedder profile) the
+    // link phase, so all act on the same values (issue #71 lockstep).
+    let materialization = gvs::Materialization::resolve(
+        aube_util::embedder().gvs_over_default_hoist,
         planned_gvs,
         resolved_hoist,
         hoist_explicit,
         resolved_node_linker,
     );
-    // Under the `gvs_over_default_hoist` embedder profile, pre-fold the
-    // (effective GVS, hidden-tree) decision ONCE here and hand it to the link
-    // phase, so the mode-change reset, the prewarm, and the linker all act on
-    // the same values (issue #71 lockstep) and the linker's own
+    let effective_gvs = materialization.uses_shared_store();
+    // Under the `gvs_over_default_hoist` embedder profile, hand the pre-folded
+    // materialization to the link phase so the linker's own
     // `use_global_virtual_store && hoist` fallback is never reached. `None` on
-    // standalone aube's default path — the link phase then resolves hoist itself
-    // and passes the raw override, and the linker re-derives, byte-for-byte
-    // unchanged.
-    let gvs_hoist_decision =
-        aube_util::embedder()
-            .gvs_over_default_hoist
-            .then(|| link::GvsHoistDecision {
-                effective_gvs,
-                build_hidden_tree: gvs::build_hidden_tree(resolved_hoist, effective_gvs),
-            });
+    // standalone aube's default path — the link phase resolves hoist itself and
+    // passes the raw override, and the linker re-derives, byte-for-byte unchanged.
+    let gvs_hoist_decision = aube_util::embedder()
+        .gvs_over_default_hoist
+        .then_some(materialization);
     gvs::reset_on_mode_change(&cwd, &aube_dir, &modules_dir_name, effective_gvs)?;
 
     // The fetch-pipelined materializer (`spawn_gvs_prewarm`) must target the

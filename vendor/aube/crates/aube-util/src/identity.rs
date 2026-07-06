@@ -255,7 +255,7 @@ pub struct Embedder {
     /// restores ambient `@types/*` resolution for store-resident packages —
     /// still gets built wherever the shared store isn't active, instead of being
     /// lost for zero GVS benefit. Standalone aube keeps `false`, so its coupling
-    /// (`gvs.rs::effective_global_virtual_store` and the linker's
+    /// (`gvs.rs::Materialization::resolve` and the linker's
     /// `use_global_virtual_store && hoist` fallback) is byte-for-byte unchanged.
     /// Embedder-fixed: the host's layout posture, not a per-project knob.
     pub gvs_over_default_hoist: bool,

@@ -41,19 +41,6 @@ pub(super) fn resolve_node_linker(
     }
 }
 
-/// Pre-folded (effective GVS, hidden-tree) decision computed once in the
-/// command layer under the `gvs_over_default_hoist` embedder profile. When
-/// present, `run_link_phase` hands the linker `use_global_virtual_store =
-/// effective_gvs` and `hoist = build_hidden_tree` directly, so the linker's own
-/// `use_global_virtual_store && hoist` fallback (which bakes in the stock
-/// coupling) is never reached. `None` on standalone aube's default path, where
-/// the linker re-derives from the raw override + resolved hoist unchanged.
-#[derive(Clone, Copy)]
-pub(super) struct GvsHoistDecision {
-    pub(super) effective_gvs: bool,
-    pub(super) build_hidden_tree: bool,
-}
-
 pub(super) struct LinkPhaseInput<'a> {
     pub(super) cwd: &'a std::path::Path,
     pub(super) settings_ctx: &'a aube_settings::ResolveCtx<'a>,
@@ -73,7 +60,14 @@ pub(super) struct LinkPhaseInput<'a> {
     pub(super) link_concurrency_setting: Option<usize>,
     pub(super) use_global_virtual_store_override: Option<bool>,
     pub(super) planned_gvs: bool,
-    pub(super) gvs_hoist_decision: Option<GvsHoistDecision>,
+    /// Pre-folded materialization computed once in the command layer under the
+    /// `gvs_over_default_hoist` embedder profile. When present, `run_link_phase`
+    /// hands the linker `use_global_virtual_store` + `hoist` (build-hidden-tree)
+    /// from it directly, so the linker's own `use_global_virtual_store && hoist`
+    /// fallback (which bakes in the stock coupling) is never reached. `None` on
+    /// standalone aube's default path, where the linker re-derives from the raw
+    /// override + resolved hoist, byte-for-byte unchanged.
+    pub(super) gvs_hoist_decision: Option<super::gvs::Materialization>,
     pub(super) has_workspace: bool,
     pub(super) dep_selection_filtered: bool,
     pub(super) workspace_filter_empty: bool,
@@ -149,10 +143,10 @@ pub(super) fn run_link_phase(input: LinkPhaseInput<'_>) -> miette::Result<LinkPh
     // aube (`None`) resolves hoist and keeps the raw override — the linker
     // re-derives, byte-for-byte unchanged.
     let (hoist, use_global_virtual_store_override) = match gvs_hoist_decision {
-        Some(GvsHoistDecision {
-            effective_gvs,
-            build_hidden_tree,
-        }) => (build_hidden_tree, Some(effective_gvs)),
+        Some(materialization) => (
+            materialization.build_hidden_tree(),
+            Some(materialization.uses_shared_store()),
+        ),
         None => (
             aube_settings::resolved::hoist(settings_ctx),
             use_global_virtual_store_override,
