@@ -1265,14 +1265,14 @@ fn hash_settings(project_dir: &Path, cli_flags: &[(String, String)]) -> String {
         hasher.update(b"\x1f");
     }
     hasher.update(b"\0");
-    // force_materialize_packages changes which `.aube/<dep>` entries are real
+    // disk_materialize_packages changes which `.aube/<dep>` entries are real
     // dirs vs shared-store symlinks under GVS. Introducing or editing the list
     // must invalidate the install state so the link phase re-runs and converts
     // a stale symlink to a materialized dir (or back) — else the existence-gated
     // step1 accepts the wrong on-disk shape as cached.
-    let force_materialize_packages = aube_settings::resolved::force_materialize_packages(&ctx);
-    hasher.update(b"force_materialize_packages=");
-    for p in &force_materialize_packages {
+    let disk_materialize_packages = aube_settings::resolved::disk_materialize_packages(&ctx);
+    hasher.update(b"disk_materialize_packages=");
+    for p in &disk_materialize_packages {
         hasher.update(p.as_bytes());
         hasher.update(b"\x1f");
     }

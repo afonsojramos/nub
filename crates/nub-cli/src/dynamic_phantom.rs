@@ -1,7 +1,7 @@
 //! Dynamic per-version phantom scan → disk-eject (the default; the
 //! `NUB_DYNAMIC_PHANTOM_EJECT=0` opt-out disables it).
 //!
-//! This REPLACES the old hand-curated static force-materialize list (capped at a
+//! This REPLACES the old hand-curated static disk-materialize list (capped at a
 //! corpus, stale on new versions) by SCANNING each installed dependency
 //! version's real published code: does it, along its reachable
 //! `exports`/`main`/`bin` graph, statically and unguardedly import a package it
@@ -15,7 +15,7 @@
 //! fetch's idle cores) instead of adding a serial post-link pass. Each verdict is
 //! written to a per-content sidecar.
 //!
-//! The sidecars are CONSUMED by the force-materialize expansion hook
+//! The sidecars are CONSUMED by the disk-materialize expansion hook
 //! ([`crate::pm_engine::phantom_closure`]): it reads them to seed the
 //! selective-subtree closure with each flagged importer, so a poisoned version is
 //! ejected project-local through #319's graph-aware materialization plan. This
@@ -98,7 +98,7 @@ pub fn register() {
 /// The written JSON is the serialized [`nub_phantom_scan::ScanResult`], read back
 /// by the CONSUMER ([`crate::pm_engine::phantom_closure`]) — which, being in
 /// nub-cli, deserializes it into the typed `ScanResult` (no cross-fork string
-/// coupling) to seed the force-materialize closure.
+/// coupling) to seed the disk-materialize closure.
 fn scan_and_cache(dir: &Path, index: &PackageIndex) {
     let fingerprint = index_content_fingerprint(index);
     let sidecar = dir.join(format!("{fingerprint}.json"));
@@ -222,7 +222,7 @@ pub fn backfill_from_lockfile(project_dir: &Path) {
         // Not in the CAS ⇒ skip: the resolve/fetch phase fetches it and the
         // extract hook covers it. `registry_name()` + `integrity` key the index
         // the SAME way the linker's own eject-gate read does (`builder.rs`
-        // `force_materialize` path), so npm-alias deps resolve to the right blob.
+        // `disk_materialize` path), so npm-alias deps resolve to the right blob.
         let Some(index) =
             store.load_index(pkg.registry_name(), &pkg.version, pkg.integrity.as_deref())
         else {

@@ -766,9 +766,9 @@ fn engine_session_inner(
     // (which calls it again as its first step, alongside the project-state-
     // dependent config surface) is a no-op for the registration.
     identity::register();
-    // Install nub's selective-subtree force-materialize expansion hook (the
+    // Install nub's selective-subtree disk-materialize expansion hook (the
     // DEFAULT; the `NUB_DYNAMIC_PHANTOM_EJECT=0` opt-out disables it). When armed
-    // it expands the force-materialize seed to its ancestor-closure +
+    // it expands the disk-materialize seed to its ancestor-closure +
     // phantom-target hoists at link time; under the opt-out it's a no-op and the
     // install path is byte-identical (pure symlink). Idempotent set-once, like
     // `identity::register()`.
@@ -2113,14 +2113,14 @@ fn nub_setting_defaults(
     store_locality: VirtualStoreLocality,
 ) -> Vec<(String, String)> {
     let fresh_format = if truly_fresh { "aube" } else { "pnpm" };
-    // The phantom-adapter force-materialize list is no longer hand-curated: the
+    // The phantom-adapter disk-materialize list is no longer hand-curated: the
     // dynamic per-version scanner (`dynamic_phantom` → `phantom_closure`, on by
     // default) detects undeclared-import phantoms per content-fingerprint and
     // ejects them through #319's ancestor-closure, subsuming the old 14-entry
     // const (incl. the singleton-hazard adapters the closure now makes sound). So
     // this embedder default carries ONLY the #315 vite eject; empty otherwise
     // (aube's `parse_string_list` drops the empty entry). A user's own
-    // `forceMaterializePackages`/`diskMaterializePackages` still wins — the
+    // `diskMaterializePackages` still wins — the
     // embedder default is the lowest precedence tier — so the additive escape
     // hatch is intact.
     //
@@ -2137,7 +2137,7 @@ fn nub_setting_defaults(
     // #315 on the phantom-eject opt-out path, where the closure hook is not
     // installed. The post-install writer/patcher lives in [`vite_compat`]; this is
     // its materialization half.
-    let force_materialize = if store_locality == VirtualStoreLocality::Default
+    let disk_materialize = if store_locality == VirtualStoreLocality::Default
         && vite_compat::enabled()
         && vite_compat::manifest_declares_vite(detected.map(|d| d.dir.as_path()).unwrap_or(cwd))
     {
@@ -2175,7 +2175,7 @@ fn nub_setting_defaults(
             //   (works either way; this only flips it project-local, harmless).
             "next,parcel,react-native".to_string(),
         ),
-        ("forceMaterializePackages".to_string(), force_materialize),
+        ("diskMaterializePackages".to_string(), disk_materialize),
     ];
     if let Some(data) = nub_data_dir() {
         defaults.push((
@@ -2765,16 +2765,16 @@ mod tests {
     }
 
     #[test]
-    fn phantom_force_materialize_list_is_retired_in_favor_of_the_detector() {
+    fn phantom_disk_materialize_list_is_retired_in_favor_of_the_detector() {
         // The 14-entry hand-curated adapter list is gone: the dynamic per-version
         // scanner + #319 ancestor-closure (on by default) detect and eject those
         // phantoms, so nub no longer seeds them as an embedder default. A fresh,
-        // non-vite project's `forceMaterializePackages` default is therefore
+        // non-vite project's `diskMaterializePackages` default is therefore
         // empty (the vite #315 seed is the only remaining embedder-default entry,
         // and this fixture declares no vite).
         let dir = tempfile::tempdir().unwrap();
         let fresh = nub_setting_defaults(None, true, dir.path(), VirtualStoreLocality::Default);
-        let list = get(&fresh, "forceMaterializePackages").unwrap_or_default();
+        let list = get(&fresh, "diskMaterializePackages").unwrap_or_default();
         let names: Vec<&str> = list.split(',').filter(|s| !s.is_empty()).collect();
         for retired in [
             "@hookform/resolvers",

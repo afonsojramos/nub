@@ -14,19 +14,19 @@ Two units, both in `crates/nub-cli/src/pm_engine/vite_compat.rs`, default-on
 - **Unit A — `node_modules/.modules.yaml`** (all Vite versions). nub writes JSON
   `{"virtualStoreDir":"<abs store>"}`. Vite ≥ 8.1 reads it natively and allows
   the store.
-- **Unit B — dist backport** (Vite < 8.1). nub force-materializes just the
+- **Unit B — dist backport** (Vite < 8.1). nub disk-materializes just the
   `vite` package project-local (CAS store untouched) and codegen-inserts Vite's
   own 8.1 `.modules.yaml` sniff at the `fs.allow`-default computation site
   (`let allowDirs = server.fs.allow;` for v6/v7; `[searchForWorkspaceRoot(root)]`
   for v5). The sniff is YAML-tolerant + PM-agnostic (reads whatever
   `virtualStoreDir` any tool wrote — never hardcodes nub's path).
 
-Unit B as shipped force-materializes vite ONLY when it is a **direct** dep — a
+Unit B as shipped disk-materializes vite ONLY when it is a **direct** dep — a
 raw `vite dev` app. A framework that embeds vite **transitively** (Astro 5 pins
 `vite@^6`, `< 8.1`) loads its vite from a store-to-store sibling symlink, so the
 direct-dep eject never reaches it and the store `/@fs` stays 403 (the #315
 residual). Behind the default-off `NUB_DYNAMIC_PHANTOM_EJECT` flag, nub now
-auto-detects an embedded vite `< 8.1` and force-materializes its
+auto-detects an embedded vite `< 8.1` and disk-materializes its
 `[framework … vite]` **ancestor closure** (measured 5 packages for Astro 5,
 `~1.5%` of the tree — everything else stays symlinked), so the framework loads a
 project-local vite that Unit B patches. With the flag OFF the behavior is
@@ -101,14 +101,14 @@ NUB_DYNAMIC_PHANTOM_EJECT=1 tests/vite-compat/driver.sh <dir> "<dev-cmd>" "<buil
 ```
 
 - **Astro 5 (rung 1 — the vite closure).** `astro@^5` pins `vite@6.4.3` (`< 8.1`),
-  loaded library-embedded. The flag force-materializes the `[astro, vite, …]`
+  loaded library-embedded. The flag disk-materializes the `[astro, vite, …]`
   closure → the ejected vite gets Unit B's sniff → a bare `astro dev` (no nub in
   the process) serves a store-resident `/@fs` module `200` (was `403`).
   Acceptance: `/@fs=200`, `log=no-403`, `patched>=1`, and only the framework
   closure ejected (the rest of the tree stays symlinked).
 - **Nuxt 4 (both rungs).** `nuxt@^4` embeds `vite@7.3.6` (`< 8.1`) AND breaks on
   transitive undeclared imports the closure alone can't place. The flag
-  force-materializes the `[nuxt, @nuxt/vite-builder, vite, vue-router,
+  disk-materializes the `[nuxt, @nuxt/vite-builder, vite, vue-router,
   @nuxt/devtools]` closure (rung 1) and hoists the two already-resolved phantom
   targets within their importers — `@vue/compiler-sfc` into `vue-router`,
   `unstorage` into `@nuxt/devtools` (rung 2). Acceptance: `nuxt prepare` →

@@ -11,8 +11,8 @@ use std::path::Path;
 
 mod builder;
 mod clonedir;
+mod disk_materialize;
 mod error;
-mod force_materialize;
 mod hoisted;
 mod link;
 mod materialize;
@@ -26,10 +26,10 @@ mod public_hoist_tests;
 #[cfg(test)]
 mod tests;
 
-pub use error::Error;
-pub use force_materialize::{
-    ForceMaterializePlan, expand_force_materialize, set_force_materialize_expand_hook,
+pub use disk_materialize::{
+    DiskMaterializePlan, expand_disk_materialize, set_disk_materialize_expand_hook,
 };
+pub use error::Error;
 pub use hoisted::HoistedPlacements;
 pub use link::build_nested_link_targets;
 pub(crate) use materialize::{
@@ -265,13 +265,13 @@ pub struct Linker {
     /// Matched by exact name against each graph package. Empty for standalone
     /// callers and every existing test → the GVS pass is byte-for-byte
     /// unchanged.
-    force_materialize: std::collections::HashSet<String>,
+    disk_materialize: std::collections::HashSet<String>,
     /// Rung 2 of selective-subtree materialization: undeclared phantom targets
-    /// to HOIST-WITHIN a force-materialized package's own `node_modules`, keyed
+    /// to HOIST-WITHIN a disk-materialized package's own `node_modules`, keyed
     /// by the importer's dep_path → the target dep_paths. A transitively-phantom
     /// package (`@nuxt/devtools` → the undeclared `unstorage`, `vue-router` →
     /// the optional-peer-but-unlinked `@vue/compiler-sfc`) doesn't declare the
-    /// import, so once it's force-materialized its own `node_modules` has no
+    /// import, so once it's disk-materialized its own `node_modules` has no
     /// sibling for it and Node's walk still 404s. Injecting the target as an
     /// extra sibling (reusing the materialize sibling-wiring, so the target
     /// resolves through its existing `.aube/<entry>`) makes the walk succeed.

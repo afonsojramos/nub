@@ -473,7 +473,7 @@ The same treatment covers packages that write generated code back into their own
 Add your own with one line in `.npmrc`:
 
 ```ini
-forceMaterializePackages[]=my-adapter
+diskMaterializePackages[]=my-adapter
 ```
 
 A bundler that resolves modules by their real path — Metro (bare React Native), Next.js, Parcel — only crawls the project directory, so it can't see the shared store. Nub gives those projects a self-contained, project-local store automatically. Extend the list in `.npmrc`:

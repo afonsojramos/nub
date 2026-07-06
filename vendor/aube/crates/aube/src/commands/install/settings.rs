@@ -172,7 +172,7 @@ pub(super) fn find_gvs_incompatible_trigger<'a>(
 ///
 /// Symlink-PRIORITY classification: any single symlink entry means the tree
 /// is in global-virtual-store mode. GVS-on trees are NOT necessarily uniform
-/// — `forceMaterializePackages` makes a handful of adapter entries real dirs
+/// — `diskMaterializePackages` makes a handful of adapter entries real dirs
 /// while the rest stay shared-store symlinks, a legitimately MIXED tree — so
 /// classifying from the first `read_dir` entry would be order-dependent (a
 /// forced real dir landing first would misread the whole tree as per-project
@@ -1264,8 +1264,8 @@ mod gvs_mode_detect_tests {
     use super::*;
     use std::os::unix::fs::symlink;
 
-    // `forceMaterializePackages` produces a MIXED `.aube` tree — some entries
-    // are shared-store symlinks, some are force-materialized real dirs. The
+    // `diskMaterializePackages` produces a MIXED `.aube` tree — some entries
+    // are shared-store symlinks, some are disk-materialized real dirs. The
     // detector must classify such a tree as GVS-on regardless of `read_dir`
     // order; a forced real dir landing first must NOT misread it as per-project
     // (which would wipe node_modules on every install).

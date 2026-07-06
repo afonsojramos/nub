@@ -37,8 +37,8 @@ nub-phantom-scan = { path = "../nub-phantom-scan" }
 # `nub ci` route through `aube::commands::install::run` in-process instead of
 # shelling out. See vendor/aube/AGENTS.md and src/pm_engine/.
 aube-lockfile = { path = "../../vendor/aube/crates/aube-lockfile" }
-# aube-linker: nub installs a force-materialize expansion hook (selective-subtree
-# materialization) via `aube_linker::set_force_materialize_expand_hook`; a pure
+# aube-linker: nub installs a disk-materialize expansion hook (selective-subtree
+# materialization) via `aube_linker::set_disk_materialize_expand_hook`; a pure
 # library crate (no CLI/tokio surface), same lean-graph rationale as aube-lockfile.
 aube-linker = { path = "../../vendor/aube/crates/aube-linker" }
 aube-manifest = { path = "../../vendor/aube/crates/aube-manifest" }

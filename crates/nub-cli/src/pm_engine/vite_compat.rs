@@ -18,8 +18,8 @@
 //!   plain data — read regardless of whether nub is in the process.
 //!
 //! - **Unit B (Vite < 8.1): backport Vite's own 8.1 sniff.** The sniff predates
-//!   the majority of installed Vite, so for < 8.1 nub force-materializes just the
-//!   `vite` package project-local (the linker's `forceMaterializePackages` path —
+//!   the majority of installed Vite, so for < 8.1 nub disk-materializes just the
+//!   `vite` package project-local (the linker's `diskMaterializePackages` path —
 //!   the shared CAS store stays pristine, only the local ejected copy is touched)
 //!   and codegen-inserts the sniff at Vite's own `fs.allow`-default computation
 //!   site in the bundled (non-minified) dist. That site is upstream of
@@ -72,7 +72,7 @@ pub(crate) fn enabled() -> bool {
 /// project-local ejected copy), so the dist backport cannot reach it CAS-safely
 /// — but Unit A (`.modules.yaml`) fixes it for Vite ≥ 8.1 (the framework's
 /// store Vite reads the file natively). Direct-dep Vite IS loaded from the
-/// force-materialized project-local copy, so the < 8.1 backport reaches it.
+/// disk-materialized project-local copy, so the < 8.1 backport reaches it.
 pub(crate) fn apply(root: &Path) {
     if !enabled() {
         return;
@@ -179,7 +179,7 @@ fn read_vite_version(pkg_dir: &Path) -> Option<String> {
 
 /// Whether the project manifest at `root` declares `vite` as a DIRECT dependency
 /// (any of dependencies / devDependencies / optionalDependencies). Drives the
-/// force-materialize decision: only a direct-dep Vite is loaded from the ejected
+/// disk-materialize decision: only a direct-dep Vite is loaded from the ejected
 /// project-local copy the backport patches, so ejecting for a library-embedded
 /// Vite (which loads its store copy) would be wasted dedup. Best-effort — an
 /// unreadable/absent manifest ⇒ `false`.

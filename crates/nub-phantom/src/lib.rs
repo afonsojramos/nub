@@ -11,7 +11,7 @@
 //! The classifier's whole job is to NOT false-flag: declared optional peers, soft
 //! (try/catch) loads, type-only imports, and unreached dev files are each handled
 //! so the emitted phantom set is trustworthy enough to drive the vendored
-//! `packageExtensions`/force-materialize list.
+//! `packageExtensions`/disk-materialize list.
 
 pub mod fetch;
 

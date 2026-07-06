@@ -2,7 +2,7 @@
 
 An internal/eval tool that detects **undeclared (phantom) dependencies** of npm
 packages, and scans the top-N most-downloaded packages to build the empirical
-`packageExtensions`/force-materialize dataset from ecosystem data instead of
+`packageExtensions`/disk-materialize dataset from ecosystem data instead of
 guesswork.
 
 It is **not** part of the shipped `nub` binary — it is its own Cargo workspace,
