@@ -2162,17 +2162,25 @@ fn nub_setting_defaults(
             // NOT a phantom-dep class (those the dynamic detector + closure now
             // eject per-package). `nuxt` was DROPPED: its walk-up is only 2 phantom
             // edges (~2.3% closure), so it's closure-ejectable at rung 1 —
-            // symlink-GVS works (see [[nuxt-gvs-unlock]]). What remains:
+            // symlink-GVS works (see [[nuxt-gvs-unlock]]). `parcel` was DROPPED: its
+            // real break was never `.parcelrc` walk-up but a GVS store-dir over-split
+            // — the prewarm hashed the widened (all-platform) graph while the link
+            // phase hashed the host-filtered one, so parcel's native subtree
+            // materialized `@parcel/core` at two byte-identical store dirs; two
+            // consumers loaded different copies → two serializer registries →
+            // `DataCloneError` at worker-farm startup. Fixed at the source (the
+            // prewarm now host-filters its graph to match the link phase), verified
+            // green across parcel 2.9–2.13 + 2.16. What remains:
             // - `next` — Turbopack canonicalizes through symlinks and chroots to a
             //   single project root; irreducible, so the store must be project-local.
-            // - `parcel` — resolver walks up for `.parcelrc` (unverified against the
-            //   closure; kept as the safe last resort).
+            //   (It hit the same store-split, now also fixed, but the chroot break is
+            //   independent and keeps it here pending its own verification.)
             // - `react-native` — bare RN's Metro (`@react-native/metro-config`)
             //   crawls by realpath and only sees the project root, so the global
             //   store is out of scope and even DECLARED deps (`@babel/runtime`)
             //   report unresolved. Expo's `@expo/metro-config` is store-aware
             //   (works either way; this only flips it project-local, harmless).
-            "next,parcel,react-native".to_string(),
+            "next,react-native".to_string(),
         ),
         ("diskMaterializePackages".to_string(), disk_materialize),
     ];
@@ -2801,16 +2809,19 @@ mod tests {
     }
 
     #[test]
-    fn disable_gvs_default_drops_nuxt_and_keeps_the_store_locality_breakers() {
+    fn disable_gvs_default_drops_nuxt_and_parcel_and_keeps_the_store_locality_breakers() {
         // The whole-install GVS-off list is now reserved for store-LOCALITY
         // breaks. `nuxt` is closure-ejectable at rung 1 ([[nuxt-gvs-unlock]]) so
-        // it was dropped; `next` (Turbopack chroot), `parcel`, and `react-native`
-        // (bare-RN Metro realpath crawl) remain irreducible.
+        // it was dropped; `parcel` was dropped once its real break — a GVS
+        // store-dir over-split from the prewarm/link graph mismatch — was fixed at
+        // the source (see `run_gvs_prewarm_materializer`). `next` (Turbopack
+        // chroot) and `react-native` (bare-RN Metro realpath crawl) remain
+        // irreducible store-locality breaks.
         let dir = tempfile::tempdir().unwrap();
         let fresh = nub_setting_defaults(None, true, dir.path(), VirtualStoreLocality::Default);
         assert_eq!(
             get(&fresh, "disableGlobalVirtualStoreForPackages"),
-            Some("next,parcel,react-native"),
+            Some("next,react-native"),
         );
     }
 

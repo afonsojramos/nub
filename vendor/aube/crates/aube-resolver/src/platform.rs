@@ -988,4 +988,148 @@ mod tests {
         let sup = SupportedArchitectures::default();
         assert!(!is_supported(&[], &[], &s(&["musl"]), &sup));
     }
+
+    // --- GVS prewarm/link graph-hash agreement (parcel worker-farm regression) ---
+
+    // A parcel-worker-farm-shaped graph: `@parcel/core` peers with
+    // `@parcel/workers`, and pulls in `@parcel/watcher`, whose subtree
+    // carries a platform-specific optional native variant per OS — exactly
+    // the shape (`@parcel/watcher-<platform>`, `@swc/core-<platform>`, lmdb,
+    // `@next/swc-<platform>`) that made the resolver widen the graph for a
+    // portable lockfile. Built with `optional_dependencies` set so
+    // `filter_graph` drops the host-mismatched leaf.
+    fn parcel_worker_farm_graph() -> aube_lockfile::LockfileGraph {
+        use aube_lockfile::{DirectDep, LockedPackage, LockfileGraph};
+        let mk = |name: &str, dep_path: &str| LockedPackage {
+            name: name.to_string(),
+            version: "1.0.0".to_string(),
+            integrity: Some(format!("sha512-{name}")),
+            dep_path: dep_path.to_string(),
+            ..Default::default()
+        };
+        let mut graph = LockfileGraph::default();
+        graph.importers.insert(
+            ".".to_string(),
+            vec![DirectDep {
+                name: "parcel".to_string(),
+                dep_path: "parcel@2.12.0".to_string(),
+                dep_type: aube_lockfile::DepType::Production,
+                specifier: Some("2.12.0".to_string()),
+            }],
+        );
+
+        let mut parcel = mk("parcel", "parcel@2.12.0");
+        parcel.dependencies = [
+            ("@parcel/core".to_string(), "2.12.0".to_string()),
+            (
+                "@parcel/workers".to_string(),
+                "2.12.0(@parcel/core@2.12.0)".to_string(),
+            ),
+        ]
+        .into();
+        graph.packages.insert("parcel@2.12.0".to_string(), parcel);
+
+        let mut core = mk("@parcel/core", "@parcel/core@2.12.0");
+        core.dependencies = [
+            (
+                "@parcel/workers".to_string(),
+                "2.12.0(@parcel/core@2.12.0)".to_string(),
+            ),
+            ("@parcel/watcher".to_string(), "2.5.6".to_string()),
+        ]
+        .into();
+        graph
+            .packages
+            .insert("@parcel/core@2.12.0".to_string(), core);
+
+        let mut workers = mk(
+            "@parcel/workers",
+            "@parcel/workers@2.12.0(@parcel/core@2.12.0)",
+        );
+        workers.dependencies = [("@parcel/core".to_string(), "2.12.0".to_string())].into();
+        graph.packages.insert(
+            "@parcel/workers@2.12.0(@parcel/core@2.12.0)".to_string(),
+            workers,
+        );
+
+        // The native package with per-OS optional variants — the widening
+        // source. `watcher-linux` is host-mismatched on the darwin target
+        // the test filters against, so `filter_graph` prunes it and the
+        // parent `watcher` (and everything above it) re-hashes.
+        let mut watcher = mk("@parcel/watcher", "@parcel/watcher@2.5.6");
+        watcher.dependencies = [
+            ("@parcel/watcher-darwin".to_string(), "2.5.6".to_string()),
+            ("@parcel/watcher-linux".to_string(), "2.5.6".to_string()),
+        ]
+        .into();
+        watcher.optional_dependencies = watcher.dependencies.clone();
+        graph
+            .packages
+            .insert("@parcel/watcher@2.5.6".to_string(), watcher);
+
+        let mut darwin = mk("@parcel/watcher-darwin", "@parcel/watcher-darwin@2.5.6");
+        darwin.os = s(&["darwin"]).into();
+        darwin.cpu = s(&["arm64"]).into();
+        graph
+            .packages
+            .insert("@parcel/watcher-darwin@2.5.6".to_string(), darwin);
+
+        let mut linux = mk("@parcel/watcher-linux", "@parcel/watcher-linux@2.5.6");
+        linux.os = s(&["linux"]).into();
+        linux.cpu = s(&["x64"]).into();
+        graph
+            .packages
+            .insert("@parcel/watcher-linux@2.5.6".to_string(), linux);
+
+        graph
+    }
+
+    #[test]
+    fn gvs_prewarm_and_link_agree_only_after_host_filtering_the_widened_graph() {
+        // The GVS prewarm materializes into the shared store while hashing the
+        // resolver's WIDENED (all-platform) graph; the link phase hashes the
+        // host-FILTERED graph. Any package whose subtree contains a
+        // platform-specific optional native dep then recursively hashes
+        // differently in the two phases, so the SAME dep_path lands at two
+        // byte-identical global store dirs — and symlink-shared consumers split
+        // across the copies (for parcel: two `@parcel/core` instances, two
+        // serializer registries, `DataCloneError` at worker-farm startup). The
+        // fix host-filters the prewarm graph so both phases hash the same graph.
+        // This pins BOTH halves: a widened-vs-filtered hash genuinely diverges
+        // (why the bug existed), and filtering both sides makes every node hash
+        // agree (one store dir per dep_path).
+        use aube_lockfile::graph_hash::compute_graph_hashes;
+
+        let widened = parcel_worker_farm_graph();
+        let host = SupportedArchitectures {
+            os: s(&["darwin"]),
+            cpu: s(&["arm64"]),
+            ..Default::default()
+        };
+        let core = "@parcel/core@2.12.0";
+
+        let prewarm_widened = compute_graph_hashes(&widened, &|_| false, None);
+        let mut filtered = widened.clone();
+        filter_graph(&mut filtered, &host, &Default::default());
+        let link = compute_graph_hashes(&filtered, &|_| false, None);
+
+        assert!(
+            !filtered
+                .packages
+                .contains_key("@parcel/watcher-linux@2.5.6"),
+            "host filter must drop the linux-only native leaf"
+        );
+        assert_ne!(
+            prewarm_widened.node_hash[core], link.node_hash[core],
+            "hashing the widened graph must diverge from the host-filtered graph \
+             — that divergence is what split @parcel/core into two store dirs"
+        );
+
+        let prewarm_fixed = compute_graph_hashes(&filtered, &|_| false, None);
+        assert_eq!(
+            prewarm_fixed.node_hash, link.node_hash,
+            "with the prewarm host-filtering its graph, prewarm and link must \
+             agree on every node hash so no dep_path materializes at two dirs"
+        );
+    }
 }

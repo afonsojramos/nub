@@ -558,6 +558,33 @@ fn reachable_package_dep_paths(
     reachable
 }
 
+/// The `(supported architectures, ignoredOptionalDependencies)` pair for
+/// [`aube_resolver::platform::filter_graph`]. Shared by the GVS-prewarm
+/// materializer and the pre-link host-filter (below) so both trim the
+/// widened, cross-platform resolve graph to the SAME host-installable set.
+/// A mismatch would have the two phases hash one dep_path's subtree
+/// differently and split a shared-store singleton — see
+/// `run_gvs_prewarm_materializer`.
+fn prewarm_host_filter_inputs(
+    manifest: &aube_manifest::PackageJson,
+    ws_config: &aube_manifest::workspace::WorkspaceConfig,
+    settings_ctx: &aube_settings::ResolveCtx<'_>,
+) -> (
+    aube_resolver::SupportedArchitectures,
+    std::collections::BTreeSet<String>,
+) {
+    let (os, cpu, libc) =
+        settings::effective_supported_architectures(manifest, ws_config, settings_ctx);
+    let supported = aube_resolver::SupportedArchitectures {
+        os,
+        cpu,
+        libc,
+        ..Default::default()
+    };
+    let ignored = aube_manifest::effective_ignored_optional_dependencies(manifest, ws_config);
+    (supported, ignored)
+}
+
 pub async fn run(opts: InstallOptions) -> miette::Result<()> {
     let mode = opts.mode;
     let cwd = resolve_project_cwd(&opts)?;
@@ -1263,6 +1290,8 @@ pub async fn run(opts: InstallOptions) -> miette::Result<()> {
             let lock_strategy = resolve_link_strategy(&cwd, &settings_ctx, planned_gvs)?;
             let (lock_patches, lock_patch_hashes) =
                 crate::patches::load_patches_for_linker(&cwd, &graph.patched_dependencies)?;
+            let (lock_supported_architectures, lock_ignored_optional) =
+                prewarm_host_filter_inputs(&manifest, &ws_config_shared, &settings_ctx);
             let (lock_materialize_tx, lock_materialize_rx) = materialize_channel();
             let lock_prewarm_inputs = GvsPrewarmInputs {
                 graph: std::sync::Arc::new(graph.clone()),
@@ -1277,6 +1306,8 @@ pub async fn run(opts: InstallOptions) -> miette::Result<()> {
                 build_policy: lock_build_policy,
                 use_global_virtual_store_override: prewarm_gvs_override,
                 virtual_store_dir: aube_dir.clone(),
+                supported_architectures: lock_supported_architectures,
+                ignored_optional_dependencies: lock_ignored_optional,
             };
             let lock_materialize_handle =
                 spawn_gvs_prewarm(lock_prewarm_inputs, lock_materialize_rx);
@@ -2152,6 +2183,8 @@ pub async fn run(opts: InstallOptions) -> miette::Result<()> {
             let materialize_strategy = resolve_link_strategy(&cwd, &settings_ctx, planned_gvs)?;
             let (materialize_patches, materialize_patch_hashes) =
                 crate::patches::load_patches_for_linker(&cwd, &graph.patched_dependencies)?;
+            let (prewarm_supported_architectures, prewarm_ignored_optional) =
+                prewarm_host_filter_inputs(&manifest, &ws_config_shared, &settings_ctx);
             let materialize_inputs = GvsPrewarmInputs {
                 graph: materialize_graph_arc.clone(),
                 store: store.clone(),
@@ -2165,6 +2198,8 @@ pub async fn run(opts: InstallOptions) -> miette::Result<()> {
                 build_policy: build_policy_for_prewarm.clone(),
                 use_global_virtual_store_override: prewarm_gvs_override,
                 virtual_store_dir: aube_dir.clone(),
+                supported_architectures: prewarm_supported_architectures,
+                ignored_optional_dependencies: prewarm_ignored_optional,
             };
             aube_util::diag::instant(
                 aube_util::diag::Category::Install,
@@ -2373,21 +2408,11 @@ pub async fn run(opts: InstallOptions) -> miette::Result<()> {
             // filter pass the lockfile-happy branch above runs against a
             // parsed lockfile. A no-op when the manifest didn't trigger
             // widening (graph was already host-only).
-            let (sup_os, sup_cpu, sup_libc) = settings::effective_supported_architectures(
-                &manifest,
-                &ws_config_shared,
-                &settings_ctx,
-            );
-            let install_supported_architectures = aube_resolver::SupportedArchitectures {
-                os: sup_os,
-                cpu: sup_cpu,
-                libc: sup_libc,
-                ..Default::default()
-            };
-            let install_ignored_optional = aube_manifest::effective_ignored_optional_dependencies(
-                &manifest,
-                &ws_config_shared,
-            );
+            // Same host-filter inputs the GVS prewarm applied to its graph
+            // clone, so the prewarm and link phases hash and materialize the
+            // identical host-only graph (`prewarm_host_filter_inputs`).
+            let (install_supported_architectures, install_ignored_optional) =
+                prewarm_host_filter_inputs(&manifest, &ws_config_shared, &settings_ctx);
             aube_resolver::platform::filter_graph(
                 &mut graph,
                 &install_supported_architectures,
