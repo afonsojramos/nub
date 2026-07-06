@@ -1307,8 +1307,8 @@ fn gvs_off_relinks_scoped_git_source_without_eexist() {
     });
     let lang_dep_path = git.dep_path("@codemirror/language");
     assert!(
-        lang_dep_path.starts_with("@codemirror/language@url+"),
-        "fixture must exercise a scoped url source: {lang_dep_path}"
+        lang_dep_path.starts_with("@codemirror/language@git+"),
+        "fixture must exercise a scoped git source: {lang_dep_path}"
     );
 
     // The scoped git source declares one transitive dep, so
