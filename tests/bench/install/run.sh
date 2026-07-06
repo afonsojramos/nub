@@ -458,7 +458,7 @@ ALL_FIXTURES=(
   "simple|simple (~435 pkgs)"
   "monorepo|monorepo (~407 pkgs, 4 workspaces)"
   "t3|t3-app (~222 pkgs, Next16/tRPC11/Drizzle — Bun's benchmark fixture)"
-  "vite|vite (~473 pkgs, React19+Vite6+TS — GVS-eligible SPA)"
+  "vitesse-lite|vitesse-lite (~685 pkgs, Vite+Vue — antfu's starter, GVS-eligible)"
   "large|large (~1168 pkgs, react+MUI+webpack+babel+ts+eslint)"
 )
 
