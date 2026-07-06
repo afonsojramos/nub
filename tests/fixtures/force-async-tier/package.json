@@ -1,0 +1,9 @@
+{
+  "name": "force-async-tier-fixture",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "loader": "node --import ./loader.mjs -e \"console.log('FORCE=' + (process.env.__NUB_FORCE_ASYNC_TIER || 'unset'))\"",
+    "plain": "node -e \"console.log('FORCE=' + (process.env.__NUB_FORCE_ASYNC_TIER || 'unset'))\""
+  }
+}
