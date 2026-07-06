@@ -1189,19 +1189,19 @@ function HypermanagerBand() {
             }
             visual={
               <div className="nub-code-panel rounded-xl border p-6">
-                {/* Source: tests/bench/install/results/warm-vite-20260706-{095500,100242,101202}.json (React 19 + Vite 6 SPA, 473 deps), warm + frozen + offline, node_modules wiped between runs. Bars are arithmetic means across 3 back-to-back hyperfine runs (12 timed runs each) on a shared/contended host — the nub:bun ratio is load-robust; absolute wall-clock is contention-affected and understates nub (it is more syscall-bound, so a quieter host widens the gap). */}
+                {/* Source: tests/bench/install/results/warm-vitesse-lite-20260706-{110751,111035,111312}.json (antfu/vitesse-lite starter, 685 deps), warm + frozen + offline, node_modules wiped between runs. Bars are arithmetic means across 3 back-to-back hyperfine runs (12 timed runs each) on a shared/contended host — ratios are load-robust; absolute wall-clock is contention-affected. */}
                 <p className="nub-code-muted mb-5 font-mono text-[0.7rem] uppercase tracking-[0.14em]">
-                  warm frozen install · Vite (React) · 473 deps · macOS
+                  warm frozen install · vitesse-lite · 685 deps · macOS
                 </p>
                 <BenchBars
                   accent="pink"
-                  max={7773}
+                  max={3725}
                   unit="ms"
                   rows={[
-                    { cmd: 'nub', ms: 419, us: true },
-                    { cmd: 'bun', ms: 2029, ratio: 4.8 },
-                    { cmd: 'pnpm', ms: 6851, ratio: 16.4 },
-                    { cmd: 'npm', ms: 7773, ratio: 18.6 },
+                    { cmd: 'nub', ms: 590, us: true },
+                    { cmd: 'bun', ms: 813, ratio: 1.4 },
+                    { cmd: 'pnpm', ms: 3000, ratio: 5.1 },
+                    { cmd: 'npm', ms: 3725, ratio: 6.3 },
                   ]}
                 />
                 <a
