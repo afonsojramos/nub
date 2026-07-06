@@ -75,7 +75,13 @@ pub(crate) fn enabled() -> bool {
 /// scanner (`dynamic_phantom_eject=false`), preserving the strict no-op install
 /// path (a scanner version can't matter when nothing scans).
 pub(crate) fn settings_fingerprint() -> String {
-    if enabled() {
+    settings_token(enabled())
+}
+
+/// Pure token builder, split from [`settings_fingerprint`] so the byte-identity
+/// contract is testable without mutating the process-global `enabled()` env.
+fn settings_token(enabled: bool) -> String {
+    if enabled {
         format!("dynamic_phantom_eject=true;phantom_scanner={PHANTOM_SCANNER_VERSION}")
     } else {
         "dynamic_phantom_eject=false".to_string()
@@ -317,6 +323,19 @@ mod tests {
             got,
             base.join(format!("s{PHANTOM_SCANNER_VERSION}"))
                 .join("deadbeef.json")
+        );
+    }
+
+    /// The opt-out's install-state token must never carry the scanner version, so
+    /// `NUB_DYNAMIC_PHANTOM_EJECT=0` keeps a byte-identical `settings_hash` (the
+    /// strict no-op). The enabled token folds the version so a bump invalidates
+    /// the warm tree. Pins both against a future refactor.
+    #[test]
+    fn disabled_token_stays_version_free_enabled_folds_version() {
+        assert_eq!(settings_token(false), "dynamic_phantom_eject=false");
+        assert_eq!(
+            settings_token(true),
+            format!("dynamic_phantom_eject=true;phantom_scanner={PHANTOM_SCANNER_VERSION}")
         );
     }
 }
