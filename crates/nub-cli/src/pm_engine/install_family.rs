@@ -370,7 +370,7 @@ fn run_add(typed: &str, args: &[String]) -> Result<i32> {
     stamp_if_virgin(&session, code);
     // `nub add vite` (or adding any dep to a vite project) changes the graph;
     // refresh `.modules.yaml` + the < 8.1 patch. Note: a FIRST `nub add vite`
-    // can't have force-materialized vite yet (the manifest didn't declare it at
+    // can't have disk-materialized vite yet (the manifest didn't declare it at
     // settings time), so Unit A applies immediately (≥ 8.1) and the < 8.1 dist
     // patch lands on the next `nub install` once vite is a declared direct dep.
     apply_vite_compat(&session, code);

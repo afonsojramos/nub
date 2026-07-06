@@ -459,10 +459,10 @@ fn test_link_all_creates_pnpm_virtual_store() {
 }
 
 #[test]
-fn force_materialize_makes_only_listed_package_a_real_dir_under_gvs() {
+fn disk_materialize_makes_only_listed_package_a_real_dir_under_gvs() {
     // Under the global virtual store every `.aube/<dep>` is normally a symlink
     // into the shared store, so the package realpath escapes the project. A
-    // package on the force-materialize list must instead be a real
+    // package on the disk-materialize list must instead be a real
     // project-local directory (its realpath back inside the project) so Node's
     // upward walk from inside it reaches a consumer-installed, undeclared
     // backend at the project root — while every OTHER package stays a symlink.
@@ -473,12 +473,12 @@ fn force_materialize_makes_only_listed_package_a_real_dir_under_gvs() {
     let (store, indices) = setup_store_with_files(dir.path());
     let linker = Linker::new_with_gvs(&store, LinkStrategy::Copy, true)
         .with_hoist(false)
-        .with_force_materialize(&["foo".to_string()]);
+        .with_disk_materialize(&["foo".to_string()]);
     let graph = make_graph();
 
     linker.link_all(&project_dir, &graph, &indices).unwrap();
 
-    // foo is force-materialized: a real directory, not a shared-store symlink,
+    // foo is disk-materialized: a real directory, not a shared-store symlink,
     // with its files materialized project-local.
     let aube_foo = project_dir.join("node_modules/.aube/foo@1.0.0");
     let foo_is_symlink = aube_foo
@@ -488,7 +488,7 @@ fn force_materialize_makes_only_listed_package_a_real_dir_under_gvs() {
         .is_symlink();
     assert!(
         !foo_is_symlink,
-        "force-materialized foo must be a real dir, not a global-store symlink"
+        "disk-materialized foo must be a real dir, not a global-store symlink"
     );
     assert_eq!(
         std::fs::read_to_string(aube_foo.join("node_modules/foo/index.js")).unwrap(),
@@ -524,12 +524,12 @@ fn force_materialize_makes_only_listed_package_a_real_dir_under_gvs() {
 }
 
 #[test]
-fn force_materialize_keeps_store_copy_so_store_resident_dependents_dont_orphan() {
+fn disk_materialize_keeps_store_copy_so_store_resident_dependents_dont_orphan() {
     // Orphan-safety regression (the shipped @storybook/builder-webpack5 ←
     // @storybook/react-webpack5 class). The graph is root → foo → bar; here bar
-    // is force-materialized while foo stays a store symlink. foo reaches bar
+    // is disk-materialized while foo stays a store symlink. foo reaches bar
     // through its store entry's sibling symlink, which targets
-    // `<store>/<subdir(bar)>/node_modules/bar`. If the force-materialize branch
+    // `<store>/<subdir(bar)>/node_modules/bar`. If the disk-materialize branch
     // only wrote bar's project-local real dir and skipped bar's store copy, that
     // sibling would dangle — the exact orphan the builder-webpack5 case hit. The
     // fix keeps bar's store copy at its subdir IN ADDITION to the project-local
@@ -541,12 +541,12 @@ fn force_materialize_keeps_store_copy_so_store_resident_dependents_dont_orphan()
     let (store, indices) = setup_store_with_files(dir.path());
     let linker = Linker::new_with_gvs(&store, LinkStrategy::Copy, true)
         .with_hoist(false)
-        .with_force_materialize(&["bar".to_string()]);
+        .with_disk_materialize(&["bar".to_string()]);
     let graph = make_graph(); // root -> foo -> bar
 
     linker.link_all(&project_dir, &graph, &indices).unwrap();
 
-    // bar is force-materialized: a real project-local dir.
+    // bar is disk-materialized: a real project-local dir.
     let aube_bar = project_dir.join("node_modules/.aube/bar@2.0.0");
     assert!(
         !aube_bar
@@ -554,7 +554,7 @@ fn force_materialize_keeps_store_copy_so_store_resident_dependents_dont_orphan()
             .unwrap()
             .file_type()
             .is_symlink(),
-        "force-materialized bar must be a real project-local dir"
+        "disk-materialized bar must be a real project-local dir"
     );
 
     // The orphan-safety invariant: bar's store copy still exists at exactly the
@@ -566,7 +566,7 @@ fn force_materialize_keeps_store_copy_so_store_resident_dependents_dont_orphan()
     assert_eq!(
         std::fs::read_to_string(&bar_store_copy).unwrap(),
         "module.exports = 'bar';",
-        "force-materialized bar's store copy must remain at its subdir so a \
+        "disk-materialized bar's store copy must remain at its subdir so a \
          store-resident dependent's sibling symlink still resolves"
     );
 
@@ -578,7 +578,7 @@ fn force_materialize_keeps_store_copy_so_store_resident_dependents_dont_orphan()
     assert_eq!(
         std::fs::read_to_string(&foo_sibling_bar).unwrap(),
         "module.exports = 'bar';",
-        "store-resident foo's sibling to force-materialized bar must resolve (no orphan)"
+        "store-resident foo's sibling to disk-materialized bar must resolve (no orphan)"
     );
 }
 

@@ -744,7 +744,7 @@ impl LockfileGraph {
     /// is a *foundational* seed (everything imports it); phantom breakers are
     /// empirically never foundational, so a large closure is a signal, not a norm.
     ///
-    /// Why the closure and not the package alone: force-materializing only a
+    /// Why the closure and not the package alone: disk-materializing only a
     /// transitively-consumed package leaves every store-resident importer
     /// resolving the un-materialized shared-store copy — a silent singleton
     /// split (two realpaths, two module instances). Materializing the whole
@@ -759,7 +759,7 @@ impl LockfileGraph {
     /// rebuilt as the plain `{name}@{tail}`, NOT the `name@git+<hash>` /
     /// `name@url+<hash>` form a git/tarball dep carries, so an importer reached
     /// ONLY through a git/tarball intermediary is not walked. This does not weaken
-    /// the force-materialize soundness in practice: force-materialize is
+    /// the disk-materialize soundness in practice: disk-materialize is
     /// registry-only, so such an intermediary could not materialize anyway — the
     /// split it would cause is a boundary of registry-only materialization, not a
     /// missed closure member.

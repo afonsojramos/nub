@@ -57,7 +57,7 @@ impl Linker {
             virtual_store_only: self.virtual_store_only,
             no_integrity_read_keys: self.no_integrity_read_keys.clone(),
             link_progress: self.link_progress.clone(),
-            force_materialize: self.force_materialize.clone(),
+            disk_materialize: self.disk_materialize.clone(),
             phantom_hoist: self.phantom_hoist.clone(),
         }
     }
@@ -313,7 +313,7 @@ impl Linker {
                             let local_aube_entry = aube_dir.join(entry_name);
                             let global_entry = self.virtual_store.join(subdir);
 
-                            // Force-materialize: this package must be a real
+                            // Disk-materialize: this package must be a real
                             // project-local directory (not a shared-store
                             // symlink) so its realpath stays inside the project
                             // and Node's upward node_modules walk from inside it
@@ -326,7 +326,7 @@ impl Linker {
                             // Only registry packages reach here — source deps
                             // (git/tarball/file/link) were filtered from
                             // `step1_prep` above and keep the shared-store path;
-                            // the curated force-materialize list is registry-only,
+                            // the curated disk-materialize list is registry-only,
                             // so that gap is unreachable in practice. A
                             // prior GVS install or the fetch prewarm may have left
                             // a symlink here; replace it. An existing real
@@ -340,8 +340,8 @@ impl Linker {
                             // and junction reparse points and returns `InvalidInput`
                             // on a real directory — the same signal `classify_entry_state`
                             // and `detect_aube_dir_gvs_mode` rely on.
-                            if self.force_materialize_matches(&pkg.name) {
-                                // Orphan-safety invariant: force-materialize gives X
+                            if self.disk_materialize_matches(&pkg.name) {
+                                // Orphan-safety invariant: disk-materialize gives X
                                 // a real project-local dir so X's OWN undeclared
                                 // consumer-provided import resolves via the project
                                 // root — but every STORE-RESIDENT dependent of X
@@ -354,16 +354,16 @@ impl Linker {
                                 // which can differ from the link-phase `subdir` a
                                 // dependent's sibling points at (they diverge
                                 // whenever the link phase folds a fingerprint the
-                                // prewarm didn't). A non-force-materialized install
+                                // prewarm didn't). A non-disk-materialized install
                                 // would still WRITE X's store copy at `subdir` here
                                 // (the normal branch below), keeping every dependent
-                                // resolvable; the pre-fix force-materialize branch
+                                // resolvable; the pre-fix disk-materialize branch
                                 // skipped that write, dangling the sibling — the
                                 // `@storybook/builder-webpack5` ← `react-webpack5`
                                 // regression. So ALWAYS keep X's store copy at
                                 // `subdir` IN ADDITION to the project-local dir. The
                                 // store copy is reflinked/CoW and is exactly what a
-                                // non-force-materialized install writes, so this only
+                                // non-disk-materialized install writes, so this only
                                 // RESTORES it — it is not a second full byte copy.
                                 let store_pkg_dir = self
                                     .virtual_store

@@ -167,13 +167,13 @@ pub(super) fn run_link_phase(input: LinkPhaseInput<'_>) -> miette::Result<LinkPh
     let virtual_store_only = aube_settings::resolved::virtual_store_only(settings_ctx);
     let node_linker = resolve_node_linker(settings_ctx)?;
     tracing::debug!("node-linker: {:?}", node_linker);
-    // Per-package force-materialize: subpath adapters that must be real
+    // Per-package disk-materialize: subpath adapters that must be real
     // project-local dirs even under GVS so their realpath stays inside the
-    // project (see `Linker::with_force_materialize`). Empty on standalone aube
+    // project (see `Linker::with_disk_materialize`). Empty on standalone aube
     // (settings default `[]`); nub seeds the curated list as an embedder
     // default. Consulted by the linker only in the GVS pass.
-    let force_materialize_packages =
-        aube_settings::resolved::force_materialize_packages(settings_ctx);
+    let disk_materialize_packages =
+        aube_settings::resolved::disk_materialize_packages(settings_ctx);
     // Embedder-pluggable expansion (selective-subtree materialization): a host
     // (nub) installs a hook that expands the flat seed into a graph-aware plan —
     // rung 1 grows each seed to its ancestor-closure so a transitively-consumed
@@ -181,8 +181,7 @@ pub(super) fn run_link_phase(input: LinkPhaseInput<'_>) -> miette::Result<LinkPh
     // rung 2 adds per-package undeclared-phantom-target hoists. Standalone aube
     // installs no hook, so the plan is the seed verbatim with no hoist —
     // byte-for-byte the prior behavior.
-    let fm_plan =
-        aube_linker::expand_force_materialize(graph_for_link, &force_materialize_packages);
+    let dm_plan = aube_linker::expand_disk_materialize(graph_for_link, &disk_materialize_packages);
 
     let mut linker = aube_linker::Linker::new(store, strategy)
         .with_shamefully_hoist(shamefully_hoist)
@@ -208,8 +207,8 @@ pub(super) fn run_link_phase(input: LinkPhaseInput<'_>) -> miette::Result<LinkPh
             cwd,
             graph_for_link.packages.values(),
         ))
-        .with_force_materialize(&fm_plan.names)
-        .with_phantom_hoist(fm_plan.hoist_within);
+        .with_disk_materialize(&dm_plan.names)
+        .with_phantom_hoist(dm_plan.hoist_within);
     if let Some(enabled) = use_global_virtual_store_override {
         linker = linker.with_use_global_virtual_store(enabled);
     }

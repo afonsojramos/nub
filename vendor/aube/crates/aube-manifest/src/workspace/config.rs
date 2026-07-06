@@ -99,7 +99,7 @@ pub struct WorkspaceConfig {
     #[serde(default)]
     pub disable_global_virtual_store_for_packages: Option<Vec<String>>,
 
-    /// Package names force-materialized project-local even under the
+    /// Package names disk-materialized project-local even under the
     /// global virtual store. Unlike
     /// `disable_global_virtual_store_for_packages` (which disables the
     /// GVS for the whole install), this materializes only the named
@@ -111,7 +111,7 @@ pub struct WorkspaceConfig {
     /// `settings.toml`'s workspaceYaml source stays in sync with the
     /// actual deserialize surface.
     #[serde(default)]
-    pub force_materialize_packages: Option<Vec<String>>,
+    pub disk_materialize_packages: Option<Vec<String>>,
 
     /// Package import method: "auto", "hardlink", "copy", "clone", "clone-or-copy".
     #[serde(default)]

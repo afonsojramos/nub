@@ -1,11 +1,11 @@
-//! Selective-subtree force-materialization policy — nub's force-materialize
+//! Selective-subtree disk-materialization policy — nub's disk-materialize
 //! expansion hook (the default; disabled by `NUB_DYNAMIC_PHANTOM_EJECT=0`).
 //!
-//! Force-materializing a package project-local is only SOUND for a
+//! Disk-materializing a package project-local is only SOUND for a
 //! transitively-consumed package if its whole ancestor-closure materializes with
 //! it — otherwise a store-resident importer keeps resolving the un-materialized
 //! shared-store copy, a silent singleton split (two realpaths, two module
-//! instances). This hook expands aube's flat force-materialize seed into a
+//! instances). This hook expands aube's flat disk-materialize seed into a
 //! graph-aware plan against the resolved lockfile:
 //!
 //! - **Rung 1 — ancestor-closure.** Each seed grows to
@@ -32,13 +32,13 @@
 //! top level, so a transitively-satisfied over-flag never ejects.
 //!
 //! Opt-out (`NUB_DYNAMIC_PHANTOM_EJECT=0`) ⇒ no hook installed ⇒ aube's
-//! `expand_force_materialize` returns the seed verbatim ⇒ the force-materialize
+//! `expand_disk_materialize` returns the seed verbatim ⇒ the disk-materialize
 //! pass is byte-for-byte the pre-productionization pure-symlink behavior. All
 //! policy lives here; aube owns only the neutral seam + the graph primitive.
 
 use std::collections::{BTreeMap, HashSet, VecDeque};
 
-use aube_linker::ForceMaterializePlan;
+use aube_linker::DiskMaterializePlan;
 use aube_lockfile::{LockedPackage, LockfileGraph};
 use nub_phantom_scan::ScanResult;
 use rayon::prelude::*;
@@ -55,23 +55,23 @@ fn enabled() -> bool {
     crate::dynamic_phantom::enabled()
 }
 
-/// Register nub's force-materialize expansion hook with the embedded engine.
+/// Register nub's disk-materialize expansion hook with the embedded engine.
 /// No-op only under the `NUB_DYNAMIC_PHANTOM_EJECT=0` opt-out, in which case
-/// `aube_linker::expand_force_materialize` stays the identity — byte-for-byte the
-/// pure-symlink force-materialize behavior. Set-once (idempotent); safe to call
+/// `aube_linker::expand_disk_materialize` stays the identity — byte-for-byte the
+/// pure-symlink disk-materialize behavior. Set-once (idempotent); safe to call
 /// once per engine-session build.
 pub(crate) fn register() {
     if !enabled() {
         return;
     }
-    aube_linker::set_force_materialize_expand_hook(Box::new(expand));
+    aube_linker::set_disk_materialize_expand_hook(Box::new(expand));
 }
 
 /// The hook entry: read the per-version scanner's sidecars (the store-IO half)
 /// then hand off to the pure planner. Split so [`plan_from_flags`] — all the
 /// closure/seed policy — is unit-tested with injected flags and never touches
 /// the host store.
-fn expand(graph: &LockfileGraph, seed_names: &[String]) -> ForceMaterializePlan {
+fn expand(graph: &LockfileGraph, seed_names: &[String]) -> DiskMaterializePlan {
     plan_from_flags(graph, seed_names, &dynamic_phantom_flags(graph))
 }
 
@@ -84,7 +84,7 @@ fn plan_from_flags(
     graph: &LockfileGraph,
     seed_names: &[String],
     flags: &[(String, String, Vec<String>)],
-) -> ForceMaterializePlan {
+) -> DiskMaterializePlan {
     // Top-level presence: default-hoist top level = the importer DIRECT deps. See
     // `should_seed` for why this gate is load-bearing and its non-default-hoist
     // scope caveat.
@@ -95,7 +95,7 @@ fn plan_from_flags(
         .collect();
     let is_top_level = |name: &str| root_provided.contains(name);
 
-    // Seed set by NAME: the caller's force-materialize list ∪ every dynamically-
+    // Seed set by NAME: the caller's disk-materialize list ∪ every dynamically-
     // flagged importer that SURVIVES the precision seed-selection filter. Embedded
     // vite<8.1 is seeded by dep_path below.
     let mut seed_names_set: HashSet<&str> = seed_names.iter().map(String::as_str).collect();
@@ -175,7 +175,7 @@ fn plan_from_flags(
         }
     }
 
-    ForceMaterializePlan {
+    DiskMaterializePlan {
         names: names.into_iter().collect(),
         hoist_within,
     }
@@ -389,7 +389,7 @@ mod tests {
 
     #[test]
     fn embedded_vite_lt_8_1_seeds_its_framework_closure() {
-        // astro → vite@6.4.3 (embedded, <8.1). The closure force-materializes
+        // astro → vite@6.4.3 (embedded, <8.1). The closure disk-materializes
         // BOTH so the ejected vite is project-local for the #318 patch.
         let g = graph(&[
             ("astro@5.0.0", "astro", &[("vite", "6.4.3")]),

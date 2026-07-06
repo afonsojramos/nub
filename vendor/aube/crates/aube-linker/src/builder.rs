@@ -43,7 +43,7 @@ impl Linker {
             aube_dir_override: None,
             no_integrity_read_keys: std::collections::BTreeMap::new(),
             link_progress: None,
-            force_materialize: std::collections::HashSet::new(),
+            disk_materialize: std::collections::HashSet::new(),
             phantom_hoist: std::collections::BTreeMap::new(),
         }
     }
@@ -52,19 +52,19 @@ impl Linker {
     /// even under the global virtual store (see the field docs on [`Linker`]).
     /// Names are matched exactly against each graph package. Standalone aube and
     /// every test omit this → the set is empty and the GVS pass is unchanged.
-    pub fn with_force_materialize(mut self, names: &[String]) -> Self {
-        self.force_materialize = names.iter().cloned().collect();
+    pub fn with_disk_materialize(mut self, names: &[String]) -> Self {
+        self.disk_materialize = names.iter().cloned().collect();
         self
     }
 
-    /// Whether `pkg_name` is on the force-materialize list. Consulted only in
+    /// Whether `pkg_name` is on the disk-materialize list. Consulted only in
     /// the global-virtual-store link pass; always false when the list is empty.
-    pub(crate) fn force_materialize_matches(&self, pkg_name: &str) -> bool {
-        !self.force_materialize.is_empty() && self.force_materialize.contains(pkg_name)
+    pub(crate) fn disk_materialize_matches(&self, pkg_name: &str) -> bool {
+        !self.disk_materialize.is_empty() && self.disk_materialize.contains(pkg_name)
     }
 
     /// Rung 2 of selective-subtree materialization: the undeclared phantom
-    /// targets to hoist-within each force-materialized package's `node_modules`,
+    /// targets to hoist-within each disk-materialized package's `node_modules`,
     /// keyed by importer dep_path → already-resolved target dep_paths (see the
     /// `phantom_hoist` field docs on [`Linker`]). Standalone aube and every test
     /// omit this → the map is empty and the materialize pass is unchanged.
@@ -77,7 +77,7 @@ impl Linker {
     }
 
     /// The phantom-hoist targets for the package at `dep_path`, if any. Consulted
-    /// only in the force-materialize branch of the GVS link pass; `None` when the
+    /// only in the disk-materialize branch of the GVS link pass; `None` when the
     /// map is empty (the standalone/default path) or the dep_path has no entry.
     pub(crate) fn phantom_hoist_for(&self, dep_path: &str) -> Option<&[String]> {
         if self.phantom_hoist.is_empty() {

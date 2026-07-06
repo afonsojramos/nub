@@ -180,7 +180,7 @@ const NPMRC_KEYS: &[&str] = &[
     "linkConcurrency",
     "hoistingLimits",
     "disableGlobalVirtualStoreForPackages",
-    "forceMaterializePackages",
+    "diskMaterializePackages",
 ];
 
 /// Keys the engine has zero implementation for: warn-drop, naming each and
