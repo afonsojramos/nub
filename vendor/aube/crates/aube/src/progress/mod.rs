@@ -89,14 +89,34 @@ const TTY_PHASE_W: usize = {
 /// the spinner + live count reveal.
 const TTY_REVEAL_DELAY: Duration = Duration::from_millis(300);
 
-/// Poll interval of the link-progress ticker thread. During linking the
-/// file count comes from an atomic the linker bumps directly (no clx
-/// event), so a background ticker re-reads it and repaints the `count`
-/// prop on this cadence — fast enough to read as a live tick, slow
-/// enough that the repaint cost is negligible against filesystem I/O.
-/// It also drives the reveal check so the line appears within one tick
-/// of crossing [`TTY_REVEAL_DELAY`] even when no other event fires.
-const TTY_TICK_INTERVAL: Duration = Duration::from_millis(90);
+/// Repaint cadence of the animated line, ~60 fps. The ticker thread wakes
+/// this often to (a) advance the self-computed spinner glyph and (b) re-read
+/// the linker's live file-count atomic — so the glyph animates smoothly and
+/// the count visibly *races* during a fast link instead of stepping. `new_tty`
+/// passes `2 ×` this to [`clx::progress::set_interval`], because clx floors its
+/// render loop at `interval/2` — so the floor lands at ~one tick (~60 fps),
+/// down from clx's default 100 ms floor (which throttled pushes to ~10 Hz).
+/// Cost is one short tera render + one single-line stderr write per cycle:
+/// clx's unchanged-frame write-skip does NOT apply while a job is Running (the
+/// glyph frame changes anyway), so it writes every cycle by design — negligible
+/// for a one-line rewrite at 60 fps. Also drives the reveal check so the line
+/// appears within one tick of crossing [`TTY_REVEAL_DELAY`].
+const TTY_TICK_INTERVAL: Duration = Duration::from_millis(16);
+
+/// Braille spinner frames — clx's `mini_dot` glyph set, self-rendered here so
+/// the glyph advances on our own cadence ([`SPIN_FRAME_MS`]) instead of clx's
+/// `{{spinner()}}`, whose per-frame duration is hardcoded at 200 ms in a
+/// private table with no override API — that 200 ms/frame (5 Hz) was the
+/// visible "spinner crawls" bottleneck.
+const SPIN_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// Wall-clock duration each spinner frame is shown (~16 fps glyph advance).
+/// Snappy-but-smooth: the 10-frame loop cycles in 600 ms; going much faster
+/// turns the braille glyph into an indistinct blur for no perceptual gain. The
+/// glyph advances on elapsed wall-clock, so it animates even while the count is
+/// static on a stalled filesystem (the proof-of-life the old `{{spinner()}}`
+/// provided).
+const SPIN_FRAME_MS: u128 = 60;
 
 /// Digit-field width for the cur/total counters. The numerator is right-aligned
 /// and the total left-aligned to this width, so `   7/331 ` and ` 577/623 `
@@ -331,13 +351,24 @@ impl InstallProgress {
         // `product_banner`); an embedder drops it so the engine brand
         // never leaks into the host's install output.
         let header = product_banner("");
+        // Lower clx's render floor to our repaint cadence so the self-computed
+        // spinner + racing count paint promptly. clx floors repaints at
+        // `interval()/2`, so passing `2 ×` the tick lands the floor at ~one tick
+        // (~60 fps); clx's default 200 ms interval (100 ms floor) is what
+        // throttled prop pushes to ~10 Hz. This is a process-global clx setting
+        // and is intentionally NOT restored: it's set only on the nub-only
+        // animated TTY path (standalone aube's `tty_progress=false` routes to
+        // the append-only `new_ci` and never reaches here, so its default output
+        // is unchanged), and any later clx bar in the same process — e.g. a
+        // Node-provision bar — should be equally snappy, not reset to 200 ms.
+        clx::progress::set_interval(TTY_TICK_INTERVAL * 2);
         // Layout — bun/uv-style: an animated spinner, the phase verb, and a
         // live count. NO progress bar (a bar for the linking phase either
         // lies by holding at a fixed fill or flashes a near-full frame on a
         // fast link — see #288); the spinner is proof-of-life on its own and
         // the count carries the real state.
         //
-        //   <header>  {{spinner()}} <phase>  <count><bytes><rate><eta>
+        //   <header>  {{spin}} <phase>  <count><bytes><rate><eta>
         //
         // The whole line is wrapped in `{% if revealed %}` so it renders
         // EMPTY (and clx drops the row) until the debounce fires — a fast
@@ -345,19 +376,21 @@ impl InstallProgress {
         // the widest verb (`tty_phase_field`), so the `count` column — and
         // everything after it — holds byte-stable when the phase word
         // changes; only the count/spinner move, and they're the live data.
-        // `{{spinner()}}` is clx's animated glyph, which keeps the background
-        // render loop repainting (proof-of-life) even when the count is
-        // momentarily static on a stalled filesystem. `progress_current` /
-        // `progress_total` are still fed (below) for the OSC taskbar
-        // indicator; no template bar consumes them.
+        // `{{spin}}` is our OWN glyph prop (not clx's `{{spinner()}}`): the
+        // ticker recomputes it from wall-clock every [`TTY_TICK_INTERVAL`], so
+        // it advances at [`SPIN_FRAME_MS`] instead of clx's hardcoded 200 ms.
+        // `progress_current` / `progress_total` are still fed (below) for the
+        // OSC taskbar indicator; no template bar consumes them.
+        let start = Instant::now();
         let phase0 = tty_phase_field("");
         let root = ProgressJobBuilder::new()
             .body(
-                "{% if revealed %}{{aube}}  {{spinner()}} {{phase}}  \
+                "{% if revealed %}{{aube}}  {{spin}} {{phase}}  \
                  {{count}}{{bytes}}{{rate}}{{eta}}{% endif %}",
             )
             .body_text(Some("{{aube}}{{phase}} {{count}}{{bytes}}{{rate}}{{eta}}"))
             .prop("aube", &header)
+            .prop("spin", &spin_frame(start))
             .prop("phase", &phase0)
             .prop("count", "")
             .prop("bytes", "")
@@ -378,7 +411,6 @@ impl InstallProgress {
         let revealed = Arc::new(AtomicBool::new(false));
         let wake = Arc::new(Condvar::new());
         let wake_lock = Arc::new(Mutex::new(()));
-        let start = Instant::now();
         let ticker = Arc::new(Mutex::new(spawn_tty_ticker(TtyTicker {
             root: Arc::downgrade(&root),
             phase_num: phase_num.clone(),
@@ -1176,6 +1208,16 @@ fn refresh_tty_bar_from_atomics(
     root.prop("count", &tty_count_field(snap, completed));
 }
 
+/// The spinner glyph for the given elapsed wall-clock, styled blue to match
+/// clx's `{{spinner()}}`. Self-computed (`elapsed / SPIN_FRAME_MS`) so the
+/// frame advances on the ticker's fast cadence, decoupled from clx's hardcoded
+/// 200 ms-per-frame spinner. Called from the builder (initial frame) and every
+/// ticker wake.
+fn spin_frame(start: Instant) -> String {
+    let idx = (start.elapsed().as_millis() / SPIN_FRAME_MS) as usize % SPIN_FRAMES.len();
+    style::eblue(SPIN_FRAMES[idx]).to_string()
+}
+
 /// Reveal the animated line once the debounce window has elapsed.
 /// Flips the `revealed` prop (and thus the body's `{% if revealed %}`
 /// guard) exactly once — the `swap` latch means repeated calls after
@@ -1229,6 +1271,11 @@ fn spawn_tty_ticker(t: TtyTicker) -> Option<thread::JoinHandle<()>> {
                     break;
                 };
                 maybe_reveal(&root, t.start, &t.revealed);
+                // Advance the spinner glyph every tick, in every phase — it's
+                // wall-clock-based, so the animation stays smooth even when no
+                // resolve/fetch/link event fires (the proof-of-life clx's
+                // `{{spinner()}}` used to give us, now at our own frame rate).
+                root.prop("spin", &spin_frame(t.start));
                 if t.phase_num.load(Ordering::Relaxed) == 3 {
                     let files = t.files_linked.load(Ordering::Relaxed);
                     root.prop("count", &tty_count_field(linking_snap(files), 0));
