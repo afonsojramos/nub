@@ -172,10 +172,17 @@ pub(super) async fn run_gvs_prewarm_materializer(
     // another the link copy of a would-be singleton — for parcel that is
     // two `@parcel/core` instances, two module-scoped serializer
     // registries, and a `DataCloneError` at worker-farm startup.
-    // filter_graph is the only transform between prewarm-spawn and link
-    // that changes a node's graph hash (the intervening lockfile-metadata
-    // mutations don't feed the hash), so applying it here makes the two
-    // phases agree and the reuse fast-path in the link phase re-engages.
+    // filter_graph is the hash-affecting transform between prewarm-spawn
+    // and link for a public-registry tree: the intervening lockfile-metadata
+    // mutations (pnpm-config checksums, `optional`/transitivePeerDeps
+    // stamping) don't feed the node hash. `apply_computed_integrities` also
+    // feeds it (integrity is folded into `full_pkg_id`), but only for a
+    // package that resolved WITHOUT integrity — a no-op for registry
+    // packages whose packument carries the SRI at resolve time (all of
+    // Parcel's tree). Integrity-less-at-resolve nodes are the git/tarball
+    // deps the prewarm already defers via `content_affected`. So filtering
+    // here makes the two phases agree on this path and the link phase's
+    // reuse fast-path re-engages.
     let graph = {
         let mut host_graph = (*graph).clone();
         aube_resolver::platform::filter_graph(

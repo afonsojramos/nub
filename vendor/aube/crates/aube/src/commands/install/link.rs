@@ -317,12 +317,15 @@ pub(super) fn run_link_phase(input: LinkPhaseInput<'_>) -> miette::Result<LinkPh
 
         // Reuse the prewarm task's `compute_graph_hashes` output when
         // the link-phase graph matches what the prewarm hashed. The
-        // prewarm hashed the unfiltered post-resolve graph; if no
-        // dep-selection or workspace filter applied, `graph_for_link`
-        // == that graph by node count + key set, so the cached
-        // hashes are byte-identical to a fresh compute. Falling
-        // through to a fresh compute keeps the contract simple
-        // whenever the graphs diverge.
+        // prewarm host-filters its graph clone with the SAME
+        // `filter_graph` inputs this branch applied (see
+        // `run_gvs_prewarm_materializer` / `prewarm_host_filter_inputs`),
+        // so absent a dep-selection or workspace filter `graph_for_link`
+        // == the prewarm's graph by node count + key set and the cached
+        // hashes are byte-identical to a fresh compute. Falling through
+        // to a fresh compute keeps the contract simple whenever the
+        // graphs diverge (e.g. a dep/workspace filter narrowed this
+        // branch's graph but not the prewarm's).
         //
         // The prewarm runs concurrently with fetch and so can't see the
         // not-yet-imported source-dep trees; when any globally-shared
