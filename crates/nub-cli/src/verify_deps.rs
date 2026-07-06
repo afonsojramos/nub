@@ -23,7 +23,10 @@
 //! `NUB_VERIFY_DEPS_BEFORE_RUN` env override); nub's default is `warn`. That is a
 //! deliberate divergence from the vendored engine's `install` default, wired
 //! through nub's OWN resolution so standalone aube's default is untouched
-//! (fork-discipline).
+//! (fork-discipline). Under a pnpm-**11+** incumbent the key lives SOLELY in
+//! `pnpm-workspace.yaml` — v11 dropped `.npmrc` support for it entirely — so
+//! `resolve_policy` reads whichever home the detected incumbent major actually
+//! uses (see its doc).
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -107,7 +110,7 @@ pub(crate) fn gate(cwd: &Path, compat_mode: bool) -> Option<i32> {
     // once-per-command guards. It never aborts the run.
     crate::phantom_scan::scan_and_warn(&project);
 
-    let policy = resolve_policy(&project.root);
+    let policy = resolve_policy(&project);
     if policy == Policy::Off {
         return None;
     }
@@ -131,20 +134,35 @@ pub(crate) fn gate(cwd: &Path, compat_mode: bool) -> Option<i32> {
     }
 }
 
-/// Resolve the policy from nub's OWN surfaces: the `NUB_*` env override, then the
-/// neutral `.npmrc` key, else nub's `warn` default. Deliberately does NOT call
-/// the engine's `resolve_verify_deps_before_run` — that carries the engine's
-/// `install` default, and reusing it would either leak that default under nub or
-/// force a fork-side edit.
-fn resolve_policy(project_root: &Path) -> Policy {
+/// Resolve the policy from nub's OWN surfaces: the `NUB_*` env override, then
+/// the incumbent's real config home, else nub's `warn` default. Deliberately
+/// does NOT call the engine's `resolve_verify_deps_before_run` — that carries
+/// the engine's `install` default, and reusing it would either leak that
+/// default under nub or force a fork-side edit.
+///
+/// The incumbent's home is per-major (mirrors the pnpm-version-aware routing
+/// `pm_engine::store_config_family` already established for scalar config, per
+/// AGENTS.md's "Compat targets are PER-MAJOR-VERSION" position): a pnpm-**11+**
+/// incumbent reads `verifyDepsBeforeRun` SOLELY from `pnpm-workspace.yaml` (v11
+/// dropped `.npmrc` support for this key entirely, so a stale `.npmrc` leftover
+/// from a pre-v11 migration must never shadow the yaml value); pnpm ≤10, the
+/// unknown-pnpm-version default, and every non-pnpm incumbent keep reading the
+/// neutral project `.npmrc` — unchanged from before this key was yaml-aware.
+fn resolve_policy(project: &Project) -> Policy {
     if let Some(p) = std::env::var("NUB_VERIFY_DEPS_BEFORE_RUN")
         .ok()
         .and_then(|v| parse_policy(&v))
     {
         return p;
     }
+    let workspace_root = project.workspace_root.as_deref().unwrap_or(&project.root);
+    if let PnpmIncumbency::Major(major) = pnpm_incumbency(workspace_root)
+        && major >= 11
+    {
+        return workspace_yaml_policy(workspace_root).unwrap_or(Policy::Warn);
+    }
     if let Some(p) = crate::pm_engine::unsupported_config::npmrc_scalar_value(
-        project_root,
+        &project.root,
         "verify-deps-before-run",
         true,
     )
@@ -155,16 +173,84 @@ fn resolve_policy(project_root: &Path) -> Policy {
     Policy::Warn
 }
 
+/// pnpm incumbency + declared major at `workspace_root`, gating whether
+/// `pnpm-workspace.yaml` may be read at all (the brand-boundary rule: a
+/// pnpm-named file is never read unless pnpm is genuinely the incumbent —
+/// AGENTS.md "pnpm-NAMED files ... NEVER read unless pnpm is the incumbent
+/// PM"). Reuses the same declared-then-lockfile identity resolution
+/// (`pm_engine::config_scope::role_of`) and the name-gated major extraction
+/// `pm_engine::store_config_family::project_scalar_home` already use for this
+/// exact per-major config-home question, rather than re-deriving it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PnpmIncumbency {
+    /// Not pnpm (or unresolved) — `pnpm-workspace.yaml` must never be read.
+    NotPnpm,
+    /// pnpm is incumbent but no pin names a major — falls back to the
+    /// `.npmrc` default (the dominant, safest target for an unpinned
+    /// v9/v10-era project).
+    UnknownVersion,
+    Major(u64),
+}
+
+fn pnpm_incumbency(workspace_root: &Path) -> PnpmIncumbency {
+    let declared = nub_core::pm::resolve::declared_pm_raw(workspace_root);
+    let kind = aube_lockfile::detect_existing_lockfile_kind(workspace_root);
+    let role =
+        crate::pm_engine::config_scope::role_of(declared.as_ref().map(|(n, _)| n.as_str()), kind);
+    if role != Some(crate::pm_engine::config_scope::Role::Pnpm) {
+        return PnpmIncumbency::NotPnpm;
+    }
+    // Only trust the declared VERSION when the name is literally "pnpm" —
+    // `role_of` maps an unrecognized declared tool through the lockfile
+    // fallback too, and that tool's version string is not a pnpm major.
+    let major = declared
+        .as_ref()
+        .and_then(|(name, v)| (name == "pnpm").then_some(v.as_deref()).flatten())
+        .and_then(|v| crate::pm_engine::parse_major_minor(v).0);
+    match major {
+        Some(m) => PnpmIncumbency::Major(m),
+        None => PnpmIncumbency::UnknownVersion,
+    }
+}
+
+/// The `verifyDepsBeforeRun` value from `<workspace_root>/pnpm-workspace.yaml`.
+/// `None` on a missing file, unparseable yaml, or an absent/unrecognized key —
+/// callers fall through to the `warn` default, never to `.npmrc` (a real
+/// pnpm-11 incumbent doesn't read `.npmrc` for this key either).
+fn workspace_yaml_policy(workspace_root: &Path) -> Option<Policy> {
+    let yaml = crate::pm_engine::use_nub::read_workspace_yaml(workspace_root)
+        .ok()
+        .flatten()?;
+    yaml.get("verifyDepsBeforeRun").and_then(parse_policy_value)
+}
+
 /// Map a config/env value to a policy. Unknown/empty → `None` (fall through to
 /// the next source, ultimately the `warn` default).
 ///
 /// `install`/`true` map to `warn`: nub deliberately does NOT auto-install before
-/// a run — it will not reshape a tree another PM installed — so it warns instead.
+/// a run — it will not reshape a tree another PM installed — so it warns
+/// instead. `prompt` maps to `warn` too: nub has no interactive confirm step
+/// here (real pnpm errors on `prompt` in a non-TTY context instead), and `warn`
+/// is the safe, non-blocking approximation.
 fn parse_policy(raw: &str) -> Option<Policy> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "off" | "false" | "0" | "no" | "none" | "skip" => Some(Policy::Off),
-        "warn" | "true" | "install" => Some(Policy::Warn),
+        "warn" | "true" | "install" | "prompt" => Some(Policy::Warn),
         "error" => Some(Policy::Error),
+        _ => None,
+    }
+}
+
+/// Map a `pnpm-workspace.yaml` scalar VALUE (already yaml-typed, not text) to a
+/// policy. Real pnpm's `verifyDepsBeforeRun` type is `'install' | 'warn' |
+/// 'error' | 'prompt' | false` — a literal yaml boolean for the off case, a
+/// bare string otherwise; `true` isn't part of pnpm's own type but is accepted
+/// here for symmetry with [`parse_policy`]'s textual `.npmrc`/env parsing.
+fn parse_policy_value(value: &serde_json::Value) -> Option<Policy> {
+    match value {
+        serde_json::Value::Bool(false) => Some(Policy::Off),
+        serde_json::Value::Bool(true) => Some(Policy::Warn),
+        serde_json::Value::String(s) => parse_policy(s),
         _ => None,
     }
 }
@@ -317,12 +403,29 @@ mod tests {
         assert_eq!(parse_policy("error"), Some(Policy::Error));
         assert_eq!(parse_policy("off"), Some(Policy::Off));
         assert_eq!(parse_policy("false"), Some(Policy::Off));
-        // `install` is recognized but mapped to `warn`: nub does not auto-install.
+        // `install`/`prompt` are recognized but mapped to `warn`: nub does not
+        // auto-install, nor does it have an interactive confirm step.
         assert_eq!(parse_policy("install"), Some(Policy::Warn));
+        assert_eq!(parse_policy("prompt"), Some(Policy::Warn));
         // Case/whitespace-insensitive; unknown falls through to the default.
         assert_eq!(parse_policy("  ERROR "), Some(Policy::Error));
         assert_eq!(parse_policy("nonsense"), None);
         assert_eq!(parse_policy(""), None);
+    }
+
+    #[test]
+    fn parses_the_yaml_typed_verify_deps_before_run_values() {
+        use serde_json::Value;
+        // The off case is a literal yaml boolean, not a string.
+        assert_eq!(parse_policy_value(&Value::Bool(false)), Some(Policy::Off));
+        // `true` isn't part of pnpm's own type but is accepted for symmetry
+        // with `parse_policy`'s textual `.npmrc`/env handling.
+        assert_eq!(parse_policy_value(&Value::Bool(true)), Some(Policy::Warn));
+        assert_eq!(
+            parse_policy_value(&Value::String("error".to_string())),
+            Some(Policy::Error)
+        );
+        assert_eq!(parse_policy_value(&Value::Null), None);
     }
 
     #[test]
