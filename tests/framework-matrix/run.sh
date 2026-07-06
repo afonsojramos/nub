@@ -65,11 +65,11 @@ if [ "$dev_cmd" != "-" ]; then
     sleep 0.5
     pp=$(grep -oE 'https?://(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]):[0-9]+' "$devlog" 2>/dev/null | grep -oE '[0-9]+$' | head -1)
     [ -n "$pp" ] && bound="$pp"
-    if [ -n "$bound" ]; then curl -s -o /dev/null "http://127.0.0.1:$bound/" 2>/dev/null && { up=1; break; }; fi
+    if [ -n "$bound" ]; then curl -s -o /dev/null "http://localhost:$bound/" 2>/dev/null && { up=1; break; }; fi
     kill -0 "$devpid" 2>/dev/null || break   # dev process died
   done
   if [ -n "$up" ]; then
-    dev_code=$(curl -s -o /tmp/fm-$name-dev-body.html -w '%{http_code}' "http://127.0.0.1:$bound/" 2>/dev/null)
+    dev_code=$(curl -s -o /tmp/fm-$name-dev-body.html -w '%{http_code}' "http://localhost:$bound/" 2>/dev/null)
     # error scan: server log + served HTML for the common SSR/runtime error markers
     if grep -qiE 'error:|ReferenceError|TypeError|Cannot find|MODULE_NOT_FOUND|ERR_|Internal Server Error|failed to (load|resolve)|is not allowed|outside of .* allow list|Unhandled' "$devlog" 2>/dev/null; then dev_err="log-errors"; else dev_err="clean"; fi
     grep -qiE 'Internal Server Error|Application error|Hydration failed|500 - ' /tmp/fm-$name-dev-body.html 2>/dev/null && dev_err="html-error"
@@ -101,11 +101,11 @@ if [ "$preview_cmd" != "-" ] && [ "$build_result" != "FAIL" ]; then
     sleep 0.5
     pp=$(grep -oE 'https?://(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]):[0-9]+' "$prevlog" 2>/dev/null | grep -oE '[0-9]+$' | head -1)
     [ -n "$pp" ] && pbound="$pp"
-    if [ -n "$pbound" ]; then curl -s -o /dev/null "http://127.0.0.1:$pbound/" 2>/dev/null && { pup=1; break; }; fi
+    if [ -n "$pbound" ]; then curl -s -o /dev/null "http://localhost:$pbound/" 2>/dev/null && { pup=1; break; }; fi
     kill -0 "$prevpid" 2>/dev/null || break
   done
   if [ -n "$pup" ]; then
-    prev_code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$pbound/" 2>/dev/null)
+    prev_code=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$pbound/" 2>/dev/null)
     [ "$prev_code" = "200" ] && prev_result="ok" || prev_result="FAIL"
   else
     prev_result="FAIL"; prev_code="no-listen"
