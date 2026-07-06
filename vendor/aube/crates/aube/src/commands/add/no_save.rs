@@ -60,7 +60,7 @@ pub(super) fn snapshot_manifest_and_lockfile(
 /// parent dir), so a `--no-save` add that migrates the legacy name can restore
 /// the tree byte-for-byte. Inert for standalone aube (empty legacy list) and
 /// for any dir carrying none of the legacy names.
-fn snapshot_legacy_lockfiles(
+pub(super) fn snapshot_legacy_lockfiles(
     lockfile_path: &Path,
 ) -> miette::Result<Vec<(PathBuf, Option<Vec<u8>>)>> {
     let Some(dir) = lockfile_path.parent() else {

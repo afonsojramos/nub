@@ -48,6 +48,14 @@ pub(super) async fn run(
     } else {
         None
     };
+    // A `--no-save` add whose transient write MIGRATES nub's legacy lockfile
+    // (writes `nub.lock`, deletes `lock.yaml`) must restore the legacy file too,
+    // or the checked-in `lock.yaml` is silently lost. Empty for standalone aube.
+    let root_legacy_snapshot = if args.no_save {
+        no_save::snapshot_legacy_lockfiles(&lockfile_path)?
+    } else {
+        Vec::new()
+    };
 
     let result: miette::Result<()> = async {
         for pkg in &matched {
@@ -99,6 +107,11 @@ pub(super) async fn run(
         }
         if let Err(e) = no_save::restore_lockfile(&lockfile_path, &root_lockfile_snapshot) {
             errors.push(e);
+        }
+        for (path, bytes) in &root_legacy_snapshot {
+            if let Err(e) = no_save::restore_lockfile(path, bytes) {
+                errors.push(e);
+            }
         }
         if errors.is_empty() {
             eprintln!(
