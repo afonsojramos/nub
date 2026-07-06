@@ -109,3 +109,92 @@ fn non_yaml_basename_keeps_pnpm_name_and_reads_both_names() {
         Some(LockfileKind::Aube)
     );
 }
+
+const EMPTY_V9: &str = "lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n";
+
+/// A real change (a graph differing from what the legacy file holds) writes
+/// under the CURRENT name and removes the pre-rename legacy file — the rename
+/// rides the change, never leaving both.
+#[test]
+fn real_write_migrates_legacy_to_current_name() {
+    aube_util::set_embedder(&MYTOOL);
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("package.json"), r#"{"name":"t"}"#).unwrap();
+    // Legacy holds the empty graph; we write a graph that carries a package.
+    std::fs::write(dir.path().join("lock.yaml"), EMPTY_V9).unwrap();
+
+    let mut changed = aube_lockfile::LockfileGraph::default();
+    changed.packages.insert(
+        "left-pad@1.3.0".to_string(),
+        aube_lockfile::LockedPackage {
+            name: "left-pad".to_string(),
+            version: "1.3.0".to_string(),
+            dep_path: "left-pad@1.3.0".to_string(),
+            integrity: Some("sha512-uNjWgY0DVJtsWJRfXt0G1L2i".to_string()),
+            ..Default::default()
+        },
+    );
+    let manifest = aube_manifest::PackageJson::default();
+    let written = write_lockfile_as(dir.path(), &changed, &manifest, LockfileKind::Aube).unwrap();
+
+    assert_eq!(written, dir.path().join("package.lock"));
+    assert!(dir.path().join("package.lock").is_file());
+    assert!(
+        !dir.path().join("lock.yaml").exists(),
+        "the migrating write must remove the pre-rename legacy file"
+    );
+}
+
+/// A no-op write (the same graph the legacy already holds) writes NOTHING: no
+/// current-name file appears and the legacy stays byte-for-byte. The migration
+/// must not be a proactive rename. The written graph is parsed back FROM the
+/// legacy file so it is graph-identical by construction — mirroring the real
+/// flow, where the resolver reproduces the lockfile it read.
+#[test]
+fn no_op_write_leaves_legacy_untouched() {
+    aube_util::set_embedder(&MYTOOL);
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("package.json"), r#"{"name":"t"}"#).unwrap();
+    std::fs::write(dir.path().join("lock.yaml"), EMPTY_V9).unwrap();
+
+    let manifest = aube_manifest::PackageJson::default();
+    let graph = aube_lockfile::parse_lockfile(dir.path(), &manifest).unwrap();
+    let _ = write_lockfile_as(dir.path(), &graph, &manifest, LockfileKind::Aube).unwrap();
+
+    assert!(
+        !dir.path().join("package.lock").exists(),
+        "a no-op write must not create the current-name file"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("lock.yaml")).unwrap(),
+        EMPTY_V9,
+        "a no-op write must leave the legacy file byte-for-byte"
+    );
+}
+
+/// When BOTH names already exist and the write is a no-op against the
+/// current-name file, the redundant legacy dup is pruned so the project never
+/// carries two canonical lockfiles.
+#[test]
+fn both_present_no_op_prunes_redundant_legacy() {
+    aube_util::set_embedder(&MYTOOL);
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("package.json"), r#"{"name":"t"}"#).unwrap();
+    std::fs::write(dir.path().join("package.lock"), EMPTY_V9).unwrap();
+    std::fs::write(dir.path().join("lock.yaml"), EMPTY_V9).unwrap();
+
+    let manifest = aube_manifest::PackageJson::default();
+    // Parsed from the current-name file (it wins precedence), so the write is a
+    // no-op against it.
+    let graph = aube_lockfile::parse_lockfile(dir.path(), &manifest).unwrap();
+    let _ = write_lockfile_as(dir.path(), &graph, &manifest, LockfileKind::Aube).unwrap();
+
+    assert!(
+        dir.path().join("package.lock").is_file(),
+        "the current-name file is kept verbatim on a no-op"
+    );
+    assert!(
+        !dir.path().join("lock.yaml").exists(),
+        "the redundant legacy dup is pruned so both names never coexist"
+    );
+}

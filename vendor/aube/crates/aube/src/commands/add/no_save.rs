@@ -10,6 +10,13 @@ pub(super) struct Snapshot {
     /// `None` means the lockfile didn't exist before the add — in that
     /// case the restore step deletes whatever the resolver wrote.
     lockfile_bytes: Option<Vec<u8>>,
+    /// Pre-rename LEGACY lockfiles for nub's own name (e.g. `lock.yaml`),
+    /// captured alongside the current-name lockfile so a `--no-save` add that
+    /// would MIGRATE the legacy name (the writer writes `nub.lock` and deletes
+    /// `lock.yaml`) can restore the tree EXACTLY — otherwise the migration's
+    /// deletion would survive the restore and silently drop the user's
+    /// lockfile. Empty for standalone aube (no legacy basenames).
+    legacy: Vec<(PathBuf, Option<Vec<u8>>)>,
 }
 
 /// Resolve the on-disk lockfile path that a normal `add` would write
@@ -41,10 +48,33 @@ pub(super) fn snapshot_manifest_and_lockfile(
         .into_diagnostic()
         .wrap_err("failed to snapshot package.json for --no-save")?;
     let lockfile_bytes = snapshot_lockfile(lockfile_path)?;
+    let legacy = snapshot_legacy_lockfiles(lockfile_path)?;
     Ok(Snapshot {
         manifest_bytes,
         lockfile_bytes,
+        legacy,
     })
+}
+
+/// Snapshot every pre-rename LEGACY lockfile beside `lockfile_path` (its
+/// parent dir), so a `--no-save` add that migrates the legacy name can restore
+/// the tree byte-for-byte. Inert for standalone aube (empty legacy list) and
+/// for any dir carrying none of the legacy names.
+fn snapshot_legacy_lockfiles(
+    lockfile_path: &Path,
+) -> miette::Result<Vec<(PathBuf, Option<Vec<u8>>)>> {
+    let Some(dir) = lockfile_path.parent() else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for name in aube_util::embedder().lockfile_legacy_basenames {
+        let p = dir.join(name);
+        if p == lockfile_path {
+            continue;
+        }
+        out.push((p.clone(), snapshot_lockfile(&p)?));
+    }
+    Ok(out)
 }
 
 pub(super) fn snapshot_lockfile(lockfile_path: &Path) -> miette::Result<Option<Vec<u8>>> {
@@ -73,6 +103,13 @@ pub(super) fn restore_manifest_and_lockfile(
     }
     if let Err(e) = restore_lockfile(lockfile_path, &snapshot.lockfile_bytes) {
         errors.push(e);
+    }
+    // Restore any pre-rename legacy lockfile the migration may have deleted, so
+    // the `--no-save` tree ends exactly as the user had it.
+    for (path, bytes) in &snapshot.legacy {
+        if let Err(e) = restore_lockfile(path, bytes) {
+            errors.push(e);
+        }
     }
     errors
 }

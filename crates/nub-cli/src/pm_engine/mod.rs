@@ -2256,48 +2256,6 @@ fn nub_lockfile_present(dir: &Path) -> bool {
         || dir.join(use_align::NUB_LEGACY_LOCKFILE).is_file()
 }
 
-/// Transitional auto-migration of nub's own lockfile name: `lock.yaml` →
-/// `nub.lock`. The bytes are identical (pnpm-lock v9), so this is a pure
-/// rename; when `nub.lock` already exists the redundant `lock.yaml` is
-/// simply removed. Runs at the project root and every workspace member dir at
-/// the start of a mutating PM op, so a project upgraded onto the new name
-/// converges silently. Best-effort: any IO error is ignored — the engine's
-/// read-both candidate set keeps an unmigrated `lock.yaml` resolvable
-/// regardless. Sunset at the next major (drop the legacy read + this sweep).
-pub(crate) fn migrate_legacy_nub_lockfile(root: &Path) {
-    migrate_legacy_nub_lockfile_dir(root);
-    for member_dir in nub_core::workspace::detect::find_workspace_members(root, None) {
-        migrate_legacy_nub_lockfile_dir(&member_dir);
-    }
-}
-
-/// Run [`migrate_legacy_nub_lockfile`] when `session` resolved a nub-identity
-/// project — the only identity that owns the `nub.lock`/`lock.yaml` pair
-/// (so a pnpm/npm/yarn/bun incumbent's tree is never touched). Call at the
-/// start of every MUTATING PM op (install/ci/add/remove/update/dedupe), before
-/// the engine resolves, so the engine reads and writes `nub.lock` with no
-/// stale `lock.yaml` left behind.
-pub(crate) fn migrate_session_lockfile(session: &EngineSession) {
-    if let Some(d) = session.detected.as_ref()
-        && d.kind == aube_lockfile::LockfileKind::Aube
-    {
-        migrate_legacy_nub_lockfile(&d.dir);
-    }
-}
-
-fn migrate_legacy_nub_lockfile_dir(dir: &Path) {
-    let legacy = dir.join(use_align::NUB_LEGACY_LOCKFILE);
-    if !legacy.is_file() {
-        return;
-    }
-    let target = dir.join(use_align::NUB_LOCKFILE);
-    if target.exists() {
-        let _ = std::fs::remove_file(&legacy);
-    } else {
-        let _ = std::fs::rename(&legacy, &target);
-    }
-}
-
 /// Nub's XDG data root (`$XDG_DATA_HOME/nub` or `~/.local/share/nub`), the
 /// data-dir sibling of `nub_core::node::discovery::cache_dir`.
 pub(crate) fn nub_data_dir() -> Option<PathBuf> {

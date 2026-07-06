@@ -128,6 +128,23 @@ pub fn write_lockfile_as(
     };
     let path = project_dir.join(&filename);
 
+    // Pre-rename LEGACY files for nub's OWN canonical lockfile (a filename
+    // transition, e.g. `lock.yaml` → `nub.lock`). Only the canonical (Aube)
+    // kind carries them and the list is EMPTY for standalone aube, so every
+    // branch below is inert there — fork-discipline: the default path is
+    // byte-for-byte unchanged. A present legacy file is nub's not-yet-migrated
+    // lockfile; the migration to `path` rides the first REAL write below.
+    let legacy_present: Vec<PathBuf> = if kind == LockfileKind::Aube {
+        aube_util::embedder()
+            .lockfile_legacy_basenames
+            .iter()
+            .map(|name| project_dir.join(name))
+            .filter(|p| *p != path && p.is_file())
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     // No-churn write guard (embedder opt-in; default upstream = always
     // write). When the embedder enables it, skip the write if the graph
     // we'd serialize is identical (by engine-agnostic graph-identity
@@ -139,14 +156,41 @@ pub fn write_lockfile_as(
     // the comparison runs ONLY behind the embedder toggle, and any
     // failure to read/parse the existing file falls through to a normal
     // write (the feature is additive, never load-bearing).
-    if aube_util::embedder().no_churn_lockfile_write
-        && lockfile_write_is_noop(&path, kind, graph, manifest)
-    {
-        tracing::debug!(
-            "no-churn: resolved graph matches existing {}; skipping rewrite",
-            filename
-        );
-        return Ok(path);
+    //
+    // The comparison targets the CURRENT-name file when present, else nub's
+    // pre-rename LEGACY file. That legacy fallback is what keeps a no-op op on
+    // a not-yet-migrated project from writing anything: a graph-equal install /
+    // `--force` re-resolve leaves the old lockfile exactly as-is (no rename, no
+    // new file). The rename rides ONLY a real change (the write below).
+    if aube_util::embedder().no_churn_lockfile_write {
+        let compare_against = if path.exists() {
+            Some(path.clone())
+        } else {
+            legacy_present.first().cloned()
+        };
+        if let Some(existing) = compare_against
+            && lockfile_write_is_noop(&existing, kind, graph, manifest)
+        {
+            tracing::debug!(
+                "no-churn: resolved graph matches existing {}; skipping rewrite",
+                existing
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(&filename)
+            );
+            // Never leave two canonical lockfiles: when the CURRENT-name file is
+            // the one we matched (it exists), a pre-rename dup beside it is
+            // redundant cruft (reads resolve to the current name) — prune it.
+            // When only the legacy exists, it stays untouched (the no-op
+            // contract: a no-op op on a not-yet-migrated project changes
+            // nothing).
+            if path.exists() {
+                for lp in &legacy_present {
+                    let _ = std::fs::remove_file(lp);
+                }
+            }
+            return Ok(path);
+        }
     }
 
     match kind {
@@ -155,6 +199,14 @@ pub fn write_lockfile_as(
         LockfileKind::Yarn => yarn::write_classic(&path, graph, manifest)?,
         LockfileKind::YarnBerry => yarn::write_berry(&path, graph, manifest)?,
         LockfileKind::Bun => bun::write(&path, graph, manifest)?,
+    }
+
+    // A real canonical write just landed under the CURRENT name; complete the
+    // one-time rename by removing any pre-rename LEGACY file so the project ends
+    // on exactly ONE lockfile. Reached only on a genuine change (the no-churn
+    // guard returned above otherwise), so this never fires on a no-op op.
+    for lp in &legacy_present {
+        let _ = std::fs::remove_file(lp);
     }
     Ok(path)
 }

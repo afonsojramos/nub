@@ -1,9 +1,12 @@
 //! Transitional rename of nub's own lockfile: `lock.yaml` → `nub.lock`.
-//! A virgin install writes the new name; an unmigrated `lock.yaml` is renamed
-//! byte-identically on the next mutating op (and a redundant one is removed);
-//! workspace members migrate too. All rows run OFFLINE with empty-dependency
-//! manifests, pointing the registry at a dead port so any accidental network
-//! fails loudly.
+//!
+//! The migration rides a REAL lockfile write — nub writes the lockfile only
+//! when the resolved graph actually changes (no-churn), and that write lands
+//! under the new name (`nub.lock`) with the pre-rename `lock.yaml` removed, so
+//! the rename shows up in the same diff as the dep change. A no-op op writes
+//! nothing and leaves the legacy file exactly as-is; a frozen/`ci` op never
+//! writes, so it never migrates. All rows run OFFLINE, pointing the registry at
+//! a dead port so any accidental network fails loudly.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -38,13 +41,27 @@ fn project(tag: &str, files: &[(&str, &str)]) -> PathBuf {
 }
 
 fn run(dir: &Path, args: &[&str]) -> (String, String, i32) {
-    let out = Command::new(nub_binary())
-        .args(args)
+    run_env(dir, args, &[])
+}
+
+/// Like [`run`] but with extra env vars. The `CI` var is stripped from the
+/// inherited environment unless a caller overrides it: aube defaults a flagless
+/// install to FROZEN when `CI` is set (pnpm parity), and a frozen op never
+/// writes the lockfile, so a real-change row that relied on the flagless
+/// writable default would flip to frozen (no write, no migration) when the
+/// suite runs on a CI runner. Rows exercising the frozen-read-only path opt
+/// back in explicitly (`CI=1`) or pass `--frozen-lockfile`.
+fn run_env(dir: &Path, args: &[&str], envs: &[(&str, &str)]) -> (String, String, i32) {
+    let mut cmd = Command::new(nub_binary());
+    cmd.args(args)
         .current_dir(dir)
+        .env_remove("CI")
         .env("XDG_DATA_HOME", dir.join("xdg-data"))
-        .env("XDG_CACHE_HOME", dir.join("xdg-cache"))
-        .output()
-        .expect("failed to spawn nub");
+        .env("XDG_CACHE_HOME", dir.join("xdg-cache"));
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().expect("failed to spawn nub");
     (
         String::from_utf8_lossy(&out.stdout).to_string(),
         String::from_utf8_lossy(&out.stderr).to_string(),
@@ -54,6 +71,12 @@ fn run(dir: &Path, args: &[&str]) -> (String, String, i32) {
 
 const EMPTY_LOCK: &str = "lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n";
 const EMPTY_PKG: &str = r#"{"name":"app","version":"1.0.0"}"#;
+
+/// A manifest with one `file:` local dependency, absent from `EMPTY_LOCK`. An
+/// install must re-resolve to record it — a genuine, network-free graph change
+/// that exercises the migrating write.
+const PKG_WITH_LOCAL_DEP: &str =
+    r#"{"name":"app","version":"1.0.0","dependencies":{"localdep":"file:./localdep"}}"#;
 
 /// A truly-fresh project (no lockfile, no PM signal) writes `nub.lock`,
 /// not the legacy `lock.yaml`.
@@ -72,89 +95,67 @@ fn virgin_install_writes_nub_lock() {
     );
 }
 
-/// An existing `lock.yaml` is migrated to `nub.lock` byte-identically on
-/// the next install, and the stale file is gone.
+/// CASE 1 (the load-bearing one): a NO-OP install on a project still carrying
+/// `lock.yaml` writes nothing — no re-resolve, no rewrite. The legacy file is
+/// left byte-for-byte and no `nub.lock` appears. Migration must not be a
+/// proactive rename; it rides a real change only.
 #[test]
-fn existing_lock_yaml_is_migrated_byte_identically() {
+fn no_op_install_leaves_legacy_untouched() {
     let dir = project(
-        "migrate",
+        "noop",
         &[("package.json", EMPTY_PKG), ("lock.yaml", EMPTY_LOCK)],
     );
     let (stdout, stderr, code) = run(&dir, &["install", "--offline"]);
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
-    assert!(
-        !dir.join("lock.yaml").exists(),
-        "the legacy lock.yaml must be removed after migration"
-    );
     assert_eq!(
-        std::fs::read_to_string(dir.join("nub.lock")).unwrap(),
+        std::fs::read_to_string(dir.join("lock.yaml")).unwrap(),
         EMPTY_LOCK,
-        "the migration is a byte-identical rename"
+        "a no-op install must leave lock.yaml byte-for-byte untouched"
+    );
+    assert!(
+        !dir.join("nub.lock").exists(),
+        "a no-op install must not create nub.lock — no write means no migration"
     );
 }
 
-/// When BOTH names exist, the redundant `lock.yaml` is removed and
-/// `nub.lock` is kept untouched (no double-lockfile left behind).
+/// CASE 2: a REAL lockfile change (here a `file:` dep the lockfile lacks) on a
+/// project carrying `lock.yaml` writes the new graph to `nub.lock` and removes
+/// the legacy file — the rename rides the change. `--no-frozen-lockfile` forces
+/// the writable path deterministically (independent of a CI runner's frozen
+/// default).
 #[test]
-fn both_present_keeps_nub_lock_and_removes_legacy() {
-    let kept = "lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n# kept\n";
+fn real_change_migrates_to_nub_lock() {
     let dir = project(
-        "both",
+        "realchange",
         &[
-            ("package.json", EMPTY_PKG),
-            ("nub.lock", kept),
+            ("package.json", PKG_WITH_LOCAL_DEP),
+            (
+                "localdep/package.json",
+                r#"{"name":"localdep","version":"1.0.0"}"#,
+            ),
             ("lock.yaml", EMPTY_LOCK),
         ],
     );
-    let (stdout, stderr, code) = run(&dir, &["install", "--offline"]);
-    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let (stdout, stderr, code) = run(&dir, &["install", "--no-frozen-lockfile", "--offline"]);
+    assert_eq!(
+        code, 0,
+        "real-change install must succeed: {stdout}\n{stderr}"
+    );
     assert!(
         !dir.join("lock.yaml").exists(),
-        "the redundant legacy lock.yaml must be removed"
+        "the legacy lock.yaml must be removed once the migrating write lands: {stderr}"
     );
-    assert_eq!(
-        std::fs::read_to_string(dir.join("nub.lock")).unwrap(),
-        kept,
-        "the existing nub.lock must be kept verbatim, not overwritten by the legacy file"
-    );
-}
-
-/// A read-only op (here, the same install path is mutating, so use a workspace
-/// member) — a `lock.yaml` in a workspace member dir migrates too.
-#[test]
-fn workspace_member_lock_yaml_migrates() {
-    let dir = project(
-        "ws",
-        &[
-            (
-                "package.json",
-                r#"{"name":"root","version":"1.0.0","private":true,"workspaces":["packages/*"]}"#,
-            ),
-            // Root carries nub's lockfile so the project resolves as nub identity.
-            ("nub.lock", EMPTY_LOCK),
-            (
-                "packages/a/package.json",
-                r#"{"name":"a","version":"1.0.0"}"#,
-            ),
-            ("packages/a/lock.yaml", EMPTY_LOCK),
-        ],
-    );
-    let (stdout, stderr, code) = run(&dir, &["install", "--offline"]);
-    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let nub_lock =
+        std::fs::read_to_string(dir.join("nub.lock")).expect("a real change must write nub.lock");
     assert!(
-        !dir.join("packages/a/lock.yaml").exists(),
-        "a workspace member's legacy lock.yaml must migrate too: {stderr}"
-    );
-    assert!(
-        dir.join("packages/a/nub.lock").is_file(),
-        "the member's lockfile must land at nub.lock"
+        nub_lock.contains("localdep"),
+        "the migrated nub.lock must reflect the resolved change:\n{nub_lock}"
     );
 }
 
 /// `nub ci` is a frozen, ephemeral install: it installs fine from an existing
-/// `lock.yaml` (read-both) but must NEVER migrate or otherwise mutate a
-/// checked-in file — no rename, no `nub.lock` written, `lock.yaml` left
-/// byte-for-byte untouched.
+/// `lock.yaml` (read-both) but never writes the lockfile, so it never migrates
+/// — no rename, no `nub.lock`, `lock.yaml` left byte-for-byte untouched.
 #[test]
 fn ci_never_migrates_or_mutates_the_lockfile() {
     let dir = project(
@@ -173,7 +174,57 @@ fn ci_never_migrates_or_mutates_the_lockfile() {
     );
     assert!(
         !dir.join("nub.lock").exists(),
-        "ci must not rename or write nub.lock — a frozen install never mutates checked-in files"
+        "ci must not rename or write nub.lock — a frozen install never writes the lockfile"
+    );
+}
+
+/// `nub install --frozen-lockfile` is read-only over the lockfile, so it
+/// installs from the legacy `lock.yaml` (read-both) but must not migrate it —
+/// no rename, no `nub.lock`. The rename is a write; a frozen install makes none.
+#[test]
+fn frozen_flag_install_does_not_migrate() {
+    let dir = project(
+        "frozen-flag",
+        &[("package.json", EMPTY_PKG), ("lock.yaml", EMPTY_LOCK)],
+    );
+    let (stdout, stderr, code) = run(&dir, &["install", "--frozen-lockfile", "--offline"]);
+    assert_eq!(
+        code, 0,
+        "frozen install must succeed from lock.yaml: {stdout}\n{stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("lock.yaml")).unwrap(),
+        EMPTY_LOCK,
+        "a frozen install must leave lock.yaml byte-for-byte untouched"
+    );
+    assert!(
+        !dir.join("nub.lock").exists(),
+        "a frozen install must not rename or write nub.lock"
+    );
+}
+
+/// A flagless `nub install` under `CI=1` defaults to FROZEN (pnpm parity), so
+/// it too must not migrate — the rename would surprise a CI run with an
+/// unexpected git diff. Migration is a developer-machine (writable) event.
+#[test]
+fn ci_env_default_frozen_does_not_migrate() {
+    let dir = project(
+        "ci-env",
+        &[("package.json", EMPTY_PKG), ("lock.yaml", EMPTY_LOCK)],
+    );
+    let (stdout, stderr, code) = run_env(&dir, &["install", "--offline"], &[("CI", "1")]);
+    assert_eq!(
+        code, 0,
+        "CI-frozen install must succeed from lock.yaml: {stdout}\n{stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("lock.yaml")).unwrap(),
+        EMPTY_LOCK,
+        "a CI-default frozen install must leave lock.yaml untouched"
+    );
+    assert!(
+        !dir.join("nub.lock").exists(),
+        "a CI-default frozen install must not rename or write nub.lock"
     );
 }
 
