@@ -1277,6 +1277,18 @@ fn hash_settings(project_dir: &Path, cli_flags: &[(String, String)]) -> String {
         hasher.update(b"\x1f");
     }
     hasher.update(b"\0");
+    // Embedder-supplied extra fingerprint: an install-shape input the host
+    // controls outside aube's resolved settings (nub's phantom-eject flag,
+    // which changes which packages materialize but rides no setting). `None`
+    // for standalone aube ⇒ the block is skipped ⇒ the hash is byte-for-byte
+    // unchanged; a host that sets it invalidates the warm tree when its input
+    // flips (an upgrade moving the default, or a user opt-out), forcing a
+    // re-link instead of trusting a stale node_modules.
+    if let Some(ext) = aube_util::embedder().extra_settings_fingerprint {
+        hasher.update(b"embedder_ext=");
+        hasher.update(ext().as_bytes());
+        hasher.update(b"\0");
+    }
     // map shaped workspace settings live in yaml. raw byte hash catches
     // catalog edits, overrides bumps, packageExtensions, allowBuilds list.
     // any of those mean re-resolve is needed, yaml bytes are the source.

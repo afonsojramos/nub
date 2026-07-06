@@ -766,17 +766,18 @@ fn engine_session_inner(
     // (which calls it again as its first step, alongside the project-state-
     // dependent config surface) is a no-op for the registration.
     identity::register();
-    // Install nub's selective-subtree force-materialize expansion hook (behind
-    // the default-off `NUB_DYNAMIC_PHANTOM_EJECT` flag). No-op when the flag is
-    // off, so the default install path is byte-identical; when armed it expands
-    // the force-materialize seed to its ancestor-closure + phantom-target hoists
-    // at link time. Idempotent set-once, like `identity::register()`.
+    // Install nub's selective-subtree force-materialize expansion hook (the
+    // DEFAULT; the `NUB_DYNAMIC_PHANTOM_EJECT=0` opt-out disables it). When armed
+    // it expands the force-materialize seed to its ancestor-closure +
+    // phantom-target hoists at link time; under the opt-out it's a no-op and the
+    // install path is byte-identical (pure symlink). Idempotent set-once, like
+    // `identity::register()`.
     phantom_closure::register();
     // Arm the dynamic per-version phantom PRODUCER: an extract-time store hook
     // that scans each fetched package and writes a per-content verdict sidecar
     // (`phantom_closure`, above, is the CONSUMER that reads those sidecars to seed
-    // the closure). No-op unless the same default-off `NUB_DYNAMIC_PHANTOM_EJECT`
-    // flag is set, so the default path is unchanged. Idempotent set-once.
+    // the closure). On by default; a no-op only under the same
+    // `NUB_DYNAMIC_PHANTOM_EJECT=0` opt-out. Idempotent set-once.
     crate::dynamic_phantom::register();
     // Initialize the diagnostics recorder from NUB_DIAG_* env vars so that
     // `NUB_DIAG_SUMMARY=1 nub install` surfaces the same per-phase/per-op
@@ -2082,62 +2083,6 @@ fn strip_yarnrc_value(rest: &str) -> &str {
     rest.split('#').next().map(str::trim).unwrap_or(rest)
 }
 
-/// Curated `forceMaterializePackages` list. Each entry ships a file that
-/// references an undeclared sibling — either a runtime backend (`import` of a
-/// consumer-installed peer) or an ambient `@types/*` its `.d.ts` consumes — and
-/// resolution of that sibling depends on the entry's realpath staying inside the
-/// project. Under nub's default GVS a store entry's realpath is the machine-global
-/// virtual store, so the upward `node_modules` walk from it escapes the project and
-/// the sibling is never found. Force-materializing the entry makes it a real
-/// project-local directory, so the walk stays in-project and reaches the sibling at
-/// the project root. Two offender classes, one mechanism:
-/// - Runtime subpath adapters that statically import a backend they don't declare
-///   (`@hookform/resolvers/zod` → the app's `zod`).
-/// - Ambient-`@types` consumers whose shipped `.d.ts` import an undeclared
-///   `@types/react` (`next-themes`, `@react-pdf/renderer` — #286). Force-materialize
-///   restores tsc parity with pnpm: the project-local realpath's `@types` walk
-///   reaches the app's own `@types/react` (verified 0-error parity for next-themes,
-///   exact residual-error parity for @react-pdf, whose remaining errors are upstream
-///   package issues present under pnpm too).
-///
-/// The runtime entries are derived from the phantom-dep detector's top-5000
-/// subpath-adapter offenders, minus the entries whose imported target is a
-/// ubiquitous BUILD tool (`@babel/*`, `babel-plugin-macros`, `tslib`, `typescript`)
-/// rather than a runtime consumer-backend — those resolve anyway and aren't the
-/// pick-your-backend class. Users grow or shrink the list via the
-/// `forceMaterializePackages` setting (embedder-tier, so any user config still wins).
-///
-/// `@storybook/addon-interactions`, `@storybook/core`, `storybook`, and
-/// `@storybook/builder-webpack5` were removed (differential-verified against a real
-/// `storybook build`, not just static analysis): the flagged `react`/`@storybook/icons`
-/// imports live solely in `dist/manager.js`, which Storybook's manager-builder consumes
-/// as an esbuild entry — esbuild's global-externals plugin intercepts those specifiers
-/// before Node module resolution ever runs, so force-materializing never mattered
-/// ("Manager built" succeeds identically with or without it). Worse,
-/// `@storybook/builder-webpack5` force-materialized ALONE regressed a working case:
-/// its declared dependent `@storybook/react-webpack5` (not on this list) stays
-/// store-resident and can no longer find its own dependency once pulled out, turning a
-/// passing `storybook build` into `Cannot find module '@storybook/builder-webpack5'`.
-///
-/// A THIRD offender class: postinstall codegen that writes generated output back into
-/// its own installed directory via realpath. `@prisma/client`'s postinstall runs
-/// `prisma generate`, which resolves the default output dir relative to the package's
-/// realpath and writes the generated client (`.prisma/client`) into the enclosing
-/// `node_modules`. Under GVS that realpath is the machine-global shared store, whose
-/// entry key is package-identity-scoped, NOT project- or schema-scoped — so two
-/// projects with different Prisma schemas share ONE mutable generated client and
-/// silently corrupt each other (last-writer-wins; #286-shape data corruption).
-/// Force-materialize makes the entry project-local, so `generate` writes into the
-/// project's own tree, matching pnpm's isolated virtual store. Orphan-safety verified:
-/// `@prisma/client` is a leaf runtime consumed by the app root (adapters like
-/// `@auth/prisma-adapter` take it as a peer, satisfied at the top level), so pulling it
-/// project-local orphans no store-resident dependent (the builder-webpack5 failure mode
-/// above does not apply).
-const NUB_FORCE_MATERIALIZE_PACKAGES: &str = "@hookform/resolvers,cypress,langsmith,\
-@testing-library/jest-dom,drizzle-orm,swiper,@angular/common,@angular/router,\
-@apollo/client,@vercel/analytics,preact,next-themes,\
-@react-pdf/renderer,@prisma/client";
-
 /// - Layout policy: EVERY project defaults to the isolated layout
 ///   (`nodeLinker=isolated`) — strict (no phantom deps) and GVS-fast; a project
 ///   that relies on phantom deps opts back into the flat tree with one `.npmrc`
@@ -2168,6 +2113,17 @@ fn nub_setting_defaults(
     store_locality: VirtualStoreLocality,
 ) -> Vec<(String, String)> {
     let fresh_format = if truly_fresh { "aube" } else { "pnpm" };
+    // The phantom-adapter force-materialize list is no longer hand-curated: the
+    // dynamic per-version scanner (`dynamic_phantom` → `phantom_closure`, on by
+    // default) detects undeclared-import phantoms per content-fingerprint and
+    // ejects them through #319's ancestor-closure, subsuming the old 14-entry
+    // const (incl. the singleton-hazard adapters the closure now makes sound). So
+    // this embedder default carries ONLY the #315 vite eject; empty otherwise
+    // (aube's `parse_string_list` drops the empty entry). A user's own
+    // `forceMaterializePackages`/`diskMaterializePackages` still wins — the
+    // embedder default is the lowest precedence tier — so the additive escape
+    // hatch is intact.
+    //
     // Vite symlink-GVS compat (#315): eject the `vite` package project-local so
     // its dist can be patched with the backported fs.allow sniff (< 8.1) without
     // touching the shared CAS store. Scoped to a DIRECT-dep vite (a raw `vite`
@@ -2177,16 +2133,17 @@ fn nub_setting_defaults(
     // sibling symlink, so ejecting for it would be wasted dedup (Unit A's
     // `.modules.yaml` covers those for Vite ≥ 8.1). Only under the machine-global
     // store (`Default`) — `nub ci`'s project-local store is already under the
-    // workspace root, so Vite serves it with no override. The post-install
-    // writer/patcher lives in [`vite_compat`]; this is its materialization half.
-    // A user-set `forceMaterializePackages` still wins (embedder-tier).
+    // workspace root, so Vite serves it with no override. This seed also carries
+    // #315 on the phantom-eject opt-out path, where the closure hook is not
+    // installed. The post-install writer/patcher lives in [`vite_compat`]; this is
+    // its materialization half.
     let force_materialize = if store_locality == VirtualStoreLocality::Default
         && vite_compat::enabled()
         && vite_compat::manifest_declares_vite(detected.map(|d| d.dir.as_path()).unwrap_or(cwd))
     {
-        format!("{NUB_FORCE_MATERIALIZE_PACKAGES},vite")
+        "vite".to_string()
     } else {
-        NUB_FORCE_MATERIALIZE_PACKAGES.to_string()
+        String::new()
     };
     let mut defaults = vec![
         (
@@ -2201,16 +2158,22 @@ fn nub_setting_defaults(
         ("stateDir".to_string(), "node_modules/.nub".to_string()),
         (
             "disableGlobalVirtualStoreForPackages".to_string(),
-            // `react-native` joins next/nuxt/parcel: bare RN's Metro bundler
-            // (`@react-native/metro-config`) crawls by realpath and only sees
-            // its project root, so the machine-global GVS store is out of scope
-            // and even DECLARED deps (`@babel/runtime`) report unresolved. A
-            // whole-install GVS-off puts the store project-local, back in
-            // Metro's crawl scope. Expo's `@expo/metro-config` is store-aware so
-            // it works either way; this only flips Expo to project-local
-            // (harmless, small dedup regression). A store-LOCALITY break, not a
-            // phantom-dep class, so force-materialize is the wrong lever.
-            "next,nuxt,parcel,react-native".to_string(),
+            // The whole-install GVS-off last resort — reserved for a store-LOCALITY
+            // break (a tool whose resolver can't reach the machine-global store),
+            // NOT a phantom-dep class (those the dynamic detector + closure now
+            // eject per-package). `nuxt` was DROPPED: its walk-up is only 2 phantom
+            // edges (~2.3% closure), so it's closure-ejectable at rung 1 —
+            // symlink-GVS works (see [[nuxt-gvs-unlock]]). What remains:
+            // - `next` — Turbopack canonicalizes through symlinks and chroots to a
+            //   single project root; irreducible, so the store must be project-local.
+            // - `parcel` — resolver walks up for `.parcelrc` (unverified against the
+            //   closure; kept as the safe last resort).
+            // - `react-native` — bare RN's Metro (`@react-native/metro-config`)
+            //   crawls by realpath and only sees the project root, so the global
+            //   store is out of scope and even DECLARED deps (`@babel/runtime`)
+            //   report unresolved. Expo's `@expo/metro-config` is store-aware
+            //   (works either way; this only flips it project-local, harmless).
+            "next,parcel,react-native".to_string(),
         ),
         ("forceMaterializePackages".to_string(), force_materialize),
     ];
@@ -2802,66 +2765,43 @@ mod tests {
     }
 
     #[test]
-    fn force_materialize_default_seeds_the_curated_adapter_list() {
-        // nub seeds the per-package force-materialize list (subpath adapters
-        // that import a consumer-installed backend they don't declare) as an
-        // embedder default so they resolve under the default GVS. The exemplar
-        // `@hookform/resolvers` is present; build-time/helper subpath imports
-        // are excluded (not the runtime consumer-backend class).
+    fn phantom_force_materialize_list_is_retired_in_favor_of_the_detector() {
+        // The 14-entry hand-curated adapter list is gone: the dynamic per-version
+        // scanner + #319 ancestor-closure (on by default) detect and eject those
+        // phantoms, so nub no longer seeds them as an embedder default. A fresh,
+        // non-vite project's `forceMaterializePackages` default is therefore
+        // empty (the vite #315 seed is the only remaining embedder-default entry,
+        // and this fixture declares no vite).
         let dir = tempfile::tempdir().unwrap();
         let fresh = nub_setting_defaults(None, true, dir.path(), VirtualStoreLocality::Default);
-        let list = get(&fresh, "forceMaterializePackages")
-            .expect("nub must seed forceMaterializePackages");
-        let names: Vec<&str> = list.split(',').collect();
-        assert!(
-            names.contains(&"@hookform/resolvers"),
-            "the exemplar adapter must be on the list: {list}"
-        );
-        // The #286 ambient-`@types` class: consumers whose shipped `.d.ts` import
-        // an undeclared `@types/react` need the same project-local realpath so
-        // tsc's `@types` walk reaches the app's own `@types/react` under GVS.
-        for types_consumer in ["next-themes", "@react-pdf/renderer"] {
+        let list = get(&fresh, "forceMaterializePackages").unwrap_or_default();
+        let names: Vec<&str> = list.split(',').filter(|s| !s.is_empty()).collect();
+        for retired in [
+            "@hookform/resolvers",
+            "@prisma/client",
+            "next-themes",
+            "@react-pdf/renderer",
+            "preact",
+            "drizzle-orm",
+        ] {
             assert!(
-                names.contains(&types_consumer),
-                "{types_consumer} (#286 ambient-@types class) must be on the list: {list}"
+                !names.contains(&retired),
+                "{retired} must no longer be a hardcoded default (detector subsumes it): {list:?}"
             );
         }
-        // The postinstall-codegen class: `@prisma/client`'s `prisma generate`
-        // writes the generated client into its own realpath, which under GVS is
-        // the machine-global store — two projects with different schemas then
-        // corrupt each other. Force-materialize keeps `generate` project-local.
-        assert!(
-            names.contains(&"@prisma/client"),
-            "@prisma/client (postinstall-codegen class) must be on the list: {list}"
-        );
-        for excluded in ["ox", "event-target-shim", "@nestjs/swagger"] {
-            assert!(
-                !names.contains(&excluded),
-                "{excluded} is a build-time/helper import and must be excluded"
-            );
-        }
-        // List-1 (whole-install GVS-off): the validated-clean trio plus
-        // `react-native` (bare-RN Metro store-locality break).
-        assert_eq!(
-            get(&fresh, "disableGlobalVirtualStoreForPackages"),
-            Some("next,nuxt,parcel,react-native"),
-        );
     }
 
     #[test]
-    fn react_native_is_on_the_disable_gvs_default() {
-        // Bare React-Native's Metro bundler crawls by realpath from the project
-        // root and can't see the machine-global GVS store, so DECLARED deps
-        // (`@babel/runtime`) report unresolved. `react-native` on the
-        // whole-install GVS-off list forces the store project-local (back in
-        // Metro's scope). Same lever/precedent as next/nuxt/parcel.
+    fn disable_gvs_default_drops_nuxt_and_keeps_the_store_locality_breakers() {
+        // The whole-install GVS-off list is now reserved for store-LOCALITY
+        // breaks. `nuxt` is closure-ejectable at rung 1 ([[nuxt-gvs-unlock]]) so
+        // it was dropped; `next` (Turbopack chroot), `parcel`, and `react-native`
+        // (bare-RN Metro realpath crawl) remain irreducible.
         let dir = tempfile::tempdir().unwrap();
         let fresh = nub_setting_defaults(None, true, dir.path(), VirtualStoreLocality::Default);
-        let list = get(&fresh, "disableGlobalVirtualStoreForPackages")
-            .expect("nub must seed disableGlobalVirtualStoreForPackages");
-        assert!(
-            list.split(',').any(|p| p == "react-native"),
-            "react-native must be on the GVS-off list: {list}"
+        assert_eq!(
+            get(&fresh, "disableGlobalVirtualStoreForPackages"),
+            Some("next,parcel,react-native"),
         );
     }
 

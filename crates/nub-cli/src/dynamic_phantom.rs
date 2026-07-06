@@ -1,12 +1,12 @@
-//! Dynamic per-version phantom scan → disk-eject (behind the default-off
-//! `NUB_DYNAMIC_PHANTOM_EJECT` flag).
+//! Dynamic per-version phantom scan → disk-eject (the default; the
+//! `NUB_DYNAMIC_PHANTOM_EJECT=0` opt-out disables it).
 //!
-//! The static curated `NUB_FORCE_MATERIALIZE_PACKAGES` list (hand-maintained,
-//! capped at a corpus, stale on new versions) is augmented by SCANNING each
-//! installed dependency version's real published code: does it, along its
-//! reachable `exports`/`main`/`bin` graph, statically and unguardedly import a
-//! package it does not declare? A version's code is immutable, so the verdict is
-//! computed once per content-fingerprint and cached machine-wide.
+//! This REPLACES the old hand-curated static force-materialize list (capped at a
+//! corpus, stale on new versions) by SCANNING each installed dependency
+//! version's real published code: does it, along its reachable
+//! `exports`/`main`/`bin` graph, statically and unguardedly import a package it
+//! does not declare? A version's code is immutable, so the verdict is computed
+//! once per content-fingerprint and cached machine-wide.
 //!
 //! Placement — EXTRACT TIME, not post-link. The scan is registered as an aube
 //! store extract hook ([`aube_store::set_extract_hook`]) that fires at the end of
@@ -23,8 +23,9 @@
 //! consumer half. The two share [`store_v1_dir`]/[`phantom_cache_dir`] so their
 //! store handle and sidecar path derive from ONE base and cannot drift apart.
 //!
-//! With the flag OFF this module registers nothing — no extract hook — so the
-//! default install path is byte-identical to a build without the scanner.
+//! With the opt-out set (`NUB_DYNAMIC_PHANTOM_EJECT=0`) this module registers
+//! nothing — no extract hook — so the install path is byte-identical to a build
+//! without the scanner (a pure-symlink tree).
 
 use std::path::{Path, PathBuf};
 
@@ -32,24 +33,42 @@ use aube_store::{PackageIndex, index_content_fingerprint};
 use nub_phantom_scan::scan_index;
 use rayon::prelude::*;
 
-/// Whether the dynamic phantom scanner is armed. Truthy `NUB_DYNAMIC_PHANTOM_EJECT`
-/// (`1`/`true`/`yes`, or any non-falsey value) arms it; unset or a falsey value
-/// (`0`/`false`/`no`/`off`/empty) is off — the default.
-fn enabled() -> bool {
+/// Whether dynamic phantom detection + ancestor-closure eject is armed — the
+/// DEFAULT. Unset (or empty, or any non-falsey value) is ON; only an explicit
+/// falsey `NUB_DYNAMIC_PHANTOM_EJECT` (`0`/`false`/`no`/`off`) is the opt-out to
+/// a pure-symlink tree. This is the SINGLE arm both halves gate on — the
+/// extract-time PRODUCER here and the link-time CONSUMER
+/// ([`crate::pm_engine::phantom_closure`]) call this one function, and the
+/// install-state fingerprint ([`settings_fingerprint`]) folds THIS value, so
+/// detection, closure, and warm-tree invalidation can never drift.
+pub(crate) fn enabled() -> bool {
     match std::env::var("NUB_DYNAMIC_PHANTOM_EJECT") {
         Ok(v) => !matches!(
             v.trim().to_ascii_lowercase().as_str(),
-            "" | "0" | "false" | "no" | "off"
+            "0" | "false" | "no" | "off"
         ),
-        Err(_) => false,
+        Err(_) => true,
     }
 }
 
+/// The effective phantom-eject setting as a stable token, folded into aube's
+/// install-state `settings_hash` through the embedder `extra_settings_fingerprint`
+/// hook (nub's [`crate::pm_engine::identity::NUB`] profile points that hook here).
+/// The flag is nub's, not an aube setting, so it can't ride the resolved-settings
+/// hash — this seam is what makes flipping it invalidate the warm tree: nub's
+/// default moving across an upgrade, or a user's `NUB_DYNAMIC_PHANTOM_EJECT=0`
+/// opt-out, changes this token, so the link phase re-runs and converts the tree
+/// to the new materialization shape instead of trusting a stale node_modules.
+pub(crate) fn settings_fingerprint() -> String {
+    format!("dynamic_phantom_eject={}", enabled())
+}
+
 /// Register the extract-time scan hook with the embedded engine. Called once at
-/// engine-session build. No-op unless the flag is on, so the default path pulls
-/// in nothing and stays byte-identical. The registration is process-global
-/// set-once; a second call is ignored. The link-time consumption of the sidecars
-/// this writes lives in [`crate::pm_engine::phantom_closure`], not here.
+/// engine-session build. No-op only under the `NUB_DYNAMIC_PHANTOM_EJECT=0`
+/// opt-out, in which case the path pulls in nothing and stays byte-identical.
+/// The registration is process-global set-once; a second call is ignored. The
+/// link-time consumption of the sidecars this writes lives in
+/// [`crate::pm_engine::phantom_closure`], not here.
 pub fn register() {
     if !enabled() {
         return;
@@ -161,9 +180,10 @@ pub(crate) fn phantom_cache_dir() -> Option<PathBuf> {
 /// fingerprint keying, sidecar-hit skip, panic-guard, and atomic write are one
 /// implementation.
 ///
-/// Flag-OFF is a STRICT no-op: it returns before any lockfile parse, store
-/// access, or fs touch, so the default install path is byte-identical. No
-/// lockfile / an unparseable one is also a no-op — a fresh install has nothing
+/// The `NUB_DYNAMIC_PHANTOM_EJECT=0` opt-out is a STRICT no-op: it returns
+/// before any lockfile parse, store access, or fs touch, so that install path is
+/// byte-identical. No lockfile / an unparseable one is also a no-op — a fresh
+/// install has nothing
 /// cached to backfill, and the extract hook covers whatever it fetches. The scan
 /// is CPU-bound and per-package independent, so it fans out across rayon; a
 /// warm re-install where every sidecar already exists does zero scanning (each
