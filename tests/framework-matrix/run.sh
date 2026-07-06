@@ -33,27 +33,31 @@ if [ $inst -ne 0 ]; then
 fi
 log "step=install result=ok"
 
-# ── linking layout: realpath a real dep, does it escape the project root? ─────
+# ── linking layout: realpath deps, do they escape the project root? ──────────
 # escape → symlink into the global virtual store (GVS on); stays inside proj →
-# ejected / disableGVS project-local. Reports the resolved realpath either way.
-read -r layout rp probe_used < <(NUBPROBE="$probe" node -e '
+# ejected / disableGVS project-local. A single-dep probe misleads: a legitimately
+# ejected dep (e.g. a `@scope/dev` CLI pulled project-local by the phantom-peer
+# closure to hold a `vite` sibling symlink) sorts first and would headline
+# "project-local" for an otherwise fully-GVS install. So SAMPLE the whole top
+# level and report the MAJORITY layout plus the exact escape/local tallies and
+# which deps are project-local — the majority is the verdict, the tally is the
+# evidence. A caller-supplied <probe> still reports that one dep's own layout too.
+read -r layout escaped local_ct locals rp probe_used < <(NUBPROBE="$probe" node -e '
 const fs=require("fs"),p=require("path"),cwd=process.cwd();
 const nm=p.join(cwd,"node_modules");
-function realOf(name){try{const l=p.join(nm,name);const st=fs.lstatSync(l);const r=fs.realpathSync(l);return r;}catch{return null}}
-let probe=process.env.NUBPROBE||"";
-let cand=[];
-if(probe) cand=[probe];
-else {
-  // pick a few ordinary deps, skip .bin/.nub/.modules and scoped-dir noise
-  for(const e of fs.readdirSync(nm)){ if(e[0]==="."||e==="node_modules") continue; if(e[0]==="@"){ for(const s of fs.readdirSync(p.join(nm,e))) cand.push(e+"/"+s);} else cand.push(e);}
-}
-let chosen=null,real=null;
-for(const c of cand){ const r=realOf(c); if(r){chosen=c;real=r;break;} }
-if(!real){console.log("unknown - -");process.exit(0)}
-const escapes=!real.startsWith(cwd+p.sep);
-console.log((escapes?"gvs-store":"project-local")+" "+real+" "+chosen);
+function realOf(name){try{return fs.realpathSync(p.join(nm,name));}catch{return null}}
+let all=[];
+for(const e of fs.readdirSync(nm)){ if(e[0]==="."||e==="node_modules") continue; if(e[0]==="@"){ for(const s of fs.readdirSync(p.join(nm,e))) all.push(e+"/"+s);} else all.push(e);}
+let esc=0,loc=[];
+for(const c of all){ const r=realOf(c); if(!r) continue; if(r.startsWith(cwd+p.sep)) loc.push(c); else esc++; }
+const majority=(esc>=loc.length)?"gvs-store":"project-local";
+// caller-supplied single probe, if any
+let probe=process.env.NUBPROBE||"", prLayout="-", prName="-";
+if(probe){ const r=realOf(probe); if(r){ prName=probe; prLayout=r.startsWith(cwd+p.sep)?"project-local":"gvs-store"; } }
+const localsStr=loc.length?loc.slice(0,8).join(","):"none";
+console.log([majority,esc,loc.length,localsStr,prLayout,prName].join(" "));
 ' 2>/dev/null)
-log "step=linking layout=${layout:-err} probe=${probe_used:-?} realpath=${rp:-?}"
+log "step=linking layout=${layout:-err} escaped=${escaped:-?} project_local=${local_ct:-?} locals=${locals:-?} probe=${probe_used:-none}/${rp:-none}"
 
 # ── dev server ────────────────────────────────────────────────────────────────
 dev_result="skip"; dev_code="n/a"; dev_err="n/a"
