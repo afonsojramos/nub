@@ -1189,19 +1189,19 @@ function HypermanagerBand() {
             }
             visual={
               <div className="nub-code-panel rounded-xl border p-6">
-                {/* Source: tests/bench/install/results/warm-t3-20260617-{100017,100453,100743}.json (create-t3-app, Next 16), warm + frozen + offline, node_modules wiped between runs. Bars are arithmetic means across 36 timed runs. */}
+                {/* Source: tests/bench/install/results/warm-vite-20260706-{095500,100242,101202}.json (React 19 + Vite 6 SPA, 473 deps), warm + frozen + offline, node_modules wiped between runs. Bars are arithmetic means across 3 back-to-back hyperfine runs (12 timed runs each) on a shared/contended host — the nub:bun ratio is load-robust; absolute wall-clock is contention-affected and understates nub (it is more syscall-bound, so a quieter host widens the gap). */}
                 <p className="nub-code-muted mb-5 font-mono text-[0.7rem] uppercase tracking-[0.14em]">
-                  warm frozen install · create-t3-app · 222 deps · macOS
+                  warm frozen install · Vite (React) · 473 deps · macOS
                 </p>
                 <BenchBars
                   accent="pink"
-                  max={4163}
+                  max={7773}
                   unit="ms"
                   rows={[
-                    { cmd: 'nub', ms: 1122, us: true },
-                    { cmd: 'bun', ms: 1444, label: '29% slower' },
-                    { cmd: 'pnpm', ms: 2847, ratio: 2.5 },
-                    { cmd: 'npm', ms: 4163, ratio: 3.7 },
+                    { cmd: 'nub', ms: 419, us: true },
+                    { cmd: 'bun', ms: 2029, ratio: 4.8 },
+                    { cmd: 'pnpm', ms: 6851, ratio: 16.3 },
+                    { cmd: 'npm', ms: 7773, ratio: 18.5 },
                   ]}
                 />
                 <a
