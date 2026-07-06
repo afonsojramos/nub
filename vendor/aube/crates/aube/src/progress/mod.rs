@@ -293,6 +293,12 @@ enum Mode {
         /// `start()`, so the count is always ≥ 2 while any clone is live —
         /// the same reason CI mode tracks its own `CiState::alive`.
         alive: Arc<AtomicUsize>,
+        /// PROTOTYPE (install-progress-render-design): the name of the
+        /// most-recently-started fetch. `start_fetch` writes it; the ticker
+        /// samples it at ~60fps into the `pkg` prop so the line churns the
+        /// currently-fetching package name (bun/uv-style motion) without
+        /// emitting a frame per tarball. TTY-only — CI mode never touches it.
+        current_pkg: Arc<Mutex<String>>,
     },
     Ci(Arc<CiState>),
 }
@@ -383,11 +389,18 @@ impl InstallProgress {
         // OSC taskbar indicator; no template bar consumes them.
         let start = Instant::now();
         let phase0 = tty_phase_field("");
+        // PROTOTYPE toggle: NUB_PROTO_LEAN=1 renders the maintainer's
+        // "less-overwhelming" variant — spinner + phase + count + churning
+        // package name, dropping the bytes/rate/ETA cluster. Default (unset)
+        // keeps the full line so both can be A/B'd live.
+        let body = if env_truthy("NUB_PROTO_LEAN") {
+            "{% if revealed %}{{aube}}  {{spin}} {{phase}}  {{count}}{{pkg}}{% endif %}"
+        } else {
+            "{% if revealed %}{{aube}}  {{spin}} {{phase}}  \
+             {{count}}{{bytes}}{{rate}}{{eta}}{{pkg}}{% endif %}"
+        };
         let root = ProgressJobBuilder::new()
-            .body(
-                "{% if revealed %}{{aube}}  {{spin}} {{phase}}  \
-                 {{count}}{{bytes}}{{rate}}{{eta}}{% endif %}",
-            )
+            .body(body)
             .body_text(Some("{{aube}}{{phase}} {{count}}{{bytes}}{{rate}}{{eta}}"))
             .prop("aube", &header)
             .prop("spin", &spin_frame(start))
@@ -396,6 +409,7 @@ impl InstallProgress {
             .prop("bytes", "")
             .prop("rate", "")
             .prop("eta", "")
+            .prop("pkg", "")
             .prop("revealed", &false)
             .progress_current(0)
             .progress_total(TTY_BAR_SCALE)
@@ -411,6 +425,7 @@ impl InstallProgress {
         let revealed = Arc::new(AtomicBool::new(false));
         let wake = Arc::new(Condvar::new());
         let wake_lock = Arc::new(Mutex::new(()));
+        let current_pkg = Arc::new(Mutex::new(String::new()));
         let ticker = Arc::new(Mutex::new(spawn_tty_ticker(TtyTicker {
             root: Arc::downgrade(&root),
             phase_num: phase_num.clone(),
@@ -420,6 +435,7 @@ impl InstallProgress {
             wake: wake.clone(),
             wake_lock: wake_lock.clone(),
             start,
+            current_pkg: current_pkg.clone(),
         })));
         Self {
             mode: Mode::Tty {
@@ -439,6 +455,7 @@ impl InstallProgress {
                 wake,
                 ticker,
                 alive: Arc::new(AtomicUsize::new(1)),
+                current_pkg,
             },
             unpacked_sizes: Arc::new(Mutex::new(HashMap::new())),
             files_linked,
@@ -936,7 +953,7 @@ impl InstallProgress {
     /// likewise just increments the `downloaded` counter on drop so the
     /// heartbeat advances.
     pub fn start_fetch(&self, name: &str, version: &str) -> FetchRow {
-        let _ = (name, version);
+        let _ = version;
         match &self.mode {
             Mode::Tty {
                 root,
@@ -945,8 +962,15 @@ impl InstallProgress {
                 reused,
                 downloaded,
                 phase_num,
+                current_pkg,
                 ..
             } => FetchRow {
+                // PROTOTYPE: carry the name + a weak handle to the shared slot.
+                // The name is written to the slot on COMPLETION (FetchRow::drop),
+                // NOT here: `start_fetch` fires for every tarball synchronously in
+                // the spawn loop before any download runs, so writing here would
+                // race the slot to the last-iterated name and freeze it. Writing
+                // on completion churns names in lockstep with the advancing count.
                 inner: FetchRowInner::Tty {
                     root: Arc::downgrade(root),
                     total: Arc::downgrade(total),
@@ -954,6 +978,8 @@ impl InstallProgress {
                     reused: Arc::downgrade(reused),
                     downloaded: Arc::downgrade(downloaded),
                     phase_num: Arc::downgrade(phase_num),
+                    name: name.to_string(),
+                    current_pkg: Arc::downgrade(current_pkg),
                 },
                 completed: false,
             },
@@ -1218,6 +1244,26 @@ fn spin_frame(start: Instant) -> String {
     style::eblue(SPIN_FRAMES[idx]).to_string()
 }
 
+/// PROTOTYPE: the trailing ` · <name>` segment carrying the currently-
+/// fetching package name. Dim so the spinner + count stay the primary
+/// read (uv's treatment: name is secondary motion, not the headline).
+/// It's the LAST field on the line, so its variable length is layout-safe
+/// — clx erases to EOL each frame — but it's still truncated so a very long
+/// scoped name can't run off a narrow terminal.
+fn tty_pkg_field(name: &str) -> String {
+    if name.is_empty() {
+        return String::new();
+    }
+    const MAX: usize = 32;
+    let shown = if name.chars().count() > MAX {
+        let head: String = name.chars().take(MAX - 1).collect();
+        format!("{head}…")
+    } else {
+        name.to_string()
+    };
+    format!(" {} {}", style::edim("·"), style::edim(shown))
+}
+
 /// Reveal the animated line once the debounce window has elapsed.
 /// Flips the `revealed` prop (and thus the body's `{% if revealed %}`
 /// guard) exactly once — the `swap` latch means repeated calls after
@@ -1243,6 +1289,9 @@ struct TtyTicker {
     wake: Arc<Condvar>,
     wake_lock: Arc<Mutex<()>>,
     start: Instant,
+    /// PROTOTYPE: shared slot of the most-recent fetch name, sampled each
+    /// tick into the `pkg` prop.
+    current_pkg: Arc<Mutex<String>>,
 }
 
 /// Spawn the link-progress ticker: a background thread that drives the
@@ -1276,9 +1325,26 @@ fn spawn_tty_ticker(t: TtyTicker) -> Option<thread::JoinHandle<()>> {
                 // resolve/fetch/link event fires (the proof-of-life clx's
                 // `{{spinner()}}` used to give us, now at our own frame rate).
                 root.prop("spin", &spin_frame(t.start));
-                if t.phase_num.load(Ordering::Relaxed) == 3 {
+                let phase = t.phase_num.load(Ordering::Relaxed);
+                if phase == 3 {
                     let files = t.files_linked.load(Ordering::Relaxed);
                     root.prop("count", &tty_count_field(linking_snap(files), 0));
+                }
+                // PROTOTYPE: churn the currently-fetching package name during
+                // fetching (phase 2). Sampling the shared slot HERE — not on
+                // each `start_fetch` — coalesces the 64-128-wide fetch fan-out
+                // to the tick cadence, so the name flies by at ~60fps max
+                // regardless of how fast tarballs start. Cleared outside
+                // fetching (bun shows no name during install/link either).
+                if phase == 2 {
+                    let name = t
+                        .current_pkg
+                        .lock()
+                        .map(|s| s.clone())
+                        .unwrap_or_default();
+                    root.prop("pkg", &tty_pkg_field(&name));
+                } else {
+                    root.prop("pkg", "");
                 }
                 drop(root);
                 let guard = t.wake_lock.lock().unwrap();
@@ -1404,6 +1470,10 @@ enum FetchRowInner {
         reused: Weak<AtomicUsize>,
         downloaded: Weak<AtomicUsize>,
         phase_num: Weak<AtomicUsize>,
+        /// PROTOTYPE: this fetch's package name + a weak handle to the shared
+        /// current-pkg slot, written on completion so the line churns names.
+        name: String,
+        current_pkg: Weak<Mutex<String>>,
     },
     /// Matches the TTY variant's weak-ref discipline: orphaned CI fetch
     /// rows shouldn't prevent `CiState` from being dropped after the
@@ -1425,7 +1495,19 @@ impl FetchRow {
                 reused,
                 downloaded,
                 phase_num,
+                name,
+                current_pkg,
             } => {
+                // PROTOTYPE: on completion, record this package's name so the
+                // ticker's next ~60fps sample surfaces it. Completions land in
+                // lockstep with the advancing count, so names churn as fast as
+                // packages finish (bun/uv motion) without a per-tarball repaint.
+                if let Some(slot) = current_pkg.upgrade()
+                    && let Ok(mut s) = slot.lock()
+                {
+                    s.clear();
+                    s.push_str(name);
+                }
                 // Bump the downloaded counter, then refresh the unified bar
                 // (clx `progress_current` + `count` prop) by upgrading the weak
                 // refs to each TTY atomic. `refresh_eta` is *not* called here —
