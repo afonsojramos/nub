@@ -28,15 +28,15 @@
 //! reads those sidecars — so there is no hand-maintained list of phantom classes;
 //! the detection is per-version and auto-current. A precision SEED-SELECTION
 //! filter (see [`should_seed`]) drops a flagged importer whose undeclared targets
-//! are all already reachable inside its own subtree and absent from the project
-//! top level, so a transitively-satisfied over-flag never ejects.
+//! are all already resolvable as its own DIRECT (depth-1) siblings and absent from
+//! the project top level, so a directly-satisfied over-flag never ejects.
 //!
 //! Opt-out (`NUB_DYNAMIC_PHANTOM_EJECT=0`) ⇒ no hook installed ⇒ aube's
 //! `expand_disk_materialize` returns the seed verbatim ⇒ the disk-materialize
 //! pass is byte-for-byte the pre-productionization pure-symlink behavior. All
 //! policy lives here; aube owns only the neutral seam + the graph primitive.
 
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashSet};
 
 use aube_linker::DiskMaterializePlan;
 use aube_lockfile::{LockedPackage, LockfileGraph};
@@ -129,7 +129,7 @@ fn plan_from_flags(
     // materializes.
     let mut dynamic_targets: BTreeMap<&str, &[String]> = BTreeMap::new();
     for (dep_path, name, targets) in flags {
-        if should_seed(targets, &reachable_dep_names(dep_path, graph), is_top_level) {
+        if should_seed(targets, &direct_dep_names(dep_path, graph), is_top_level) {
             seed_names_set.insert(name.as_str());
             dynamic_targets.insert(dep_path.as_str(), targets.as_slice());
         }
@@ -267,12 +267,12 @@ fn dynamic_phantom_flags(graph: &LockfileGraph) -> Vec<(String, String, Vec<Stri
 /// Whether a dynamically-flagged package must SEED the closure — the precision
 /// filter, applied as seed-selection. DEFAULT is SEED (eject); a flag is
 /// downgraded to a SKIP (not seeded) only when it can PROVE every undeclared
-/// target is BOTH reachable inside the package's own resolved subtree AND absent
-/// from the project top level.
+/// target is BOTH a DIRECT (depth-1) sibling of the importer AND absent from the
+/// project top level.
 ///
 /// SAFETY INVARIANT (non-negotiable): a wrong SKIP is a real phantom BREAK,
 /// strictly worse than a redundant over-eject. So every uncertainty — a
-/// target-less flag, a target outside the closure, a top-level target — falls
+/// target-less flag, a depth-≥2 / absent target, a top-level target — falls
 /// through to SEED. The filter only ever REMOVES an over-seed it can prove safe.
 ///
 /// Why the top-level gate is load-bearing: under GVS there is no hidden hoist
@@ -307,52 +307,37 @@ fn should_seed(
         .all(|t| reachable.contains(t) && !is_top_level(t))
 }
 
-/// The set of package NAMES transitively reachable from the package at
-/// `root_dep_path` through its resolved `dependencies` edges — the siblings a
-/// phantom import from that package can satisfy WITHIN its own subtree, with no
-/// project-local disk copy.
+/// The set of package NAMES that are DIRECT (depth-1) declared dependencies of the
+/// package at `root_dep_path` and resolve in `graph.packages` — precisely the
+/// siblings symlinked into that package's own private `node_modules` under nub's
+/// isolated (GVS) layout, and therefore the ONLY names a phantom import from the
+/// un-ejected (store-resident) copy can satisfy.
 ///
-/// Walks `dependencies` ONLY, deliberately. Per [`LockedPackage`]'s contract that
-/// map is the resolved edge set, with ACTIVE optional edges and RESOLVED peer
-/// versions already MIRRORED into it — exactly the siblings symlinked into each
-/// node's `node_modules`. Also walking the raw `optional_dependencies` /
-/// `peer_dependencies` maps could only ADD edges ABSENT from `dependencies`
-/// (platform-pruned optionals, or unresolved peer RANGES that never key
-/// `graph.packages`); counting either as reachable would OVER-complete the
-/// closure — the one direction that yields a wrong SKIP. So `dependencies` is both
-/// the complete AND the safe edge source; this mirrors
-/// [`LockfileGraph::importer_closure`]'s reconstruction of child keys.
+/// Depth-1 ONLY, deliberately. Under GVS a store-resident package's realpath lives
+/// in the GLOBAL store, so Node's ancestor `node_modules` walk from its files
+/// reaches only its own direct siblings — never a transitive dep's private tree (a
+/// different store path) and never the project top level (the walk ascends the
+/// store, not the project). A target declared by a TRANSITIVE (depth-≥2) dep is
+/// thus NOT resolvable from the un-ejected copy; the earlier multi-hop BFS counted
+/// it reachable, which let a depth-≥2 phantom target (`@crawlee/basic` →
+/// `@crawlee/core` → `@apify/datastructures`, #280) wrongly SKIP its eject and
+/// break. Depth-≥2 and absent targets now fall through to SEED — the safe
+/// direction (the ejected copy hoists the target in as a real sibling, rung 2).
 ///
-/// A child NAME enters only when its full dep_path (`{name}@{tail}`, the tail
-/// carrying any peer suffix) resolves in `graph.packages`; an unresolvable edge
-/// halts that branch, leaving the closure a SUBSET of true reachability — which
-/// errs toward SEED, never toward a wrong skip. A visited set + a hard node cap
-/// bound a cyclic/adversarial graph; hitting the cap truncates, again toward SEED.
-fn reachable_dep_names(root_dep_path: &str, graph: &LockfileGraph) -> HashSet<String> {
-    // Ceiling far above any real subtree (hundreds of nodes); it only bounds a
-    // pathological graph, and truncation errs toward seed.
-    const MAX_NODES: usize = 100_000;
+/// Reads `dependencies` ONLY: per [`LockedPackage`]'s contract that map is the
+/// resolved edge set with ACTIVE optionals and RESOLVED peer versions already
+/// MIRRORED in — exactly the depth-1 siblings on disk. A name enters only when its
+/// full dep_path (`{name}@{tail}`, the tail carrying any peer suffix) resolves in
+/// `graph.packages`; an unresolvable edge is dropped, erring toward SEED.
+fn direct_dep_names(root_dep_path: &str, graph: &LockfileGraph) -> HashSet<String> {
     let mut names = HashSet::new();
-    let mut visited = HashSet::new();
-    let mut queue = VecDeque::new();
-    visited.insert(root_dep_path.to_string());
-    queue.push_back(root_dep_path.to_string());
-    while let Some(dep_path) = queue.pop_front() {
-        if visited.len() >= MAX_NODES {
-            break;
-        }
-        let Some(pkg) = graph.packages.get(&dep_path) else {
-            continue;
-        };
-        for (child_name, child_tail) in &pkg.dependencies {
-            let child_key = format!("{child_name}@{child_tail}");
-            if !graph.packages.contains_key(&child_key) {
-                continue;
-            }
+    let Some(pkg) = graph.packages.get(root_dep_path) else {
+        return names;
+    };
+    for (child_name, child_tail) in &pkg.dependencies {
+        let child_key = format!("{child_name}@{child_tail}");
+        if graph.packages.contains_key(&child_key) {
             names.insert(child_name.clone());
-            if visited.insert(child_key.clone()) {
-                queue.push_back(child_key);
-            }
         }
     }
     names
@@ -577,14 +562,16 @@ mod tests {
         ));
     }
 
-    // Reachability (`reachable_dep_names`) — the in-subtree name set the precision
-    // filter consults.
+    // Direct-dep reachability (`direct_dep_names`) — the depth-1 sibling name set
+    // the precision filter consults; a store-resident copy resolves ONLY these.
 
     #[test]
-    fn reachable_names_reconstruct_from_tails_including_peer_suffix() {
-        // P → a → shared; P → styled(peer suffix in the tail). The full graph key
-        // for the peer-context child carries the `(react@18.2.0)` suffix — the
-        // reconstruction must reproduce it exactly.
+    fn direct_dep_names_are_depth1_only_not_transitive() {
+        // P → a → shared; P → styled(peer suffix in the tail). `a` and `styled` are
+        // direct (depth-1) siblings; `shared` sits at depth 2 behind `a` and is NOT
+        // a sibling of `p` under isolated layout, so it must NOT count as reachable
+        // — the exact distinction the #280 fix turns on. The peer-suffixed tail
+        // (`(react@18.2.0)`) must still reconstruct to key `graph.packages`.
         let g = graph(&[
             (
                 "p@1.0.0",
@@ -595,37 +582,85 @@ mod tests {
             ("shared@2.0.0", "shared", &[]),
             ("styled@6.0.0(react@18.2.0)", "styled", &[]),
         ]);
-        let r = reachable_dep_names("p@1.0.0", &g);
+        let r = direct_dep_names("p@1.0.0", &g);
         assert!(r.contains("a"), "direct dep");
-        assert!(r.contains("shared"), "transitive dep");
         assert!(r.contains("styled"), "peer-suffixed tail reconstructs");
-        assert!(!r.contains("p"), "root itself is not in its own closure");
+        assert!(
+            !r.contains("shared"),
+            "depth-2 transitive dep is NOT a depth-1 sibling"
+        );
+        assert!(!r.contains("p"), "root itself is not among its own deps");
     }
 
     #[test]
-    fn reachable_names_halt_on_unresolvable_edge_toward_seed() {
+    fn direct_dep_names_drop_unresolvable_edge_toward_seed() {
         // P declares `a@9.9.9`, absent from the graph → the edge does not resolve,
-        // so `a` and its subtree (`deep`) stay out of the closure → a phantom
-        // target of either SEEDS (the safe direction).
+        // so `a` stays out of the depth-1 set → a phantom target of `a` SEEDS (the
+        // safe direction). `deep` is depth-2 and never a sibling regardless.
         let g = graph(&[
             ("p@1.0.0", "p", &[("a", "9.9.9")]),
             ("a@1.0.0", "a", &[("deep", "1.0.0")]),
             ("deep@1.0.0", "deep", &[]),
         ]);
-        let r = reachable_dep_names("p@1.0.0", &g);
+        let r = direct_dep_names("p@1.0.0", &g);
         assert!(!r.contains("a"), "unresolved edge is not counted reachable");
-        assert!(!r.contains("deep"), "subtree behind it is unreached");
+        assert!(!r.contains("deep"), "depth-2 dep is not a sibling anyway");
     }
 
     #[test]
-    fn reachable_names_terminate_on_cycles() {
-        // A ↔ B mutual dependency must not stall the bounded walk.
+    fn depth2_phantom_target_seeds_not_skipped() {
+        // #280 @crawlee shape at the planner boundary: importer `basic` → direct dep
+        // `core`, and `core` declares `datastructures` (depth 2 from `basic`).
+        // `basic` phantom-imports `datastructures`, which is NOT a symlinked sibling
+        // in `basic`'s own private node_modules under isolated layout, so the
+        // un-ejected copy cannot resolve it — the flag MUST SEED (eject + rung-2
+        // hoist), never skip as "transitively reachable". `datastructures` is absent
+        // from the (empty) project top level, so only the depth fix drives the seed.
+        // FAILS before the fix (multi-hop BFS marks `datastructures` reachable →
+        // SKIP → `basic` absent from the plan); passes after.
         let g = graph(&[
-            ("p@1.0.0", "p", &[("a", "1.0.0")]),
-            ("a@1.0.0", "a", &[("b", "1.0.0")]),
-            ("b@1.0.0", "b", &[("a", "1.0.0")]),
+            ("basic@1.0.0", "basic", &[("core", "1.0.0")]),
+            ("core@1.0.0", "core", &[("datastructures", "2.0.0")]),
+            ("datastructures@2.0.0", "datastructures", &[]),
         ]);
-        let r = reachable_dep_names("p@1.0.0", &g);
-        assert!(r.contains("a") && r.contains("b"));
+        let flags = vec![(
+            "basic@1.0.0".to_string(),
+            "basic".to_string(),
+            vec!["datastructures".to_string()],
+        )];
+        let plan = plan_from_flags(&g, &[], &flags);
+        let names: HashSet<&str> = plan.names.iter().map(String::as_str).collect();
+        assert!(
+            names.contains("basic"),
+            "depth-2 phantom target must SEED the importer, not skip: {names:?}"
+        );
+        assert_eq!(
+            plan.hoist_within.get("basic@1.0.0").map(Vec::as_slice),
+            Some(["datastructures@2.0.0".to_string()].as_slice()),
+            "rung-2 hoists the depth-2 target into the ejected importer"
+        );
+    }
+
+    #[test]
+    fn depth1_phantom_target_still_skips() {
+        // The precision win must survive the fix: an importer whose undeclared
+        // target IS its own direct (depth-1) sibling — resolved into its private
+        // node_modules already — needs no eject, so the flag still SKIPs (empty
+        // plan). Guards against the fix collapsing into "always seed".
+        let g = graph(&[
+            ("adapter@1.0.0", "adapter", &[("helper", "1.0.0")]),
+            ("helper@1.0.0", "helper", &[]),
+        ]);
+        let flags = vec![(
+            "adapter@1.0.0".to_string(),
+            "adapter".to_string(),
+            vec!["helper".to_string()],
+        )];
+        let plan = plan_from_flags(&g, &[], &flags);
+        assert!(
+            plan.names.is_empty() && plan.hoist_within.is_empty(),
+            "a depth-1-satisfied phantom target stays skipped: {:?}",
+            plan.names
+        );
     }
 }
