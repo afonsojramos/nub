@@ -244,8 +244,8 @@ enum Mode {
         /// reason.
         downloaded: Arc<AtomicUsize>,
         /// Phase number: 0=init, 1=resolving, 2=fetching, 3=linking. Used
-        /// by the rate / ETA props to gate display to the fetching
-        /// window and switch to the `linking` label in phase 3.
+        /// by the rate prop to gate display to the fetching window and
+        /// switch to the `linking` label in phase 3.
         phase_num: Arc<AtomicUsize>,
         /// Cumulative downloaded bytes. Fed into the transfer-rate
         /// calculation displayed in the TTY bar's `rate` prop.
@@ -260,13 +260,6 @@ enum Mode {
         /// measures the fetch window only, not `bytes / (resolve_time +
         /// fetch_time)`.
         fetch_start: Arc<OnceLock<Instant>>,
-        /// Snapshot of `reused + downloaded` at the moment
-        /// `set_phase("fetching")` first fires. Used as the baseline
-        /// for the fetch-window ETA so the displayed estimate
-        /// reflects per-package throughput *during fetching*, not the
-        /// install-elapsed denominator. `usize::MAX` sentinel = "not
-        /// captured yet"; render falls back to `ETA …`.
-        completed_at_fetch_start: Arc<AtomicUsize>,
         /// Install start instant — the debounce baseline. The live line
         /// stays hidden (the body's `{% if revealed %}` guard renders
         /// empty) until this is older than [`TTY_REVEAL_DELAY`], so a
@@ -368,7 +361,7 @@ impl InstallProgress {
         // fast link — see #288); the spinner is proof-of-life on its own and
         // the count carries the real state.
         //
-        //   <header>  {{spin}} <phase>  <count><bytes><rate><eta>
+        //   <header>  {{spin}} <phase>  <count><bytes><rate>
         //
         // The whole line is wrapped in `{% if revealed %}` so it renders
         // EMPTY (and clx drops the row) until the debounce fires — a fast
@@ -386,16 +379,15 @@ impl InstallProgress {
         let root = ProgressJobBuilder::new()
             .body(
                 "{% if revealed %}{{aube}}  {{spin}} {{phase}}  \
-                 {{count}}{{bytes}}{{rate}}{{eta}}{% endif %}",
+                 {{count}}{{bytes}}{{rate}}{% endif %}",
             )
-            .body_text(Some("{{aube}}{{phase}} {{count}}{{bytes}}{{rate}}{{eta}}"))
+            .body_text(Some("{{aube}}{{phase}} {{count}}{{bytes}}{{rate}}"))
             .prop("aube", &header)
             .prop("spin", &spin_frame(start))
             .prop("phase", &phase0)
             .prop("count", "")
             .prop("bytes", "")
             .prop("rate", "")
-            .prop("eta", "")
             .prop("revealed", &false)
             .progress_current(0)
             .progress_total(TTY_BAR_SCALE)
@@ -433,7 +425,6 @@ impl InstallProgress {
                 downloaded_bytes: Arc::new(AtomicU64::new(0)),
                 estimated_bytes: Arc::new(AtomicU64::new(0)),
                 fetch_start: Arc::new(OnceLock::new()),
-                completed_at_fetch_start: Arc::new(AtomicUsize::new(usize::MAX)),
                 start,
                 revealed,
                 wake,
@@ -515,7 +506,6 @@ impl InstallProgress {
                 // pick up the corrected numerator on the same tick
                 // the denominator drops.
                 self.refresh_tty_bar();
-                self.refresh_eta();
             }
             Mode::Ci(s) => {
                 s.resolved.store(total, Ordering::Relaxed);
@@ -530,7 +520,6 @@ impl InstallProgress {
             Mode::Tty { total, .. } => {
                 total.fetch_add(n, Ordering::Relaxed);
                 self.refresh_tty_bar();
-                self.refresh_eta();
             }
             Mode::Ci(s) => {
                 s.resolved.fetch_add(n, Ordering::Relaxed);
@@ -624,9 +613,6 @@ impl InstallProgress {
                 root,
                 phase_num,
                 fetch_start,
-                reused,
-                downloaded,
-                completed_at_fetch_start,
                 ..
             } => {
                 // Fixed-width phase field (verb right-padded to the longest
@@ -643,30 +629,15 @@ impl InstallProgress {
                     // Seed the rate denominator on the fetching transition.
                     // First-writer-wins; repeated calls are no-ops.
                     let _ = fetch_start.set(Instant::now());
-                    // Capture the completion baseline so the ETA divides
-                    // remaining work by *fetch-window* throughput, not by
-                    // total install elapsed (which would inflate the
-                    // estimate when resolve was slow). `compare_exchange`
-                    // matches `fetch_start` first-writer-wins.
-                    let baseline =
-                        reused.load(Ordering::Relaxed) + downloaded.load(Ordering::Relaxed);
-                    let _ = completed_at_fetch_start.compare_exchange(
-                        usize::MAX,
-                        baseline,
-                        Ordering::Relaxed,
-                        Ordering::Relaxed,
-                    );
                 } else if n == 3 {
-                    // Linking phase: rate / ETA aren't meaningful — the
+                    // Linking phase: the rate segment isn't meaningful — the
                     // network's done, the linker work is dominated by
-                    // filesystem ops on a fixed package count. Clear
-                    // both props so the "linking" word reads cleanly.
+                    // filesystem ops on a fixed package count. Clear it so
+                    // the "linking" word reads cleanly.
                     root.prop("rate", "");
-                    root.prop("eta", "");
                 }
                 self.refresh_bytes_segment();
                 self.refresh_rate();
-                self.refresh_eta();
                 // Phase change shifts the unified-progress slice
                 // (resolving → fetching crosses the
                 // `RESOLVE_BAR_WEIGHT` boundary; fetching → linking
@@ -686,7 +657,6 @@ impl InstallProgress {
             Mode::Tty { reused, .. } => {
                 reused.fetch_add(n, Ordering::Relaxed);
                 self.refresh_tty_bar();
-                self.refresh_eta();
             }
             Mode::Ci(s) => {
                 s.reused.fetch_add(n, Ordering::Relaxed);
@@ -698,7 +668,7 @@ impl InstallProgress {
     /// tarball after the registry fetch completes, on top of the per-package
     /// increment that `FetchRow::drop` contributes to the downloaded count.
     ///
-    /// In TTY mode this refreshes the bytes / rate / ETA props on the
+    /// In TTY mode this refreshes the bytes / rate props on the
     /// animated bar. In CI mode the heartbeat re-renders from the
     /// cumulative byte counter on each tick; here we just bump that
     /// counter.
@@ -710,13 +680,6 @@ impl InstallProgress {
                 downloaded_bytes.fetch_add(bytes, Ordering::Relaxed);
                 self.refresh_bytes_segment();
                 self.refresh_rate();
-                // The package counter that drives ETA only changes via
-                // `inc_reused` and `FetchRow::drop`, but bytes landing
-                // is the strongest signal that fetch-window throughput
-                // is still alive — refresh ETA on every byte event so
-                // it keeps ticking down through long-lived downloads
-                // even when no new package completion has fired.
-                self.refresh_eta();
             }
             Mode::Ci(s) => {
                 s.downloaded_bytes.fetch_add(bytes, Ordering::Relaxed);
@@ -870,61 +833,6 @@ impl InstallProgress {
                 " · {}",
                 style::edim(format!("{}/s", render::format_bytes(rate)))
             ),
-        );
-    }
-
-    /// TTY-only: rebuild the `eta` prop. `ETA …` while we don't have
-    /// enough fetch-window data to extrapolate; `ETA Xs` once we do.
-    /// Mirrors the CI render's eta_segment logic: divides remaining
-    /// work by fetch-window throughput (`completed - baseline / fetch_elapsed_ms`)
-    /// instead of total install elapsed, so a slow resolve doesn't
-    /// inflate the early-fetching estimate.
-    fn refresh_eta(&self) {
-        let Mode::Tty {
-            root,
-            total,
-            reused,
-            downloaded,
-            phase_num,
-            fetch_start,
-            completed_at_fetch_start,
-            ..
-        } = &self.mode
-        else {
-            return;
-        };
-        let phase = phase_num.load(Ordering::Relaxed);
-        // Only show ETA in resolving + fetching. Linking is fast and
-        // bounded — adding an ETA there would just flap around 0s.
-        if phase == 0 || phase == 3 {
-            root.prop("eta", "");
-            return;
-        }
-        let total_n = total.load(Ordering::Relaxed);
-        let completed =
-            (reused.load(Ordering::Relaxed) + downloaded.load(Ordering::Relaxed)).min(total_n);
-        let baseline = completed_at_fetch_start.load(Ordering::Relaxed);
-        let placeholder = || root.prop("eta", &format!(" · {}", style::edim("ETA …")));
-        if completed >= total_n || total_n == 0 || baseline == usize::MAX {
-            placeholder();
-            return;
-        }
-        let Some(start) = fetch_start.get() else {
-            placeholder();
-            return;
-        };
-        let fetch_elapsed_ms = start.elapsed().as_millis() as u64;
-        let fetch_completed = completed.saturating_sub(baseline);
-        if fetch_completed == 0 || fetch_elapsed_ms == 0 {
-            placeholder();
-            return;
-        }
-        let remaining = total_n - completed;
-        let eta_ms = fetch_elapsed_ms.saturating_mul(remaining as u64) / fetch_completed as u64;
-        let eta_str = format_duration(Duration::from_millis(eta_ms));
-        root.prop(
-            "eta",
-            &format!(" · {}", style::edim(format!("ETA {eta_str}"))),
         );
     }
 
@@ -1123,11 +1031,11 @@ fn tty_phase_field(phase: &str) -> String {
 /// The counter field. Linking shows a live, monotonically growing file
 /// count — `12043 files` — with NO denominator (the total isn't known
 /// until the pass ends); this is the number the user watches tick up on
-/// a slow filesystem, and since bytes/rate/ETA are all cleared during
+/// a slow filesystem, and since bytes/rate are both cleared during
 /// linking its digit growth shifts nothing to its right. Resolving and
 /// fetching keep the fixed-column `577/623 pkgs` shape (numerator
 /// right-aligned, total left-aligned to [`TTY_COUNT_DIGITS`]) so the
-/// trailing byte/rate/ETA segment holds a constant column for installs
+/// trailing byte/rate segment holds a constant column for installs
 /// up to 9999 packages. Phase 0 renders empty — nothing trails it.
 /// TTY-specific (not the shared `render::count_segment`, which the
 /// append-only CI renderer uses).
@@ -1428,12 +1336,7 @@ impl FetchRow {
             } => {
                 // Bump the downloaded counter, then refresh the unified bar
                 // (clx `progress_current` + `count` prop) by upgrading the weak
-                // refs to each TTY atomic. `refresh_eta` is *not* called here —
-                // the ETA prop is recomputed on every `inc_downloaded_bytes`
-                // event, which fires once per tarball before this drop. The
-                // off-by-one (ETA computed against pre-bump `downloaded`)
-                // self-corrects on the next fetch's bytes; for the very last
-                // fetch, `set_phase("linking")` immediately clears the prop.
+                // refs to each TTY atomic.
                 if let Some(d) = downloaded.upgrade() {
                     d.fetch_add(1, Ordering::Relaxed);
                 }
@@ -1665,7 +1568,7 @@ mod tests {
 
     /// Resolving/fetching hold one column across digit counts (up to 9999),
     /// numerator right-aligned — `7/331` and `577/623` line up — so the
-    /// trailing byte/rate/ETA segment never shifts.
+    /// trailing byte/rate segment never shifts.
     #[test]
     fn count_field_is_constant_width_up_to_four_digits() {
         let expected = 2 * TTY_COUNT_DIGITS + 6; // cur(D) + "/" + total(D) + " pkgs"
