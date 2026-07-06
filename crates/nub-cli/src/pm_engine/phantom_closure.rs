@@ -85,6 +85,28 @@ fn plan_from_flags(
     seed_names: &[String],
     flags: &[(String, String, Vec<String>)],
 ) -> DiskMaterializePlan {
+    // Drop the version-BLIND `vite` name-seed and decide vite version-aware here.
+    // The embedder default (mod.rs) seeds the literal `vite` for ANY direct-dep
+    // vite, but vite ≥ 8.1 reads `.modules.yaml` from the shared store natively
+    // (#318 Unit A, written post-install regardless of eject) and needs NO eject —
+    // a name-seed would drag vite + its whole ancestor-closure project-local for
+    // zero benefit. vite < 8.1 is independently dep_path-auto-seeded below (the
+    // `vite_lt_8_1` check), which fires for every < 8.1 copy the name-seed caught,
+    // so pruning the name-seed loses nothing for < 8.1 and stops the ≥ 8.1
+    // over-eject. This is the ONLY version-aware chokepoint: the mod.rs seed runs
+    // pre-resolve and can't see the concrete version. (The
+    // `NUB_DYNAMIC_PHANTOM_EJECT=0` opt-out installs no hook, so its raw name-seed
+    // still over-ejects vite ≥ 8.1 — an accepted cost of that rare opt-out path.)
+    // Provenance-blind: this also strips a user's explicit `vite` in
+    // `diskMaterializePackages`, which is fine — vite ≥ 8.1 works symlinked and
+    // vite < 8.1 is re-seeded below regardless of source, so a working vite is
+    // served either way.
+    let seed_names: Vec<&str> = seed_names
+        .iter()
+        .map(String::as_str)
+        .filter(|&name| name != "vite")
+        .collect();
+
     // Top-level presence: default-hoist top level = the importer DIRECT deps. See
     // `should_seed` for why this gate is load-bearing and its non-default-hoist
     // scope caveat.
@@ -98,7 +120,7 @@ fn plan_from_flags(
     // Seed set by NAME: the caller's disk-materialize list ∪ every dynamically-
     // flagged importer that SURVIVES the precision seed-selection filter. Embedded
     // vite<8.1 is seeded by dep_path below.
-    let mut seed_names_set: HashSet<&str> = seed_names.iter().map(String::as_str).collect();
+    let mut seed_names_set: HashSet<&str> = seed_names.iter().copied().collect();
 
     // Dynamic phantom source (the per-version scanner's sidecars) — the replacement
     // for the retired hand-curated map. `dynamic_targets` keeps each SURVIVING
@@ -149,7 +171,7 @@ fn plan_from_flags(
     // Rung-1 names: every closure member's name ∪ the original seed names (the
     // executor is name-keyed). Original seed names are kept even if absent from
     // the graph — the executor simply never matches an absent name.
-    let mut names: HashSet<String> = seed_names.iter().cloned().collect();
+    let mut names: HashSet<String> = seed_names.iter().map(|s| s.to_string()).collect();
     for dep_path in &closure {
         if let Some(pkg) = graph.packages.get(dep_path) {
             names.insert(pkg.name.clone());
@@ -415,16 +437,62 @@ mod tests {
     }
 
     #[test]
-    fn modern_vite_alone_is_not_seeded() {
+    fn direct_dep_vite_ge_8_1_not_ejected_even_with_name_seed() {
+        // Regression for the version-blind over-eject: a direct-dep vite carries
+        // the embedder's `vite` name-seed (mod.rs), but vite ≥ 8.1 reads
+        // `.modules.yaml` natively (#318) and must stay symlinked. The planner
+        // prunes the name-seed, so a ≥ 8.1 direct dep yields an EMPTY plan — no
+        // eject of vite or its ancestor closure. (Passing the real production
+        // `["vite"]` seed is load-bearing: the old `&[]` seed masked the bug.)
         let g = graph(&[
             ("app@1.0.0", "app", &[("vite", "8.1.3")]),
             ("vite@8.1.3", "vite", &[]),
         ]);
-        let plan = plan_from_flags(&g, &[], &[]);
+        let plan = plan_from_flags(&g, &["vite".to_string()], &[]);
         assert!(
             plan.names.is_empty(),
-            "vite>=8.1 needs no eject (Unit A covers it)"
+            "vite>=8.1 needs no eject (Unit A covers it); got {:?}",
+            plan.names
         );
+    }
+
+    #[test]
+    fn direct_dep_vite_lt_8_1_still_ejects_despite_name_seed_prune() {
+        // The prune must not weaken the < 8.1 path: a direct-dep vite < 8.1 carries
+        // the `vite` name-seed AND is caught by the version-aware `vite_lt_8_1`
+        // dep_path auto-seed. Dropping the name-seed loses nothing — vite and its
+        // importer closure still disk-materialize so the #318 dist patch reaches a
+        // now-project-local copy.
+        let g = graph(&[
+            ("app@1.0.0", "app", &[("vite", "7.0.0")]),
+            ("vite@7.0.0", "vite", &[]),
+        ]);
+        let plan = plan_from_flags(&g, &["vite".to_string()], &[]);
+        let names: HashSet<&str> = plan.names.iter().map(String::as_str).collect();
+        assert!(names.contains("vite"), "vite<8.1 still ejects: {names:?}");
+        assert!(
+            names.contains("app"),
+            "its importer closure ejects with it: {names:?}"
+        );
+    }
+
+    #[test]
+    fn mixed_embedded_lt_and_direct_ge_vite_is_not_worse_than_pre_fix() {
+        // Embedded vite<8.1 (astro→6.4.3) + a direct vite>=8.1 in one graph. The
+        // <8.1 copy seeds its closure via `vite_lt_8_1`, which re-adds "vite" to
+        // `names`; because the executor is NAME-keyed, "vite" materializes BOTH
+        // copies — identical to pre-fix (which ejected every vite too). Locks in
+        // that the prune never regresses the mixed case.
+        let g = graph(&[
+            ("astro@5.0.0", "astro", &[("vite", "6.4.3")]),
+            ("vite@6.4.3", "vite", &[]),
+            ("app@1.0.0", "app", &[("vite", "8.1.3")]),
+            ("vite@8.1.3", "vite", &[]),
+        ]);
+        let plan = plan_from_flags(&g, &["vite".to_string()], &[]);
+        let names: HashSet<&str> = plan.names.iter().map(String::as_str).collect();
+        assert!(names.contains("vite"), "name-keyed vite still materializes");
+        assert!(names.contains("astro"), "the <8.1 framework closure ejects");
     }
 
     #[test]
