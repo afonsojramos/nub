@@ -42,7 +42,7 @@ node scripts/ci-watch.ts --pr  <number> [--repo o/r] [--timeout <min>]
 - `--pr <number>` — watch a PR's check rollup (polls `gh pr view --json statusCheckRollup,…`).
 - `--repo <owner/repo>` — defaults to the current repo.
 - `--timeout <minutes>` — wall-clock cap before giving up as pending (default 45).
-- `--required <names>` — comma-separated branch-protection check names to gate on (e.g. `--required "CI gate"`). Success fires the instant every required check is green; any ghost / non-required pending check is non-blocking. The precise, hang-proof gate for a merge watcher — prefer it when you know the required check name.
+- `--required <names>` — comma-separated branch-protection check names to gate on (e.g. `--required "CI gate"`). Success fires the instant every required check is green; a ghost or a non-required check — pending *or* failed — never blocks, matching branch-protection semantics. The precise, hang-proof gate for a merge watcher — prefer it when you know the required check name.
 - `--no-progress <minutes>` — how long an unchanged incomplete set (all required/named checks already green, only a ghost left) may sit before exiting 4 STUCK-but-safe (default 8).
 
 What it fixes: **waits for the target to EXIST** (a not-found / no-jobs-yet target is "keep polling," never "done"); polls **authoritative** terminal state (`status == "completed"` / every required/named rollup item terminal+green); **fails fast** on the first FAILURE/CANCELLED/TIMED_OUT/STARTUP_FAILURE; **never hangs on a ghost** (see below); **tolerates transient** gh/API errors (retried with backoff, not treated as a run failure); uses gh's stored token implicitly (high rate limit) with exponential jittered backoff (10s → cap 60s, 90s if unauthenticated).

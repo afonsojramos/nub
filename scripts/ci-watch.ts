@@ -94,9 +94,10 @@ Flags:
   --timeout <minutes>   Max wall-clock before giving up as pending (default 45).
   --required <names>    Comma-separated branch-protection check names to gate on
                         (e.g. --required "CI gate"). Success fires as soon as
-                        every required check is green; ghost / non-required
-                        pending checks never block. The precise, hang-proof gate
-                        for a merge watcher.
+                        every required check is green; a ghost or a non-required
+                        check (pending OR failed) never blocks — branch
+                        protection doesn't gate on it. The precise, hang-proof
+                        gate for a merge watcher.
   --no-progress <min>   How long an UNCHANGED incomplete set (all required/named
                         checks already green, only a ghost remaining) may sit
                         before exiting 4 STUCK-but-safe (default 8).
@@ -155,6 +156,7 @@ function parseArgs(argv: string[]): Opts {
     } else if (a === "--required") {
       const csv = argv[++i] ?? die("--required requires a check name (or comma-separated list)");
       for (const n of csv.split(",").map((s) => s.trim()).filter(Boolean)) required.add(n);
+      if (required.size === 0) die("--required was given no non-empty check name");
     } else if (a === "--timeout") {
       timeoutMin = Number(argv[++i]);
       if (!Number.isFinite(timeoutMin) || timeoutMin <= 0) die("--timeout must be a positive number of minutes");
@@ -263,6 +265,7 @@ type Buckets = {
 };
 
 function classifyRollup(rollup: RollupItem[], required: Set<string>): Buckets {
+  const scoped = required.size > 0;
   const failures: string[] = [];
   const realPending: string[] = [];
   const ghosts: string[] = [];
@@ -270,23 +273,34 @@ function classifyRollup(rollup: RollupItem[], required: Set<string>): Buckets {
   for (const it of rollup) {
     const name = itemName(it);
     const st = itemState(it);
+    // In --required mode a NON-required check never blocks — pass OR fail. Branch
+    // protection doesn't gate on it, so a red optional check must not report
+    // FAILURE (that would refuse to merge a mergeable PR). It is non-blocking;
+    // a non-terminal one is surfaced as a ghost, a terminal one is ignored.
+    if (scoped && !required.has(name)) {
+      if (!st.terminal) ghosts.push(name || "(unnamed)");
+      continue;
+    }
     if (st.terminal) {
       if (st.failed) failures.push(name || "(unnamed)");
       else if (name) greenNamed++;
       continue;
     }
-    // Non-terminal. Nameless → ghost. In --required mode a NAMED but non-required
-    // pending check is also non-blocking (branch protection doesn't gate on it).
+    // Non-terminal required-or-any check. Nameless → ghost (the #327 ghost);
+    // named → a real pending check that genuinely gates.
     if (name === "") ghosts.push("(unnamed)");
-    else if (required.size > 0 && !required.has(name)) ghosts.push(name);
     else realPending.push(name);
   }
+  // A required check is satisfied only when EVERY occurrence of its name is
+  // terminal+green — a matrix / re-run can list the same name twice, and branch
+  // protection keys on the latest, so the first-match `find` would green-light a
+  // still-pending same-named check.
   const requiredMissing: string[] = [];
-  if (required.size > 0) {
+  if (scoped) {
     for (const rname of required) {
-      const found = rollup.find((it) => itemName(it) === rname);
-      const st = found ? itemState(found) : null;
-      if (!st || !st.terminal || st.failed) requiredMissing.push(rname);
+      const matches = rollup.filter((it) => itemName(it) === rname);
+      const allGreen = matches.length > 0 && matches.every((it) => { const st = itemState(it); return st.terminal && !st.failed; });
+      if (!allGreen) requiredMissing.push(rname);
     }
   }
   return { failures, realPending, ghosts, greenNamed, total: rollup.length, requiredMissing };
@@ -310,7 +324,7 @@ function verdictForBuckets(b: Buckets, hasRequired: boolean): Verdict {
   if (hasRequired) {
     if (b.requiredMissing.length > 0)
       return { kind: "pending", reason: `required check(s) not green: ${joinCapped(b.requiredMissing, 4)}`, ghostsOnly: false, realPending: b.requiredMissing, ghosts: b.ghosts, greenNamed: b.greenNamed };
-    return { kind: "success", reason: `all required check(s) green (${b.greenNamed}/${b.total} check(s) terminal+green)` };
+    return { kind: "success", reason: `all ${b.greenNamed} required check(s) green (of ${b.total} total; non-required checks non-blocking)` };
   }
   if (b.realPending.length > 0)
     return { kind: "pending", reason: `${b.realPending.length} check(s) pending: ${joinCapped(b.realPending, 4)}`, ghostsOnly: false, realPending: b.realPending, ghosts: b.ghosts, greenNamed: b.greenNamed };
@@ -367,16 +381,22 @@ function signatureOf(v: Verdict): string {
 
 type Timing = { lastSig: string | null; lastProgressAt: number };
 
-// Decide, for a PENDING verdict, whether the watch may keep waiting or must exit
-// now with an actionable verdict — the anti-hang core. Returns null to keep
-// polling, or a terminal {code, summary}. Kept pure (no gh, no clock, no sleep)
-// so the #327 ghost shape is unit-testable without real time or network.
+// Decide whether the watch may keep waiting or must exit now with an actionable
+// verdict — the anti-hang core. Returns null to keep polling, or a terminal
+// {code, summary}. Kept pure (no gh, no clock, no sleep) so the #327 ghost shape
+// is unit-testable without real time or network.
+//
+// `v` is the LAST pending verdict, or null when no successful poll has produced
+// one yet (a gh-failure streak from the start). Called EVERY iteration, including
+// on a failed poll — the deadline/chunk caps must fire even during a transient-gh
+// streak, or a `--chunk` invocation can blow past the Bash-tool timeout and be
+// killed mid-watch.
 //   exit 4 — ghostsOnly persisted past the no-progress window OR the overall
 //            deadline hit with only ghosts left: required/named green, safe.
 //   exit 2 — chunk cap hit (RERUN) or overall deadline hit with a REAL/required
-//            check still pending: genuinely not green, NOT safe to merge.
+//            check still pending (or no status ever resolved): NOT safe to merge.
 function resolvePendingExit(
-  v: Verdict & { kind: "pending" },
+  v: (Verdict & { kind: "pending" }) | null,
   label: string,
   now: number,
   timing: Timing,
@@ -384,14 +404,14 @@ function resolvePendingExit(
 ): { code: number; summary: string } | null {
   const stuckSafe = () => ({
     code: 4,
-    summary: `CI-WATCH ${label}: STUCK — required/named checks GREEN (${v.greenNamed}), ${v.ghosts.length} non-terminal ghost/non-required check(s): ${joinCapped(v.ghosts, 4)}; safe to --admin merge`,
+    summary: `CI-WATCH ${label}: STUCK — required/named checks GREEN (${v ? v.greenNamed : 0}), ${v ? v.ghosts.length : 0} non-terminal ghost/non-required check(s): ${joinCapped(v ? v.ghosts : [], 4)}; safe to --admin merge`,
   });
 
   // A ghost that will never report must not park the watcher forever: once the
   // incomplete set has been UNCHANGED for the no-progress window (all real checks
   // already green), stop and surface it. Progress (a new named check registering)
   // resets lastProgressAt in the caller, so this only fires on a genuine stall.
-  if (v.ghostsOnly && now - timing.lastProgressAt >= cfg.noProgressMs) return stuckSafe();
+  if (v && v.ghostsOnly && now - timing.lastProgressAt >= cfg.noProgressMs) return stuckSafe();
 
   // Chunk cap: sub-agent foreground loop — exit 2 with a RERUN message so it loops.
   if (cfg.chunkDeadline !== null && now > cfg.chunkDeadline) {
@@ -399,10 +419,11 @@ function resolvePendingExit(
   }
 
   // Overall deadline: only-ghosts-left is STUCK-but-safe (exit 4); a real/required
-  // check still pending after the full timeout is genuinely stuck (exit 2).
+  // check still pending (or nothing resolved) after the full timeout is exit 2.
   if (now > cfg.deadline) {
-    if (v.ghostsOnly) return stuckSafe();
-    return { code: 2, summary: `CI-WATCH ${label}: TIMEOUT — required/named check(s) NOT green after ${cfg.timeoutMin}min: ${joinCapped(v.realPending, 4)}` };
+    if (v && v.ghostsOnly) return stuckSafe();
+    const pending = v && v.realPending.length > 0 ? joinCapped(v.realPending, 4) : "no check status resolved";
+    return { code: 2, summary: `CI-WATCH ${label}: TIMEOUT — required/named check(s) NOT green after ${cfg.timeoutMin}min: ${pending}` };
   }
   return null;
 }
@@ -436,11 +457,16 @@ async function watch(opts: Opts): Promise<{ code: number; summary: string }> {
   const deadline = Date.now() + opts.timeoutMin * 60_000;
   const chunkDeadline = opts.chunkMin !== null ? Date.now() + opts.chunkMin * 60_000 : null;
   const noProgressMs = opts.noProgressMin * 60_000;
+  const cfg = { deadline, chunkDeadline, noProgressMs, chunkMin: opts.chunkMin, timeoutMin: opts.timeoutMin };
   let delay = 10_000;
   let consecutiveErrors = 0;
   // Tracks whether the incomplete-check set is still changing — a stuck ghost is
   // only "given up on" after the set has been unchanged for the no-progress window.
   const timing: Timing = { lastSig: null, lastProgressAt: Date.now() };
+  // The last pending verdict a successful poll produced. Retained so the deadline
+  // check below can run — and message accurately — even on an iteration whose poll
+  // failed transiently (null until the first successful poll).
+  let lastPending: (Verdict & { kind: "pending" }) | null = null;
 
   for (;;) {
     const out = ghTry(viewArgs);
@@ -460,17 +486,20 @@ async function watch(opts: Opts): Promise<{ code: number; summary: string }> {
         const url = ghTry(opts.mode === "run" ? ["run", "view", opts.target, ...repoArgs(opts.repo), "--json", "url", "--jq", ".url"] : ["pr", "view", opts.target, ...repoArgs(opts.repo), "--json", "url", "--jq", ".url"]);
         return { code: 1, summary: `CI-WATCH ${label}: FAILURE — ${v.reason}${url ? ` (${url})` : ""}` };
       }
-      // pending: track progress, then let the pure resolver decide exit-vs-wait.
+      // pending: record it and mark progress when the incomplete set changes.
+      lastPending = v;
       const sig = signatureOf(v);
-      const now = Date.now();
       if (sig !== timing.lastSig) {
         timing.lastSig = sig;
-        timing.lastProgressAt = now;
+        timing.lastProgressAt = Date.now();
       }
-      const exit = resolvePendingExit(v, label, now, timing, { deadline, chunkDeadline, noProgressMs, chunkMin: opts.chunkMin, timeoutMin: opts.timeoutMin });
-      if (exit) return exit;
       process.stderr.write(`    … ${v.reason}\n`);
     }
+
+    // Deadline/ghost check runs EVERY iteration (even after a failed poll) so the
+    // overall timeout and the --chunk cap always fire on schedule.
+    const exit = resolvePendingExit(lastPending, label, Date.now(), timing, cfg);
+    if (exit) return exit;
 
     await sleep(delay);
     delay = nextDelay(delay, cap);

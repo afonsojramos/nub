@@ -106,3 +106,37 @@ test("chunk cap: exits 2 with a RERUN message when the chunk deadline passes (lo
   assert.equal(exit.code, 2);
   assert.match(exit.summary, /RERUN/);
 });
+
+// --- review-hardening: branch-protection-faithful --required + deadline-during-gh-streak ---
+
+test("--required mode: a FAILING non-required check does NOT block (branch-protection faithful)", () => {
+  const rollup = [check("CI gate", "SUCCESS"), check("optional lint", "FAILURE"), ghost()];
+  const v = classifyPr(JSON.stringify({ statusCheckRollup: rollup }), new Set(["CI gate"]));
+  assert.equal(v.kind, "success", "an optional red check must not refuse to merge a mergeable PR");
+});
+
+test("--required mode: a FAILING required check DOES block → exit 1 failure", () => {
+  const v = classifyPr(JSON.stringify({ statusCheckRollup: [check("CI gate", "FAILURE"), check("optional", "SUCCESS")] }), new Set(["CI gate"]));
+  assert.equal(v.kind, "failure");
+  assert.match(v.reason, /CI gate/);
+});
+
+test("--required mode: duplicate required name (first green, second pending) blocks — every occurrence must be green", () => {
+  const rollup = [check("CI gate", "SUCCESS"), { __typename: "CheckRun", name: "CI gate", status: "IN_PROGRESS", startedAt: "t" }];
+  const b = classifyRollup(rollup, new Set(["CI gate"]));
+  assert.deepEqual(b.requiredMissing, ["CI gate"], "a same-named still-running required check must not be green-lit");
+  assert.equal(verdictForBuckets(b, true).kind, "pending");
+});
+
+test("deadline fires during a gh-failure streak: null verdict past the overall deadline → exit 2, does not hang", () => {
+  const exit = resolvePendingExit(null, "pr 9", 10, { lastSig: null, lastProgressAt: 0 }, cfg({ deadline: 0 }));
+  assert.ok(exit, "a stalled poll must not wait forever");
+  assert.equal(exit.code, 2);
+  assert.match(exit.summary, /no check status resolved/);
+});
+
+test("deadline fires during a gh-failure streak: chunk cap on a null verdict → exit 2 RERUN", () => {
+  const exit = resolvePendingExit(null, "pr 9", 10, { lastSig: null, lastProgressAt: 0 }, cfg({ chunkDeadline: 0, chunkMin: 9 }));
+  assert.equal(exit.code, 2);
+  assert.match(exit.summary, /RERUN/);
+});
