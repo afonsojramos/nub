@@ -175,7 +175,7 @@ pub(super) fn reject_gvs_layout_contradiction(
 /// exactly where the link phase later reads it.
 ///
 /// For the isolated linker this is the *effective* mode
-/// ([`effective_global_virtual_store`]), which folds in `hoist`: under the
+/// ([`Materialization::uses_shared_store`]), which folds in `hoist`: under the
 /// default `hoist=true` layout `Linker::link_all` recurses to
 /// `without_global_virtual_store` and materializes per-project, so the
 /// prewarm must too. Feeding the prewarm the raw (hoist-unaware) override
