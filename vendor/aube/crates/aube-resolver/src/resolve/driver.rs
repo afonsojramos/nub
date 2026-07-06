@@ -106,6 +106,15 @@ pub(crate) struct ResolveDriver<'a> {
     /// (i.e. wave 0 of direct deps hasn't finished). Re-enqueued in
     /// FIFO order once the cutoff fires.
     deferred_transitives: Vec<ResolveTask>,
+    /// Auto-installed (`auto-install-peers=true`) transitive peers, parked
+    /// until the ENTIRE main tree has resolved and drained in the
+    /// queue-empty branch of `bfs_loop`. Mirrors pnpm's peer hoist as a
+    /// second phase: a missing peer binds to the highest ALREADY-RESOLVED
+    /// version satisfying its range, never the registry-wide highest — so a
+    /// wildcard/loose peer resolved before the hard deps that constrain it
+    /// can't drag a major nothing depends on into the graph (the Expo/RN
+    /// `@babel/core` 8-vs-7 break). Full rationale at the drain site.
+    deferred_auto_peers: Vec<ResolveTask>,
 
     /// ISO-8601 UTC cutoff string used by the version picker. Seeded
     /// from `minimum_release_age` for supply-chain mitigation;
@@ -265,6 +274,7 @@ impl<'a> ResolveDriver<'a> {
             failed_fetches: FxHashMap::default(),
             catalog_picks: BTreeMap::new(),
             deferred_transitives: Vec::new(),
+            deferred_auto_peers: Vec::new(),
             published_by,
             time_cutoff: None,
             age_gate_cutoff,
@@ -418,6 +428,26 @@ impl<'a> ResolveDriver<'a> {
                             self.deferred_transitives.len()
                         ),
                     ));
+                }
+                // Main tree fully resolved: bind the parked auto-installed
+                // peers against the complete preferred pool, one at a time so a
+                // genuinely-missing peer that must hit the registry contributes
+                // its own transitives (and nested peers) back before the next
+                // is bound. `try_peer_reuse` reuses the highest already-resolved
+                // satisfying version; a peer nothing satisfies (or one whose
+                // range is a `catalog:`/`npm:` spec that fails the semver check)
+                // falls through to `process_task` via `queue`, which applies
+                // the catalog/alias/override rewrites. We deliberately do NOT
+                // pre-apply overrides to the reuse path: pnpm applies a
+                // `parent>child` override to a real dependency edge (which
+                // seeds `resolved_versions`, so the peer already reuses the
+                // overridden version) but NOT to a peer edge, so reusing the
+                // raw range here matches pnpm — verified empirically.
+                if let Some(peer_task) = self.deferred_auto_peers.pop() {
+                    if !self.try_peer_reuse(&peer_task) {
+                        self.queue.push_back(peer_task);
+                    }
+                    continue;
                 }
                 return Ok(());
             };
@@ -1177,8 +1207,10 @@ impl<'a> ResolveDriver<'a> {
         // for aliased packages where `name` alone (`h3-v2`)
         // would 404.
         if let Some(ref tx) = self.resolver.resolved_tx {
-            let pending =
-                self.queue.len() + self.fetcher.in_flight_count() + self.deferred_transitives.len();
+            let pending = self.queue.len()
+                + self.fetcher.in_flight_count()
+                + self.deferred_transitives.len()
+                + self.deferred_auto_peers.len();
             let _ = tx
                 .send(ResolvedPackage {
                     dep_path: dep_path.clone(),
@@ -1533,7 +1565,11 @@ impl<'a> ResolveDriver<'a> {
                 {
                     self.ensure_fetch(dep_name);
                 }
-                self.queue.push_back(ResolveTask::transitive(
+                // Park, don't enqueue: bound only after the main tree drains
+                // (see `deferred_auto_peers` / the drain in `bfs_loop`), so the
+                // peer reuses an already-resolved version instead of racing the
+                // hard deps and pulling in a registry-highest major.
+                self.deferred_auto_peers.push(ResolveTask::transitive(
                     dep_name.clone(),
                     dep_range.clone(),
                     DepType::Production,
@@ -1792,7 +1828,8 @@ impl<'a> ResolveDriver<'a> {
             if let Some(ref tx) = self.resolver.resolved_tx {
                 let pending = self.queue.len()
                     + self.fetcher.in_flight_count()
-                    + self.deferred_transitives.len();
+                    + self.deferred_transitives.len()
+                    + self.deferred_auto_peers.len();
                 let _ = tx
                     .send(ResolvedPackage {
                         dep_path: dep_path.clone(),
@@ -2208,7 +2245,8 @@ impl<'a> ResolveDriver<'a> {
             if let Some(ref tx) = self.resolver.resolved_tx {
                 let pending = self.queue.len()
                     + self.fetcher.in_flight_count()
-                    + self.deferred_transitives.len();
+                    + self.deferred_transitives.len()
+                    + self.deferred_auto_peers.len();
                 let _ = tx
                     .send(ResolvedPackage {
                         dep_path: dep_path.clone(),
@@ -2355,6 +2393,40 @@ impl<'a> ResolveDriver<'a> {
             return false;
         };
         self.link_to_existing_version(task, &matched_ver);
+        true
+    }
+
+    /// Bind a parked auto-installed peer to the HIGHEST already-resolved
+    /// version satisfying its range — pnpm's `maxSatisfying(preferredVersions,
+    /// range)` for a hoisted missing peer. Distinct from `try_sibling_dedupe`
+    /// (first-satisfying): a `*` peer must pick the tallest resolved major the
+    /// graph actually settled on, matching what pnpm hoists, rather than
+    /// whichever happened to resolve first. Runs only in the drain phase, when
+    /// `resolved_versions` holds the full preferred pool. Returns false when
+    /// nothing resolved satisfies the range — a genuinely missing peer the
+    /// caller then routes to the registry fetch path.
+    fn try_peer_reuse(&mut self, task: &ResolveTask) -> bool {
+        let Some(best) = self.resolved_versions.get(&task.name).and_then(|versions| {
+            versions
+                .iter()
+                .filter(|v| {
+                    version_satisfies(v, &task.range)
+                        && !is_vulnerable(task.registry_name(), v, &self.resolver.vulnerable_ranges)
+                })
+                .max_by(|a, b| {
+                    match (
+                        node_semver::Version::parse(a),
+                        node_semver::Version::parse(b),
+                    ) {
+                        (Ok(av), Ok(bv)) => av.cmp(&bv),
+                        _ => a.as_str().cmp(b.as_str()),
+                    }
+                })
+                .cloned()
+        }) else {
+            return false;
+        };
+        self.link_to_existing_version(task, &best);
         true
     }
 }

@@ -787,3 +787,53 @@ fn frozen_install_with_trust_downgrade_still_aborts() {
         "no package may be linked when the trust gate aborts resolution"
     );
 }
+
+/// Regression (Expo/RN out-of-box failure): an auto-installed WILDCARD peer
+/// must bind to a major already present in the resolved graph, never a
+/// registry-highest major nothing declared a dependency on.
+///
+/// `react-native-worklets@0.10.1` declares `@babel/core: "*"` as a peer with
+/// no co-declared dependency, while `react-native@0.86.0` hard-deps
+/// `@babel/core: "^7.25.2"` (→ a 7.x). pnpm binds the `*` peer to that 7.x.
+/// nub used to resolve the auto-installed peer inline mid-BFS, racing the hard
+/// dep; when the peer won it fetched the registry-highest `@babel/core` (8.x)
+/// that no range asked for, so Metro's Worklets babel plugin rejected the tree
+/// (`Requires Babel "^7.0.0-0", but was loaded with "8.0.1"`) and `expo
+/// export` failed. The fix parks auto-installed peers until the tree resolves,
+/// so the peer reuses the graph's 7.x. Assert no `@babel/core` 8.x lands.
+#[test]
+#[ignore = "network: installs react-native + react-native-worklets from the npm registry"]
+fn wildcard_peer_binds_resolved_major_not_registry_highest() {
+    if !registry_reachable() {
+        eprintln!("skipping: registry.npmjs.org unreachable");
+        return;
+    }
+    let dir = pm_tmpdir("wildcard-peer");
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"wp","version":"1.0.0","dependencies":{"react-native":"0.86.0","react-native-worklets":"0.10.1"}}"#,
+    )
+    .unwrap();
+
+    let (stdout, stderr, code) = run_install(&dir, &["install"]);
+    assert_eq!(code, 0, "install must succeed: {stdout}{stderr}");
+
+    // The isolated store keys every resolved version as `@babel+core@<ver>`;
+    // @babel/core declares no peers so its own dirs carry no peer suffix.
+    let store = dir.join("node_modules/.nub");
+    let babel_majors: Vec<String> = std::fs::read_dir(&store)
+        .expect("virtual store must exist under node_modules/.nub")
+        .filter_map(|e| e.ok())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter_map(|n| n.strip_prefix("@babel+core@").map(str::to_string))
+        .collect();
+    assert!(
+        !babel_majors.is_empty(),
+        "react-native hard-deps @babel/core, so a version must resolve: {stderr}"
+    );
+    assert!(
+        babel_majors.iter().all(|v| v.starts_with("7.")),
+        "the `*` @babel/core peer must reuse the resolved 7.x, never introduce \
+         a higher major; store held: {babel_majors:?}"
+    );
+}
