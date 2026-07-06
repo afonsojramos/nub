@@ -476,7 +476,7 @@ Add your own with one line in `.npmrc`:
 forceMaterializePackages[]=my-adapter
 ```
 
-A bundler that resolves modules by their real path — Metro (bare React Native), Next.js, Nuxt, Parcel — only crawls the project directory, so it can't see the shared store. Nub gives those projects a self-contained, project-local store automatically. Extend the list in `.npmrc`:
+A bundler that resolves modules by their real path — Metro (bare React Native), Next.js, Parcel — only crawls the project directory, so it can't see the shared store. Nub gives those projects a self-contained, project-local store automatically. Extend the list in `.npmrc`:
 
 ```ini
 disableGlobalVirtualStoreForPackages[]=my-bundler
