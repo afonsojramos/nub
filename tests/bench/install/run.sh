@@ -24,7 +24,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
-NUB="$REPO_ROOT/target/release/nub"
+NUB="${NUB:-$REPO_ROOT/target/release/nub}"
 FIXTURE_DIR="$REPO_ROOT/tests/bench/install/fixtures"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 
@@ -36,9 +36,10 @@ trap cleanup_trash EXIT
 
 # Empty npmrc so a host ~/.npmrc can't redirect fetches (e.g. custom registry=).
 EMPTY_NPMRC="$TRASH_DIR/empty.npmrc"
-touch "$EMPTY_NPMRC"
+EMPTY_NPMRC_GLOBAL="$TRASH_DIR/empty-global.npmrc"
+touch "$EMPTY_NPMRC" "$EMPTY_NPMRC_GLOBAL"
 export NPM_CONFIG_USERCONFIG="$EMPTY_NPMRC"
-export NPM_CONFIG_GLOBALCONFIG="$EMPTY_NPMRC"
+export NPM_CONFIG_GLOBALCONFIG="$EMPTY_NPMRC_GLOBAL"
 
 RUN_WARM=1
 RUN_COLD=1
@@ -162,9 +163,9 @@ setup_workdir() {
 nub_install() {
   local wd="$1"; shift
   if [[ $MATERIALIZED -eq 1 ]]; then
-    CI=1 "$NUB" install --frozen-lockfile --cwd "$wd" "$@"
+    CI=1 "$NUB" --cwd "$wd" install --frozen-lockfile "$@"
   else
-    env -u CI "$NUB" install --frozen-lockfile --cwd "$wd" "$@"
+    env -u CI "$NUB" --cwd "$wd" install --frozen-lockfile "$@"
   fi
 }
 
@@ -229,9 +230,9 @@ run_warm() {
   # nub install command, GVS pinned via CI env. Single-quote-safe.
   local nub_cmd
   if [[ $MATERIALIZED -eq 1 ]]; then
-    nub_cmd="CI=1 '$NUB' install --frozen-lockfile --cwd '$WD_NUB' -s"
+    nub_cmd="CI=1 '$NUB' --cwd '$WD_NUB' install --frozen-lockfile -s"
   else
-    nub_cmd="env -u CI '$NUB' install --frozen-lockfile --cwd '$WD_NUB' -s"
+    nub_cmd="env -u CI '$NUB' --cwd '$WD_NUB' install --frozen-lockfile -s"
   fi
 
   # Run nub and pnpm together for direct comparison. Per-command --prepare so
