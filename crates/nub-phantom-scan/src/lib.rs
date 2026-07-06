@@ -266,6 +266,56 @@ mod tests {
     }
 
     #[test]
+    fn extensionless_and_directory_main_are_scanned() {
+        // Regression (the @vercel/static-build shape): a package whose `main` has
+        // no file extension (`"./dist/index"`) or points at a directory
+        // (`"./dist"`) must still be scanned. Before the entry-candidate fix the
+        // `is_js_like`-only gate dropped these mains → `files_analyzed: 0` → the
+        // phantom `require('@vercel/build-utils')` inside `dist/index.js` was never
+        // seen, so the package silently ejected nothing and broke at runtime.
+        let build = |main: &str| {
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static SEQ: AtomicU32 = AtomicU32::new(0);
+            let root = std::env::temp_dir().join(format!(
+                "nub-phantom-scan-extless-{}-{}",
+                std::process::id(),
+                SEQ.fetch_add(1, Ordering::Relaxed)
+            ));
+            let _ = fs::remove_dir_all(&root);
+            fs::create_dir_all(root.join("dist")).unwrap();
+            fs::write(
+                root.join("package.json"),
+                format!(r#"{{"name":"pkg","main":"{main}","dependencies":{{"react":"*"}}}}"#),
+            )
+            .unwrap();
+            fs::write(
+                root.join("dist/index.js"),
+                "const b = require('undeclared-phantom'); require('react');",
+            )
+            .unwrap();
+            root
+        };
+
+        for main in ["./dist/index", "./dist"] {
+            let root = build(main);
+            let r = scan_extracted(&root).unwrap();
+            assert!(
+                r.files_analyzed > 0,
+                "main {main:?}: entry must resolve and scan (files_analyzed > 0)"
+            );
+            assert!(
+                r.has_unguarded_phantom,
+                "main {main:?}: undeclared-phantom must be flagged"
+            );
+            assert!(
+                r.targets.iter().any(|t| t.name == "undeclared-phantom"),
+                "main {main:?}: phantom target present"
+            );
+            let _ = fs::remove_dir_all(&root);
+        }
+    }
+
+    #[test]
     fn scan_index_is_output_identical_to_scan_extracted() {
         // The hard requirement: an extract-time index scan yields the exact same
         // verdict + target set + file count as a post-link tree scan. Uses the

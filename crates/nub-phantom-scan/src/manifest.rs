@@ -108,9 +108,10 @@ fn collect_bundled(v: &Value, out: &mut BTreeSet<String>) {
 }
 
 /// Gather the published entry files from `main`, `module`, `bin`, and `exports`,
-/// each tagged Main or Subpath. Only JS-like relative paths are kept;
-/// `types`/`.d.ts` and asset conditions are filtered (they carry no runtime
-/// imports).
+/// each tagged Main or Subpath. A recognized JS file is kept directly; an
+/// extensionless / directory-style target (`"./dist/index"`, `"./dist"`) is kept
+/// as a candidate and resolved Node-style by the graph walk; `types`/`.d.ts` and
+/// asset conditions carry no runtime imports and are filtered.
 fn collect_entry_points(v: &Value) -> Vec<Entry> {
     // Dedup on (kind, path) so a file exported at both `.` and a subpath seeds
     // both surfaces into the walk.
@@ -120,7 +121,7 @@ fn collect_entry_points(v: &Value) -> Vec<Entry> {
         |p: &str, kind: EntryKind, out: &mut Vec<Entry>, seen: &mut BTreeSet<(u8, String)>| {
             let norm = normalize_rel(p);
             let key = (kind as u8, norm.clone());
-            if is_js_like(&norm) && seen.insert(key) {
+            if is_entry_candidate(&norm) && seen.insert(key) {
                 out.push(Entry { path: norm, kind });
             }
         };
@@ -210,6 +211,20 @@ fn normalize_rel(p: &str) -> String {
         .to_string()
 }
 
+/// Whether a `main`/`module`/`bin`/`exports` target should SEED the reachable
+/// walk. Admits a recognized JS file (parsed directly) OR an EXTENSIONLESS /
+/// directory-style target — Node resolves `"./dist/index"` → `./dist/index.js`
+/// and `"./dist"` → `./dist/index.js` at runtime, and the graph walk's
+/// `resolve_entry` runs that SAME ladder, so on-disk resolution is deferred to
+/// it (a path that resolves to nothing is simply never analyzed — no false
+/// entry). A non-JS asset/type extension (`.json`/`.node`/`.wasm`/`.css`, a
+/// `.d.ts` stub) carries no analyzable imports, so it is dropped here and never
+/// costs a resolver probe. The `is_js_like`-only gate this replaced dropped
+/// extensionless mains outright → `files_analyzed: 0` → every phantom missed.
+fn is_entry_candidate(path: &str) -> bool {
+    is_js_like(path) || extension(path).is_none()
+}
+
 /// A JS-like runtime file (extension we can parse for imports). Excludes `.json`,
 /// `.node`, `.wasm`, `.css`, and `.d.ts` type stubs.
 pub fn is_js_like(path: &str) -> bool {
@@ -274,5 +289,44 @@ mod tests {
             super::EntryKind::Subpath
         );
         assert!(!m.entry_points.iter().any(|e| e.path.contains(".d.ts")));
+    }
+
+    #[test]
+    fn keeps_extensionless_and_directory_entries_drops_asset_mains() {
+        // The recall bug: an extensionless `main` (Node resolves `./dist/index`
+        // → `./dist/index.js`) must survive as a candidate for the graph walk to
+        // resolve — not be dropped for lacking a literal JS extension. A
+        // directory-style main is the same shape. `.json`/`.node`/`.d.ts` targets
+        // carry no analyzable imports and stay filtered.
+        let has = |m: &Manifest, p: &str| m.entry_points.iter().any(|e| e.path == p);
+
+        let ext = Manifest::parse(br#"{"name":"p","main":"./dist/index"}"#).unwrap();
+        assert!(
+            has(&ext, "dist/index"),
+            "extensionless main kept as candidate"
+        );
+
+        let dir = Manifest::parse(br#"{"name":"p","main":"./dist"}"#).unwrap();
+        assert!(has(&dir, "dist"), "directory-style main kept as candidate");
+
+        let json = Manifest::parse(br#"{"name":"p","main":"./data.json"}"#).unwrap();
+        assert!(
+            !has(&json, "data.json"),
+            ".json main dropped (not analyzable)"
+        );
+        // No entry survived → the entry-less fallback (`index.js`) seeds instead.
+        assert_eq!(json.entry_points.len(), 1);
+        assert_eq!(json.entry_points[0].path, "index.js");
+
+        let native = Manifest::parse(br#"{"name":"p","main":"./addon.node"}"#).unwrap();
+        assert!(!has(&native, "addon.node"), ".node main dropped");
+
+        // Extensionless conditional target inside an `exports` map is admitted too.
+        let exp = Manifest::parse(
+            br#"{"name":"p","exports":{".":{"import":"./dist/index","types":"./dist/index.d.ts"}}}"#,
+        )
+        .unwrap();
+        assert!(has(&exp, "dist/index"), "extensionless exports target kept");
+        assert!(!exp.entry_points.iter().any(|e| e.path.contains(".d.ts")));
     }
 }
