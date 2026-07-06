@@ -42,8 +42,14 @@ node scripts/ci-watch.ts --pr  <number> [--repo o/r] [--timeout <min>]
 - `--pr <number>` — watch a PR's check rollup (polls `gh pr view --json statusCheckRollup,…`).
 - `--repo <owner/repo>` — defaults to the current repo.
 - `--timeout <minutes>` — wall-clock cap before giving up as pending (default 45).
+- `--required <names>` — comma-separated branch-protection check names to gate on (e.g. `--required "CI gate"`). Success fires the instant every required check is green; any ghost / non-required pending check is non-blocking. The precise, hang-proof gate for a merge watcher — prefer it when you know the required check name.
+- `--no-progress <minutes>` — how long an unchanged incomplete set (all required/named checks already green, only a ghost left) may sit before exiting 4 STUCK-but-safe (default 8).
 
-What it fixes: **waits for the target to EXIST** (a not-found / no-jobs-yet target is "keep polling," never "done"); polls **authoritative** terminal state (`status == "completed"` / all rollup items terminal); **fails fast** on the first FAILURE/CANCELLED/TIMED_OUT/STARTUP_FAILURE; **tolerates transient** gh/API errors (retried with backoff, not treated as a run failure); uses gh's stored token implicitly (high rate limit) with exponential jittered backoff (10s → cap 60s, 90s if unauthenticated).
+What it fixes: **waits for the target to EXIST** (a not-found / no-jobs-yet target is "keep polling," never "done"); polls **authoritative** terminal state (`status == "completed"` / every required/named rollup item terminal+green); **fails fast** on the first FAILURE/CANCELLED/TIMED_OUT/STARTUP_FAILURE; **never hangs on a ghost** (see below); **tolerates transient** gh/API errors (retried with backoff, not treated as a run failure); uses gh's stored token implicitly (high rate limit) with exponential jittered backoff (10s → cap 60s, 90s if unauthenticated).
+
+### The #327 ghost — why a strict "all checks terminal" gate hangs
+
+GitHub occasionally registers a check-run that never reports a status: it stays PENDING, nameless, forever. A watcher that waits for *every* rollup item to be terminal then blocks indefinitely even though every real check is green — PR [#327](https://github.com/nubjs/nub/issues/327) sat reviewed-and-green for hours this way, its merge watcher parked on one nameless ghost. The fix: a nameless / never-terminating non-required check does not block a green verdict. Once every named check is green and the incomplete set has been unchanged for `--no-progress` minutes, the watcher exits **4 (STUCK-but-safe)** with an actionable summary — the caller `--admin` merges instead of hanging. A *named* pending check is never treated as a ghost, so a real in-flight check is never green-lit early.
 
 ### Exit-code contract
 
@@ -51,10 +57,11 @@ What it fixes: **waits for the target to EXIST** (a not-found / no-jobs-yet targ
 | ---- | ------- |
 | 0 | completed AND all green |
 | 1 | a check/job failed (the summary names which + the URL) |
-| 2 | still pending after `--timeout` |
+| 2 | required/named checks still NOT green after `--timeout` (genuinely stuck) |
 | 3 | usage / target-unresolvable / unrecoverable error |
+| 4 | STUCK-but-safe — required/named checks all green, but a ghost check will never terminate; safe to `--admin` merge (the caller decides) |
 
-The final stdout line is a single self-describing summary, e.g. `CI-WATCH run 27972328590: SUCCESS (25 job(s) green)` or `CI-WATCH pr 73: FAILURE — check "Test (ubuntu-latest, node 22.13)" → FAILURE (https://…)`.
+The final stdout line is a single self-describing summary, e.g. `CI-WATCH run 27972328590: SUCCESS (25 job(s) green)`, `CI-WATCH pr 73: FAILURE — check "Test (ubuntu-latest, node 22.13)" → FAILURE (https://…)`, or `CI-WATCH pr 327: STUCK — required/named checks GREEN (51), 1 non-terminal ghost/non-required check(s): (unnamed); safe to --admin merge`.
 
 ### Run it detached (CAVEAT: a long wait STRANDS — see the cron-heartbeat section below; this is for SHORT, synchronously-observed gates only)
 
