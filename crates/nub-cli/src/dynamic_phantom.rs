@@ -21,7 +21,12 @@
 //! ejected project-local through #319's graph-aware materialization plan. This
 //! module is the PRODUCER (scan + sidecar) half; `phantom_closure` is the
 //! consumer half. The two share [`store_v1_dir`]/[`phantom_cache_dir`] so their
-//! store handle and sidecar path derive from ONE base and cannot drift apart.
+//! store handle and sidecar path derive from ONE base, and both build the sidecar
+//! path through the single [`sidecar_path`] helper, so the fingerprint keying and
+//! the scanner-version segment cannot drift apart. The sidecar path folds
+//! [`PHANTOM_SCANNER_VERSION`] so a scanner-logic improvement re-scans already
+//! cached content instead of serving the stale verdict its immutable bytes would
+//! otherwise key forever.
 //!
 //! With the opt-out set (`NUB_DYNAMIC_PHANTOM_EJECT=0`) this module registers
 //! nothing — no extract hook — so the install path is byte-identical to a build
@@ -101,13 +106,20 @@ pub fn register() {
 /// coupling) to seed the disk-materialize closure.
 fn scan_and_cache(dir: &Path, index: &PackageIndex) {
     let fingerprint = index_content_fingerprint(index);
-    let sidecar = dir.join(format!("{fingerprint}.json"));
-    // Cross-process / warm cache hit: this exact content was already scanned.
-    // The verdict is a pure function of the immutable bytes, so a concurrent
+    let sidecar = sidecar_path(dir, &fingerprint);
+    // Cross-process / warm cache hit: this exact content was already scanned
+    // UNDER THE CURRENT SCANNER VERSION (the version is in `sidecar`'s path, so a
+    // scanner bump makes this `exists()` false and forces a re-scan). The verdict
+    // is a pure function of the immutable bytes + scanner logic, so a concurrent
     // first-writer race is benign (identical result) — skip the redundant scan.
     if sidecar.exists() {
         return;
     }
+    // The versioned subdir (`sidecar`'s parent) is where both the temp and the
+    // final sidecar live, so the atomic rename stays within one directory.
+    let Some(subdir) = sidecar.parent() else {
+        return;
+    };
 
     // `StoredFile.store_path` is the absolute CAS blob; the scanner resolves the
     // reachable graph over the relpath key set and reads content from the blobs.
@@ -123,7 +135,7 @@ fn scan_and_cache(dir: &Path, index: &PackageIndex) {
         return;
     };
     if let Ok(bytes) = serde_json::to_vec(&result) {
-        let _ = std::fs::create_dir_all(dir);
+        let _ = std::fs::create_dir_all(subdir);
         // Atomic publish: write a per-call-unique temp then rename, so a
         // concurrent installer's linker never observes a half-written sidecar.
         // (The reader already degrades a torn read to "no eject" and self-heals,
@@ -135,7 +147,7 @@ fn scan_and_cache(dir: &Path, index: &PackageIndex) {
         // last-writer-wins and byte-identical.
         static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let tmp = dir.join(format!("{fingerprint}.{}.{seq}.tmp", std::process::id()));
+        let tmp = subdir.join(format!("{fingerprint}.{}.{seq}.tmp", std::process::id()));
         if std::fs::write(&tmp, &bytes).is_ok() && std::fs::rename(&tmp, &sidecar).is_err() {
             let _ = std::fs::remove_file(&tmp);
         }
@@ -161,6 +173,48 @@ pub(crate) fn store_v1_dir() -> Option<PathBuf> {
 /// producer writes.
 pub(crate) fn phantom_cache_dir() -> Option<PathBuf> {
     Some(store_v1_dir()?.join("phantom"))
+}
+
+/// The phantom scanner's LOGIC version — BUMP on ANY change to the scanner's
+/// detection logic (`nub-phantom-scan`'s extract / specifier / classify passes:
+/// a new heuristic like R3 createRequire/template detection, a changed
+/// classification, a fixed miss). Sidecars are keyed by content fingerprint AND
+/// this version (it is a path segment, see [`sidecar_path`]), so a version's
+/// immutable bytes — which hash to the same fingerprint forever — are re-scanned
+/// after a bump instead of serving a stale verdict: the bump makes every prior
+/// sidecar's path unreachable, so the extract hook + [`backfill_from_lockfile`]
+/// write fresh verdicts under the new version and the old-version sidecars are
+/// ignored (GC-able). Forgetting to bump when the logic changes reintroduces the
+/// exact forward-compat gap this segment closes. Starts at 1 for the post-R3
+/// scanner: there is no prior VERSIONED scheme to migrate from, and any
+/// pre-versioning flat `phantom/<fingerprint>.json` sidecar (only ever written
+/// into ephemeral dev/CI caches — the eject default has not shipped in a release)
+/// is unreachable from the `s<N>/` path, so it is ignored and simply re-scanned.
+///
+/// WHEN YOU BUMP THIS: a bump re-scans and re-writes sidecars, but on a WARM tree
+/// with an unchanged lockfile + flag the link phase is skipped unless the
+/// install-state token changes — so the improved verdict is written but not
+/// APPLIED to `node_modules` until an unrelated relink. To make a bump actually
+/// re-materialize, fold this constant into [`settings_fingerprint`] (which today
+/// folds only the on/off flag) so the bump invalidates the warm tree. That fold
+/// forces a one-time global relink on upgrade — a user-visible behavior call
+/// deferred to the bump PR (out of scope for the version-1 scaffold, whose logic
+/// is unchanged so no warm tree needs re-materializing).
+pub(crate) const PHANTOM_SCANNER_VERSION: u32 = 1;
+
+/// THE single source of truth for a phantom sidecar's location: the versioned
+/// subdir `<phantom_cache_dir>/s<PHANTOM_SCANNER_VERSION>/<fingerprint>.json`.
+/// Both halves derive their path HERE — the extract-time PRODUCER
+/// ([`scan_and_cache`]) and the link-time CONSUMER
+/// ([`crate::pm_engine::phantom_closure`]) — so the fingerprint keying, the
+/// `.json` extension, AND the scanner-version segment stay in lockstep and cannot
+/// drift apart (a producer/consumer path disagreement would silently serve "no
+/// eject" for every package). `base` is the caller-resolved
+/// [`phantom_cache_dir`]; the version subdir keeps each scanner generation's
+/// sidecars grouped for wholesale GC of a superseded version.
+pub(crate) fn sidecar_path(base: &Path, fingerprint: &str) -> PathBuf {
+    base.join(format!("s{PHANTOM_SCANNER_VERSION}"))
+        .join(format!("{fingerprint}.json"))
 }
 
 /// Pre-install BACKFILL pass — the warm-store companion to the extract hook,
@@ -230,4 +284,24 @@ pub fn backfill_from_lockfile(project_dir: &Path) {
         };
         scan_and_cache(&sidecar_dir, &index);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The sidecar path MUST carry the scanner-version segment ahead of the
+    /// fingerprint file, so a version bump relocates every sidecar (making the old
+    /// verdict unreachable → a re-scan). Both halves derive through this one helper,
+    /// so asserting the format here pins the contract they share.
+    #[test]
+    fn sidecar_path_carries_scanner_version_segment() {
+        let base = Path::new("/store/v1/phantom");
+        let got = sidecar_path(base, "deadbeef");
+        assert_eq!(
+            got,
+            base.join(format!("s{PHANTOM_SCANNER_VERSION}"))
+                .join("deadbeef.json")
+        );
+    }
 }

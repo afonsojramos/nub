@@ -222,7 +222,14 @@ fn dynamic_phantom_flags(graph: &LockfileGraph) -> Vec<(String, String, Vec<Stri
             let index =
                 store.load_index(pkg.registry_name(), &pkg.version, pkg.integrity.as_deref())?;
             let fingerprint = aube_store::index_content_fingerprint(&index);
-            let bytes = std::fs::read(sidecar_dir.join(format!("{fingerprint}.json"))).ok()?;
+            // Derive the sidecar path through the SAME helper the producer writes
+            // with, so the fingerprint keying and the scanner-version segment
+            // cannot drift between the two halves.
+            let bytes = std::fs::read(crate::dynamic_phantom::sidecar_path(
+                &sidecar_dir,
+                &fingerprint,
+            ))
+            .ok()?;
             // nub-cli CAN depend on the scanner crate, so the sidecar deserializes
             // straight into the typed `ScanResult` (no cross-fork string coupling).
             let result: ScanResult = serde_json::from_slice(&bytes).ok()?;
