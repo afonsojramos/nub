@@ -1200,8 +1200,8 @@ function HypermanagerBand() {
                   rows={[
                     { cmd: 'nub', ms: 419, us: true },
                     { cmd: 'bun', ms: 2029, ratio: 4.8 },
-                    { cmd: 'pnpm', ms: 6851, ratio: 16.3 },
-                    { cmd: 'npm', ms: 7773, ratio: 18.5 },
+                    { cmd: 'pnpm', ms: 6851, ratio: 16.4 },
+                    { cmd: 'npm', ms: 7773, ratio: 18.6 },
                   ]}
                 />
                 <a

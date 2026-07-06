@@ -489,14 +489,14 @@ Vite is the exception that keeps the shared store. Its dev server gates real-pat
 Like pnpm, Nub relinks files from the global store into `node_modules` via reflink (APFS/btrfs) or hardlink (ext4) when the store already holds every package — no re-download, no byte-for-byte copy. The benchmark below measures the warm reinstall case: `node_modules` is removed, packages are already on disk, and the installer rebuilds the project layout.
 
 <Bench
-  label="warm reinstall · create-t3-app · macOS"
+  label="warm reinstall · Vite (React) · macOS"
   accent="pink"
-  max={4163}
+  max={7773}
   rows={[
-    { cmd: 'nub install', ms: 1122, us: true },
-    { cmd: 'bun install', ms: 1444, ratio: 1.29 },
-    { cmd: 'pnpm install', ms: 2847, ratio: 2.5 },
-    { cmd: 'npm ci', ms: 4163, ratio: 3.7 },
+    { cmd: 'nub install', ms: 419, us: true },
+    { cmd: 'bun install', ms: 2029, ratio: 4.8 },
+    { cmd: 'pnpm install', ms: 6851, ratio: 16.4 },
+    { cmd: 'npm ci', ms: 7773, ratio: 18.6 },
   ]}
   source="https://github.com/nubjs/nub/tree/main/tests/bench/install"
 />
