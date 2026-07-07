@@ -45,7 +45,6 @@ use std::collections::HashSet;
 
 use aube_linker::DiskMaterializePlan;
 use aube_lockfile::{LockedPackage, LockfileGraph};
-use nub_phantom_scan::ScanResult;
 use rayon::prelude::*;
 
 /// The SINGLE phantom-eject arm — [`crate::dynamic_phantom::enabled`] — shared
@@ -236,18 +235,16 @@ fn dynamic_phantom_flags(graph: &LockfileGraph) -> Vec<(String, String, Vec<Stri
             // producer's backfill does, so npm-alias deps resolve to the right blob.
             let index =
                 store.load_index(pkg.registry_name(), &pkg.version, pkg.integrity.as_deref())?;
-            let fingerprint = aube_store::index_content_fingerprint(&index);
-            // Derive the sidecar path through the SAME helper the producer writes
-            // with, so the fingerprint keying and the scanner-version segment
-            // cannot drift between the two halves.
-            let bytes = std::fs::read(crate::dynamic_phantom::sidecar_path(
-                &sidecar_dir,
-                &fingerprint,
-            ))
-            .ok()?;
-            // nub-cli CAN depend on the scanner crate, so the sidecar deserializes
-            // straight into the typed `ScanResult` (no cross-fork string coupling).
-            let result: ScanResult = serde_json::from_slice(&bytes).ok()?;
+            // Read the cached verdict, or SCAN the loaded index on-demand when no
+            // sidecar exists yet — the warm-cache-first-install gap. The extract
+            // hook writes a sidecar only on a fresh FETCH and the backfill reads
+            // only the PRE-EXISTING lockfile, so a warm-cached package with no
+            // sidecar (GC'd, or cached by a pre-eject-default nub) on a first
+            // install/add would otherwise reach this decision with no verdict and
+            // never seed its eject (leaving it symlinked, its phantom 404'ing).
+            // `cached_or_scan_verdict` scans + caches here so the decision is
+            // correct at the point the resolved graph + CAS index are both in hand.
+            let result = crate::dynamic_phantom::cached_or_scan_verdict(&sidecar_dir, &index)?;
             if !result.has_unguarded_phantom {
                 return None;
             }
