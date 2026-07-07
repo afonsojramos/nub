@@ -29,32 +29,44 @@
 //!   `virtualStoreDir` any PM wrote — nub's store path lives ONLY in the
 //!   `.modules.yaml` data file, never hardcoded into the patch.
 //!
-//! Both units are gated on `vite` being in the installed graph and on the
-//! `NUB_VITE_COMPAT` opt-out (a falsey value disables both). The materialization
-//! decision lives in [`super::mod`]'s setting defaults; this module writes the
-//! file and patches the ejected copy post-install. Fail-open throughout: a
-//! missing anchor / unwritable copy is a no-op, never a corrupt Vite.
+//! Both units are gated ONLY on `vite` being in the installed graph (and the
+//! machine-global store locality) — there is NO user opt-out: this is core GVS
+//! correctness, so it is unconditional (maintainer 2026-07-07). The
+//! materialization decision lives in [`super::mod`]'s setting defaults; this
+//! module writes the file and patches the ejected copy post-install. Fail-open
+//! throughout: a missing anchor / unwritable copy is a no-op, never a corrupt
+//! Vite.
 
 use std::path::{Path, PathBuf};
 
-/// User-facing opt-out. Default-on (nub's goal is Vite just-working under the
-/// global store); a falsey value disables BOTH units. `NUB_*` is a sanctioned PM
-/// knob. Read at the setting-defaults site (materialize decision) and here (the
-/// post-install writer/patcher) so the two stay in lockstep.
-pub(crate) const VITE_COMPAT_ENV: &str = "NUB_VITE_COMPAT";
+/// INTERNAL, UNDOCUMENTED test seam — NOT a user knob. Truthy turns Vite compat
+/// OFF so the `tests/vite-compat/` matrix can reproduce the pre-fix `403 …
+/// outside of Vite serving allow list` break as an A/B control against a real
+/// built binary (those driver runs use `target/fast/nub`, not a `cfg(test)`
+/// build). The `__NUB_` double-underscore prefix marks internal plumbing — the
+/// brand boundary exempts internal `__NUB_*` sentinels; this one is never
+/// documented and users must not rely on it. Mirrors phantom-eject's
+/// `__NUB_PHANTOM_EJECT_DISABLE`; the removed public `NUB_VITE_COMPAT` knob is
+/// dead and ignored, so a stale `NUB_VITE_COMPAT=0` in a user's env has no effect.
+const INTERNAL_COMPAT_DISABLE_VAR: &str = "__NUB_VITE_COMPAT_DISABLE";
 
-/// Whether the Vite compat behavior is enabled. Disabled only by an explicit
-/// falsey `NUB_VITE_COMPAT` (`0`/`false`/`no`/`off`, case-insensitive); unset or
-/// any other value keeps it on. Same spelling as nub's other positive-default
-/// knobs (`NUB_SELF_SHIM`).
+/// Whether the Vite compat behavior is enabled. Unconditionally ON for users —
+/// this is core GVS correctness, not a preference (maintainer 2026-07-07). Off
+/// ONLY under the internal A/B seam ([`INTERNAL_COMPAT_DISABLE_VAR`]). Read at
+/// the setting-defaults site (materialize decision) and here (the post-install
+/// writer/patcher) so the two stay in lockstep.
 pub(crate) fn enabled() -> bool {
-    match std::env::var(VITE_COMPAT_ENV) {
-        Ok(v) => !matches!(
-            v.trim().to_ascii_lowercase().as_str(),
-            "0" | "false" | "no" | "off"
-        ),
-        Err(_) => true,
-    }
+    !compat_disabled(std::env::var(INTERNAL_COMPAT_DISABLE_VAR).ok().as_deref())
+}
+
+/// Pure predicate for the internal disable seam, split from the env read so its
+/// truthiness contract is testable without mutating the process-global env. A
+/// truthy value disables; unset / empty / any other value keeps compat ON.
+fn compat_disabled(raw: Option<&str>) -> bool {
+    matches!(
+        raw.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
 }
 
 /// Post-install entry: write `.modules.yaml` for every install that has Vite
@@ -406,23 +418,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn opt_out_only_on_explicit_falsey() {
-        // Default-on when unset; the test mutates process env, so it is the sole
-        // reader in-process (serialized by cargo per-test-binary is not enough —
-        // keep the assertions in one test to avoid cross-test env races).
-        let key = VITE_COMPAT_ENV;
-        // SAFETY: single-threaded test body; restored at the end.
-        unsafe { std::env::remove_var(key) };
-        assert!(enabled(), "unset ⇒ on");
-        for falsey in ["0", "false", "FALSE", "no", "Off", " off "] {
-            unsafe { std::env::set_var(key, falsey) };
-            assert!(!enabled(), "{falsey:?} ⇒ off");
+    fn compat_is_unconditional_except_internal_seam() {
+        // Pure predicate — no process-env mutation. Unset/empty/any non-truthy
+        // value keeps compat ON; only an explicit truthy internal seam disables.
+        assert!(!compat_disabled(None), "unset ⇒ on");
+        assert!(!compat_disabled(Some("")), "empty ⇒ on");
+        assert!(!compat_disabled(Some("0")), "0 ⇒ on (not a disable value)");
+        for truthy in ["1", "true", "TRUE", "yes", "on", " On "] {
+            assert!(compat_disabled(Some(truthy)), "{truthy:?} ⇒ off");
         }
-        for truthy in ["1", "true", "yes", "anything"] {
-            unsafe { std::env::set_var(key, truthy) };
-            assert!(enabled(), "{truthy:?} ⇒ on");
-        }
-        unsafe { std::env::remove_var(key) };
     }
 
     #[test]

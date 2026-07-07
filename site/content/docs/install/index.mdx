@@ -177,7 +177,7 @@ A project is Nub's own in three cases: it declares Nub through `nub pm use nub`,
 
 - **Lockfile:** `nub.lock` — the pnpm v9 schema byte-for-byte, under Nub's own basename
 - **Package fields:** `workspaces`, `overrides`, `resolutions`, `patchedDependencies`, `allowBuilds`, `engines.node`, `scripts`
-- **Config and env:** the `.npmrc` cascade, `npm_config_*`, neutral env (`CI`, proxies), plus `NUB_CACHE_DIR`, `NUB_CONCURRENCY`, `NUB_PRIMER_TTL`, `NUB_VITE_COMPAT`
+- **Config and env:** the `.npmrc` cascade, `npm_config_*`, neutral env (`CI`, proxies), plus `NUB_CACHE_DIR`, `NUB_CONCURRENCY`, `NUB_PRIMER_TTL`
 - **Install state:** `node_modules/.nub/`, `.nub-state`, and the global store under Nub's own directories
 
 A fresh `nub install` records Nub as the manager with a non-locking range — `devEngines.packageManager` set to `{ name: "nub", version: "^<version>", onFail: "warn" }`, never an exact `packageManager` pin. Tools that read `devEngines` by name see the signal, and the caret is a floor, so upgrading Nub just works. To freeze the project at an exact Nub version — the corepack-visible hard pin — opt in with `nub pm use nub@<version>`; the bare `nub pm use nub` writes only the range.
@@ -482,7 +482,7 @@ A bundler that resolves modules by their real path — Metro (bare React Native)
 disableGlobalVirtualStoreForPackages[]=my-bundler
 ```
 
-Vite is the exception that keeps the shared store. Its dev server gates real-path file access through a configurable allow-list, not a resolver crawl, so a store-resident module served over `/@fs` would otherwise be rejected with `403 … outside of Vite serving allow list`. Nub tells Vite about the store automatically: it writes `node_modules/.modules.yaml`, which Vite 8.1+ reads natively, and for older Vite it backports the same check into the project's own copy. `vite dev` then serves the store with no `vite.config` change, and the fix lives on disk in `node_modules` — so it works whether or not Nub is in the process (a teammate on plain Vite, or CI). Turn it off with `NUB_VITE_COMPAT=0`.
+Vite is the exception that keeps the shared store. Its dev server gates real-path file access through a configurable allow-list, not a resolver crawl, so a store-resident module served over `/@fs` would otherwise be rejected with `403 … outside of Vite serving allow list`. Nub tells Vite about the store automatically: it writes `node_modules/.modules.yaml`, which Vite 8.1+ reads natively, and for older Vite it backports the same check into the project's own copy. `vite dev` then serves the store with no `vite.config` change, and the fix lives on disk in `node_modules` — so it works whether or not Nub is in the process (a teammate on plain Vite, or CI).
 
 ### Offline installs
 
