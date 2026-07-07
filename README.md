@@ -31,7 +31,7 @@ A Bun-like DX on top of stock `node`, written in Rust.
 nub index.ts             # TypeScript-first Node.js runtime
 nub run dev              # 24× faster pnpm run
 nubx prisma generate     # 19× faster npx
-nub install              # 2.5× faster pnpm install
+nub install              # 5× faster pnpm install
 nub watch src/server.ts  # native watch mode
 nub pm shim              # built-in Corepack-style shims
 nub node install 26      # Node version manager
@@ -244,12 +244,12 @@ It's fast — avoids the per-command Node.js bootstrap lag incurred by JS-based 
 
 | Tool | Time | Relative |
 |---|---|---|
-| `nub` | 1122 ms | — |
-| `bun` | 1444 ms | 29% slower |
-| `pnpm` | 2847 ms | 2.5× |
-| `npm` | 4163 ms | 3.7× |
+| `nub` | 171 ms | — |
+| `bun` | 686 ms | 4.0× |
+| `pnpm` | 3193 ms | 18.7× |
+| `npm` | 5316 ms | 31.1× |
 
-> warm frozen install · create-t3-app · 222 deps · macOS — [view benchmark](https://github.com/nubjs/nub/tree/main/tests/bench/install)
+> warm frozen install · TanStack Start · 313 deps · macOS — [view benchmark](https://github.com/nubjs/nub/tree/main/tests/bench/install)
 
 ### Security
 

@@ -164,7 +164,7 @@ const heroLines = (major: string) => [
   { cmd: 'nub index.ts', comment: 'TypeScript-first Node.js runtime' },
   { cmd: 'nub run dev', comment: '24× faster pnpm run' },
   { cmd: 'nubx prisma generate', comment: '19× faster npx' },
-  { cmd: 'nub install', comment: '2.5× faster pnpm install' },
+  { cmd: 'nub install', comment: '5× faster pnpm install' },
   { cmd: 'nub watch src/server.ts', comment: 'native watch mode' },
   { cmd: 'nub pm shim', comment: 'built-in Corepack-style shims' },
   { cmd: `nub node install ${major}`, comment: 'Node version manager' },
@@ -654,7 +654,6 @@ const APIS: { name: string; label: string }[] = [
   { name: 'using / await using', label: 'Transpiled' },
   { name: 'node:sqlite', label: 'Unflagged < 23' },
   { name: 'vm.Module', label: 'Auto-unflagged' },
-  { name: 'ShadowRealm', label: 'Auto-unflagged' },
   { name: 'RegExp.escape', label: 'Polyfilled < 24' },
   { name: 'Promise.try', label: 'Polyfilled < 24' },
   { name: 'Float16Array', label: 'Polyfilled < 24' },
@@ -1105,7 +1104,7 @@ function HypermanagerBand() {
           command="nub install"
           title={
             <>
-              A <span className="text-pink">2.5×</span> faster pnpm
+              A <span className="text-pink">5×</span> faster pnpm
             </>
           }
           subhead={
