@@ -1487,6 +1487,33 @@ impl Linker {
     /// cross-project state. Remove any stale shared mirror left by older
     /// linkers and keep the only hidden-hoist tree project-local.
     fn link_hidden_hoist(&self, aube_dir: &Path, graph: &LockfileGraph) -> Result<(), Error> {
+        // GVS active with a non-empty disk-materialize (ejected) subset: each
+        // ejected package is a real project-local directory, so its realpath is
+        // inside the project and Node's upward `node_modules` walk from inside it
+        // passes through `.aube/node_modules/`. Build ONE COLLECTIVE project-local
+        // hidden hoist tree there over the whole graph so any ejected package
+        // resolves any undeclared phantom via that walk — blanket, detection-free,
+        // the pnpm-parity successor to the per-importer `phantom_hoist`. Two
+        // invariants make this sound:
+        //   - #6-safe: the tree lives in the PROJECT (`node_modules/.aube/
+        //     node_modules/`), never the shared store, so its bare-name aliases
+        //     are per-project state — not the cross-project-mutable shared-store
+        //     alias issue #6 forbids (the `Materialization::Symlink` "no hidden
+        //     tree" rule is about the SHARED-store tree; a project-local one is a
+        //     distinct, safe location).
+        //   - leak-free: only the ejected (project-local-realpath) packages reach
+        //     this tree on their walk-up. A symlinked package's realpath is in the
+        //     shared store, so its walk ascends the store, never the project — it
+        //     can NEVER consume this tree. So the ejected subset gets pnpm's
+        //     blanket phantom tolerance while the symlinked majority is untouched.
+        // Standalone aube always has an empty `disk_materialize`, so this branch
+        // is unreachable there and the pass stays byte-for-byte unchanged.
+        if self.use_global_virtual_store && !self.disk_materialize.is_empty() {
+            let packages = self.collect_hidden_hoist_packages(graph, &|_| true);
+            self.write_hidden_hoist_entries(aube_dir, aube_dir, &packages, false, true)?;
+            remove_hidden_hoist_tree(&self.virtual_store.join("node_modules"));
+            return Ok(());
+        }
         self.link_hidden_hoist_at(aube_dir, aube_dir, graph, false, true)?;
         if self.use_global_virtual_store {
             remove_hidden_hoist_tree(&self.virtual_store.join("node_modules"));
@@ -1502,39 +1529,6 @@ impl Linker {
         use_hashed_subdirs: bool,
         sweep_stale_entries: bool,
     ) -> Result<(), Error> {
-        let hidden = hidden_root.join("node_modules");
-        // FxHashSet over the borrowed name (lives for the lockfile graph
-        // lifetime) drops the SipHash overhead and the per-insert
-        // `String` clone the `HashSet<String>` version forced.
-        let mut claimed: rustc_hash::FxHashSet<&str> = rustc_hash::FxHashSet::default();
-        let mut packages = Vec::new();
-        if self.hoist {
-            for direct in graph.root_deps() {
-                let Some(pkg) = graph.packages.get(&direct.dep_path) else {
-                    continue;
-                };
-                if pkg.local_source.is_some() || !self.hoist_matches(&pkg.name) {
-                    continue;
-                }
-                if claimed.insert(pkg.name.as_str()) {
-                    packages.push((direct.dep_path.as_str(), pkg));
-                }
-            }
-            for (dep_path, pkg) in &graph.packages {
-                if pkg.local_source.is_some() || !self.hoist_matches(&pkg.name) {
-                    continue;
-                }
-                // Root direct dependencies reserve their package names
-                // before the deterministic transitive sweep. That matches
-                // pnpm's undeclared-import fallback when the app and a
-                // transitive dependency bring different versions of the
-                // same package into the graph.
-                if claimed.insert(pkg.name.as_str()) {
-                    packages.push((dep_path.as_str(), pkg));
-                }
-            }
-        }
-
         if !self.hoist {
             // Previous install may have populated this tree with
             // hoist=true. Drop entries so Node doesn't keep resolving
@@ -1542,6 +1536,7 @@ impl Linker {
             // hidden hoist owns the whole tree and can remove it in
             // one shot; the shared GVS mirror only reclaims broken
             // entries because live links may belong to another project.
+            let hidden = hidden_root.join("node_modules");
             if sweep_stale_entries {
                 remove_hidden_hoist_tree(&hidden);
             } else {
@@ -1549,6 +1544,70 @@ impl Linker {
             }
             return Ok(());
         }
+        let packages = self.collect_hidden_hoist_packages(graph, &|name| self.hoist_matches(name));
+        self.write_hidden_hoist_entries(
+            hidden_root,
+            source_root,
+            &packages,
+            use_hashed_subdirs,
+            sweep_stale_entries,
+        )
+    }
+
+    /// Select the non-local graph packages to symlink into a hidden hoist tree,
+    /// deduplicated by name with root direct dependencies reserving their name
+    /// before the deterministic transitive sweep — pnpm's undeclared-import
+    /// version choice when the app and a transitive dep bring different versions
+    /// of the same name. `select` is the per-name gate: `hoist_matches` for the
+    /// pattern-driven GVS-off tree, `|_| true` for the blanket collective tree.
+    fn collect_hidden_hoist_packages<'g>(
+        &self,
+        graph: &'g LockfileGraph,
+        select: &dyn Fn(&str) -> bool,
+    ) -> Vec<(&'g str, &'g LockedPackage)> {
+        // FxHashSet over the borrowed name (lives for the lockfile graph
+        // lifetime) drops the SipHash overhead and the per-insert `String`
+        // clone the `HashSet<String>` version forced.
+        let mut claimed: rustc_hash::FxHashSet<&str> = rustc_hash::FxHashSet::default();
+        let mut packages = Vec::new();
+        for direct in graph.root_deps() {
+            let Some(pkg) = graph.packages.get(&direct.dep_path) else {
+                continue;
+            };
+            if pkg.local_source.is_some() || !select(&pkg.name) {
+                continue;
+            }
+            if claimed.insert(pkg.name.as_str()) {
+                packages.push((direct.dep_path.as_str(), pkg));
+            }
+        }
+        for (dep_path, pkg) in &graph.packages {
+            if pkg.local_source.is_some() || !select(&pkg.name) {
+                continue;
+            }
+            if claimed.insert(pkg.name.as_str()) {
+                packages.push((dep_path.as_str(), pkg));
+            }
+        }
+        packages
+    }
+
+    /// Wipe then repopulate a hidden hoist tree at `hidden_root/node_modules/`
+    /// with `<name>` → `<source_root>/<subdir(dep_path)>/node_modules/<name>`
+    /// symlinks. Shared by the pattern-driven `link_hidden_hoist_at` and the
+    /// collective GVS tree. Under GVS the source entry is itself a symlink into
+    /// the shared store, so `<name>` resolves through it to the store copy — a
+    /// project-local alias whose bytes live machine-global, which is exactly
+    /// what a phantom import from an ejected package needs to reach.
+    fn write_hidden_hoist_entries(
+        &self,
+        hidden_root: &Path,
+        source_root: &Path,
+        packages: &[(&str, &LockedPackage)],
+        use_hashed_subdirs: bool,
+        sweep_stale_entries: bool,
+    ) -> Result<(), Error> {
+        let hidden = hidden_root.join("node_modules");
         // Wipe before repopulating so a dependency removed from the
         // graph (or a pattern that no longer matches) doesn't linger.
         // The shared GVS hidden hoist only prunes broken entries:
@@ -1559,7 +1618,7 @@ impl Linker {
         } else {
             sweep_dead_hidden_hoist_entries(&hidden);
         }
-        for (dep_path, pkg) in packages {
+        for &(dep_path, pkg) in packages {
             let source_subdir = if use_hashed_subdirs {
                 self.virtual_store_subdir(dep_path)
             } else {

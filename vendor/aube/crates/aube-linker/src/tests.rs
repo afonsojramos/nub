@@ -582,6 +582,160 @@ fn disk_materialize_keeps_store_copy_so_store_resident_dependents_dont_orphan() 
     );
 }
 
+/// Graph where the root declares `foo` and `bar` as siblings and `foo` declares
+/// NOTHING — so `bar` is a pure phantom target of `foo` (foo imports it without
+/// declaring it). Reuses the foo@1.0.0 / bar@2.0.0 store indices from
+/// `setup_store_with_files`.
+fn make_graph_phantom() -> LockfileGraph {
+    let mut packages = BTreeMap::new();
+    packages.insert(
+        "foo@1.0.0".to_string(),
+        LockedPackage {
+            name: "foo".to_string(),
+            version: "1.0.0".to_string(),
+            dependencies: BTreeMap::new(),
+            dep_path: "foo@1.0.0".to_string(),
+            ..Default::default()
+        },
+    );
+    packages.insert(
+        "bar@2.0.0".to_string(),
+        LockedPackage {
+            name: "bar".to_string(),
+            version: "2.0.0".to_string(),
+            dependencies: BTreeMap::new(),
+            dep_path: "bar@2.0.0".to_string(),
+            ..Default::default()
+        },
+    );
+    let mut importers = BTreeMap::new();
+    importers.insert(
+        ".".to_string(),
+        vec![
+            DirectDep {
+                name: "foo".to_string(),
+                dep_path: "foo@1.0.0".to_string(),
+                dep_type: DepType::Production,
+                specifier: None,
+            },
+            DirectDep {
+                name: "bar".to_string(),
+                dep_path: "bar@2.0.0".to_string(),
+                dep_type: DepType::Production,
+                specifier: None,
+            },
+        ],
+    );
+    LockfileGraph {
+        importers,
+        packages,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn collective_hidden_hoist_over_ejected_set_resolves_undeclared_phantom_under_gvs() {
+    // The collective project-local hidden hoist tree. Under GVS an ejected
+    // (disk-materialized) package is a real project-local dir, so Node's upward
+    // node_modules walk from inside it passes through `.aube/node_modules/`.
+    // Building that tree over the graph lets the ejected `foo` resolve its
+    // UNDECLARED phantom `bar` (a sibling at the project root here) via the
+    // walk-up — the detection-free, blanket successor to per-importer hoisting.
+    let dir = tempfile::tempdir().unwrap();
+    let project_dir = dir.path().join("project");
+    std::fs::create_dir_all(&project_dir).unwrap();
+
+    let (store, indices) = setup_store_with_files(dir.path());
+    let linker = Linker::new_with_gvs(&store, LinkStrategy::Copy, true)
+        .with_hoist(false)
+        .with_disk_materialize(&["foo".to_string()]);
+
+    linker
+        .link_all(&project_dir, &make_graph_phantom(), &indices)
+        .unwrap();
+
+    // foo is ejected: a real project-local dir (its realpath is in the project,
+    // so its walk-up reaches `.aube/node_modules/`).
+    let aube_foo = project_dir.join("node_modules/.aube/foo@1.0.0");
+    assert!(
+        !aube_foo
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "disk-materialized foo must be a real project-local dir"
+    );
+
+    // The collective hidden tree exists and carries the phantom target `bar`,
+    // resolving all the way to bar's content — so foo's undeclared `require('bar')`
+    // succeeds via the walk-up. foo lists itself in the blanket tree too.
+    let hidden = project_dir.join("node_modules/.aube/node_modules");
+    assert!(
+        hidden.join("bar").symlink_metadata().unwrap().is_symlink(),
+        "collective tree must carry the phantom target bar"
+    );
+    assert_eq!(
+        std::fs::read_to_string(hidden.join("bar/index.js")).unwrap(),
+        "module.exports = 'bar';",
+        "the phantom target resolves to bar's real content through the tree"
+    );
+    assert!(
+        hidden.join("foo").symlink_metadata().unwrap().is_symlink(),
+        "the blanket collective tree lists every non-local package, incl. foo"
+    );
+
+    // #6 safety: the tree is project-local ONLY — the shared store carries no
+    // hidden tree (its bare-name aliases would be cross-project-mutable state).
+    assert!(
+        store
+            .virtual_store_dir()
+            .join("node_modules")
+            .symlink_metadata()
+            .is_err(),
+        "no hidden hoist tree may live in the shared global store (#6)"
+    );
+
+    // Isolation: bar stays a shared-store symlink (its realpath escapes the
+    // project), so bar's own walk-up ascends the store and never reaches this
+    // project-local tree — only the ejected foo consumes it.
+    assert!(
+        project_dir
+            .join("node_modules/.aube/bar@2.0.0")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the symlinked majority (bar) stays a shared-store symlink, off this walk-up"
+    );
+}
+
+#[test]
+fn no_collective_hidden_hoist_when_ejected_set_empty_under_gvs() {
+    // The collective tree is gated on a non-empty disk-materialize (ejected)
+    // set. With none, plain GVS has no project-local-realpath consumer, so no
+    // tree is built — the pass stays byte-for-byte the swept-empty behavior
+    // (and standalone aube, whose disk-materialize is always empty, is
+    // unaffected).
+    let dir = tempfile::tempdir().unwrap();
+    let project_dir = dir.path().join("project");
+    std::fs::create_dir_all(&project_dir).unwrap();
+
+    let (store, indices) = setup_store_with_files(dir.path());
+    let linker = Linker::new_with_gvs(&store, LinkStrategy::Copy, true).with_hoist(false);
+
+    linker
+        .link_all(&project_dir, &make_graph(), &indices)
+        .unwrap();
+
+    assert!(
+        project_dir
+            .join("node_modules/.aube/node_modules")
+            .symlink_metadata()
+            .is_err(),
+        "no collective tree without an ejected set"
+    );
+}
+
 #[test]
 fn test_link_file_fresh_reports_missing_cas_shard_and_invalidates_cache() {
     // Reproduces jdx/aube#393: a partially corrupt CAS leaves the
