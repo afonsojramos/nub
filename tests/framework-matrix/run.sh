@@ -20,7 +20,11 @@ name="$1"; proj="$2"; dev_cmd="$3"; build_cmd="$4"; preview_cmd="$5"; probe="${6
 
 log() { echo "ROW|$name|$*"; }
 
-kill_tree() { local p="$1" c; for c in $(pgrep -P "$p" 2>/dev/null); do kill_tree "$c"; done; kill -TERM "$p" 2>/dev/null; }
+# TERM then KILL each descendant — a dev-server worker that ignores SIGTERM must
+# not survive to hold a port into the next stage. The group-kill in kill_group is
+# the primary reaper; this PID-walk is the fallback for anything that escaped the
+# group (e.g. via its own setsid), so it also needs the follow-up KILL.
+kill_tree() { local p="$1" c; for c in $(pgrep -P "$p" 2>/dev/null); do kill_tree "$c"; done; kill -TERM "$p" 2>/dev/null; kill -KILL "$p" 2>/dev/null; }
 kill_group() { local g="$1"; kill -TERM -"$g" 2>/dev/null; sleep 0.4; kill -KILL -"$g" 2>/dev/null; kill_tree "$g"; kill -KILL "$g" 2>/dev/null; }
 
 cd "$proj" || { log "step=setup result=FAIL detail=no-dir"; echo "VERDICT|$name|FAIL"; exit 2; }
@@ -89,7 +93,9 @@ fi
 # ── production build ──────────────────────────────────────────────────────────
 build_result="skip"
 if [ "$build_cmd" != "-" ]; then
-  ( cd "$proj" && eval "$build_cmd" ) >/tmp/fm-$name-build.log 2>&1; bx=$?
+  # Word-split (not eval) — consistent with how dev/preview are run; build_cmd is
+  # a plain command from the trusted manifest with no shell metacharacters.
+  ( cd "$proj" && $build_cmd ) >/tmp/fm-$name-build.log 2>&1; bx=$?
   [ $bx -eq 0 ] && build_result="ok" || build_result="FAIL"
   log "step=build result=$build_result exit=$bx"
   [ "$build_result" = "FAIL" ] && { echo "  build-log tail:"; tail -20 /tmp/fm-$name-build.log | sed 's/^/  build> /'; }

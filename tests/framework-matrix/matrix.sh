@@ -29,16 +29,19 @@
 # PASSes (an excluded framework is asserted to land PROJECT-LOCAL, not GVS).
 set -u
 
-# Needs bash 4+ (associative arrays + mapfile). macOS ships bash 3.2, where these
-# silently misbehave — re-exec under a newer bash if one is on PATH, else error
-# clearly rather than collapsing the summary.
-if [ "${BASH_VERSINFO:-0}" -lt 4 ]; then
+# Needs bash 4.4+: associative arrays + mapfile are 4.0, but the "empty array +
+# ${arr[@]} under set -u = unbound variable" bug (which bites the default
+# no-flag path where env_prefix=()) was only fixed in 4.4. macOS ships 3.2 —
+# re-exec under a newer bash if one is on PATH, else error clearly.
+_bash_ge_44() { [ "${BASH_VERSINFO[0]}" -gt 4 ] || { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -ge 4 ]; }; }
+if ! _bash_ge_44; then
   for b in /opt/homebrew/bin/bash /usr/local/bin/bash bash; do
-    if command -v "$b" >/dev/null 2>&1 && [ "$("$b" -c 'echo ${BASH_VERSINFO:-0}')" -ge 4 ]; then
+    if command -v "$b" >/dev/null 2>&1 && \
+       "$b" -c '[ "${BASH_VERSINFO[0]}" -gt 4 ] || { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -ge 4 ]; }' 2>/dev/null; then
       exec "$b" "$0" "$@"
     fi
   done
-  echo "error: matrix.sh needs bash 4+ (macOS system bash is 3.2 — 'brew install bash')" >&2
+  echo "error: matrix.sh needs bash 4.4+ (macOS system bash is 3.2 — 'brew install bash')" >&2
   exit 2
 fi
 

@@ -56,7 +56,12 @@ _vite() {
 }
 
 scaffold() {
-  local name="$1" dest="$2" parent base
+  local name="$1" dest="$2" parent base known
+  # Validate the name against the known set BEFORE any destructive fs op. `dest`
+  # is derived from a CLI arg; an unknown/garbage name (`..`, a stray path) must
+  # never reach `rm -rf "$dest"` — `rm -rf "$OUT/.."` would wipe $OUT's parent.
+  known=0; for f in "${FRAMEWORKS[@]}"; do [ "$f" = "$name" ] && known=1; done
+  [ "$known" -eq 1 ] || { echo "UNKNOWN_FRAMEWORK: $name" >&2; return 2; }
   parent="$(dirname "$dest")"; base="$(basename "$dest")"
   rm -rf "$dest"; mkdir -p "$parent"
   # Every generator scaffolds into a CWD-relative <base>; cd to the parent first
