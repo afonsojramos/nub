@@ -198,6 +198,47 @@ fn plan_from_flags(
         }
     }
 
+    // Rung 2b — SATISFIED optional-peer reachability. An optional peer a package
+    // STATICALLY imports (`vue-router/vite` → `@vue/compiler-sfc`) is a hard
+    // requirement mis-declared optional: the scanner correctly classifies it
+    // DeclaredOptionalPeer (not a hard phantom, so rung-2 never targets it) and
+    // the resolver doesn't thread it into this deep graph, so under GVS the
+    // member's store-resident-or-materialized realpath walk can't reach it. For
+    // each ALREADY-ejected closure member, hoist its optional peers that are
+    // PRESENT in the tree, RANGE-SATISFYING, and NOT already a resolved sibling —
+    // matching pnpm, which links present optional peers down the subtree. Safe by
+    // construction: it only ever RESTORES reachability a hoisted layout would give
+    // (a present, declared, satisfying copy the tree already carries) into a
+    // subtree that already materializes — it never expands the closure and never
+    // places a package the tree lacks. CAVEAT: "free" only while something else
+    // ejects the member (today the Nuxt closure ejects via embedded vite<8.1 + the
+    // `@nuxt/devtools`→`unstorage` phantom); a member that is NOT ejected has no
+    // project-local `node_modules` to hoist into, so a future eject-free layout
+    // would need to SEED the importer (grow the eject set) — out of scope here.
+    for dep_path in &closure {
+        let Some(pkg) = graph.packages.get(dep_path) else {
+            continue;
+        };
+        for (peer_name, meta) in &pkg.peer_dependencies_meta {
+            // A resolved sibling (active-optional / threaded peer mirrored into
+            // `dependencies`) is already reachable — hoisting would duplicate it.
+            if !meta.optional || pkg.dependencies.contains_key(peer_name) {
+                continue;
+            }
+            let range = pkg
+                .peer_dependencies
+                .get(peer_name)
+                .map_or("*", String::as_str);
+            let Some(target) = resolve_satisfying_dep_path(graph, peer_name, range) else {
+                continue;
+            };
+            let entry = hoist_within.entry(dep_path.clone()).or_default();
+            if !entry.contains(&target) {
+                entry.push(target);
+            }
+        }
+    }
+
     DiskMaterializePlan {
         names: names.into_iter().collect(),
         hoist_within,
@@ -355,6 +396,31 @@ fn resolve_target_dep_path(graph: &LockfileGraph, target_name: &str) -> Option<S
         .iter()
         .find(|(_, pkg)| pkg.name == target_name)
         .map(|(dep_path, _)| dep_path.clone())
+}
+
+/// Resolve an optional-peer NAME + its declared RANGE to a PRESENT, range-
+/// satisfying dep_path, picking the HIGHEST satisfying version in the tree
+/// (deterministic; unambiguous for the single-version peer classes this targets).
+/// Uses npm range semantics (`node-semver`, which handles `*`, `||` unions, and
+/// x-ranges), NOT Cargo's. `None` when the peer is absent or no present version
+/// satisfies — so a hoist is only ever recorded for a copy the tree already
+/// carries at a satisfying version.
+fn resolve_satisfying_dep_path(
+    graph: &LockfileGraph,
+    peer_name: &str,
+    range: &str,
+) -> Option<String> {
+    let req = node_semver::Range::parse(range).ok()?;
+    graph
+        .packages
+        .iter()
+        .filter(|(_, pkg)| pkg.name == peer_name)
+        .filter_map(|(dep_path, pkg)| {
+            let v = node_semver::Version::parse(&pkg.version).ok()?;
+            v.satisfies(&req).then(|| (v, dep_path.clone()))
+        })
+        .max_by(|(a, _), (b, _)| a.cmp(b))
+        .map(|(_, dep_path)| dep_path)
 }
 
 #[cfg(test)]
@@ -516,6 +582,85 @@ mod tests {
                 .map(Vec::as_slice),
             Some(["zod@3.0.0".to_string()].as_slice()),
             "rung-2 records the undeclared target's hoist"
+        );
+    }
+
+    #[test]
+    fn satisfied_optional_peer_of_closure_member_is_hoisted() {
+        // Nuxt shape at the planner boundary: vue-router embeds vite<8.1 (so its
+        // ancestor-closure ejects) and declares `@vue/compiler-sfc` an OPTIONAL
+        // peer that its `/vite` subpath statically imports. compiler-sfc is present
+        // and satisfies the range, so rung-2b hoists it into vue-router's
+        // materialized `node_modules` — the reachability the store-resident/
+        // materialized realpath walk lacks under GVS (the `nuxt prepare` crash).
+        let mut g = graph(&[
+            ("vue-router@5.1.0", "vue-router", &[("vite", "7.0.0")]),
+            ("vite@7.0.0", "vite", &[]),
+            ("@vue/compiler-sfc@3.5.39", "@vue/compiler-sfc", &[]),
+        ]);
+        let vr = g.packages.get_mut("vue-router@5.1.0").unwrap();
+        vr.peer_dependencies
+            .insert("@vue/compiler-sfc".to_string(), "^3.5.34".to_string());
+        vr.peer_dependencies_meta.insert(
+            "@vue/compiler-sfc".to_string(),
+            aube_lockfile::PeerDepMeta { optional: true },
+        );
+
+        let plan = plan_from_flags(&g, &[], &[]);
+        let names: HashSet<&str> = plan.names.iter().map(String::as_str).collect();
+        assert!(
+            names.contains("vue-router"),
+            "the embedded-vite<8.1 closure ejects vue-router: {names:?}"
+        );
+        assert_eq!(
+            plan.hoist_within.get("vue-router@5.1.0").map(Vec::as_slice),
+            Some(["@vue/compiler-sfc@3.5.39".to_string()].as_slice()),
+            "the satisfied optional peer hoists into the ejected member"
+        );
+    }
+
+    #[test]
+    fn optional_peer_not_hoisted_when_unsatisfied_or_already_linked() {
+        // The three guards, on one ejected member: a present-but-out-of-range peer
+        // (`old-peer@1.0.0` vs `^2`) is not a valid target; an already-resolved
+        // sibling (`linked@1.0.0` in `dependencies`) is already reachable; an
+        // absent peer has no target. None may hoist — so the member gets NO
+        // rung-2b entry, guarding against over-hoisting a peer the tree can't
+        // satisfy or already reaches.
+        let mut g = graph(&[
+            (
+                "host@1.0.0",
+                "host",
+                &[("vite", "7.0.0"), ("linked", "1.0.0")],
+            ),
+            ("vite@7.0.0", "vite", &[]),
+            ("old-peer@1.0.0", "old-peer", &[]),
+            ("linked@1.0.0", "linked", &[]),
+        ]);
+        let host = g.packages.get_mut("host@1.0.0").unwrap();
+        for (name, range) in [
+            ("old-peer", "^2.0.0"), // present but out of range
+            ("linked", "^1.0.0"),   // already a resolved sibling
+            ("absent", "^1.0.0"),   // not in the tree
+        ] {
+            host.peer_dependencies
+                .insert(name.to_string(), range.to_string());
+            host.peer_dependencies_meta.insert(
+                name.to_string(),
+                aube_lockfile::PeerDepMeta { optional: true },
+            );
+        }
+
+        let plan = plan_from_flags(&g, &[], &[]);
+        assert!(
+            names(&["host", "vite"])
+                .is_subset(&plan.names.iter().cloned().collect::<HashSet<String>>()),
+            "host still ejects via the embedded vite<8.1 seed"
+        );
+        assert!(
+            !plan.hoist_within.contains_key("host@1.0.0"),
+            "no satisfied+unlinked+present optional peer → no hoist: {:?}",
+            plan.hoist_within
         );
     }
 
