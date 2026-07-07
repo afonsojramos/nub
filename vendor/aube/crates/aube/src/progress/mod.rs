@@ -125,6 +125,12 @@ const SPIN_FRAME_MS: u128 = 60;
 /// degrades gracefully (the field just grows by one column).
 const TTY_COUNT_DIGITS: usize = 4;
 
+/// Max display columns for the churning package-name slot. The name is the
+/// LAST field (clx erases to EOL each frame, so its variable length is
+/// layout-safe), but it's still capped so a long scoped name can't run off a
+/// narrow terminal — a truncated name is enough to read the motion.
+const TTY_PKG_MAX_CHARS: usize = 32;
+
 /// Trim `reused` so `reused + downloaded <= total`. No-op when the
 /// counters already fit. Called from `set_total` after a downward
 /// rebase (post-`filter_graph`) so streamed-then-pruned credits don't
@@ -247,6 +253,13 @@ enum Mode {
         /// by the rate prop to gate display to the fetching window and
         /// switch to the `linking` label in phase 3.
         phase_num: Arc<AtomicUsize>,
+        /// Name of the most-recently-completed fetch. `FetchRow::drop`
+        /// writes it on completion (NOT `start_fetch` — see there for why);
+        /// the ticker samples it at the repaint cadence into the `pkg` prop
+        /// during fetching, so the line churns the current package name
+        /// (bun/uv-style motion) without a repaint per tarball. TTY-only —
+        /// CI mode has no single animated line to churn.
+        current_pkg: Arc<Mutex<String>>,
         /// Cumulative downloaded bytes. Fed into the transfer-rate
         /// calculation displayed in the TTY bar's `rate` prop.
         downloaded_bytes: Arc<AtomicU64>,
@@ -355,13 +368,23 @@ impl InstallProgress {
         // is unchanged), and any later clx bar in the same process — e.g. a
         // Node-provision bar — should be equally snappy, not reset to 200 ms.
         clx::progress::set_interval(TTY_TICK_INTERVAL * 2);
-        // Layout — bun/uv-style: an animated spinner, the phase verb, and a
-        // live count. NO progress bar (a bar for the linking phase either
-        // lies by holding at a fixed fill or flashes a near-full frame on a
-        // fast link — see #288); the spinner is proof-of-life on its own and
-        // the count carries the real state.
+        // Layout — bun/uv-style: an animated spinner, the phase verb, a live
+        // count, and (fetching only) the currently-fetching package name
+        // churning in the trailing slot. NO progress bar (a bar for the
+        // linking phase either lies by holding at a fixed fill or flashes a
+        // near-full frame on a fast link — see #288); the spinner is
+        // proof-of-life on its own and the count carries the real state.
         //
-        //   <header>  {{spin}} <phase>  <count><bytes><rate>
+        //   <header>  {{spin}} <phase>  <count><pkg>
+        //
+        // The churning name is the motion that makes the line FEEL fast: a
+        // near-static count reads as stalled (the npm negative case), while a
+        // stream of package names flying past reads as rapid progress. This is
+        // the lean take on bun's line — spinner + count + name, deliberately no
+        // byte / rate cluster. The byte/rate props/atomics still exist (fed by
+        // the refreshers below) but are intentionally left out of the rendered
+        // template, so the display stays uncluttered while the machinery — and
+        // the ability to restore a segment by re-adding its token — is retained.
         //
         // The whole line is wrapped in `{% if revealed %}` so it renders
         // EMPTY (and clx drops the row) until the debounce fires — a fast
@@ -379,15 +402,19 @@ impl InstallProgress {
         let root = ProgressJobBuilder::new()
             .body(
                 "{% if revealed %}{{aube}}  {{spin}} {{phase}}  \
-                 {{count}}{{bytes}}{{rate}}{% endif %}",
+                 {{count}}{{pkg}}{% endif %}",
             )
-            .body_text(Some("{{aube}}{{phase}} {{count}}{{bytes}}{{rate}}"))
+            // The logged/non-animated form omits the churning name (a single
+            // static snapshot of one package name is noise) and the byte/rate
+            // segments, matching the lean animated line.
+            .body_text(Some("{{aube}}{{phase}} {{count}}"))
             .prop("aube", &header)
             .prop("spin", &spin_frame(start))
             .prop("phase", &phase0)
             .prop("count", "")
             .prop("bytes", "")
             .prop("rate", "")
+            .prop("pkg", "")
             .prop("revealed", &false)
             .progress_current(0)
             .progress_total(TTY_BAR_SCALE)
@@ -403,6 +430,7 @@ impl InstallProgress {
         let revealed = Arc::new(AtomicBool::new(false));
         let wake = Arc::new(Condvar::new());
         let wake_lock = Arc::new(Mutex::new(()));
+        let current_pkg = Arc::new(Mutex::new(String::new()));
         let ticker = Arc::new(Mutex::new(spawn_tty_ticker(TtyTicker {
             root: Arc::downgrade(&root),
             phase_num: phase_num.clone(),
@@ -412,6 +440,7 @@ impl InstallProgress {
             wake: wake.clone(),
             wake_lock: wake_lock.clone(),
             start,
+            current_pkg: current_pkg.clone(),
         })));
         Self {
             mode: Mode::Tty {
@@ -422,6 +451,7 @@ impl InstallProgress {
                 reused: Arc::new(AtomicUsize::new(0)),
                 downloaded: Arc::new(AtomicUsize::new(0)),
                 phase_num,
+                current_pkg,
                 downloaded_bytes: Arc::new(AtomicU64::new(0)),
                 estimated_bytes: Arc::new(AtomicU64::new(0)),
                 fetch_start: Arc::new(OnceLock::new()),
@@ -838,13 +868,12 @@ impl InstallProgress {
 
     /// Register an in-flight tarball fetch. Drop the returned `FetchRow` when
     /// the fetch completes to bump the `downloaded` bucket (which advances the
-    /// bar's fetching slice). `name`/`version` are accepted for call-site
-    /// symmetry but not displayed: the TTY renderer is single-line and shows no
-    /// per-package rows, so the fetch only moves the unified bar. CI mode
-    /// likewise just increments the `downloaded` counter on drop so the
-    /// heartbeat advances.
+    /// bar's fetching slice) and record `name` as the currently-fetching
+    /// package for the churning trailing slot. `version` is accepted for
+    /// call-site symmetry but not displayed. CI mode ignores the name and just
+    /// increments the `downloaded` counter on drop so the heartbeat advances.
     pub fn start_fetch(&self, name: &str, version: &str) -> FetchRow {
-        let _ = (name, version);
+        let _ = version;
         match &self.mode {
             Mode::Tty {
                 root,
@@ -853,8 +882,15 @@ impl InstallProgress {
                 reused,
                 downloaded,
                 phase_num,
+                current_pkg,
                 ..
             } => FetchRow {
+                // The name is written to `current_pkg` on COMPLETION
+                // (`FetchRow::drop`), NOT here: every tarball's `start_fetch`
+                // fires synchronously up front in the spawn loop, so writing
+                // the slot here would race it straight to the last-iterated
+                // name and freeze it. Writing on completion churns names in
+                // lockstep with the advancing count.
                 inner: FetchRowInner::Tty {
                     root: Arc::downgrade(root),
                     total: Arc::downgrade(total),
@@ -862,6 +898,8 @@ impl InstallProgress {
                     reused: Arc::downgrade(reused),
                     downloaded: Arc::downgrade(downloaded),
                     phase_num: Arc::downgrade(phase_num),
+                    name: name.to_string(),
+                    current_pkg: Arc::downgrade(current_pkg),
                 },
                 completed: false,
             },
@@ -1065,6 +1103,24 @@ fn tty_count_field(snap: ci::Snap, completed: usize) -> String {
     format!("{cur_s}{mid} {}", style::edim("pkgs"))
 }
 
+/// The trailing ` · <name>` segment carrying the currently-fetching package
+/// name. Dim so the spinner + count stay the primary read (uv's treatment:
+/// the name is secondary motion, not the headline). Empty name → empty
+/// segment. Truncated to [`TTY_PKG_MAX_CHARS`] on a char boundary (multibyte
+/// safe) with an ellipsis.
+fn tty_pkg_field(name: &str) -> String {
+    if name.is_empty() {
+        return String::new();
+    }
+    let shown = if name.chars().count() > TTY_PKG_MAX_CHARS {
+        let head: String = name.chars().take(TTY_PKG_MAX_CHARS - 1).collect();
+        format!("{head}…")
+    } else {
+        name.to_string()
+    };
+    format!(" {} {}", style::edim("·"), style::edim(shown))
+}
+
 /// TTY-only count refresh primitive. Strongly-typed `&AtomicUsize` /
 /// `&ProgressJob` references so both the `InstallProgress`
 /// method (which holds Arcs) and `FetchRow::drop` (which holds
@@ -1151,6 +1207,9 @@ struct TtyTicker {
     wake: Arc<Condvar>,
     wake_lock: Arc<Mutex<()>>,
     start: Instant,
+    /// Shared slot holding the most-recently-completed fetch name, sampled
+    /// each tick into the `pkg` prop (see the fetching branch in the loop).
+    current_pkg: Arc<Mutex<String>>,
 }
 
 /// Spawn the link-progress ticker: a background thread that drives the
@@ -1184,9 +1243,22 @@ fn spawn_tty_ticker(t: TtyTicker) -> Option<thread::JoinHandle<()>> {
                 // resolve/fetch/link event fires (the proof-of-life clx's
                 // `{{spinner()}}` used to give us, now at our own frame rate).
                 root.prop("spin", &spin_frame(t.start));
-                if t.phase_num.load(Ordering::Relaxed) == 3 {
+                let phase = t.phase_num.load(Ordering::Relaxed);
+                if phase == 3 {
                     let files = t.files_linked.load(Ordering::Relaxed);
                     root.prop("count", &tty_count_field(linking_snap(files), 0));
+                }
+                // Sampling the shared slot HERE (not on each `start_fetch`)
+                // coalesces the wide fetch fan-out to the tick cadence: names
+                // fly by at the repaint rate regardless of how fast tarballs
+                // complete, so a burst costs one prop write per tick, not one
+                // per package. Only during fetching — bun/uv show no name while
+                // resolving or linking, and the count carries those phases.
+                if phase == 2 {
+                    let name = t.current_pkg.lock().map(|s| s.clone()).unwrap_or_default();
+                    root.prop("pkg", &tty_pkg_field(&name));
+                } else {
+                    root.prop("pkg", "");
                 }
                 drop(root);
                 let guard = t.wake_lock.lock().unwrap();
@@ -1312,6 +1384,12 @@ enum FetchRowInner {
         reused: Weak<AtomicUsize>,
         downloaded: Weak<AtomicUsize>,
         phase_num: Weak<AtomicUsize>,
+        /// This fetch's package name plus a weak handle to the shared
+        /// current-pkg slot, written on completion so the line churns names.
+        /// Weak, matching the other handles: an orphaned in-flight row must
+        /// not pin the slot (or the root) alive past `InstallProgress::Drop`.
+        name: String,
+        current_pkg: Weak<Mutex<String>>,
     },
     /// Matches the TTY variant's weak-ref discipline: orphaned CI fetch
     /// rows shouldn't prevent `CiState` from being dropped after the
@@ -1333,7 +1411,23 @@ impl FetchRow {
                 reused,
                 downloaded,
                 phase_num,
+                name,
+                current_pkg,
             } => {
+                // Record this package as the currently-fetching name so the
+                // ticker's next sample surfaces it. Completions land in
+                // lockstep with the advancing count, so names churn as fast as
+                // packages finish — the bun/uv motion — without a per-tarball
+                // repaint. A concurrent completion may overwrite it before the
+                // next tick; that's the intended coalescing (last-writer-wins
+                // is exactly the churn), and the short critical section keeps
+                // the fetch fan-out from contending on the lock.
+                if let Some(slot) = current_pkg.upgrade()
+                    && let Ok(mut s) = slot.lock()
+                {
+                    s.clear();
+                    s.push_str(name);
+                }
                 // Bump the downloaded counter, then refresh the unified bar
                 // (clx `progress_current` + `count` prop) by upgrading the weak
                 // refs to each TTY atomic.
