@@ -573,6 +573,12 @@ fn ci_lockfile_only_regenerates_a_drifted_lock() {
         code2, 0,
         "CI=true plain install must still auto-freeze and reject a drifted lock: {err2}"
     );
+    // Pin the failure to the frozen-drift path (not an unrelated network/store
+    // error), so the contrast can't pass vacuously.
+    assert!(
+        err2.contains("ERR_NUB_OUTDATED_LOCKFILE"),
+        "the rejection must be the frozen outdated-lockfile error: {err2}"
+    );
 }
 
 /// A truly-fresh `nub add` claims nub identity exactly like a fresh `install`:
