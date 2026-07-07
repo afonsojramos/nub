@@ -8,7 +8,7 @@ date: 2026-07-07
 Nuxt 4 and VitePress now run out of the box, and nub selects `.env` files from `APP_ENV` rather than `NODE_ENV`.
 
 > [!IMPORTANT]
-> **`NODE_ENV` no longer selects `.env` files.** nub treats `NODE_ENV` as the application's own dev/prod variable — it never sets it, never reads it to pick env files, and won't let a `.env` file change it. If an ambient `NODE_ENV=<mode>` was selecting `.env.{mode}` files, set `APP_ENV=<mode>` (or pass `--env <mode>`) instead.
+> **`NODE_ENV` no longer selects `.env` files.** nub treats `NODE_ENV` as the application's own dev/prod variable — it never sets it, never reads it to pick env files, and won't let a `.env` file change it. If an ambient `NODE_ENV=<mode>` was selecting `.env.{mode}` files, set `APP_ENV=<mode>` instead.
 
 ## Framework support
 
@@ -19,7 +19,7 @@ Two more frameworks scaffold and run with no config change:
 
 ## Env-file mode
 
-`.env.{mode}` selection now resolves `--env <mode>` first, then `APP_ENV`. With neither set, only `.env.local` and `.env` load. This decouples the file selector from `NODE_ENV` — the same move Vite, varlock, dotenvx, Node, and Deno made, so a non-standard `NODE_ENV` can no longer silently flip a framework into development. `--env` coexists with `--env-file <path>`, and the mode value is restricted to `[A-Za-z0-9_.-]`. ([#351](https://github.com/nubjs/nub/pull/351))
+`.env.{mode}` selection is driven by `APP_ENV`. With it unset, only `.env.local` and `.env` load. This decouples the file selector from `NODE_ENV` — the same move Vite, varlock, dotenvx, Node, and Deno made, so a non-standard `NODE_ENV` can no longer silently flip a framework into development. The mode value is restricted to `[A-Za-z0-9_.-]`, and `--env-file` (repeatable) still loads specific files explicitly. ([#351](https://github.com/nubjs/nub/pull/351))
 
 ## Install
 
