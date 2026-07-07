@@ -341,7 +341,7 @@ function resolveViaParentRequire(specifier, parentURL) {
 //
 // Two conditions, both required, so the hint fires ONLY for a true phantom dep:
 //   (1) the bare package is in the project's graph — nub names every graph
-//       package `<name>@<version>` (scoped `/` → `+`) under `node_modules/.nub`,
+//       package `<name>@<version>` (scoped `/` → `+`) under `node_modules/.store`,
 //       so a matching entry means it's installed (GVS: symlinks into the global
 //       store; non-GVS: real dirs);
 //   (2) the bare package is NOT reachable at any `node_modules/<pkg>` up the
@@ -349,7 +349,7 @@ function resolveViaParentRequire(specifier, parentURL) {
 //       missing SUBPATH/file inside it (`react-dom/client-typo`), not a phantom.
 // A genuine typo / absent dep fails (1); a subpath miss of a declared dep fails
 // (2); the hoisted opt-out leaves no `<name>@*` entries (only internal state),
-// and node-suite / plain-Node trees have no `.nub` at all — none get the hint.
+// and node-suite / plain-Node trees have no `.store` at all — none get the hint.
 // NOT COVERED: the compat-tier ESM loader (Node 18.19–22.14 `import`) resolves
 // in preload-async-hooks.mjs and can't reach this CJS helper, so that band
 // surfaces Node's standard error without the hint; the fast tier (22.15+) and
@@ -379,9 +379,9 @@ function phantomDepHint(specifier, fromPath) {
     if (existsSync(join(nm, pkg))) return null;
     if (!inStore) {
       try {
-        inStore = readdirSync(join(nm, ".nub")).some((e) => e.startsWith(prefix));
+        inStore = readdirSync(join(nm, ".store")).some((e) => e.startsWith(prefix));
       } catch {
-        /* no `.nub` at this level */
+        /* no `.store` at this level */
       }
     }
     const parent = dirname(dir);

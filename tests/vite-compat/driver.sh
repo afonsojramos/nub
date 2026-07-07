@@ -72,9 +72,9 @@ inst=$?
 [ $inst -eq 0 ] || { fail "nub install exit $inst"; tail -5 /tmp/vc-$name-install.log >&2; exit 2; }
 
 # Vite reaches the graph as a direct dep (top-level node_modules/vite) OR
-# transitively as a framework's embedded engine (only .nub/vite@* entries, no
+# transitively as a framework's embedded engine (only .store/vite@* entries, no
 # top-level symlink). Detect + resolve the LOADED vite either way: prefer what
-# the framework/CLI actually imports (node resolution), else the first .nub entry.
+# the framework/CLI actually imports (node resolution), else the first .store entry.
 read -r vite_ver realpath_vite < <(node -e '
 const fs=require("fs"),p=require("path");
 function ver(d){try{return require(p.join(d,"package.json")).version}catch{return null}}
@@ -82,8 +82,8 @@ let dir=null;
 try{ // what would `vite dev` / the framework load?
   dir=p.dirname(fs.realpathSync(require.resolve("vite/package.json",{paths:[process.cwd()]})));
 }catch{}
-if(!dir){ // transitive-only: scan .nub/vite@*
-  const nb=p.join("node_modules",".nub");
+if(!dir){ // transitive-only: scan .store/vite@*
+  const nb=p.join("node_modules",".store");
   for(const e of (fs.existsSync(nb)?fs.readdirSync(nb):[])){
     if(e.startsWith("vite@")){const c=p.join(nb,e,"node_modules","vite");if(fs.existsSync(c)){dir=fs.realpathSync(c);break}}
   }

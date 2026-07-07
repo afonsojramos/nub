@@ -6794,7 +6794,7 @@ fn external_subcommand_never_shadows_an_engine_verb() {
 /// under a flat node_modules fails — and the runtime resolve hooks annotate
 /// that specific failure with the one-line `node-linker=hoisted` opt-out.
 /// Hand-built minimal layout (no real install / network): the bare-package
-/// presence in `node_modules/.nub` plus top-level reachability is the entire
+/// presence in `node_modules/.store` plus top-level reachability is the entire
 /// discriminator, so a directory tree is enough. Guards the three branches that
 /// the gate must get right (the middle one is the regression the reachability
 /// check fixes): a true phantom hints, a subpath miss of a DECLARED dep does
@@ -6822,11 +6822,11 @@ fn phantom_dependency_miss_points_at_the_hoisted_opt_out() {
     // A graph package present ONLY in the virtual store (a phantom: installed,
     // not reachable from the project root).
     mk(
-        "node_modules/.nub/phantom-pkg@1.0.0/node_modules/phantom-pkg/package.json",
+        "node_modules/.store/phantom-pkg@1.0.0/node_modules/phantom-pkg/package.json",
         r#"{"name":"phantom-pkg","version":"1.0.0","main":"index.js"}"#,
     );
     mk(
-        "node_modules/.nub/phantom-pkg@1.0.0/node_modules/phantom-pkg/index.js",
+        "node_modules/.store/phantom-pkg@1.0.0/node_modules/phantom-pkg/index.js",
         "module.exports = 'phantom';",
     );
     let _ = &nm; // node_modules is created lazily by the writes above.
@@ -6848,7 +6848,7 @@ fn phantom_dependency_miss_points_at_the_hoisted_opt_out() {
     let phantom = run("phantom.cjs");
     assert!(
         phantom.contains("phantom dependency") && phantom.contains("node-linker=hoisted"),
-        "an undeclared transitive present in .nub must surface the opt-out hint: {phantom}"
+        "an undeclared transitive present in .store must surface the opt-out hint: {phantom}"
     );
     assert!(
         phantom.matches("phantom dependency").count() == 1,
@@ -6864,6 +6864,6 @@ fn phantom_dependency_miss_points_at_the_hoisted_opt_out() {
     let typo = run("typo.cjs");
     assert!(
         !typo.contains("phantom dependency"),
-        "a package absent from .nub is a genuine miss, not a phantom dep — no hint: {typo}"
+        "a package absent from .store is a genuine miss, not a phantom dep — no hint: {typo}"
     );
 }

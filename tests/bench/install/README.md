@@ -19,7 +19,7 @@ bash tests/bench/install/run.sh --materialized
 
 ## Warm install — GVS eligibility
 
-`nub install`'s warm-install speed comes from its global virtual store. `node_modules` stays project-local, but with GVS on the inner package under `.nub/` is hardlinked from a shared store instead of materialized per project. A warm reinstall becomes a relink against an already-materialized store.
+`nub install`'s warm-install speed comes from its global virtual store. `node_modules` stays project-local, but with GVS on the inner package under `.store/` is hardlinked from a shared store instead of materialized per project. A warm reinstall becomes a relink against an already-materialized store.
 
 The main harness exercises both sides of the compatibility split:
 

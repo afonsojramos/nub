@@ -6,19 +6,19 @@
 # work go in known-gaps.txt instead; tests failing for any other reason are
 # real defects to fix, not to list.
 
-# ── virtual store / engine state are nub-named (node_modules/.nub) ──────────
-install.bats|aube install creates node_modules|virtual store lands at node_modules/.nub, not node_modules/.aube
-install.bats|aube install creates .aube virtual store|virtual store lands at node_modules/.nub
-install.bats|aube install creates transitive dep symlinks in .aube|virtual store lands at node_modules/.nub
+# ── virtual store / engine state are nub-named (node_modules/.store) ──────────
+install.bats|aube install creates node_modules|virtual store lands at node_modules/.store, not node_modules/.aube
+install.bats|aube install creates .aube virtual store|virtual store lands at node_modules/.store
+install.bats|aube install creates transitive dep symlinks in .aube|virtual store lands at node_modules/.store
 install.bats|aube install writes state at node_modules/.aube-state|engine state stem follows nub's store naming (rename of the leaf-fixed .aube-state basename is tracked separately)
 install.bats|aube install self-heals when a CAS shard goes missing under a cached index|asserts the node_modules/.aube path
 install.bats|aube install preserves npm-alias as folder on fresh resolve|walks the node_modules/.aube tree
 add.bats|aube add jsr: resolves against the @jsr scope and writes jsr:<range>|asserts the node_modules/.aube path
-lockfile_settings.bats|modulesDir=custom installs into the configured directory|asserts <modulesDir>/.aube; nub's virtual store stem is .nub
+lockfile_settings.bats|modulesDir=custom installs into the configured directory|asserts <modulesDir>/.aube; nub's virtual store stem is .store
 prune.bats|aube prune --help|nub's clap help omits aube's "Remove extraneous packages" about line
-prune.bats|aube prune removes orphaned .aube entries|fixture seeds an orphan under node_modules/.aube; nub's virtual store is node_modules/.nub
+prune.bats|aube prune removes orphaned .aube entries|fixture seeds an orphan under node_modules/.aube; nub's virtual store is node_modules/.store
 prune.bats|aube prune honors virtualStoreDir|asserts the prune summary's ".aube" label; nub rebrands it to "the virtual store"
-prune.bats|aube prune removes orphan scoped .aube entries and cleans empty scope dir|fixture seeds an orphan under node_modules/.aube; nub's virtual store is node_modules/.nub
+prune.bats|aube prune removes orphan scoped .aube entries and cleans empty scope dir|fixture seeds an orphan under node_modules/.aube; nub's virtual store is node_modules/.store
 
 # ── fresh projects default to pnpm-lock.yaml (defaultLockfileFormat=pnpm) ───
 install.bats|aube install in CI generates a lockfile when none is present|fresh projects write pnpm-lock.yaml, not aube-lock.yaml

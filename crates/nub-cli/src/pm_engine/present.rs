@@ -74,7 +74,7 @@ pub(crate) fn info(msg: &str) {
 /// embedder seams actually configure: `defaultLockfileFormat=pnpm` (fresh
 /// lockfiles are `pnpm-lock.yaml`), the workspace-yaml list restricted to
 /// `pnpm-workspace.yaml`, the manifest config namespace restricted to
-/// `pnpm`, and `virtualStoreDir=node_modules/.nub`. Runtime messages must
+/// `pnpm`, and `virtualStoreDir=node_modules/.store`. Runtime messages must
 /// keep using [`rewrite`]: they may truthfully name on-disk files (a real
 /// `aube-lock.yaml` sitting in a project), which the word pass deliberately
 /// preserves and this map would falsify.
@@ -123,7 +123,7 @@ pub(crate) fn rewrite_help(text: impl AsRef<str>) -> String {
             "`global-links` in the engine's data directory",
         ),
         // `why --paths` example path: nub's virtualStoreDir default.
-        (".aube/<dep_path>", ".nub/<dep_path>"),
+        (".aube/<dep_path>", ".store/<dep_path>"),
         // The GVS location in engine docs;
         // described structurally — the literal path is engine cache state.
         (
@@ -461,7 +461,7 @@ mod tests {
         for name in [
             "aube-lock.yaml",
             "aube-workspace.yaml",
-            "node_modules/.nub/.aube-state",
+            "node_modules/.store/.aube-state",
             "node_modules/.aube-applied-patches.json",
             "~/.local/share/aube/store/v1",
         ] {

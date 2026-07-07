@@ -79,7 +79,7 @@
 //!   spellings rebrand ("`aube outdated -w`" reads "`nub outdated -w`") and
 //!   config-location spellings map to nub's configured contract
 //!   (`aube-workspace.yaml` → `pnpm-workspace.yaml`, `why`'s
-//!   `.aube/<dep_path>` example → `.nub/<dep_path>`).
+//!   `.aube/<dep_path>` example → `.store/<dep_path>`).
 //! - `outdated` / `audit` / `peers check` signal "findings exist" via
 //!   `std::process::exit(1)` *inside* the engine (pnpm-compat), after the
 //!   report is fully printed — they bypass this file's `Result<i32>` return
@@ -509,7 +509,7 @@ fn run_check(typed: &str, args: &[String]) -> Result<i32> {
         Parsed::Done(code) => return Ok(code),
     };
     let session = super::engine_session_quiet(cli.dir.as_deref())?;
-    // Reads the *resolved* virtual store (node_modules/.nub under nub's
+    // Reads the *resolved* virtual store (node_modules/.store under nub's
     // defaults); a never-installed project reports `checked 0 packages`
     // rather than erroring, so no pre-flight applies. Broken links exit 1
     // via std::process::exit inside the engine (pnpm-compat), like
