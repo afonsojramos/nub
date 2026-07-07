@@ -278,10 +278,120 @@ fn update_latest_moves_the_manifest_and_lockfile_forward() {
         manifest.contains("3.1.0"),
         "--latest must rewrite the manifest past the pin: {manifest}"
     );
-    let lock = std::fs::read_to_string(dir.join("pnpm-lock.yaml")).unwrap();
+    // Fresh project with no incumbent lockfile → nub writes its neutral
+    // nub.lock; a project already on pnpm-lock.yaml keeps that.
+    let lock = std::fs::read_to_string(dir.join("nub.lock"))
+        .or_else(|_| std::fs::read_to_string(dir.join("pnpm-lock.yaml")))
+        .expect("update must write a lockfile");
     assert!(
         lock.contains("3.1.0") && !lock.contains("is-positive@3.0.0"),
         "the lockfile must resolve the updated version: {lock}"
+    );
+}
+
+/// `nub up <pkg>@<version>` pins the named dep to that version, preserving
+/// the manifest's existing range operator (`^3.0.0` + `is-positive@3.1.0` ->
+/// `^3.1.0`) — matching `pnpm update <pkg>@<version>`. The pre-fix engine
+/// rejected any non-`latest` spec here.
+#[test]
+#[ignore = "network: resolves is-positive from the npm registry"]
+fn update_pins_named_version_preserving_manifest_operator() {
+    if !registry_reachable() {
+        eprintln!("skipping: registry.npmjs.org unreachable");
+        return;
+    }
+    let dir = pm_tmpdir("updatepin");
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"updatepin","version":"1.0.0","dependencies":{"is-positive":"^3.0.0"}}"#,
+    )
+    .unwrap();
+
+    let up = run_nub(&dir, &["up", "is-positive@3.1.0"]);
+    assert_eq!(up.code, 0, "stdout: {}\nstderr: {}", up.stdout, up.stderr);
+    up.assert_brand_clean();
+    let manifest = std::fs::read_to_string(dir.join("package.json")).unwrap();
+    assert!(
+        manifest.contains("\"is-positive\": \"^3.1.0\""),
+        "the caret operator must be preserved on the pinned version: {manifest}"
+    );
+    // Fresh project with no incumbent lockfile → nub writes its neutral
+    // nub.lock; a project already on pnpm-lock.yaml keeps that.
+    let lock = std::fs::read_to_string(dir.join("nub.lock"))
+        .or_else(|_| std::fs::read_to_string(dir.join("pnpm-lock.yaml")))
+        .expect("update must write a lockfile");
+    assert!(
+        lock.contains("3.1.0") && !lock.contains("is-positive@3.0.0"),
+        "the lockfile must resolve the pinned version: {lock}"
+    );
+}
+
+/// `nub up <pkg>@<protocol-spec>` (npm alias, `link:`, `file:`, git, a
+/// tarball URL, a non-`latest` dist-tag) is rejected up front with a
+/// non-zero exit and the manifest left untouched — pinning one of those
+/// into a semver slot would silently corrupt package.json. The rejection
+/// is a pre-flight, so this needs no network.
+#[test]
+fn update_rejects_non_semver_specs_without_touching_the_manifest() {
+    let dir = pm_tmpdir("updatereject");
+    let manifest_src =
+        r#"{"name":"updatereject","version":"1.0.0","dependencies":{"is-odd":"^3.0.0"}}"#;
+    for spec in [
+        "is-odd@npm:is-even@1.0.0",
+        "is-odd@link:../bar",
+        "is-odd@file:./bar",
+        "is-odd@github:a/b",
+        "is-odd@https://example.com/is-odd.tgz",
+        "is-odd@next",
+    ] {
+        std::fs::write(dir.join("package.json"), manifest_src).unwrap();
+        let out = run_nub(&dir, &["up", spec]);
+        assert_ne!(out.code, 0, "`{spec}` must be rejected: {}", out.combined());
+        out.assert_brand_clean();
+        let after = std::fs::read_to_string(dir.join("package.json")).unwrap();
+        assert_eq!(
+            after, manifest_src,
+            "a rejected `{spec}` must leave package.json byte-identical"
+        );
+    }
+}
+
+/// `nub add <pkg>@<version> --lockfile-only` resolves and writes the
+/// lockfile + manifest but never links `node_modules` — the grammar the
+/// pre-fix `add` rejected outright (`unexpected argument '--lockfile-only'`).
+#[test]
+#[ignore = "network: resolves is-positive from the npm registry"]
+fn add_lockfile_only_writes_lockfile_without_linking_node_modules() {
+    if !registry_reachable() {
+        eprintln!("skipping: registry.npmjs.org unreachable");
+        return;
+    }
+    let dir = pm_tmpdir("addlockonly");
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"addlockonly","version":"1.0.0"}"#,
+    )
+    .unwrap();
+
+    let add = run_nub(&dir, &["add", "is-positive@3.1.0", "--lockfile-only"]);
+    assert_eq!(
+        add.code, 0,
+        "stdout: {}\nstderr: {}",
+        add.stdout, add.stderr
+    );
+    add.assert_brand_clean();
+    let manifest = std::fs::read_to_string(dir.join("package.json")).unwrap();
+    assert!(
+        manifest.contains("is-positive"),
+        "add must still persist the dependency to package.json: {manifest}"
+    );
+    assert!(
+        dir.join("nub.lock").exists() || dir.join("pnpm-lock.yaml").exists(),
+        "the lockfile must be written"
+    );
+    assert!(
+        !dir.join("node_modules/is-positive").exists(),
+        "--lockfile-only must skip linking node_modules"
     );
 }
 

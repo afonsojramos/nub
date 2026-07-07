@@ -82,6 +82,8 @@ pub(super) async fn run(
         // See the sibling `aube add` codepath for why this flag is set:
         // live OSV API on the resolved transitives.
         install_opts.osv_transitive_check = true;
+        // `--lockfile-only`: write the lockfile + manifests, skip linking.
+        install_opts.lockfile_only = args.lockfile_only;
         install::run(install_opts).await?;
         Ok(())
     }

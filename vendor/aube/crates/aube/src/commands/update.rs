@@ -141,20 +141,30 @@ pub async fn run(
         return run_filtered(args, &filter).await;
     }
     reject_unsupported_pkg_specs(&args.packages)?;
-    // Parse `<pkg>@<spec>` arg syntax. Today only `@latest` is honored —
-    // it's the syntactic equivalent of `--latest` scoped to that one
-    // entry, which is how pnpm phrases the manifest-rewrite-past-range
-    // case (`pnpm update foo@latest`). Non-`latest` specs are rejected
-    // by `reject_unsupported_pkg_specs` above so they don't silently
-    // get swallowed.
-    let mut explicit_latest_keys: BTreeSet<String> = BTreeSet::new();
+    // Parse `<pkg>@<spec>` arg syntax into a per-key target spec. A
+    // concrete version or range (`foo@3.0.1`, `foo@~2`) pins the named
+    // entry to that spec (`pnpm update foo@3.0.1`); `@latest` is the
+    // dist-tag bump-past-range case (`pnpm update foo@latest`). Both are
+    // honored by injecting the spec as the resolver range for that key
+    // below, then gluing the manifest's existing operator back onto the
+    // resolved version — so `^3.0.0` + `foo@3.0.1` yields `^3.0.1`,
+    // matching pnpm (the arg's own operator, if any, is discarded). The
+    // `latest` dist-tag is just one possible spec value; the separate
+    // `--latest` FLAG (`args.latest`, whole-project scope) keeps its
+    // own `preserve_pin` downgrade guard below.
+    let mut explicit_specs: BTreeMap<String, String> = BTreeMap::new();
     let parsed_packages: Vec<String> = args
         .packages
         .iter()
         .map(|raw| {
             let (name, spec) = split_pkg_arg(raw);
-            if spec == Some("latest") {
-                explicit_latest_keys.insert(name.to_string());
+            // A concrete `<spec>` pins the entry; an empty spec (`foo@`)
+            // is pnpm's bare in-range update, so leave it unmapped and it
+            // flows the same path as bare `foo`.
+            if let Some(s) = spec
+                && !s.is_empty()
+            {
+                explicit_specs.insert(name.to_string(), s.to_string());
             }
             name.to_string()
         })
@@ -163,10 +173,11 @@ pub async fn run(
     let latest = args.latest;
     let no_save = args.no_save;
     // `--latest` flag triggers manifest rewrites for every direct dep;
-    // `<pkg>@latest` triggers it only for that one entry. Combine them
-    // into a per-key predicate so the same code path serves both.
-    let effective_latest = latest || !explicit_latest_keys.is_empty();
-    let should_rewrite_key = |key: &str| -> bool { latest || explicit_latest_keys.contains(key) };
+    // an explicit `<pkg>@<spec>` triggers it only for that one entry.
+    // Combine them into a per-key predicate so the same rewrite path
+    // serves both.
+    let effective_latest = latest || !explicit_specs.is_empty();
+    let should_rewrite_key = |key: &str| -> bool { latest || explicit_specs.contains_key(key) };
     let mut cwd = crate::dirs::project_root()?;
     // `-w/--workspace-root`: act on the workspace root manifest
     // regardless of which sub-package the user ran from. Mirrors
@@ -509,10 +520,17 @@ pub async fn run(
                 // the package.json rewrite loop below.
                 continue;
             }
+            // Concrete `<pkg>@<spec>` args inject their own spec as the
+            // resolver range; the `--latest` flag (no per-key spec) and
+            // `<pkg>@latest` inject the `latest` dist-tag.
+            let target = explicit_specs
+                .get(key)
+                .map(String::as_str)
+                .unwrap_or("latest");
             let new_spec = if original.starts_with("npm:") {
-                format!("npm:{real_name}@latest")
+                format!("npm:{real_name}@{target}")
             } else {
-                "latest".to_string()
+                target.to_string()
             };
             if m.dependencies.contains_key(key) {
                 m.dependencies.insert(key.clone(), new_spec);
@@ -555,30 +573,31 @@ pub async fn run(
                     .as_deref()
                     .is_some_and(|a| indirect_set.contains(a))
         });
-        // Indirect-arg dist-tag forwarding. When the user passes
-        // `<indirect>@latest`, dropping the indirect's own snapshot
+        // Indirect-arg spec forwarding. When the user passes
+        // `<indirect>@<spec>`, dropping the indirect's own snapshot
         // entry isn't enough on its own — the resolver's lockfile-reuse
         // path (aube_resolver::resolve.rs:1164) iterates each parent's
         // locked `dependencies` map and enqueues transitive tasks using
         // the *locked version* as the range. So a parent locked at
         // `pkg-with-1-dep@100.0.0` with `dependencies: { dep-of: 100.0.0 }`
         // still re-resolves dep-of at exactly 100.0.0, even after we
-        // dropped dep-of from `packages`. Rewriting the edge to `latest`
-        // rebroadcasts it as a dist-tag spec, so the transitive task
-        // resolves through the registry packument and picks the new
-        // latest. Only applied for entries the user named with
-        // `@latest`; bare `update <indirect>` keeps the locked edge so
-        // we don't silently bump something the user didn't ask to bump.
-        if !explicit_latest_keys.is_empty() {
+        // dropped dep-of from `packages`. Rewriting the edge to the
+        // named spec (a `latest` dist-tag or a concrete version/range)
+        // rebroadcasts it, so the transitive task resolves through the
+        // registry packument and picks the requested version. Only
+        // applied for entries the user named with an explicit `@<spec>`;
+        // bare `update <indirect>` keeps the locked edge so we don't
+        // silently bump something the user didn't ask to bump.
+        if !explicit_specs.is_empty() {
             for parent_pkg in filtered.packages.values_mut() {
                 for indirect_name in &indirect_arg_names {
-                    if !explicit_latest_keys.contains(indirect_name) {
+                    let Some(target) = explicit_specs.get(indirect_name) else {
                         continue;
-                    }
+                    };
                     if parent_pkg.dependencies.contains_key(indirect_name.as_str()) {
                         parent_pkg
                             .dependencies
-                            .insert(indirect_name.clone(), "latest".to_string());
+                            .insert(indirect_name.clone(), target.clone());
                     }
                 }
             }
@@ -658,7 +677,18 @@ pub async fn run(
                 eprintln!("  {manifest_key}: {old} -> {new}");
             }
             (Some(ver), Some(_)) => {
-                eprintln!("  {manifest_key}: {ver} (already latest)");
+                // A concrete `<pkg>@<version>` pin that resolved to the
+                // version already installed isn't "already latest" — say
+                // so precisely; the `--latest`/`@latest`/bare paths keep
+                // their original wording.
+                if explicit_specs
+                    .get(manifest_key)
+                    .is_some_and(|s| s != "latest")
+                {
+                    eprintln!("  {manifest_key}: {ver} (already at target)");
+                } else {
+                    eprintln!("  {manifest_key}: {ver} (already latest)");
+                }
             }
             (None, Some(new)) => {
                 eprintln!("  {manifest_key}: (new) {new}");
@@ -1560,21 +1590,37 @@ fn split_pkg_arg(arg: &str) -> (&str, Option<&str>) {
     }
 }
 
-/// Reject any `<pkg>@<spec>` arg whose spec isn't `latest`. Other forms
-/// (`foo@^2.0.0`, `foo@1.2.3`) are *parsed* by `split_pkg_arg` but the
-/// rest of the update path only acts on `@latest` — silently swallowing
-/// them would leave the user wondering why their spec didn't take. Hard
-/// error early with the supported alternatives so it's discoverable;
-/// future work can lift the restriction by threading the spec into the
-/// resolver_manifest rewrite + manifest write paths.
+/// Validate each `<pkg>@<spec>` arg against the specs the update-pin
+/// path can actually resolve. This is a positive ALLOWLIST — a spec is
+/// accepted iff nub can pin it to a registry version:
+///   - a semver version or range (`foo@3.0.1`, `foo@~2`, `foo@^2.0.0`,
+///     `foo@>=1`) — injected as the resolver range for that entry, then
+///     glued back onto the manifest's existing operator (matching
+///     `pnpm update foo@3.0.1`).
+///   - the `latest` dist-tag (`foo@latest`) — bump past the range.
+///   - an empty spec (`foo@`) — pnpm treats this as a bare in-range
+///     update (`foo`); the parse loop leaves it unmapped so it flows
+///     the bare path.
+///
+/// Everything else is REJECTED with a clean error rather than silently
+/// injected into the pin path. This is the load-bearing safety net: the
+/// alias/protocol/URL forms (`npm:is-even@1`, `link:../bar`, `file:./x`,
+/// `portal:../x`, `workspace:*`, `catalog:`, `git+https://…`,
+/// `github:u/r`, a tarball URL) carry no plain semver target, so pinning
+/// one would corrupt the manifest/lockfile — wrong package (an `npm:`
+/// alias loses its real-name intent) or a bogus `^0.0.0` — while exiting
+/// 0. Non-`latest` dist-tags (`next`, `beta`) are likewise rejected: the
+/// update path only ever honored `latest`. The check reuses
+/// `node_semver::Range::parse`, so the allowlist tracks exactly what the
+/// resolver can consume (every protocol/alias/URL form fails to parse).
 fn reject_unsupported_pkg_specs(packages: &[String]) -> miette::Result<()> {
     for raw in packages {
         let (name, spec) = split_pkg_arg(raw);
-        if let Some(s) = spec
-            && s != "latest"
-        {
+        let Some(s) = spec else { continue };
+        let supported = s.is_empty() || s == "latest" || node_semver::Range::parse(s).is_ok();
+        if !supported {
             return Err(miette!(
-                "package spec '{name}@{s}' is not supported by `update` — use `--latest` (or `<pkg>@latest`) to bump past the manifest range, or omit the spec to refresh in-range",
+                "package spec '{name}@{s}' is not supported by `update` — pass a version, range, or `latest` (e.g. `{name}@3.0.1`, `{name}@^2`, `{name}@latest`)",
             ));
         }
     }
@@ -1955,5 +2001,65 @@ mod tests {
         let versions = workspace_package_versions(root).unwrap();
         assert_eq!(versions.get("@my/root").unwrap(), "3.0.0");
         assert_eq!(versions.get("@my/docs").unwrap(), "1.0.0");
+    }
+
+    #[test]
+    fn update_pin_preserves_manifest_operator_over_arg_version() {
+        // `update <pkg>@<version>` glues the manifest's existing operator
+        // onto the resolved version (the arg's own operator is discarded),
+        // matching `pnpm update`: `^3.0.0` + resolve `3.0.1` -> `^3.0.1`,
+        // an exact pin stays exact, out-of-range downgrades keep the caret.
+        assert_eq!(rewrite_specifier("^3.0.0", "p", "3.0.1", false), "^3.0.1");
+        assert_eq!(rewrite_specifier("~3.0.0", "p", "3.4.0", false), "~3.4.0");
+        assert_eq!(rewrite_specifier("3.0.0", "p", "3.0.1", false), "3.0.1");
+        assert_eq!(rewrite_specifier("^3.1.0", "p", "3.0.0", false), "^3.0.0");
+        // `--save-exact`/`-E` forces an exact pin regardless of operator.
+        assert_eq!(rewrite_specifier("^3.0.0", "p", "3.0.1", true), "3.0.1");
+        // `npm:` aliases round-trip through the alias, operator preserved.
+        assert_eq!(
+            rewrite_specifier("npm:real@^1.0.0", "real", "1.2.0", false),
+            "npm:real@^1.2.0"
+        );
+    }
+
+    #[test]
+    fn reject_unsupported_pkg_specs_allowlists_semver_rejects_protocols() {
+        // Registry versions, ranges, `latest`, bare names, and the empty
+        // spec (pnpm's bare in-range update) are all honored.
+        for ok in [
+            "is-odd@3.0.1",
+            "is-odd@^2",
+            "is-odd@~3.0",
+            "is-odd@>=1.0.0",
+            "is-odd@1.2.3-rc.0",
+            "is-odd@latest",
+            "is-odd@",
+            "is-odd",
+        ] {
+            assert!(
+                reject_unsupported_pkg_specs(&[ok.to_string()]).is_ok(),
+                "{ok} should be accepted"
+            );
+        }
+        // Alias/protocol/URL forms and non-`latest` dist-tags carry no
+        // plain semver target — pinning them would silently corrupt the
+        // manifest, so they must hard-error (the pre-pin safety net).
+        for bad in [
+            "is-odd@npm:is-even@1.0.0",
+            "is-odd@link:../bar",
+            "is-odd@file:./bar",
+            "is-odd@portal:../bar",
+            "is-odd@workspace:*",
+            "is-odd@catalog:",
+            "is-odd@github:a/b",
+            "is-odd@git+https://example.com/a/b.git",
+            "is-odd@https://example.com/is-odd-3.0.1.tgz",
+            "is-odd@next",
+        ] {
+            assert!(
+                reject_unsupported_pkg_specs(&[bad.to_string()]).is_err(),
+                "{bad} should be rejected"
+            );
+        }
     }
 }
