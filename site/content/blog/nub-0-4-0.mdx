@@ -1,0 +1,28 @@
+---
+title: "Nub 0.4.0"
+description: Nuxt 4 and VitePress run out of the box, and env-file mode is now selected by APP_ENV instead of NODE_ENV.
+author: The Nub Team
+date: 2026-07-07
+---
+
+Nuxt 4 and VitePress now run out of the box, and nub selects `.env` files from `APP_ENV` rather than `NODE_ENV`.
+
+> [!IMPORTANT]
+> **`NODE_ENV` no longer selects `.env` files.** nub treats `NODE_ENV` as the application's own dev/prod variable — it never sets it, never reads it to pick env files, and won't let a `.env` file change it. If an ambient `NODE_ENV=<mode>` was selecting `.env.{mode}` files, set `APP_ENV=<mode>` (or pass `--env <mode>`) instead.
+
+## Framework support
+
+Two more frameworks scaffold and run with no config change:
+
+- **Nuxt 4** installs and runs under the global virtual store — `nuxt prepare` and `nuxt dev` resolve `@vue/compiler-sfc`, which `vue-router`'s `/vite` entry imports statically while declaring it an optional peer. Nub now hoists such present, range-satisfying optional peers into ejected closure members, matching pnpm. ([#350](https://github.com/nubjs/nub/pull/350))
+- **VitePress** can read linked files from the store: nub appends the store directory to Vite's `server.fs.allow` instead of skipping it when the list is already set. ([#346](https://github.com/nubjs/nub/pull/346))
+
+## Env-file mode
+
+`.env.{mode}` selection now resolves `--env <mode>` first, then `APP_ENV`. With neither set, only `.env.local` and `.env` load. This decouples the file selector from `NODE_ENV` — the same move Vite, varlock, dotenvx, Node, and Deno made, so a non-standard `NODE_ENV` can no longer silently flip a framework into development. `--env` coexists with `--env-file <path>`, and the mode value is restricted to `[A-Za-z0-9_.-]`. ([#351](https://github.com/nubjs/nub/pull/351))
+
+## Install
+
+`nub install --lockfile-only` now updates the lockfile in CI. `--lockfile-only` is exempt from the CI auto-frozen-lockfile default, so it no longer fails as frozen when run in a CI environment. ([#349](https://github.com/nubjs/nub/pull/349))
+
+The [full release notes](https://github.com/nubjs/nub/releases/tag/v0.4.0) list every change in this release.
