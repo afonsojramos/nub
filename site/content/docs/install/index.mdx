@@ -178,7 +178,7 @@ A project is Nub's own in three cases: it declares Nub through `nub pm use nub`,
 - **Lockfile:** `nub.lock` — the pnpm v9 schema byte-for-byte, under Nub's own basename
 - **Package fields:** `workspaces`, `overrides`, `resolutions`, `patchedDependencies`, `allowBuilds`, `engines.node`, `scripts`
 - **Config and env:** the `.npmrc` cascade, `npm_config_*`, neutral env (`CI`, proxies), plus `NUB_CACHE_DIR`, `NUB_CONCURRENCY`, `NUB_PRIMER_TTL`
-- **Install state:** `node_modules/.nub/`, `.nub-state`, and the global store under Nub's own directories
+- **Install state:** `node_modules/.store/`, `.nub-state`, and the global store under Nub's own directories
 
 A fresh `nub install` records Nub as the manager with a non-locking range — `devEngines.packageManager` set to `{ name: "nub", version: "^<version>", onFail: "warn" }`, never an exact `packageManager` pin. Tools that read `devEngines` by name see the signal, and the caret is a floor, so upgrading Nub just works. To freeze the project at an exact Nub version — the corepack-visible hard pin — opt in with `nub pm use nub@<version>`; the bare `nub pm use nub` writes only the range.
 
@@ -444,7 +444,7 @@ Files materialize into `node_modules` by reflink (APFS/btrfs), hardlink (ext4), 
 
 ### Virtual store
 
-The default `node_modules` layout is **isolated**: direct dependencies sit at the top level, transitive packages link into a per-project virtual store, and phantom dependencies fail instead of resolving by accident. Nub's virtual store is `node_modules/.nub/` (pnpm uses `node_modules/.pnpm/`) — same shape, not byte-shared, so alternating tools relinks the tree.
+The default `node_modules` layout is **isolated**: direct dependencies sit at the top level, transitive packages link into a per-project virtual store, and phantom dependencies fail instead of resolving by accident. Nub's virtual store is `node_modules/.store/` (pnpm uses `node_modules/.pnpm/`) — same shape, not byte-shared, so alternating tools relinks the tree.
 
 Every incumbent defaults to **isolated** — npm, Yarn, and Bun included, alongside pnpm and Nub-identity projects. A project that relies on phantom (undeclared) dependencies opts into the flat, npm-style layout with one line in `.npmrc`:
 

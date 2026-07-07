@@ -453,7 +453,7 @@ fn run_prune(typed: &str, args: &[String]) -> Result<i32> {
     let session = super::engine_session(globals.dir.as_deref())?;
     // prune prints its summary via raw eprintln with a hardcoded `.aube`
     // store label (the walked directory is the *resolved* virtualStoreDir —
-    // node_modules/.nub here — only the label lies). Capture + neutralize.
+    // node_modules/.store here — only the label lies). Capture + neutralize.
     // Under `--silent` the output guard redirects stderr, so the rebranded
     // reprint is suppressed too; the guard drops before `finish`.
     let result = with_output(&globals.output, || {

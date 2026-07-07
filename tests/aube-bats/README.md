@@ -12,7 +12,7 @@ The default curated subset is the install family: `install.bats ci.bats add.bats
 
 Tests that cannot pass under nub are annotated at staging time (a `skip` line injected into a patched copy — `vendor/aube` is never modified) from two separate files, and the distinction is load-bearing:
 
-- [`skips.txt`](skips.txt) — **permanent, intended divergences** (`skip "nub-divergence: …"`): aube-branded behavior nub deliberately toggles off — the `node_modules/.aube` virtual-store stem (nub: `node_modules/.nub`), `aube-lock.yaml` as the fresh-project lockfile (nub: `pnpm-lock.yaml` via the `defaultLockfileFormat` embedder default), and verb/flag collisions where nub's own surface wins (`run` is nub's script runner; `-v` is `--version`).
+- [`skips.txt`](skips.txt) — **permanent, intended divergences** (`skip "nub-divergence: …"`): aube-branded behavior nub deliberately toggles off — the `node_modules/.aube` virtual-store stem (nub: `node_modules/.store`), `aube-lock.yaml` as the fresh-project lockfile (nub: `pnpm-lock.yaml` via the `defaultLockfileFormat` embedder default), and verb/flag collisions where nub's own surface wins (`run` is nub's script runner; `-v` is `--version`).
 - [`known-gaps.txt`](known-gaps.txt) — **real gaps in-flight work must close** (`skip "KNOWN-GAP: …"`): unwired verbs/flags/aliases (`recursive`, `clean-install`, `--fix-lockfile`, `--lockfile-dir`, `--reporter`, `--network-concurrency`), engine info/warn lines that don't surface through nub's presentation yet, and exit-code mapping. **This list must shrink** — when the wiring lands, delete the entries so the tests assert for real. `run.sh` hard-fails if an entry matches no test, so stale entries can't linger silently.
 
 ## Running locally

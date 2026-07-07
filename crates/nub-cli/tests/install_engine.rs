@@ -86,7 +86,7 @@ fn registry_reachable() -> bool {
 
 /// Truly-fresh project (no lockfile, no PM declaration, no pnpm-named file):
 /// nub claims identity via the neutral lockfile only. The engine resolves, links
-/// the isolated (pnpm-style) layout under `node_modules/.nub`, and writes nub's
+/// the isolated (pnpm-style) layout under `node_modules/.store`, and writes nub's
 /// neutral `nub.lock` — the quiet identity marker. It must NOT auto-stamp
 /// `packageManager` / `devEngines` into `package.json`: that exclusivity claim
 /// is reserved for the explicit `nub pm use nub` command.
@@ -115,7 +115,7 @@ fn install_truly_fresh_project_claims_nub_identity() {
     );
 
     // Isolated layout: the top-level entry is a symlink into the virtual
-    // store, which nub relocates to `node_modules/.nub`.
+    // store, which nub relocates to `node_modules/.store`.
     let dep = dir.join("node_modules/is-positive");
     assert!(
         dep.join("package.json").is_file(),
@@ -123,17 +123,24 @@ fn install_truly_fresh_project_claims_nub_identity() {
     );
     assert!(
         dep.symlink_metadata().unwrap().file_type().is_symlink(),
-        "no-lockfile projects default to the isolated layout (symlink into .nub)"
+        "no-lockfile projects default to the isolated layout (symlink into .store)"
     );
     let target = std::fs::read_link(&dep).unwrap();
     assert!(
-        target.to_string_lossy().contains(".nub/"),
-        "the virtual store must live under node_modules/.nub, got: {}",
+        target.to_string_lossy().contains(".store/"),
+        "the virtual store must live under node_modules/.store, got: {}",
         target.display()
     );
     assert!(
         !dir.join("node_modules/.aube").exists(),
         "no .aube directory may materialize"
+    );
+
+    // A patch-free install writes no applied-patches sidecar (an empty `{}`
+    // manifest is information-free clutter; a missing file reads back the same).
+    assert!(
+        !dir.join("node_modules/.nub-applied-patches.json").exists(),
+        "a patch-free install must not write an empty applied-patches sidecar"
     );
 
     assert!(
@@ -369,12 +376,12 @@ fn install_with_package_lock_isolates_and_preserves_the_npm_lockfile() {
         "is-positive must be installed: stderr: {stderr}"
     );
     // npm/yarn/bun incumbents now default to the isolated layout (the GVS flip):
-    // a declared dep is a top-level SYMLINK into the `.nub` virtual store, not a
+    // a declared dep is a top-level SYMLINK into the `.store` virtual store, not a
     // real directory. (GVS engagement itself is off-CI-gated, but the isolated
     // symlink layout holds regardless.)
     assert!(
         dep.symlink_metadata().unwrap().file_type().is_symlink(),
-        "package-lock projects default to the isolated layout (a symlink into .nub)"
+        "package-lock projects default to the isolated layout (a symlink into .store)"
     );
     assert!(
         dir.join("package-lock.json").is_file(),
@@ -905,9 +912,9 @@ fn wildcard_peer_binds_resolved_major_not_registry_highest() {
 
     // The isolated store keys every resolved version as `@babel+core@<ver>`;
     // @babel/core declares no peers so its own dirs carry no peer suffix.
-    let store = dir.join("node_modules/.nub");
+    let store = dir.join("node_modules/.store");
     let babel_majors: Vec<String> = std::fs::read_dir(&store)
-        .expect("virtual store must exist under node_modules/.nub")
+        .expect("virtual store must exist under node_modules/.store")
         .filter_map(|e| e.ok())
         .filter_map(|e| e.file_name().into_string().ok())
         .filter_map(|n| n.strip_prefix("@babel+core@").map(str::to_string))

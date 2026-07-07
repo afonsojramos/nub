@@ -161,7 +161,7 @@ pub async fn run(args: PruneArgs) -> miette::Result<()> {
         } else {
             None
         };
-        // The virtual-store leaf (e.g. `.nub`) scopes the dangling-symlink
+        // The virtual-store leaf (e.g. `.store`) scopes the dangling-symlink
         // sweep to store-pointing symlinks, sparing `link:`/`portal:` deps.
         prune_top_level(
             &nm,

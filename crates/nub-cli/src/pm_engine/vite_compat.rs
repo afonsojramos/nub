@@ -80,7 +80,7 @@ fn compat_disabled(raw: Option<&str>) -> bool {
 /// Vite reaches the graph two ways, and both are handled: as a DIRECT dep (a raw
 /// `vite` app / a `vite dev` CLI project — the top-level `node_modules/vite`),
 /// and TRANSITIVELY as a framework's embedded engine (Astro/SvelteKit/VitePress
-/// — the `.nub/vite@*` isolated-store entries, no top-level symlink). A
+/// — the `.store/vite@*` isolated-store entries, no top-level symlink). A
 /// library-embedded framework is itself store-resident and loads ITS Vite via a
 /// store-to-store sibling symlink (the shared virtual-store copy, NOT the
 /// project-local ejected copy), so the dist backport cannot reach it CAS-safely
@@ -130,7 +130,7 @@ struct ViteCopy {
 }
 
 /// Enumerate every distinct Vite package in the install: the top-level
-/// `node_modules/vite` (direct dep) plus each `node_modules/.nub/vite@*`
+/// `node_modules/vite` (direct dep) plus each `node_modules/.store/vite@*`
 /// isolated-store entry (transitive/library-embedded). Deduplicated by realpath;
 /// each entry carries its version and whether it is project-local.
 fn discover_vite(node_modules: &Path) -> Vec<ViteCopy> {
@@ -143,7 +143,7 @@ fn discover_vite(node_modules: &Path) -> Vec<ViteCopy> {
         &mut seen,
         &mut out,
     );
-    if let Ok(entries) = std::fs::read_dir(node_modules.join(".nub")) {
+    if let Ok(entries) = std::fs::read_dir(node_modules.join(super::PROJECT_VIRTUAL_STORE_LEAF)) {
         for e in entries.flatten() {
             if e.file_name().to_string_lossy().starts_with("vite@") {
                 let pkg = e.path().join("node_modules").join("vite");
