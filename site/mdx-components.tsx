@@ -9,6 +9,7 @@ import { PmSupport } from '@/components/pm-support-table';
 import { InstallTabs } from '@/components/install-tabs';
 import { TypesSetup } from '@/components/types-setup';
 import { Yes, No, ColGlow } from '@/components/runner-table';
+import { SectionHeading } from '@/components/section-heading';
 
 // Neutral info glyph (lucide "info" path) drawn with currentColor so it inherits a
 // muted tone — no loud accent. Inline SVG keeps us off a runtime icon dependency,
@@ -63,6 +64,14 @@ function Callout({
 export function getMDXComponents(components?: MDXComponents): MDXComponents {
   return {
     ...defaultMdxComponents,
+    // Override the heading anchors so a copied section link carries a
+    // server-visible `?section=<slug>` param (drives per-heading OG cards).
+    h1: (props: ComponentProps<'h1'>) => <SectionHeading as="h1" {...props} />,
+    h2: (props: ComponentProps<'h2'>) => <SectionHeading as="h2" {...props} />,
+    h3: (props: ComponentProps<'h3'>) => <SectionHeading as="h3" {...props} />,
+    h4: (props: ComponentProps<'h4'>) => <SectionHeading as="h4" {...props} />,
+    h5: (props: ComponentProps<'h5'>) => <SectionHeading as="h5" {...props} />,
+    h6: (props: ComponentProps<'h6'>) => <SectionHeading as="h6" {...props} />,
     Callout,
     Bench,
     ShimDemo,
