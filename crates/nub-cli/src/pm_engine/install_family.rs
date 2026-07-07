@@ -1101,8 +1101,8 @@ pub fn run_install(flags: InstallFlags) -> Result<i32> {
     // Vite symlink-GVS serving compat (#315): after a successful install, write
     // `node_modules/.modules.yaml` and (for Vite < 8.1) patch the ejected vite
     // dist so its dev server serves the machine-global store. Gated internally on
-    // vite-in-graph + the `NUB_VITE_COMPAT` opt-out; best-effort, never fails the
-    // install.
+    // vite-in-graph only (unconditional — no user opt-out); best-effort, never
+    // fails the install.
     apply_vite_compat(&session, code);
     // Virgin install only: stamp a caret RANGE into `devEngines.packageManager`
     // so the project advertises nub the standard, cross-tool way WITHOUT locking

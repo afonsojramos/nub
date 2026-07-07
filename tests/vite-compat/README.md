@@ -8,8 +8,10 @@ runs correctly when its dev server is invoked with no nub in the process).
 
 ## The fix under test
 
-Two units, both in `crates/nub-cli/src/pm_engine/vite_compat.rs`, default-on
-(opt out with `NUB_VITE_COMPAT=0`), gated on `vite` being in the graph:
+Two units, both in `crates/nub-cli/src/pm_engine/vite_compat.rs`, unconditional
+(core GVS correctness, no user opt-out), gated on `vite` being in the graph. The
+pre-fix `403` break is reproducible against a built binary via the internal test
+seam `__NUB_VITE_COMPAT_DISABLE=1` — an undocumented A/B control, not a user knob:
 
 - **Unit A — `node_modules/.modules.yaml`** (all Vite versions). nub writes JSON
   `{"virtualStoreDir":"<abs store>"}`. Vite ≥ 8.1 reads it natively and allows
