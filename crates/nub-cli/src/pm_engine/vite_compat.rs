@@ -21,8 +21,10 @@
 //!   the majority of installed Vite, so for < 8.1 nub disk-materializes just the
 //!   `vite` package project-local (the linker's `diskMaterializePackages` path —
 //!   the shared CAS store stays pristine, only the local ejected copy is touched)
-//!   and codegen-inserts the sniff at Vite's own `fs.allow`-default computation
-//!   site in the bundled (non-minified) dist. That site is upstream of
+//!   and codegen-inserts the sniff at Vite's own `allowDirs` declaration in the
+//!   bundled (non-minified) dist, APPENDING the store dir to whatever `fs.allow`
+//!   resolved to — the framework's own array if it set one, else Vite's default —
+//!   matching Vite 8.1's native unconditional append. That site is upstream of
 //!   `createServer`, so it covers a bare `vite dev` CLI as well as
 //!   library-embedded Vite (Astro/SvelteKit/Nuxt). The inserted sniff is
 //!   YAML-tolerant (JSON first, block-YAML regex fallback) and reads whatever
@@ -289,27 +291,47 @@ fn is_nub_modules_yaml(body: &str) -> bool {
 const PREPEND: &str = "import{readFileSync as __nubRfs}from\"node:fs\";\
 import{join as __nubJoin,isAbsolute as __nubIsAbs,resolve as __nubResolve}from\"node:path\";\n";
 
-/// The sniff, inserted immediately after the anchor (where `allowDirs` is a live
-/// array and `searchForWorkspaceRoot`/`root` are in scope). YAML-tolerant
-/// (JSON.parse → block-YAML regex fallback) and PM-agnostic: appends whatever
-/// `virtualStoreDir` any PM wrote. Strictly better than upstream 8.1's
-/// JSON-only sniff (which silently no-ops on real pnpm's block YAML).
-const INSERT: &str = ";try{const __wr=searchForWorkspaceRoot(root);\
-const __c=__nubRfs(__nubJoin(__wr,\"node_modules\",\".modules.yaml\"),\"utf-8\");\
+/// The sniff, inserted immediately after the anchor `let allowDirs = …;`
+/// declaration (see [`ANCHORS`]). It APPENDS the store dir to whatever `fs.allow`
+/// resolved to — the framework's own array if it set one (VitePress hardcodes
+/// `[DIST_CLIENT_PATH, srcDir, searchForWorkspaceRoot(cwd)]`), else Vite's
+/// default — matching Vite 8.1's native `.modules.yaml` handler, which pushes the
+/// `virtualStoreDir` UNCONDITIONALLY (`server/index.ts`, PR vitejs/vite#22415:
+/// `allowDirs.push(virtualStoreDir)` with no `!allowDirs` gate). A prior version
+/// anchored at Vite 5's `allowDirs = [searchForWorkspaceRoot(root)]` line, which
+/// lives INSIDE `if(!allowDirs){…}` — so a framework that set `fs.allow` skipped
+/// the block AND the sniff, leaving store `/@fs` at 403. Anchoring at the
+/// unconditional declaration and defaulting `allowDirs` ourselves (Vite 5 leaves
+/// it `undefined` there when `fs.allow` is unset — its own default is on the next,
+/// now-redundant line) makes the append fire in every case. YAML-tolerant
+/// (JSON.parse → block-YAML regex fallback) and PM-agnostic: reads whatever
+/// `virtualStoreDir` any PM wrote. Strictly better than upstream 8.1's JSON-only
+/// sniff (which silently no-ops on real pnpm's block YAML).
+const INSERT: &str = ";const __wr=searchForWorkspaceRoot(root);\
+if(!allowDirs)allowDirs=[__wr];\
+try{const __c=__nubRfs(__nubJoin(__wr,\"node_modules\",\".modules.yaml\"),\"utf-8\");\
 let __v;try{__v=JSON.parse(__c).virtualStoreDir;}\
 catch{const __m=__c.match(/^\\s*virtualStoreDir:\\s*(.+?)\\s*$/m);__v=__m&&__m[1].replace(/^['\"]|['\"]$/g,\"\");}\
 if(__v){if(__nubIsAbs(__v))allowDirs.push(__v);\
 else if(__v.startsWith(\"..\"))allowDirs.push(__nubResolve(__nubJoin(__wr,\"node_modules\"),__v));}}catch{}";
 
-/// The fs.allow-default computation anchors, in Vite's own bundled-but-not-
-/// minified source. `let allowDirs = server.fs.allow;` is identical across
-/// Vite 6 and 7; the `[searchForWorkspaceRoot(root)]` form is Vite 5's. The
-/// insert goes immediately AFTER the anchor. Vite ≥ 8.1 needs no patch (native
-/// sniff), so a new major only needs a one-line anchor check — if it ever stops
-/// matching, nothing is patched (fail-open; Unit A still covers ≥ 8.1).
+/// The `allowDirs` DECLARATION anchors, in Vite's own bundled-but-not-minified
+/// source. Both are the unconditional `let allowDirs = …;` line, so the appended
+/// [`INSERT`] runs whether or not the framework set `fs.allow` — the fix for the
+/// v5 `!allowDirs`-scoping bug (a framework's own `fs.allow` no longer defeats the
+/// sniff). Vite 6 & 7 resolve the default eagerly (`server.fs.allow =
+/// raw?.fs?.allow ?? [searchForWorkspaceRoot(root)]`), so `allowDirs` is always a
+/// live array; Vite 5's `server.fs?.allow` can be `undefined` here, so INSERT
+/// defaults it. The two forms are mutually exclusive across versions (v5 has the
+/// `?.`, v6/7 don't), so anchor order is irrelevant. The `.map(resolvedAllowDir)`
+/// normalization line — where 8.1 natively pushes — is NOT a usable anchor: the
+/// bundler mangles its loop var (`i` → `i$1`) and indentation across builds. Vite
+/// ≥ 8.1 needs no patch (native sniff), so a new major only needs a one-line
+/// anchor check — if it ever stops matching, nothing is patched (fail-open; Unit A
+/// still covers ≥ 8.1).
 const ANCHORS: &[&str] = &[
-    "let allowDirs = server.fs.allow;",            // Vite 6 & 7
-    "allowDirs = [searchForWorkspaceRoot(root)];", // Vite 5
+    "let allowDirs = server.fs.allow;",  // Vite 6 & 7
+    "let allowDirs = server.fs?.allow;", // Vite 5
 ];
 
 /// A marker unique to the insert; its presence means a file is already patched,
@@ -567,7 +589,7 @@ mod tests {
         assert!(after.starts_with(PREPEND), "import prepended");
         assert!(after.contains(MARKER), "sniff inserted");
         assert!(
-            after.contains("let allowDirs = server.fs.allow;;try{"),
+            after.contains("let allowDirs = server.fs.allow;;const __wr="),
             "insert lands immediately after the anchor"
         );
 
@@ -584,6 +606,43 @@ mod tests {
             std::fs::read_to_string(&plain).unwrap(),
             "export const a = 1;\n"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The Vite 5 anchor is the unconditional `let allowDirs = server.fs?.allow;`
+    /// DECLARATION — NOT the `[searchForWorkspaceRoot(root)]` default line that
+    /// lives inside `if(!allowDirs){…}`. This is the fix's crux: anchoring inside
+    /// that block meant a framework which set `fs.allow` (VitePress) skipped the
+    /// block AND the sniff → store `/@fs` stayed 403. Proves the v5 anchor matches
+    /// and the appended sniff (a) defaults `allowDirs` when unset and (b) appends
+    /// the store dir unconditionally, so it fires whether or not `fs.allow` is set.
+    #[test]
+    fn vite5_anchor_appends_outside_the_allowdirs_conditional() {
+        let dir = std::env::temp_dir().join(format!("nub-vite-v5-{}", std::process::id()));
+        let dn = dir.join("dist").join("node").join("chunks");
+        std::fs::create_dir_all(&dn).unwrap();
+        // Vite 5's real bundled shape: an unconditional `?.` declaration, then the
+        // default applied ONLY when unset.
+        let chunk = dn.join("dep.js");
+        std::fs::write(
+            &chunk,
+            "  let allowDirs = server.fs?.allow;\n  if (!allowDirs) {\n    allowDirs = [searchForWorkspaceRoot(root)];\n  }\n",
+        )
+        .unwrap();
+
+        patch_one(&chunk);
+        let after = std::fs::read_to_string(&chunk).unwrap();
+        assert!(after.starts_with(PREPEND), "import prepended");
+        assert!(after.contains(MARKER), "sniff inserted on the v5 anchor");
+        // The sniff lands on the DECLARATION, above Vite's own default line — so it
+        // runs unconditionally, not gated by `if(!allowDirs)`.
+        assert!(
+            after.contains("let allowDirs = server.fs?.allow;;const __wr="),
+            "insert lands on the unconditional v5 declaration"
+        );
+        // The append is unconditional and defaults allowDirs when unset.
+        assert!(after.contains("if(!allowDirs)allowDirs=[__wr];"));
+        assert!(after.contains("allowDirs.push(__v)"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
