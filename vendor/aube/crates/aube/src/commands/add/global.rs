@@ -184,6 +184,10 @@ async fn run_global_inner(
         // of the check here keeps `aube add -g` robust against that
         // regression without relying on the chdir-ordering invariant.
         ignore_workspace_root_check: true,
+        // Global installs always link into the global store; a
+        // lockfile-only global add makes no sense, so the synthetic
+        // inner add never sets it.
+        lockfile_only: false,
         workspace: false,
         save_catalog: false,
         save_catalog_name: None,
