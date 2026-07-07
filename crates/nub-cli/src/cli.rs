@@ -168,27 +168,6 @@ fn env_file_flag_present() -> bool {
     ENV_FILE_PRESENT.get().copied().unwrap_or(false)
 }
 
-/// The explicit env-file *mode* from `--env <mode>`, captured once at startup —
-/// the highest-precedence mode source (over `APP_ENV`/`NODE_ENV`) that
-/// `env_file_names` resolves. Distinct from `--env-file <path>` (a specific file);
-/// `--env` selects which `.env.{mode}` files auto-discovery loads. Set once on the
-/// file-run and `nub watch` paths (the only ones that reach `.env` auto-loading).
-static ENV_MODE_OVERRIDE: OnceLock<String> = OnceLock::new();
-
-/// The `--env <mode>` override, if any. Read by the file-run and watch paths and
-/// handed to `load_env_files`/`discover_env_files` as the top-precedence mode.
-fn env_mode_override() -> Option<String> {
-    ENV_MODE_OVERRIDE.get().cloned()
-}
-
-/// Record the `--env <mode>` value (once; empty values are not a selection and are
-/// ignored). Idempotent — a later re-entry (e.g. the node shim) can't clobber it.
-fn set_env_mode_override(mode: &str) {
-    if !mode.is_empty() {
-        let _ = ENV_MODE_OVERRIDE.set(mode.to_string());
-    }
-}
-
 /// Overlay the `--env-file` vars onto an env map bound for a child's
 /// `Command::env`. Shell env still wins (skip keys already in this process's
 /// environment); `--env-file` overrides `.env` (insert over existing entries).
@@ -486,10 +465,6 @@ pub enum Command {
 
     /// Run a file in watch mode (restarts on change).
     Watch {
-        /// Select the env-file mode (loads `.env.{mode}`); highest precedence, over APP_ENV/NODE_ENV.
-        #[arg(long, value_name = "MODE")]
-        env: Option<String>,
-
         /// File to watch and execute.
         file: String,
 
@@ -1263,20 +1238,6 @@ fn run_nub() -> Result<i32> {
             s if s.starts_with("--loglevel=") => {
                 loglevel_val = Some(s["--loglevel=".len()..].to_string());
             }
-            // `--env <mode>` selects the env-file mode (`.env.{mode}`), the
-            // top-precedence source over APP_ENV/NODE_ENV. Distinct from
-            // `--env-file <path>` below (matched first — `--env-file` is neither
-            // `--env` nor `--env=…`, so the two never collide). Consumed here so it
-            // never reaches Node; after the entrypoint it forwards to the script.
-            "--env" => {
-                i += 1;
-                if i < raw_args.len() {
-                    set_env_mode_override(&raw_args[i]);
-                }
-            }
-            s if s.starts_with("--env=") => {
-                set_env_mode_override(&s["--env=".len()..]);
-            }
             s if s == "--env-file"
                 || s.starts_with("--env-file=")
                 || s == "--env-file-if-exists"
@@ -1284,7 +1245,7 @@ fn run_nub() -> Result<i32> {
             {
                 // `--env-file-if-exists` mirrors Node v22: load the file if present,
                 // skip SILENTLY when it is absent — vs `--env-file`, which errors on
-                // a missing file. Everything else is identical: same first-writer
+                // a missing file. Everything else is identical: same last-writer
                 // merge, same `${VAR}` expansion, and the flag's presence opts the
                 // run out of eager `.env*` auto-discovery either way (even when the
                 // if-exists target turns out to be absent — the user named explicit
@@ -1323,12 +1284,12 @@ fn run_nub() -> Result<i32> {
                         // explicit --env-file flag strips backtick-quoted values
                         // like Node's parser, matching the .env auto-load path.
                         for (k, v) in nub_core::workspace::env::parse_env(&content) {
-                            // First-writer-wins across multiple `--env-file` flags
-                            // (`or_insert`). Whether nub should instead be
-                            // last-writer-wins (matching Node's own `--env-file`
-                            // merge) is a separate open question, intentionally left
-                            // unchanged by the auto-discovery-suppression change.
-                            env_file_vars.entry(k).or_insert(v);
+                            // Last-writer-wins across multiple `--env-file` flags,
+                            // matching Node: "subsequent files override pre-existing
+                            // variables defined in previous files" (doc/api/cli.md).
+                            // Shell env still wins over all of them — enforced later
+                            // in `overlay_env_file_vars` (skips keys already set).
+                            env_file_vars.insert(k, v);
                         }
                     } else {
                         eprintln!("nub: cannot read env file: {file_path}");
@@ -1688,10 +1649,7 @@ fn value_consuming_flags(subcommand: &str) -> &'static [&'static str] {
             "-p",
             "--cwd",
         ],
-        // `--env <mode>` takes a following token, so the positional-boundary scan
-        // must skip its value — else `nub watch --env production app.ts` mistakes
-        // `production` for the file and clap sees no positional.
-        "watch" => &["--cwd", "--env"],
+        "watch" => &["--cwd"],
         _ => &[],
     }
 }
@@ -1949,15 +1907,8 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             };
             run_script(script.as_deref(), node, &ws_opts, &args)
         }
-        Some(Command::Watch {
-            env,
-            file,
-            mut args,
-        }) => {
+        Some(Command::Watch { file, mut args }) => {
             args.extend(suffix);
-            if let Some(mode) = env.as_deref() {
-                set_env_mode_override(mode);
-            }
             run_watch(&file, &args)
         }
         Some(Command::Exec {
@@ -2482,11 +2433,10 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
     // (only the named file(s) load; the maintainer, 2026-06-15). `merge_child_env` applies the
     // gate. --env-file vars apply even in compat mode (explicit user flag).
     let project = nub_core::workspace::detect::detect_project(cwd);
-    let mode_override = env_mode_override();
     let auto_env = if !compat_mode {
         project
             .as_ref()
-            .map(|p| nub_core::workspace::env::load_env_files(&p.root, mode_override.as_deref()))
+            .map(|p| nub_core::workspace::env::load_env_files(&p.root))
             .unwrap_or_default()
     } else {
         Default::default()
@@ -4453,16 +4403,13 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     // the child. This keeps `nub --watch --env-file …` consistent with the direct
     // file runner.
     let env_file_present = env_file_flag_present();
-    let mode_override = env_mode_override();
     let project = nub_core::workspace::detect::detect_project(&cwd);
     let env_file_paths = if env_file_present {
         Vec::new()
     } else {
         project
             .as_ref()
-            .map(|p| {
-                nub_core::workspace::env::discover_env_files(&p.root, mode_override.as_deref())
-            })
+            .map(|p| nub_core::workspace::env::discover_env_files(&p.root))
             .unwrap_or_default()
     };
     // Load the `.env*` files ONCE: `raw_env` is the unexpanded merge (the values
@@ -4478,9 +4425,7 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     } else {
         project
             .as_ref()
-            .map(|p| {
-                nub_core::workspace::env::load_env_files_raw(&p.root, mode_override.as_deref())
-            })
+            .map(|p| nub_core::workspace::env::load_env_files_raw(&p.root))
             .unwrap_or_default()
     };
     // Pre-expand the auto base to the same map the direct file runner's

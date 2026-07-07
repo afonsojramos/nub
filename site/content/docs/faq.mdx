@@ -35,7 +35,7 @@ Running `nub <file>` is flag-for-flag compatible with `node <file>` — same arg
 - **TypeScript first** — full TS surface, not just type stripping (enums, namespaces, parameter properties, decorators, `import =` / `export =`, extensionless `.ts` imports, inline source maps)
 - **Respects `tsconfig.json`** — `paths`, `baseUrl`, `extends` chains, `jsx` all applied at runtime
 - **JSX support** — `.jsx` / `.tsx` files execute directly, runtime sourced from `compilerOptions.jsx` / `jsxImportSource`
-- **Env files** — `.env` and `.env.[mode]` (mode from `--env` / `APP_ENV`) loaded eagerly with Vite-compatible precedence
+- **Env files** — `.env` and `.env.[mode]` (mode from `APP_ENV`) loaded eagerly with Vite-compatible precedence
 - **YAML / TOML / JSON5 / JSONC / text loaders** — `import config from "./config.yaml"` works the way `import data from "./data.json"` already does
 - **Automatic polyfills** — `Temporal`, `URLPattern`, browser-shape `Worker`, WinterTC gap globals, version-detected and feature-gated
 - **Unflagged experimentals** — `EventSource`, `WebSocket`, `localStorage` / `sessionStorage`, `vm.Module`, `node:sqlite` — flags Node already ships but keeps gated, auto-injected in exact per-version bands where each is still behind `--experimental-*`
@@ -171,10 +171,10 @@ Not needed. Nub loads your env files automatically — with the Vite/Bun-style p
 .env
 ```
 
-The `[mode]` slot comes from `--env <mode>` or `APP_ENV` — not `NODE_ENV`. Expansion of `${VAR}` and `$VAR` is supported, including nested references and cycle detection.
+The `[mode]` slot comes from `APP_ENV` — not `NODE_ENV`. To load a specific file directly, pass `--env-file` (repeatable). Expansion of `${VAR}` and `$VAR` is supported, including nested references and cycle detection.
 
 <Callout title="Test mode">
-Under the test mode (`--env test` or `APP_ENV=test`), `.env.local` is skipped, following the Next.js convention — local secrets shouldn't leak into your test suite.
+Under the test mode (`APP_ENV=test`), `.env.local` is skipped, following the Next.js convention — local secrets shouldn't leak into your test suite.
 </Callout>
 
 Full details: [Runtime → Environment variables](/docs/runtime/env).

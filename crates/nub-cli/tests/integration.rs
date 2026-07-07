@@ -3509,7 +3509,7 @@ fn npm_run_threads_node_execpath() {
 ///      read `.env.production`, not `.env.development`/`.env`. The old eager-outer
 ///      load froze the wrong env-file values into the process before the inline
 ///      mode could correct them; node-scoped loading reads the right file. (Mode
-///      is `--env`/`APP_ENV`; `NODE_ENV` is no longer a file selector.)
+///      is `APP_ENV`; `NODE_ENV` is no longer a file selector.)
 ///
 /// Unix-only: the `printenv` probe and inline `APP_ENV=…` script syntax are
 /// POSIX `sh`; the node-scoping itself is platform-agnostic (build_script_command
@@ -5116,12 +5116,65 @@ fn env_file_flag_reaches_child_and_shell_wins() {
     );
 }
 
+/// Multiple `--env-file` flags load every file, in order, LAST-writer-wins for a
+/// shared key — matching Node (`doc/api/cli.md`: "subsequent files override
+/// pre-existing variables defined in previous files"). This is the replacement for
+/// the removed `--env <mode>` flag: to load a specific env file, name it.
+#[test]
+fn multiple_env_file_flags_load_all_last_wins() {
+    let dir = unique_test_cache();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("package.json"), "{}\n").unwrap();
+    std::fs::write(dir.join("a.env"), "KEY=from_a\nA_ONLY=a\n").unwrap();
+    std::fs::write(dir.join("b.env"), "KEY=from_b\nB_ONLY=b\n").unwrap();
+    std::fs::write(
+        dir.join("print.mjs"),
+        "console.log(`KEY=${process.env.KEY} A_ONLY=${process.env.A_ONLY} B_ONLY=${process.env.B_ONLY}`);\n",
+    )
+    .unwrap();
+
+    let run = |first: &str, second: &str| {
+        let out = Command::new(nub_binary())
+            .arg(format!("--env-file={first}"))
+            .arg(format!("--env-file={second}"))
+            .arg("print.mjs")
+            .current_dir(&dir)
+            .env("XDG_CACHE_HOME", unique_test_cache())
+            .env_remove("KEY")
+            .output()
+            .expect("failed to spawn nub");
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+
+    // a then b: both files' vars present; b wins the shared KEY (last-wins).
+    let ab = run("a.env", "b.env");
+    assert!(
+        ab.contains("KEY=from_b") && ab.contains("A_ONLY=a") && ab.contains("B_ONLY=b"),
+        "both files must load, later file wins the shared key: {ab}"
+    );
+    // Reversed order flips the winner, proving it is order-dependent last-wins.
+    let ba = run("b.env", "a.env");
+    assert!(
+        ba.contains("KEY=from_a"),
+        "reversed order must make the last file (a.env) win: {ba}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// #263, end-to-end through the binary — the differential that broke `next build`.
 /// A `.env` FILE must NOT leak its `NODE_ENV` into the spawned child (dotenv/
 /// @next/env/Vite parity). An AMBIENT `NODE_ENV` passes through untouched but does
 /// NOT select `.env.<mode>` files — `NODE_ENV` is no longer a mode source; only
-/// `APP_ENV` (or `--env`) selects. Child ambient is set via `Command::env`, so the
-/// test never mutates its own process env (hermetic).
+/// `APP_ENV` selects. Child ambient is set via `Command::env`, so the test never
+/// mutates its own process env (hermetic).
 #[test]
 fn dotenv_node_env_stripped_and_app_env_selects_env_file() {
     let work = unique_test_cache();
