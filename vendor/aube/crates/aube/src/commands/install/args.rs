@@ -261,7 +261,7 @@ impl InstallArgs {
             // `--force` without an explicit frozen mode re-resolves.
             FrozenMode::No
         } else {
-            FrozenMode::from_override(global, yaml_prefer_frozen)
+            FrozenMode::from_override(global, yaml_prefer_frozen, self.lockfile_only)
         };
         let network_mode = if self.offline {
             aube_registry::NetworkMode::Offline

@@ -201,7 +201,7 @@ pub(crate) fn load_global_config_yaml() -> std::collections::BTreeMap<String, ya
 /// to the given default when none was set on the command line.
 pub(crate) fn chained_frozen_mode(default: install::FrozenMode) -> install::FrozenMode {
     match global_frozen_override() {
-        Some(ovr) => install::FrozenMode::from_override(Some(ovr), None),
+        Some(ovr) => install::FrozenMode::from_override(Some(ovr), None, false),
         None => default,
     }
 }
