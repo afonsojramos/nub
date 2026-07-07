@@ -545,6 +545,17 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         // and re-entrant child shells skip it for free.
         cmd.env(VERSION_ENV, env!("CARGO_PKG_VERSION"));
 
+        // Force the async loader-worker tier when this child hosts a foreign async
+        // loader (tsx/ts-node/--import) on a Node whose sync/async hook composition
+        // is broken — the sync fast tier would otherwise crash with
+        // ERR_METHOD_NOT_IMPLEMENTED (see force_async_tier_env / node_hook_compose_broken).
+        if let Some((k, val)) = force_async_tier_env(
+            &config.node.version,
+            config.user_args.iter().map(String::as_str),
+        ) {
+            cmd.env(k, val);
+        }
+
         // Value-bearing preload/PnP `--require`/`--import` flags are NOT passed via
         // argv here — ONLY via NODE_OPTIONS (assembled below). The direct child
         // inherits that NODE_OPTIONS, so it is still fully augmented; keeping the
@@ -1275,6 +1286,68 @@ pub(crate) const NEUTRALIZE_LOCALSTORAGE_ENV: &str = "__NUB_NEUTRALIZE_LOCALSTOR
 /// the same preload via NODE_OPTIONS) and they advertise the marker too.
 pub(crate) const VERSION_ENV: &str = "__NUB_VERSION";
 
+/// Tells nub's fast-tier preload to register its module hooks via the ASYNC
+/// loader-worker path (`module.register`) instead of the sync
+/// `module.registerHooks`, even on a Node that supports the sync fast tier. Set
+/// only when nub is about to host a FOREIGN async `module.register` loader
+/// (tsx/ts-node) on a Node whose sync/async hook composition is broken
+/// ([`node_hook_compose_broken`]). Inherited by the whole augmented subtree
+/// (like [`VERSION_ENV`]) so every child in a tsx run composes async. An internal
+/// `__NUB_*` plumbing var, NOT a user knob — explicitly permitted by the brand
+/// boundary.
+pub(crate) const FORCE_ASYNC_TIER_ENV: &str = "__NUB_FORCE_ASYNC_TIER";
+
+/// Node versions where the async `module.register` loader's `resolveSync`/
+/// `loadSync` are unimplemented stubs that throw `ERR_METHOD_NOT_IMPLEMENTED`.
+/// nub's sync `module.registerHooks` fast tier forces resolution synchronous, so
+/// composing it with a foreign async loader (tsx/ts-node) reaches that throwing
+/// stub and crashes the run. Node implemented these methods in 24.11.1
+/// (block-on-loader-worker), so the broken window is 22.15.0 ..= 24.11.0
+/// inclusive; 24.11.1+/25.2+/26 are fine. Refs nodejs/node#59666. (A later 22.x
+/// that backported the fix would be over-covered here — harmless, since the
+/// async tier composes correctly on every version.)
+pub(crate) fn node_hook_compose_broken(v: &super::version::NodeVersion) -> bool {
+    use super::version::NodeVersion;
+    *v >= NodeVersion::new(22, 15, 0) && *v <= NodeVersion::new(24, 11, 0)
+}
+
+/// Whether the child nub is about to launch hosts a FOREIGN async ESM loader — a
+/// tsx/ts-node executable, or an explicit `--import`/`--loader`/
+/// `--experimental-loader` that registers one. Scans ALL tokens (not just
+/// argv[0]) so an env-prefixed/compound script (`NODE_ENV=prod tsx x`) is still
+/// caught; a rare false positive (a literal `echo tsx`) only makes that one
+/// process use nub's async tier, which is always correct — never a crash.
+pub(crate) fn child_hosts_async_loader<'a>(tokens: impl IntoIterator<Item = &'a str>) -> bool {
+    tokens.into_iter().any(|tok| {
+        let flag = tok.split_once('=').map_or(tok, |(f, _)| f);
+        if matches!(flag, "--import" | "--loader" | "--experimental-loader") {
+            return true;
+        }
+        let base = tok.rsplit(['/', '\\']).next().unwrap_or(tok);
+        // Strip the Windows launcher-shim suffixes npm generates (`tsx.cmd`,
+        // `tsx.ps1`, a native `.exe`) so the basename compares as the tool name.
+        let base = base
+            .strip_suffix(".cmd")
+            .or_else(|| base.strip_suffix(".exe"))
+            .or_else(|| base.strip_suffix(".ps1"))
+            .unwrap_or(base);
+        matches!(base, "tsx" | "ts-node" | "ts-node-esm")
+    })
+}
+
+/// The `(key, "1")` env pair that forces nub's async tier for a child that will
+/// host a foreign async loader on a broken-compose Node — or `None` when the
+/// fast tier is safe. Callers set it on the child only when nub is establishing
+/// augmentation (not compat/`--node`, not re-entrant); a re-entrant descendant
+/// inherits the already-set var through the environment.
+pub fn force_async_tier_env<'a>(
+    node_version: &super::version::NodeVersion,
+    child_tokens: impl IntoIterator<Item = &'a str>,
+) -> Option<(&'static str, &'static str)> {
+    (node_hook_compose_broken(node_version) && child_hosts_async_loader(child_tokens))
+        .then_some((FORCE_ASYNC_TIER_ENV, "1"))
+}
+
 /// Whether Node's test-runner coverage is active for this invocation — i.e. the
 /// user passed `--experimental-test-coverage` directly in argv or via NODE_OPTIONS.
 /// (`nub` has no separate coverage verb; coverage is engaged solely by that flag,
@@ -1937,6 +2010,71 @@ mod tests {
             &[s("--no-experimental-webstorage")],
             None
         ));
+    }
+
+    #[test]
+    fn hook_compose_broken_band_is_22_15_through_24_11_0_inclusive() {
+        // Broken (async-loader resolveSync stub throws): the whole 22.15.0–24.11.0 window.
+        for v in [
+            NodeVersion::new(22, 15, 0),
+            NodeVersion::new(22, 16, 0),
+            NodeVersion::new(23, 11, 0),
+            NodeVersion::new(24, 11, 0),
+        ] {
+            assert!(
+                node_hook_compose_broken(&v),
+                "{v:?} must be in the broken band"
+            );
+        }
+        // Fixed at 24.11.1 (Node implemented resolveSync/loadSync), and below the
+        // fast-tier floor there is no sync registerHooks to force the crash.
+        for v in [
+            NodeVersion::new(22, 14, 99),
+            NodeVersion::new(24, 11, 1),
+            NodeVersion::new(24, 12, 0),
+            NodeVersion::new(25, 2, 0),
+            NodeVersion::new(26, 2, 0),
+        ] {
+            assert!(
+                !node_hook_compose_broken(&v),
+                "{v:?} must be outside the broken band"
+            );
+        }
+    }
+
+    #[test]
+    fn child_hosts_async_loader_detects_tsx_ts_node_and_loader_flags() {
+        let t = |toks: &[&str]| child_hosts_async_loader(toks.iter().copied());
+        // Bare + path-prefixed + platform-suffixed tsx/ts-node launchers.
+        assert!(t(&["tsx", "--conditions", "@zod/source"]));
+        assert!(t(&["node_modules/.bin/tsx", "x.ts"]));
+        assert!(t(&["ts-node", "x.ts"]));
+        assert!(t(&["C:\\proj\\node_modules\\.bin\\tsx.cmd", "x.ts"]));
+        assert!(t(&["C:\\proj\\node_modules\\.bin\\tsx.ps1", "x.ts"]));
+        // Loader flags in either form register an async loader.
+        assert!(t(&["node", "--import", "tsx/esm", "app.mjs"]));
+        assert!(t(&["node", "--loader=ts-node/esm", "app.mjs"]));
+        assert!(t(&["node", "--experimental-loader", "x.mjs"]));
+        // No foreign loader → fast tier stays. A stray `tsx` SUBSTRING must not match.
+        assert!(!t(&["webpack", "--mode", "production"]));
+        assert!(!t(&["node", "server.js"]));
+        assert!(!t(&["mytsx", "x"]));
+        assert!(!t(&["tsx.ts"]));
+    }
+
+    #[test]
+    fn force_async_tier_env_gated_on_band_and_loader() {
+        let broken = NodeVersion::new(22, 16, 0);
+        let fixed = NodeVersion::new(24, 12, 0);
+        // Broken band + foreign loader → the signal.
+        assert_eq!(
+            force_async_tier_env(&broken, ["tsx", "x.ts"]),
+            Some((FORCE_ASYNC_TIER_ENV, "1"))
+        );
+        // Broken band, no foreign loader → fast tier (None).
+        assert_eq!(force_async_tier_env(&broken, ["node", "x.js"]), None);
+        // Foreign loader but a fixed Node → no need to force (None).
+        assert_eq!(force_async_tier_env(&fixed, ["tsx", "x.ts"]), None);
     }
 
     // `ctrl_c::CURRENT_CHILD` is a process-global AtomicU32. The two tests that

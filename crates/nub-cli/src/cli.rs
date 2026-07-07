@@ -3518,6 +3518,14 @@ fn build_script_command(
     // `node` was resolved above (its path fed npm_node_execpath).
     let nub_binary = nub_core::node::spawn::current_nub_binary()?;
     let pnp_ctx = nub_core::pnp::detect(&project.root);
+    // Force-async-tier decision, captured before `node.version` is moved into
+    // compute_augmentation_env below: the common `nub run dev` = `tsx …` case
+    // crashes with ERR_METHOD_NOT_IMPLEMENTED on a broken-compose Node.
+    let force_async_tier = nub_core::node::spawn::force_async_tier_env(
+        &node.version,
+        cmd.split_whitespace()
+            .chain(args.iter().map(String::as_str)),
+    );
     let aug = nub_core::node::spawn::compute_augmentation_env(
         &nub_binary,
         node.version,
@@ -3609,6 +3617,16 @@ fn build_script_command(
         aug.apply_localstorage_env(|k, v| {
             command.env(k, v);
         });
+    }
+
+    // Force nub's async tier for a script that runs a foreign async loader
+    // (tsx/ts-node) on a broken-compose Node — the common `nub run dev` = `tsx …`
+    // case that otherwise crashes with ERR_METHOD_NOT_IMPLEMENTED. Only when we
+    // establish augmentation (`aug` is Some); a re-entrant child inherits the var.
+    if aug.is_some()
+        && let Some((k, val)) = force_async_tier
+    {
+        command.env(k, val);
     }
 
     // `npm_config_node_gyp`: npm/pnpm always point this at a runnable node-gyp
@@ -4770,6 +4788,18 @@ fn apply_exec_augmentation(cmd: &mut std::process::Command, cwd: &Path) {
     };
     let node = nub_core::node::discovery::discover_node(cwd)
         .unwrap_or_else(|_| nub_core::node::discovery::ResolvedNode::fallback());
+    // Force-async-tier decision for a foreign async loader (`nubx tsx …`) on a
+    // broken-compose Node — captured now, before `node.version` is moved into
+    // compute_augmentation_env below and before `cmd` is mutated (the returned
+    // pair is 'static, so it outlives both). Applied only once aug is confirmed.
+    let exec_tokens: Vec<String> = std::iter::once(cmd.get_program())
+        .chain(cmd.get_args())
+        .map(|s| s.to_string_lossy().into_owned())
+        .collect();
+    let force_async_tier = nub_core::node::spawn::force_async_tier_env(
+        &node.version,
+        exec_tokens.iter().map(String::as_str),
+    );
     // Exec-path parity with `nub run`/lifecycle: a launched non-node bin (a
     // create-* scaffolder, a tool that shells out) must see the same role-aware
     // `npm_config_user_agent` so it detects nub as the invoking PM instead of a
@@ -4801,6 +4831,9 @@ fn apply_exec_augmentation(cmd: &mut std::process::Command, cwd: &Path) {
     aug.apply_localstorage_env(|k, v| {
         cmd.env(k, v);
     });
+    if let Some((k, val)) = force_async_tier {
+        cmd.env(k, val);
+    }
     if let Some(node_options) = aug.node_options {
         cmd.env("NODE_OPTIONS", node_options);
     }

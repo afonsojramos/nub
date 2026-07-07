@@ -379,3 +379,77 @@ fn compat_tier_rejects_require_of_esm_ts_with_clean_error() {
         "the pre-check must fire BEFORE Node's special-require crashes: stderr={stderr:?}"
     );
 }
+
+/// Run `nub run <script>` in a fixture dir with PATH pinned to the requested
+/// Node (same discovery + skip-if-absent contract as `run_nub_against_node`).
+fn run_nub_script(
+    want: (u32, u32, u32),
+    fixture: &str,
+    script: &str,
+) -> Option<(String, String, i32)> {
+    let bin_dir = find_node_bin_dir(want)?;
+    let fixture_path = fixtures_dir().join(fixture);
+    let existing = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths = vec![bin_dir];
+    paths.extend(std::env::split_paths(&existing));
+    let new_path = std::env::join_paths(paths).expect("join PATH");
+
+    let output = Command::new(nub_binary())
+        .arg("run")
+        .arg(script)
+        .current_dir(&fixture_path)
+        .env("PATH", new_path)
+        .output()
+        .expect("failed to spawn nub run");
+    Some((
+        String::from_utf8_lossy(&output.stdout).to_string(),
+        String::from_utf8_lossy(&output.stderr).to_string(),
+        output.status.code().unwrap_or(-1),
+    ))
+}
+
+/// The resolveSync hook-composition fix (nodejs/node#59666). On the broken band
+/// (22.15.0–24.11.0) nub's sync `module.registerHooks` fast tier crashes with
+/// ERR_METHOD_NOT_IMPLEMENTED when it composes with a foreign async loader
+/// (tsx/ts-node), because the async loader's `resolveSync` is a throwing stub
+/// there. nub avoids it by registering its own hooks via the async tier for that
+/// process, signalled by `__NUB_FORCE_ASYNC_TIER`. The tier CHOICE is the
+/// contract, so this asserts the signal directly (a hermetic proxy for the crash,
+/// which needs a real tsx to reproduce — see the PR for the manual tsx validation).
+#[test]
+fn force_async_tier_signal_gated_on_broken_band_and_foreign_loader() {
+    // Broken band (22.16.0): a script carrying `--import` (a foreign async loader)
+    // forces the async tier; the signal propagates to the child that prints it.
+    if let Some((out, err, code)) = run_nub_script((22, 16, 0), "force-async-tier", "loader") {
+        assert_eq!(code, 0, "loader script must run: stderr={err}");
+        assert!(
+            out.contains("FORCE=1"),
+            "a loader-hosting script on the broken band must force the async tier: {out:?}"
+        );
+        // Broken band + a PLAIN script keeps the sync fast tier (no common-case
+        // degradation) — the whole point of gating on foreign-loader presence.
+        let (plain, _e, c) = run_nub_script((22, 16, 0), "force-async-tier", "plain").unwrap();
+        assert_eq!(c, 0);
+        assert!(
+            plain.contains("FORCE=unset"),
+            "a plain script must keep the sync fast tier on the broken band: {plain:?}"
+        );
+    } else {
+        eprintln!("skipping: Node 22.16.0 not installed (broken-band representative)");
+    }
+
+    // Fixed Node (26.2.0): even a loader-hosting script keeps the fast tier —
+    // Node implemented the sync methods, so there is nothing to work around.
+    if let Some((out, err, code)) = run_nub_script((26, 2, 0), "force-async-tier", "loader") {
+        assert_eq!(
+            code, 0,
+            "loader script must run on fixed Node: stderr={err}"
+        );
+        assert!(
+            out.contains("FORCE=unset"),
+            "a fixed Node must NOT force the async tier (fast tier is safe there): {out:?}"
+        );
+    } else {
+        eprintln!("skipping: Node 26.2.0 not installed (fixed-band representative)");
+    }
+}

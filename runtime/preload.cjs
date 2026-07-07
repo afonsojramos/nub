@@ -93,7 +93,19 @@ try {
 
 const { installSyncPolyfills } = __require("./polyfills.cjs");
 
-if (!requireEsmDisabled) {
+// Force the async loader-worker tier when nub's launcher detected this process
+// will host a FOREIGN async `module.register` loader (tsx/ts-node) on a Node
+// whose sync/async hook composition is broken (22.15.0–24.11.0, fixed in
+// Node 24.11.1; nodejs/node#59666). There, nub's sync `module.registerHooks`
+// forces resolution synchronous and reaches the foreign loader's unimplemented
+// `resolveSync` stub → ERR_METHOD_NOT_IMPLEMENTED. Registering nub's hooks via
+// the async path instead keeps BOTH loaders async, so Node's all-async resolve
+// composes cleanly. The signal (__NUB_FORCE_ASYNC_TIER) is set by the Rust
+// spawn path only for the specific loader-hosting process; every other run on
+// this Node keeps the sync fast tier. See crates/nub-core/src/node/spawn.rs.
+const forceAsyncTier = !!process.env.__NUB_FORCE_ASYNC_TIER;
+
+if (!requireEsmDisabled && !forceAsyncTier) {
   // ── Fast tier (sync require(esm) available) ───────────────────────
 
   // ── Watch-mode dependency reporting + hooks ───────────────────────
@@ -150,10 +162,12 @@ if (!requireEsmDisabled) {
   // ── Compile-cache: re-enable for the USER's modules (R8) ──────────
   common.reenableUserCompileCache();
 } else {
-  // ── Fallback tier (`--no-experimental-require-module`): async hooks ─
-  // The user disabled require(esm), so the in-thread sync `module.registerHooks`
-  // core can't be loaded here. Register the SAME hooks the compat tier uses, run
-  // in a dedicated loader worker via `module.register`; that worker imports
+  // ── Async loader-worker tier ──────────────────────────────────────
+  // Entered when EITHER require(esm) is disabled (`--no-experimental-require-module`,
+  // so the in-thread sync core can't load) OR `forceAsyncTier` is set (nub composes
+  // with a foreign async loader on a broken-compose Node — see above). Register the
+  // SAME hooks the compat tier uses, run in a dedicated loader worker via
+  // `module.register`; that worker imports
   // transform-core.mjs as a static ESM import (not gated by the flag). The
   // main-thread CJS require() transpile shim, which would need the core
   // synchronously in-thread, is unavailable in this mode — an honest, additive
