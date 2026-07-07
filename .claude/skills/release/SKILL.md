@@ -83,7 +83,7 @@ Build the notes from the **full** `git log "$PREV"..HEAD` changeset (Step 1), no
 - **A table for a batch of independent fixes.** When several small fixes share a theme (a run of lockfile fixes), put them in a table — `| Area | What changed | Commit |` — tables read far faster than a bullet wall.
 - **A callout for heads-up / migration items.** Anything a user should know before upgrading (a cache-schema re-warm, a behavior change) goes in a GitHub-flavored alert: `> [!IMPORTANT]` (or `> [!NOTE]`), not buried in a bullet.
 - **Per-item links.** Every fix/change links to its commit (`[`abc1234`](https://github.com/nubjs/nub/commit/<full-sha>)`) and/or PR (`[#17](https://github.com/nubjs/nub/pull/17)`). Issue refs link too (`[#16](https://github.com/nubjs/nub/issues/16)`).
-- **A "Commits in this release" section at the BOTTOM** — every commit in `$PREV..HEAD` as a bullet, `- <subject> (<short-sha-link>)`, with the PR link added where the subject carries a `(#N)`. This is the full audit trail beyond the themed sections above.
+- **An auto-generated `## What's Changed` section at the BOTTOM (MANDATORY) — this is what makes "lists every change" literally true.** GitHub's PR-level breakdown (every merged PR + author + New Contributors) plus the `**Full Changelog**: <PREV>...v<ver>` compare link, from `gh api …/releases/generate-notes` (command below). Append it verbatim under a `---` separator below the curated narrative — the curated themes stay on top, the exhaustive PR list goes underneath.
 - **Tone: factual + neutral.** Readability ≠ hype. Each line states what changed. No superlatives, no competitive framing, no editorializing. (Same bar as commit messages — AGENTS.md.) Visual interest comes from structure (sections, tables, callouts), never from marketing language.
 
 **Template** (adapt the section names to the actual changeset):
@@ -110,19 +110,25 @@ Build the notes from the **full** `git log "$PREV"..HEAD` changeset (Step 1), no
 
 - <Bullet> ([`<sha7>`](https://github.com/nubjs/nub/commit/<full-sha>)).
 
-## Commits in this release
+---
 
-- <subject> ([`<sha7>`](https://github.com/nubjs/nub/commit/<full-sha>))
-- <subject with PR> ([#17](https://github.com/nubjs/nub/pull/17), [`<sha7>`](https://github.com/nubjs/nub/commit/<full-sha>))
+## What's Changed
+
+<!-- appended verbatim from `gh api …/releases/generate-notes` — the PR list, New Contributors, and Full Changelog link -->
+* <PR title> by @<author> in https://github.com/nubjs/nub/pull/<n>
 
 **Full Changelog**: https://github.com/nubjs/nub/compare/<PREV>...v<ver>
 ```
 
-Generate the bottom commit list mechanically so nothing is missed:
+Generate the bottom `## What's Changed` breakdown mechanically so every merged PR is listed:
 
 ```bash
-git log "$PREV"..HEAD --reverse --format='- %s ([`%h`](https://github.com/nubjs/nub/commit/%H))'
+# PR-level list + New Contributors + Full Changelog compare link — append verbatim below the curated narrative
+gh api repos/nubjs/nub/releases/generate-notes \
+  -f tag_name=v<ver> -f previous_tag_name=$PREV --jq '.body'
 ```
+
+Append that block under a `---` separator below the curated sections, then `gh release edit`. The curated narrative stays on top; this exhaustive PR list goes underneath.
 
 Update the release body:
 
@@ -151,14 +157,19 @@ Comment a brief factual note carrying **the version and a link to the release** 
 
 The release URL is `https://github.com/nubjs/nub/releases/tag/v<ver>`. Every comment includes both the version and that link, e.g. `Shipped in v<ver>: <release URL>`.
 
-Enumerate the targets from the changeset:
+**Enumerate the targets MECHANICALLY — never a hand-typed list.** A hand-enumerated pass silently misses any issue still open at cut time or closed AFTER the cut (this happened on v0.3.0). Drive the set from the union of three queries:
 
 ```bash
-# Merged PRs in the range (each PR body's "Fixes #N" / "Closes #N" gives the issues it resolved):
-git log "$PREV"..HEAD --oneline --merges
-# Plus any squash-merged PRs / direct fix commits — scan the changeset for "#<n>" references
-# and "(#<n>)" PR-merge suffixes, and cross-check the release thread's targeted-fix list.
+# 1. Every issue a shipped PR auto-closes (closingIssuesReferences) + any Closes/Fixes/Resolves #N in a PR body:
+gh pr list --repo nubjs/nub --state merged --search "merged:<PREV-date>..<cut-date>" \
+  --json number,body,closingIssuesReferences --limit 200 \
+  --jq '.[] | {pr:.number, closes:[.closingIssuesReferences[].number], refs:([.body|scan("(?i)(?:clos|fix|resolv)\\w*\\s+#(\\d+)")]|flatten)}'
+# 2. Every issue closed in the release window (catches issues closed without a linked PR):
+gh issue list --repo nubjs/nub --state closed --search "closed:<PREV-date>..<cut-date+1>" \
+  --json number,title,stateReason --limit 200
 ```
+
+For each issue/PR in the union, check whether it ALREADY carries the comment before posting (`gh issue view <n> --repo nubjs/nub --json comments --jq '[.comments[].body|select(test("Shipped in v<ver>"))]|length'`) — skip a `NOT_PLANNED` issue with no shipped fix. **Re-run this pass for any issue closed AFTER the cut** — a late-closing issue does not appear in the first sweep.
 
 Then comment (short, factual — what fixed it + the version and release link, no fluff):
 
@@ -168,7 +179,7 @@ gh issue comment <n> --body "Fixed in v<ver> (now published): $REL"
 gh pr comment <n>    --body "Shipped in v<ver>: $REL"
 ```
 
-Hit **every** issue closed and **every** PR merged since `$PREV` — at minimum every issue the release thread lists as targeted (for v0.1.3 that was #15, #16, #18, the NODE_OPTIONS fix, …) plus any other issue/PR closed in the range. This is non-optional; do not skip an issue because it was "minor." Do not comment on issues unrelated to the release.
+Hit **every** issue and PR the mechanical union above surfaces — not just the headline fixes. This is non-optional; do not skip an issue because it was "minor," and do not fall back to the release thread's targeted-fix list as the source of truth (it under-counts). Do not comment on issues unrelated to the release.
 
 ## Step 6 — Post-release verify
 
