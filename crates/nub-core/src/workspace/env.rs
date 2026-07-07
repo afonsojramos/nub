@@ -10,6 +10,79 @@ use std::path::Path;
 /// KB-sized; this caps an absurdly large regular file.
 const ENV_FILE_MAX_BYTES: u64 = 16 * 1024 * 1024;
 
+/// Process-controlling variables nub ignores when they come from a `.env*` /
+/// `--env-file` source. A `.env` file is meant to provide configuration to the
+/// user's PROGRAM, not to reconfigure the runtime nub launches — so a value it
+/// sets for one of these keys is dropped rather than silently changing how Node
+/// itself starts. This mirrors Deno's `ENV_FILE_DENYLIST`
+/// (`.repos/deno/cli/util/env.rs`), which ignores Deno's own control vars from an
+/// env file for the same reason; applied here to Node's control surface, since
+/// Node is the runtime nub launches.
+///
+/// The set — Node's start-up / transport control knobs:
+/// - `NODE_OPTIONS` — injects launch flags (`--require`/`--import`, heap sizing,
+///   inspector) into the process nub spawns.
+/// - `NODE_TLS_REJECT_UNAUTHORIZED` — `=0` turns off TLS certificate verification.
+/// - `NODE_EXTRA_CA_CERTS` — adds a trusted CA to the process.
+/// - `NODE_REPL_EXTERNAL_MODULE` — auto-loads a module at start-up.
+///
+/// Only values ORIGINATING from a `.env*` file are dropped: an ambiently-set value
+/// passes through untouched (shell-wins, and the child inherits nub's env). A user
+/// who legitimately wants one of these (e.g. `NODE_OPTIONS=--max-old-space-size=4096`)
+/// sets it in the real shell/CI environment instead — the trade Deno also makes.
+const ENV_FILE_DENYLIST: &[&str] = &[
+    "NODE_OPTIONS",
+    "NODE_TLS_REJECT_UNAUTHORIZED",
+    "NODE_EXTRA_CA_CERTS",
+    "NODE_REPL_EXTERNAL_MODULE",
+];
+
+/// Whether `key` is a denylisted runtime-control variable nub ignores from a
+/// `.env*` / `--env-file` source. ASCII case-insensitive — environment variable
+/// lookups are case-insensitive on Windows, so a lowercased spelling must not slip
+/// one through (matches Deno's comparison).
+pub fn is_denied_env_file_key(key: &str) -> bool {
+    ENV_FILE_DENYLIST
+        .iter()
+        .any(|denied| key.eq_ignore_ascii_case(denied))
+}
+
+/// Remove every denylisted key from an env-file-sourced map, returning the dropped
+/// keys (sorted, for a stable warning). Used by the explicit `--env-file` path,
+/// which builds its map outside [`load_env_files_raw_reporting`] and so needs the
+/// same strip applied for defense-in-depth (Deno denies from `--env-file` too).
+pub fn strip_denied_env_file_keys(map: &mut HashMap<String, String>) -> Vec<String> {
+    let mut dropped: Vec<String> = map
+        .keys()
+        .filter(|k| is_denied_env_file_key(k))
+        .cloned()
+        .collect();
+    for key in &dropped {
+        map.remove(key);
+    }
+    dropped.sort();
+    dropped
+}
+
+/// Emit the "ignoring runtime-control var(s) from .env" notice at most once per
+/// process. A denylisted key an env file tried to set was dropped; tell the user
+/// where to set it instead so a legitimate use (e.g.
+/// `NODE_OPTIONS=--max-old-space-size`) has a clear migration. `Once` guards
+/// against repeats across multiple loads in one process.
+pub fn warn_denied_env_file_keys(keys: &[String]) {
+    if keys.is_empty() {
+        return;
+    }
+    use std::sync::Once;
+    static WARNED: Once = Once::new();
+    WARNED.call_once(|| {
+        eprintln!(
+            "nub: ignoring {} from .env files; set them in your shell or CI environment instead",
+            keys.join(", ")
+        );
+    });
+}
+
 /// Read an env file's contents, refusing anything that is not a regular file or
 /// that exceeds the size cap, then read it. This guards against `read_to_string`
 /// hanging or OOMing on a character device (`--env-file=/dev/zero`), a FIFO, or
@@ -149,17 +222,23 @@ pub fn load_env_files_raw(project_root: &Path) -> HashMap<String, String> {
     load_env_files_raw_reporting(project_root).0
 }
 
-/// The raw loader, additionally reporting whether a `.env` FILE declared
-/// `NODE_ENV` (always dropped from the returned map — dotenv/@next/env/Vite
-/// parity, #263). The bool is consumed by [`load_env_files`] (the direct run/file
-/// injection path) to warn the user; the plain [`load_env_files_raw`] wrapper
-/// discards it because the watch path defers `NODE_ENV` to Node's own `--env-file`
-/// and so is NOT the one ignoring it — warning there would be false.
-fn load_env_files_raw_reporting(project_root: &Path) -> (HashMap<String, String>, bool) {
+/// The raw loader, additionally reporting (1) whether a `.env` FILE declared
+/// `NODE_ENV` (always dropped — dotenv/@next/env/Vite parity, #263) and (2) which
+/// denylisted runtime-control keys were dropped ([`ENV_FILE_DENYLIST`]). Both
+/// drops happen HERE at load, so every consumer of the returned map —
+/// [`load_env_files`] (direct run/file injection) and [`load_env_files_raw`]
+/// (watch injection) — is covered by construction; a denylisted key can never
+/// enter the map that flows to a spawned child. The reports are consumed by
+/// [`load_env_files`] to warn; the plain [`load_env_files_raw`] wrapper discards
+/// them (the watch path defers the corresponding warnings to avoid false claims).
+fn load_env_files_raw_reporting(
+    project_root: &Path,
+) -> (HashMap<String, String>, bool, Vec<String>) {
     let files = env_file_names();
 
     let mut result = HashMap::new();
     let mut node_env_ignored = false;
+    let mut denied_keys: Vec<String> = Vec::new();
 
     for filename in &files {
         let path = project_root.join(filename);
@@ -183,13 +262,26 @@ fn load_env_files_raw_reporting(project_root: &Path) -> (HashMap<String, String>
                     node_env_ignored = true;
                     continue;
                 }
+                // Env hygiene (Deno parity): a `.env` FILE configures the user's
+                // PROGRAM, not the runtime — so a runtime-control var it sets
+                // ([`ENV_FILE_DENYLIST`] — `NODE_OPTIONS` et al.) is ignored rather
+                // than silently reconfiguring Node's start-up. Reaching here means it
+                // is not ambiently set (shell-wins above), so it WOULD have been
+                // injected → drop it and flag it for the warning.
+                if is_denied_env_file_key(&key) {
+                    if !denied_keys.contains(&key) {
+                        denied_keys.push(key);
+                    }
+                    continue;
+                }
                 // First writer wins among .env files.
                 result.entry(key).or_insert(value);
             }
         }
     }
 
-    (result, node_env_ignored)
+    denied_keys.sort();
+    (result, node_env_ignored, denied_keys)
 }
 
 /// Emit the "ignoring `.env` `NODE_ENV`" notice at most once per process. Called
@@ -211,19 +303,21 @@ fn warn_node_env_from_dotenv_ignored() {
 /// (from the parent process) always wins — values already set in
 /// the process environment are not overridden.
 pub fn load_env_files(project_root: &Path) -> HashMap<String, String> {
-    let (mut result, node_env_ignored) = load_env_files_raw_reporting(project_root);
+    let (mut result, node_env_ignored, denied_keys) = load_env_files_raw_reporting(project_root);
 
     // Expand ${VAR} references within values. Multi-pass to handle
     // nested references like A=hello, B=${A}_world, C=${B}_!.
     expand_env_map(&mut result);
 
     // Warn only here — this map is injected straight into the child via
-    // `Command::env`, so a dropped `.env` `NODE_ENV` truly never reaches it. The
-    // watch path (plain `load_env_files_raw`) hands the files to Node's `--env-file`
-    // instead, so nub isn't ignoring `NODE_ENV` there and must not claim to.
+    // `Command::env`, so a dropped `.env` `NODE_ENV` / denylisted var truly never
+    // reaches it. The watch path (plain `load_env_files_raw`) hands the files to
+    // Node's `--env-file` instead, so nub isn't the one ignoring them there and must
+    // not claim to.
     if node_env_ignored {
         warn_node_env_from_dotenv_ignored();
     }
+    warn_denied_env_file_keys(&denied_keys);
 
     result
 }
@@ -801,6 +895,64 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Env hygiene (Deno parity): a `.env` FILE must never inject a runtime-control
+    /// var ([`ENV_FILE_DENYLIST`]) — those configure Node's own start-up, not the
+    /// user's program. `NODE_OPTIONS` is the load-bearing case and
+    /// `NODE_TLS_REJECT_UNAUTHORIZED` confirms the case-insensitive match; benign
+    /// siblings must still load. The strip runs in the shared per-file loop, so
+    /// `.env` coverage exercises it for every `.env*` file — mode-file SELECTION is a
+    /// separate concern (tested by `env_file_names*`) and needs no ambient env here.
+    #[test]
+    fn denylisted_runtime_control_vars_never_injected() {
+        let dir = std::env::temp_dir().join(format!("nub-deny-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(".env"),
+            "NODE_OPTIONS=--require ./x.js\nnode_tls_reject_unauthorized=0\nAPP_KEY=safe\n",
+        )
+        .unwrap();
+
+        let base = load_env_files(&dir);
+        assert!(
+            !base.contains_key("NODE_OPTIONS"),
+            "a `.env` NODE_OPTIONS must not reach the child; got {base:?}"
+        );
+        assert!(
+            !base
+                .keys()
+                .any(|k| k.eq_ignore_ascii_case("NODE_TLS_REJECT_UNAUTHORIZED")),
+            "a `.env` NODE_TLS_REJECT_UNAUTHORIZED must be dropped case-insensitively; got {base:?}"
+        );
+        assert_eq!(
+            base.get("APP_KEY").map(String::as_str),
+            Some("safe"),
+            "benign siblings must still load after the denylist strip; got {base:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `strip_denied_env_file_keys` (the explicit `--env-file` path's guard) removes
+    /// every denylisted key case-insensitively, leaves benign keys, and returns the
+    /// dropped keys sorted.
+    #[test]
+    fn strip_denied_env_file_keys_removes_control_vars() {
+        let mut map = HashMap::new();
+        map.insert("NODE_OPTIONS".to_string(), "--require ./x.js".to_string());
+        map.insert("node_extra_ca_certs".to_string(), "/x.pem".to_string());
+        map.insert("PORT".to_string(), "3000".to_string());
+
+        let dropped = strip_denied_env_file_keys(&mut map);
+
+        assert_eq!(dropped, vec!["NODE_OPTIONS", "node_extra_ca_certs"]);
+        assert!(!map.contains_key("NODE_OPTIONS"));
+        assert!(!map.contains_key("node_extra_ca_certs"));
+        assert_eq!(map.get("PORT").map(String::as_str), Some("3000"));
+        assert!(is_denied_env_file_key("node_options"));
+        assert!(!is_denied_env_file_key("PATH"));
     }
 
     /// `expand_env_map` (used by the `--env-file` flag path) must apply the same

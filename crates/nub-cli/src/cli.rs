@@ -1372,6 +1372,14 @@ fn run_nub() -> Result<i32> {
     // the expansion load_env_files applies on the non-watch run path.
     nub_core::workspace::env::expand_env_map(&mut env_file_vars);
 
+    // Env hygiene (Deno parity): ignore runtime-control vars (NODE_OPTIONS et al.)
+    // from the explicit `--env-file` map too, so no env-file-sourced value silently
+    // reconfigures the spawned Node — uniform with the auto-loaded `.env*` strip in
+    // env.rs, and matching Deno, which ignores its control vars from `--env-file`.
+    let denied_env_file_keys =
+        nub_core::workspace::env::strip_denied_env_file_keys(&mut env_file_vars);
+    nub_core::workspace::env::warn_denied_env_file_keys(&denied_env_file_keys);
+
     // Capture --env-file vars for per-child Command::env application (A19): no
     // process-env mutation, so no `unsafe { env::set_var }` and no data race if a
     // dep threads during init. Shell-wins / `.env`-override precedence is applied
