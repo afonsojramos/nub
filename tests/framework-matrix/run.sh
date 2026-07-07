@@ -67,7 +67,7 @@ if [ "$dev_cmd" != "-" ]; then
   bound=""; up=""
   for i in $(seq 1 120); do
     sleep 0.5
-    pp=$(grep -oE 'https?://(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]):[0-9]+' "$devlog" 2>/dev/null | grep -oE '[0-9]+$' | head -1)
+    pp=$(grep -oE 'https?://(localhost|127\.0\.0\.1|0\.0\.0\.0|\[[0-9a-fA-F:]*\]):[0-9]+' "$devlog" 2>/dev/null | grep -oE '[0-9]+$' | head -1)
     [ -n "$pp" ] && bound="$pp"
     if [ -n "$bound" ]; then curl -s -o /dev/null "http://localhost:$bound/" 2>/dev/null && { up=1; break; }; fi
     kill -0 "$devpid" 2>/dev/null || break   # dev process died
@@ -103,7 +103,7 @@ if [ "$preview_cmd" != "-" ] && [ "$build_result" != "FAIL" ]; then
   pbound=""; pup=""
   for i in $(seq 1 120); do
     sleep 0.5
-    pp=$(grep -oE 'https?://(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]):[0-9]+' "$prevlog" 2>/dev/null | grep -oE '[0-9]+$' | head -1)
+    pp=$(grep -oE 'https?://(localhost|127\.0\.0\.1|0\.0\.0\.0|\[[0-9a-fA-F:]*\]):[0-9]+' "$prevlog" 2>/dev/null | grep -oE '[0-9]+$' | head -1)
     [ -n "$pp" ] && pbound="$pp"
     if [ -n "$pbound" ]; then curl -s -o /dev/null "http://localhost:$pbound/" 2>/dev/null && { pup=1; break; }; fi
     kill -0 "$prevpid" 2>/dev/null || break
