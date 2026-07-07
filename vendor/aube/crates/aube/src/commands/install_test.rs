@@ -44,6 +44,9 @@ pub async fn run(script_args: ScriptArgs) -> miette::Result<Option<i32>> {
         let mode = install::FrozenMode::from_override(
             None,
             aube_settings::resolved::prefer_frozen_lockfile(&ctx),
+            // `install-test` is not lockfile-only; it behaves like
+            // argumentless `aube install`, so the CI-frozen default applies.
+            false,
         );
         // `install-test` is a pnpm-compat alias for `install && test`,
         // so the install phase needs to behave like argumentless `aube
