@@ -16,21 +16,6 @@ use aube_store::PackageIndex;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// Split a resolved dep_path into `(name, dep_path_tail)` — the inverse of the
-/// `format!("{name}@{tail}")` reconstruction used across the graph walk. The
-/// version `@` is the last `@` BEFORE any peer suffix `(...)`, since a peer
-/// suffix can itself contain `@` (`@vue/compiler-sfc@1.2.3(vue@3.4.0)` →
-/// `("@vue/compiler-sfc", "1.2.3(vue@3.4.0)")`). Returns `None` when there is no
-/// version boundary (a bare scope or malformed key), which the caller skips.
-fn split_dep_path_name_tail(dep_path: &str) -> Option<(&str, &str)> {
-    let core_end = dep_path.find('(').unwrap_or(dep_path.len());
-    let at = dep_path[..core_end].rfind('@')?;
-    if at == 0 {
-        return None;
-    }
-    Some((&dep_path[..at], dep_path.get(at + 1..)?))
-}
-
 impl Linker {
     fn without_global_virtual_store(&self) -> Self {
         Self {
@@ -58,7 +43,6 @@ impl Linker {
             no_integrity_read_keys: self.no_integrity_read_keys.clone(),
             link_progress: self.link_progress.clone(),
             disk_materialize: self.disk_materialize.clone(),
-            phantom_hoist: self.phantom_hoist.clone(),
         }
     }
 
@@ -429,40 +413,18 @@ impl Linker {
                                     let _ = std::fs::remove_dir(&local_aube_entry)
                                         .or_else(|_| std::fs::remove_file(&local_aube_entry));
                                 }
-                                // Rung 2 (selective-subtree): if this package has
-                                // undeclared phantom targets to hoist-within,
-                                // materialize the PROJECT-LOCAL copy with those
-                                // targets added as extra dependency edges.
-                                // `materialize_into`'s sibling-wiring then creates
-                                // `<P>/node_modules/<T>` → the target's existing
-                                // `.aube/<entry>`, so P's undeclared import
-                                // resolves. Applied ONLY here (the project-local
-                                // copy) — the shared-store copy written above keeps
-                                // the original edges, since the hoist is
-                                // project-specific and the store is cross-project.
-                                let hoisted_pkg;
-                                let pkg_for_local = match self.phantom_hoist_for(dep_path) {
-                                    Some(targets) if !targets.is_empty() => {
-                                        let mut p = pkg.clone();
-                                        for target in targets {
-                                            if let Some((name, tail)) =
-                                                split_dep_path_name_tail(target)
-                                            {
-                                                p.dependencies
-                                                    .entry(name.to_string())
-                                                    .or_insert_with(|| tail.to_string());
-                                            }
-                                        }
-                                        hoisted_pkg = p;
-                                        &hoisted_pkg
-                                    }
-                                    _ => pkg,
-                                };
+                                // Undeclared imports this ejected package makes are
+                                // resolved by the collective project-local hidden
+                                // hoist tree (built in `link_hidden_hoist` over the
+                                // whole ejected set) — its realpath is project-local,
+                                // so Node's upward walk from inside it reaches
+                                // `.aube/node_modules/`. So materialize the copy with
+                                // its own edges; no per-importer sibling injection.
                                 self.materialize_into(
                                     &aube_dir,
                                     &aube_dir,
                                     dep_path,
-                                    pkg_for_local,
+                                    pkg,
                                     index,
                                     &mut local_stats,
                                     false,
@@ -1493,8 +1455,8 @@ impl Linker {
         // passes through `.aube/node_modules/`. Build ONE COLLECTIVE project-local
         // hidden hoist tree there over the whole graph so any ejected package
         // resolves any undeclared phantom via that walk — blanket, detection-free,
-        // the pnpm-parity successor to the per-importer `phantom_hoist`. Two
-        // invariants make this sound:
+        // pnpm-parity, and the SOLE phantom-resolution mechanism (it replaced the
+        // former per-importer phantom-target hoist). Two invariants make this sound:
         //   - #6-safe: the tree lives in the PROJECT (`node_modules/.aube/
         //     node_modules/`), never the shared store, so its bare-name aliases
         //     are per-project state — not the cross-project-mutable shared-store

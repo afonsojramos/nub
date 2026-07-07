@@ -7,22 +7,26 @@
 //! it — otherwise a store-resident importer keeps resolving the un-materialized
 //! shared-store copy, a silent singleton split (two realpaths, two module
 //! instances). This hook expands aube's flat disk-materialize seed into a
-//! graph-aware plan against the resolved lockfile:
+//! graph-aware plan against the resolved lockfile — the ancestor-closure
+//! (rung 1). Each seed grows to [`LockfileGraph::importer_closure`] — the seed
+//! UNION every package that transitively imports it. Bounded to the affected
+//! subtree by construction (unrelated top-level subtrees are not importers),
+//! measured 0.3–2.1% of real large trees. Also SUBSUMES the #315
+//! library-embedded-vite<8.1 residual: an embedded vite<8.1 (a framework's
+//! transitive engine, no direct-dep symlink) is auto-detected and its
+//! `[framework…vite]` closure ejected, so #318's dist sniff patch reaches a
+//! now-project-local vite.
 //!
-//! - **Rung 1 — ancestor-closure.** Each seed grows to
-//!   [`LockfileGraph::importer_closure`] — the seed UNION every package that
-//!   transitively imports it. Bounded to the affected subtree by construction
-//!   (unrelated top-level subtrees are not importers), measured 0.3–2.1% of real
-//!   large trees. Also SUBSUMES the #315 library-embedded-vite<8.1 residual: an
-//!   embedded vite<8.1 (a framework's transitive engine, no direct-dep symlink)
-//!   is auto-detected and its `[framework…vite]` closure ejected, so #318's dist
-//!   sniff patch reaches a now-project-local vite.
-//! - **Rung 2 — hoist-within.** For a transitively-phantom importer whose
-//!   undeclared target the closure alone can't place, the already-resolved target
-//!   is hoisted as an extra sibling within the importer's own materialized
-//!   `node_modules`.
+//! Undeclared phantoms an ejected member imports are resolved by the linker's
+//! COLLECTIVE project-local hidden hoist tree over the whole ejected set (see
+//! `aube_linker::link_hidden_hoist`): each ejected member's realpath is
+//! project-local, so Node's upward `node_modules` walk from inside it passes
+//! through `.nub/node_modules/`, a blanket first-write-wins alias for every graph
+//! package — detection-free and pnpm-parity. So this hook only needs to grow the
+//! eject set; it records no per-importer target hoist. (This replaced the former
+//! per-importer hoist-within mechanism.)
 //!
-//! The phantom importers + their undeclared targets are the DYNAMIC output of the
+//! The phantom importers are the DYNAMIC output of the
 //! extract-time per-version scanner (`crate::dynamic_phantom`, the PRODUCER): it
 //! scans each fetched version's real published code for unguarded undeclared
 //! imports and writes a per-content verdict sidecar. This hook (the CONSUMER)
@@ -37,7 +41,7 @@
 //! pre-productionization pure-symlink behavior. All policy lives here; aube owns
 //! only the neutral seam + the graph primitive.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 
 use aube_linker::DiskMaterializePlan;
 use aube_lockfile::{LockedPackage, LockfileGraph};
@@ -124,15 +128,14 @@ fn plan_from_flags(
     let mut seed_names_set: HashSet<&str> = seed_names.iter().copied().collect();
 
     // Dynamic phantom source (the per-version scanner's sidecars) — the replacement
-    // for the retired hand-curated map. `dynamic_targets` keeps each SURVIVING
-    // importer's undeclared targets keyed by dep_path, for the rung-2 hoist; only
-    // survivors are kept, so a hoist only ever lands in a package the seed actually
-    // materializes.
-    let mut dynamic_targets: BTreeMap<&str, &[String]> = BTreeMap::new();
+    // for the retired hand-curated map. Each SURVIVING flagged importer seeds the
+    // eject closure by NAME; the collective project-local hidden hoist tree the
+    // linker builds over the ejected set (see `aube_linker::link_hidden_hoist`)
+    // then resolves every undeclared phantom for those members via Node's walk-up,
+    // so no per-importer target hoist is recorded.
     for (dep_path, name, targets) in flags {
         if should_seed(targets, &direct_dep_names(dep_path, graph), is_top_level) {
             seed_names_set.insert(name.as_str());
-            dynamic_targets.insert(dep_path.as_str(), targets.as_slice());
         }
     }
 
@@ -179,69 +182,17 @@ fn plan_from_flags(
         }
     }
 
-    // Rung-2 hoist map: for each closure member that is a surviving dynamically-
-    // flagged importer, resolve its undeclared target(s) to a dep_path present in
-    // the graph and record importer_dep_path → [target_dep_paths]. A survivor is
-    // seeded by name, so its dep_path is in the closure by construction; iterating
-    // the closure keeps this aligned to what actually materializes.
-    let mut hoist_within: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for dep_path in &closure {
-        let Some(targets) = dynamic_targets.get(dep_path.as_str()) else {
-            continue;
-        };
-        let resolved: Vec<String> = targets
-            .iter()
-            .filter_map(|t| resolve_target_dep_path(graph, t))
-            .collect();
-        if !resolved.is_empty() {
-            hoist_within.insert(dep_path.clone(), resolved);
-        }
-    }
-
-    // Rung 2b — SATISFIED optional-peer reachability. An optional peer a package
-    // STATICALLY imports (`vue-router/vite` → `@vue/compiler-sfc`) is a hard
-    // requirement mis-declared optional: the scanner correctly classifies it
-    // DeclaredOptionalPeer (not a hard phantom, so rung-2 never targets it) and
-    // the resolver doesn't thread it into this deep graph, so under GVS the
-    // member's store-resident-or-materialized realpath walk can't reach it. For
-    // each ALREADY-ejected closure member, hoist its optional peers that are
-    // PRESENT in the tree, RANGE-SATISFYING, and NOT already a resolved sibling —
-    // matching pnpm, which links present optional peers down the subtree. Safe by
-    // construction: it only ever RESTORES reachability a hoisted layout would give
-    // (a present, declared, satisfying copy the tree already carries) into a
-    // subtree that already materializes — it never expands the closure and never
-    // places a package the tree lacks. CAVEAT: "free" only while something else
-    // ejects the member (today the Nuxt closure ejects via embedded vite<8.1 + the
-    // `@nuxt/devtools`→`unstorage` phantom); a member that is NOT ejected has no
-    // project-local `node_modules` to hoist into, so a future eject-free layout
-    // would need to SEED the importer (grow the eject set) — out of scope here.
-    for dep_path in &closure {
-        let Some(pkg) = graph.packages.get(dep_path) else {
-            continue;
-        };
-        for (peer_name, meta) in &pkg.peer_dependencies_meta {
-            // A resolved sibling (active-optional / threaded peer mirrored into
-            // `dependencies`) is already reachable — hoisting would duplicate it.
-            if !meta.optional || pkg.dependencies.contains_key(peer_name) {
-                continue;
-            }
-            let range = pkg
-                .peer_dependencies
-                .get(peer_name)
-                .map_or("*", String::as_str);
-            let Some(target) = resolve_satisfying_dep_path(graph, peer_name, range) else {
-                continue;
-            };
-            let entry = hoist_within.entry(dep_path.clone()).or_default();
-            if !entry.contains(&target) {
-                entry.push(target);
-            }
-        }
-    }
-
+    // Undeclared phantoms — every class the retired per-importer hoist used to
+    // place (a scanner-flagged undeclared import; a statically-imported but
+    // optional peer like `vue-router/vite` → `@vue/compiler-sfc`) — are now
+    // resolved uniformly by the linker's collective project-local hidden hoist
+    // tree over the ejected set: each ejected member's realpath is project-local,
+    // so Node's upward walk from inside it passes through `.nub/node_modules/`,
+    // which carries a blanket first-write-wins alias for every graph package.
+    // Detection-free and pnpm-parity, so this planner only needs to grow the
+    // eject set (rung 1) — it records no per-importer target hoist.
     DiskMaterializePlan {
         names: names.into_iter().collect(),
-        hoist_within,
     }
 }
 
@@ -364,7 +315,7 @@ fn should_seed(
 /// it reachable, which let a depth-≥2 phantom target (`@crawlee/basic` →
 /// `@crawlee/core` → `@apify/datastructures`, #280) wrongly SKIP its eject and
 /// break. Depth-≥2 and absent targets now fall through to SEED — the safe
-/// direction (the ejected copy hoists the target in as a real sibling, rung 2).
+/// direction (the ejected copy resolves the target via the collective hidden tree).
 ///
 /// Reads `dependencies` ONLY: per [`LockedPackage`]'s contract that map is the
 /// resolved edge set with ACTIVE optionals and RESOLVED peer versions already
@@ -383,44 +334,6 @@ fn direct_dep_names(root_dep_path: &str, graph: &LockfileGraph) -> HashSet<Strin
         }
     }
     names
-}
-
-/// Resolve a target package NAME to a dep_path present in the graph. `packages`
-/// is a `BTreeMap`, so `.find` yields the lexically-first matching dep_path —
-/// deterministic, and unambiguous for the single-version phantom classes. The
-/// scanner reports targets by name; per-version target dep_paths would need the
-/// scanner to also record the resolved coordinate.
-fn resolve_target_dep_path(graph: &LockfileGraph, target_name: &str) -> Option<String> {
-    graph
-        .packages
-        .iter()
-        .find(|(_, pkg)| pkg.name == target_name)
-        .map(|(dep_path, _)| dep_path.clone())
-}
-
-/// Resolve an optional-peer NAME + its declared RANGE to a PRESENT, range-
-/// satisfying dep_path, picking the HIGHEST satisfying version in the tree
-/// (deterministic; unambiguous for the single-version peer classes this targets).
-/// Uses npm range semantics (`node-semver`, which handles `*`, `||` unions, and
-/// x-ranges), NOT Cargo's. `None` when the peer is absent or no present version
-/// satisfies — so a hoist is only ever recorded for a copy the tree already
-/// carries at a satisfying version.
-fn resolve_satisfying_dep_path(
-    graph: &LockfileGraph,
-    peer_name: &str,
-    range: &str,
-) -> Option<String> {
-    let req = node_semver::Range::parse(range).ok()?;
-    graph
-        .packages
-        .iter()
-        .filter(|(_, pkg)| pkg.name == peer_name)
-        .filter_map(|(dep_path, pkg)| {
-            let v = node_semver::Version::parse(&pkg.version).ok()?;
-            v.satisfies(&req).then(|| (v, dep_path.clone()))
-        })
-        .max_by(|(a, _), (b, _)| a.cmp(b))
-        .map(|(_, dep_path)| dep_path)
 }
 
 #[cfg(test)]
@@ -551,16 +464,16 @@ mod tests {
     fn no_seeds_yields_empty_plan() {
         let g = graph(&[("lodash@4.17.21", "lodash", &[])]);
         let plan = plan_from_flags(&g, &[], &[]);
-        assert!(plan.names.is_empty() && plan.hoist_within.is_empty());
+        assert!(plan.names.is_empty());
     }
 
     #[test]
-    fn dynamic_flag_seeds_importer_and_records_hoist() {
+    fn dynamic_flag_seeds_importer() {
         // The now-default path: a phantom adapter (`@hookform/resolvers`)
-        // statically imports an undeclared `zod`. The target isn't reachable
-        // within the adapter's own subtree, so `should_seed` SEEDS it; rung-2
-        // resolves `zod` to its dep_path and records the hoist into the adapter's
-        // materialized `node_modules`.
+        // statically imports an undeclared `zod`. The target isn't reachable within
+        // the adapter's own subtree, so `should_seed` SEEDS it (ejects it). The
+        // collective hidden tree then resolves the undeclared `zod` at link time —
+        // the planner only needs to grow the eject set, not record a target hoist.
         let g = graph(&[
             ("@hookform/resolvers@1.0.0", "@hookform/resolvers", &[]),
             ("zod@3.0.0", "zod", &[]),
@@ -574,25 +487,19 @@ mod tests {
         let names: HashSet<&str> = plan.names.iter().map(String::as_str).collect();
         assert!(
             names.contains("@hookform/resolvers"),
-            "the flagged phantom importer is seeded"
-        );
-        assert_eq!(
-            plan.hoist_within
-                .get("@hookform/resolvers@1.0.0")
-                .map(Vec::as_slice),
-            Some(["zod@3.0.0".to_string()].as_slice()),
-            "rung-2 records the undeclared target's hoist"
+            "the flagged phantom importer is seeded (ejected)"
         );
     }
 
     #[test]
-    fn satisfied_optional_peer_of_closure_member_is_hoisted() {
+    fn optional_peer_host_still_ejects_via_embedded_vite() {
         // Nuxt shape at the planner boundary: vue-router embeds vite<8.1 (so its
         // ancestor-closure ejects) and declares `@vue/compiler-sfc` an OPTIONAL
-        // peer that its `/vite` subpath statically imports. compiler-sfc is present
-        // and satisfies the range, so rung-2b hoists it into vue-router's
-        // materialized `node_modules` — the reachability the store-resident/
-        // materialized realpath walk lacks under GVS (the `nuxt prepare` crash).
+        // peer that its `/vite` subpath statically imports. The eject is what
+        // matters — once vue-router is project-local, the collective hidden tree
+        // resolves the undeclared `@vue/compiler-sfc` for it (the reachability the
+        // store-resident realpath walk lacked under GVS, the `nuxt prepare` crash).
+        // The planner records no per-importer hoist.
         let mut g = graph(&[
             ("vue-router@5.1.0", "vue-router", &[("vite", "7.0.0")]),
             ("vite@7.0.0", "vite", &[]),
@@ -611,56 +518,6 @@ mod tests {
         assert!(
             names.contains("vue-router"),
             "the embedded-vite<8.1 closure ejects vue-router: {names:?}"
-        );
-        assert_eq!(
-            plan.hoist_within.get("vue-router@5.1.0").map(Vec::as_slice),
-            Some(["@vue/compiler-sfc@3.5.39".to_string()].as_slice()),
-            "the satisfied optional peer hoists into the ejected member"
-        );
-    }
-
-    #[test]
-    fn optional_peer_not_hoisted_when_unsatisfied_or_already_linked() {
-        // The three guards, on one ejected member: a present-but-out-of-range peer
-        // (`old-peer@1.0.0` vs `^2`) is not a valid target; an already-resolved
-        // sibling (`linked@1.0.0` in `dependencies`) is already reachable; an
-        // absent peer has no target. None may hoist — so the member gets NO
-        // rung-2b entry, guarding against over-hoisting a peer the tree can't
-        // satisfy or already reaches.
-        let mut g = graph(&[
-            (
-                "host@1.0.0",
-                "host",
-                &[("vite", "7.0.0"), ("linked", "1.0.0")],
-            ),
-            ("vite@7.0.0", "vite", &[]),
-            ("old-peer@1.0.0", "old-peer", &[]),
-            ("linked@1.0.0", "linked", &[]),
-        ]);
-        let host = g.packages.get_mut("host@1.0.0").unwrap();
-        for (name, range) in [
-            ("old-peer", "^2.0.0"), // present but out of range
-            ("linked", "^1.0.0"),   // already a resolved sibling
-            ("absent", "^1.0.0"),   // not in the tree
-        ] {
-            host.peer_dependencies
-                .insert(name.to_string(), range.to_string());
-            host.peer_dependencies_meta.insert(
-                name.to_string(),
-                aube_lockfile::PeerDepMeta { optional: true },
-            );
-        }
-
-        let plan = plan_from_flags(&g, &[], &[]);
-        assert!(
-            names(&["host", "vite"])
-                .is_subset(&plan.names.iter().cloned().collect::<HashSet<String>>()),
-            "host still ejects via the embedded vite<8.1 seed"
-        );
-        assert!(
-            !plan.hoist_within.contains_key("host@1.0.0"),
-            "no satisfied+unlinked+present optional peer → no hoist: {:?}",
-            plan.hoist_within
         );
     }
 
@@ -759,11 +616,12 @@ mod tests {
         // `core`, and `core` declares `datastructures` (depth 2 from `basic`).
         // `basic` phantom-imports `datastructures`, which is NOT a symlinked sibling
         // in `basic`'s own private node_modules under isolated layout, so the
-        // un-ejected copy cannot resolve it — the flag MUST SEED (eject + rung-2
-        // hoist), never skip as "transitively reachable". `datastructures` is absent
-        // from the (empty) project top level, so only the depth fix drives the seed.
-        // FAILS before the fix (multi-hop BFS marks `datastructures` reachable →
-        // SKIP → `basic` absent from the plan); passes after.
+        // un-ejected copy cannot resolve it — the flag MUST SEED (eject), never skip
+        // as "transitively reachable". `datastructures` is absent from the (empty)
+        // project top level, so only the depth fix drives the seed. FAILS before the
+        // fix (multi-hop BFS marks `datastructures` reachable → SKIP → `basic` absent
+        // from the plan); passes after. Once `basic` is ejected the collective hidden
+        // tree resolves the undeclared `datastructures` for it.
         let g = graph(&[
             ("basic@1.0.0", "basic", &[("core", "1.0.0")]),
             ("core@1.0.0", "core", &[("datastructures", "2.0.0")]),
@@ -779,11 +637,6 @@ mod tests {
         assert!(
             names.contains("basic"),
             "depth-2 phantom target must SEED the importer, not skip: {names:?}"
-        );
-        assert_eq!(
-            plan.hoist_within.get("basic@1.0.0").map(Vec::as_slice),
-            Some(["datastructures@2.0.0".to_string()].as_slice()),
-            "rung-2 hoists the depth-2 target into the ejected importer"
         );
     }
 
@@ -804,7 +657,7 @@ mod tests {
         )];
         let plan = plan_from_flags(&g, &[], &flags);
         assert!(
-            plan.names.is_empty() && plan.hoist_within.is_empty(),
+            plan.names.is_empty(),
             "a depth-1-satisfied phantom target stays skipped: {:?}",
             plan.names
         );
