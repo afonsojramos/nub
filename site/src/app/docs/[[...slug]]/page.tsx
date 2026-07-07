@@ -148,25 +148,63 @@ const EYEBROW_BY_URL: Record<string, string> = {
   '/docs/watch': 'nub watch',
 };
 
-/* Build the per-page social-card URL handled by `app/og/route.tsx`. The card
-   shows the eyebrow and title only — no description (it rarely fit). */
-function ogImageUrl({ url, title }: { url: string; title: string }): string {
-  const params = new URLSearchParams({
-    title,
-    eyebrow: EYEBROW_BY_URL[url] ?? 'Documentation',
-  });
+/* Build the social-card URL handled by `app/og/route.tsx`. The card shows the
+   eyebrow and title only — no description (it rarely fit). */
+function ogImageUrl({ title, eyebrow }: { title: string; eyebrow: string }): string {
+  const params = new URLSearchParams({ title, eyebrow });
   return `/og?${params.toString()}`;
+}
+
+/* Flatten a TOC entry's `title` (a ReactNode — plain text, or an element tree
+   when the heading contains inline code/formatting) to its visible text, so a
+   heading like `nub pm which` resolves to that string for the OG card. */
+function nodeToText(node: React.ReactNode): string {
+  if (node == null || typeof node === 'boolean') return '';
+  if (typeof node === 'string' || typeof node === 'number') return String(node);
+  if (Array.isArray(node)) return node.map(nodeToText).join('');
+  if (typeof node === 'object' && 'props' in node) {
+    return nodeToText((node as { props?: { children?: React.ReactNode } }).props?.children);
+  }
+  return '';
+}
+
+/* Resolve a section slug to its heading text via the page TOC. Heading slugs are
+   unique per page, so a direct `#<slug>` match returns the right heading at any
+   depth (h2/h3/…) — the deepest/most-specific heading the reader shared. */
+function headingTextForSlug(
+  toc: { url: string; title: React.ReactNode }[],
+  slug: string,
+): string | undefined {
+  const item = toc.find((entry) => entry.url === `#${slug}`);
+  if (!item) return undefined;
+  const text = nodeToText(item.title).trim();
+  return text.length > 0 ? text : undefined;
 }
 
 export async function generateMetadata(props: {
   params: Promise<{ slug?: string[] }>;
+  searchParams: Promise<{ section?: string | string[] }>;
 }): Promise<Metadata> {
   const params = await props.params;
   const page = source.getPage(params.slug);
   if (!page) notFound();
 
   const { title, description } = page.data;
-  const ogImage = ogImageUrl({ url: page.url, title });
+
+  // A shared section link (`?section=<slug>#<slug>`) recasts the card: the
+  // heading becomes the main title and the page title moves to the eyebrow.
+  // Absent (or unresolvable) `section` keeps the page-level card. Only the OG
+  // image varies on `section`; the page body/metadata are otherwise identical.
+  const searchParams = await props.searchParams;
+  const rawSection = searchParams.section;
+  const sectionSlug = typeof rawSection === 'string' ? rawSection : undefined;
+  const sectionTitle = sectionSlug
+    ? headingTextForSlug(page.data.toc, sectionSlug)
+    : undefined;
+
+  const ogImage = sectionTitle
+    ? ogImageUrl({ title: sectionTitle, eyebrow: title })
+    : ogImageUrl({ title, eyebrow: EYEBROW_BY_URL[page.url] ?? 'Documentation' });
 
   return {
     title,
