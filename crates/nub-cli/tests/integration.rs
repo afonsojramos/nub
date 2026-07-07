@@ -3435,9 +3435,11 @@ fn env_file_flag_preserves_unquoted_json_value_without_auto_dotenv() {
 }
 
 #[test]
-fn env_precedence_with_node_env() {
+fn env_precedence_with_app_env_mode() {
+    // `APP_ENV` selects the mode (`.env.development` here); `NODE_ENV` no longer
+    // does (dropped as a mode source — it is the app's own dev/prod variable).
     let (stdout, stderr, code) =
-        run_nub_with_env("env-test", "precedence.ts", &[("NODE_ENV", "development")]);
+        run_nub_with_env("env-test", "precedence.ts", &[("APP_ENV", "development")]);
     assert_eq!(code, 0, "stderr: {stderr}");
     assert!(
         stdout.contains("SHARED=local-wins"),
@@ -3503,12 +3505,13 @@ fn npm_run_threads_node_execpath() {
 ///   2. CORRECTNESS — a NODE tool (`node -e …`) in the same script MUST still
 ///      see `.env`, because the node-hijack loads it at the node child's own
 ///      startup. This is nub's advantage over Bun's blunt "load nothing".
-///   3. NODE_ENV-cascade (bun#9635) — `NODE_ENV=production node …` must read
-///      `.env.production`, not `.env.development`/`.env`. The old eager-outer
+///   3. Mode-cascade, node-scoped (bun#9635) — `APP_ENV=production node …` must
+///      read `.env.production`, not `.env.development`/`.env`. The old eager-outer
 ///      load froze the wrong env-file values into the process before the inline
-///      `NODE_ENV` could correct them; node-scoped loading reads the right file.
+///      mode could correct them; node-scoped loading reads the right file. (Mode
+///      is `--env`/`APP_ENV`; `NODE_ENV` is no longer a file selector.)
 ///
-/// Unix-only: the `printenv` probe and inline `NODE_ENV=…` script syntax are
+/// Unix-only: the `printenv` probe and inline `APP_ENV=…` script syntax are
 /// POSIX `sh`; the node-scoping itself is platform-agnostic (build_script_command
 /// drops the load on every OS), validated here on the runner that can express it.
 #[cfg(unix)]
@@ -3548,13 +3551,13 @@ fn run_script_env_is_node_scoped_not_process_scoped() {
         "a node tool under `nub run` must still get `.env` (node-scoped load): stdout={node_out:?}"
     );
 
-    // 3. NODE_ENV-cascade: inline `NODE_ENV=production` ⇒ the node child loads
+    // 3. Mode-cascade: inline `APP_ENV=production` ⇒ the node child loads
     //    `.env.production`, not the base `.env` (and not `.env.development`).
     let (cascade_out, cascade_err, cascade_code) = run("cascade", &[]);
     assert_eq!(cascade_code, 0, "cascade script failed: {cascade_err}");
     assert!(
         cascade_out.contains("ENVFILE=from-production"),
-        "NODE_ENV=production must read `.env.production` (bun#9635 cascade fix); got {cascade_out:?}"
+        "APP_ENV=production must read `.env.production` (bun#9635 cascade fix); got {cascade_out:?}"
     );
 }
 
@@ -5115,11 +5118,12 @@ fn env_file_flag_reaches_child_and_shell_wins() {
 
 /// #263, end-to-end through the binary — the differential that broke `next build`.
 /// A `.env` FILE must NOT leak its `NODE_ENV` into the spawned child (dotenv/
-/// @next/env/Vite parity), yet an AMBIENT `NODE_ENV` must both pass through
-/// untouched AND still select the `.env.<NODE_ENV>` file. Child ambient is set via
-/// `Command::env`, so the test never mutates its own process env (hermetic).
+/// @next/env/Vite parity). An AMBIENT `NODE_ENV` passes through untouched but does
+/// NOT select `.env.<mode>` files — `NODE_ENV` is no longer a mode source; only
+/// `APP_ENV` (or `--env`) selects. Child ambient is set via `Command::env`, so the
+/// test never mutates its own process env (hermetic).
 #[test]
-fn dotenv_node_env_stripped_but_ambient_selects_env_file() {
+fn dotenv_node_env_stripped_and_app_env_selects_env_file() {
     let work = unique_test_cache();
     let proj = work.join("proj");
     std::fs::create_dir_all(&proj).unwrap();
@@ -5132,15 +5136,19 @@ fn dotenv_node_env_stripped_but_ambient_selects_env_file() {
     )
     .unwrap();
 
-    let run = |ambient: Option<&str>| {
+    let run = |node_env: Option<&str>, app_env: Option<&str>| {
         let mut cmd = Command::new(nub_binary());
         cmd.arg(proj.join("print.mjs").to_str().unwrap())
             .current_dir(&proj)
-            .env("XDG_CACHE_HOME", unique_test_cache());
-        match ambient {
+            .env("XDG_CACHE_HOME", unique_test_cache())
+            .env_remove("APP_ENV");
+        match node_env {
             Some(v) => cmd.env("NODE_ENV", v),
             None => cmd.env_remove("NODE_ENV"),
         };
+        if let Some(v) = app_env {
+            cmd.env("APP_ENV", v);
+        }
         let out = cmd.output().expect("failed to spawn nub");
         (
             String::from_utf8_lossy(&out.stdout).to_string(),
@@ -5149,9 +5157,9 @@ fn dotenv_node_env_stripped_but_ambient_selects_env_file() {
         )
     };
 
-    // (a) ambient NODE_ENV unset: the `.env` NODE_ENV is dropped (not "development"),
-    //     so `.env` — not `.env.production` — is selected, and nub warns once.
-    let (out_a, err_a, code_a) = run(None);
+    // (a) no mode set: the `.env` NODE_ENV is dropped (not "development"), so `.env`
+    //     — not `.env.production` — is selected, and nub warns once.
+    let (out_a, err_a, code_a) = run(None, None);
     assert_eq!(code_a, 0, "run must succeed; stderr: {err_a}");
     assert!(
         out_a.contains("NE=[]"),
@@ -5163,29 +5171,42 @@ fn dotenv_node_env_stripped_but_ambient_selects_env_file() {
     );
     assert!(
         out_a.contains("PROD=[]"),
-        "ambient NODE_ENV unset must select `.env`, never `.env.production`: {out_a}"
+        "no mode must select `.env`, never `.env.production`: {out_a}"
     );
     assert!(
         err_a.contains("ignoring NODE_ENV set in .env"),
         "nub must warn that a `.env` NODE_ENV was ignored: {err_a}"
     );
 
-    // (b) ambient NODE_ENV=production: passes through untouched AND selects
-    //     `.env.production` (selection keys off ambient, never the `.env` value),
-    //     with no spurious warning (ambient wins before the strip).
-    let (out_b, err_b, code_b) = run(Some("production"));
+    // (b) ambient NODE_ENV=production: passes through untouched but does NOT select
+    //     `.env.production` — NODE_ENV is no longer a mode source. No spurious
+    //     warning (the ambient value wins over the `.env` value before the strip).
+    let (out_b, err_b, code_b) = run(Some("production"), None);
     assert_eq!(code_b, 0, "run must succeed; stderr: {err_b}");
     assert!(
         out_b.contains("NE=[production]"),
         "ambient NODE_ENV must pass through: {out_b}"
     );
     assert!(
-        out_b.contains("PROD=[prod]"),
-        "ambient NODE_ENV must select `.env.production`: {out_b}"
+        out_b.contains("PROD=[]"),
+        "ambient NODE_ENV must NOT select `.env.production` (no longer a mode source): {out_b}"
     );
     assert!(
         !err_b.contains("ignoring NODE_ENV set in .env"),
         "no warning when an ambient NODE_ENV wins over the `.env` value: {err_b}"
+    );
+
+    // (c) APP_ENV=production selects `.env.production` (the mode mechanism), while
+    //     the `.env` file's own NODE_ENV is still stripped + warned.
+    let (out_c, err_c, code_c) = run(None, Some("production"));
+    assert_eq!(code_c, 0, "run must succeed; stderr: {err_c}");
+    assert!(
+        out_c.contains("PROD=[prod]"),
+        "APP_ENV=production must select `.env.production`: {out_c}"
+    );
+    assert!(
+        out_c.contains("NE=[]"),
+        "`.env` NODE_ENV must still not leak into the child: {out_c}"
     );
 
     let _ = std::fs::remove_dir_all(&work);

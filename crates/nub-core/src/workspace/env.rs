@@ -27,25 +27,78 @@ pub fn read_env_file(path: &Path) -> Option<String> {
 }
 
 /// The `.env*` filenames Nub loads, in descending priority order (the file
-/// listed first wins a key over later ones). Driven by `NODE_ENV`, matching
-/// Node's own `.env` precedence. Shared by [`load_env_files`] (first-writer-wins
-/// merge) and [`discover_env_files`] (the watch path's `--env-file` args).
-fn env_file_names() -> Vec<String> {
-    let node_env = std::env::var("NODE_ENV").unwrap_or_default();
-    let is_test = node_env == "test";
+/// listed first wins a key over later ones). Driven by the resolved *mode*. The
+/// `.env` / `.env.local` / `.env.{mode}` cascade mirrors the dotenv-flow / Next /
+/// Vite ecosystem convention — NOT Node core, which has no mode cascade (its
+/// `--env-file` loads named files only). Shared by [`load_env_files`]
+/// (first-writer-wins merge) and [`discover_env_files`] (the watch path's
+/// `--env-file` args), so this one function governs mode selection on both paths.
+///
+/// Mode precedence: an explicit `mode_override` (the `--env <mode>` CLI flag)
+/// wins, else `APP_ENV` (when non-empty). `NODE_ENV` is deliberately NOT a mode
+/// source — nub treats it as the application's own dev/prod behavior variable,
+/// never a file selector (dropped as a breaking change; a non-dev/prod/test
+/// `NODE_ENV` used as a file selector silently flips frameworks into development
+/// mode, the footgun the modern ecosystem decoupled away). `APP_ENV` is the
+/// framework-neutral selector (Vite, and others); when neither is set there is no
+/// mode, so only `.env` / `.env.local` load.
+fn env_file_names(mode_override: Option<&str>) -> Vec<String> {
+    env_file_names_for_mode(&resolve_env_mode(mode_override))
+}
+
+/// Resolve the env-file mode: the `--env` override, else the ambient `APP_ENV`.
+/// Reads process env once; [`resolve_mode`] holds the pure precedence logic
+/// (hermetically testable).
+fn resolve_env_mode(mode_override: Option<&str>) -> String {
+    resolve_mode(
+        mode_override.map(str::to_string),
+        std::env::var("APP_ENV").ok(),
+    )
+}
+
+/// Pure `--env > APP_ENV` precedence: the override wins when non-empty, else
+/// `APP_ENV` when non-empty, else no mode. `NODE_ENV` is intentionally absent —
+/// see [`env_file_names`].
+fn resolve_mode(mode_override: Option<String>, app_env: Option<String>) -> String {
+    mode_override
+        .filter(|v| !v.is_empty())
+        .or_else(|| app_env.filter(|v| !v.is_empty()))
+        .unwrap_or_default()
+}
+
+/// The `.env*` precedence list for a resolved mode. `is_test` (mode `test`) omits
+/// `.env.local`, matching dotenv/Next; an empty mode yields only `.env.local` +
+/// `.env`. Pure in `mode`, so callers pass any resolution and the ordering is
+/// tested without touching process env.
+fn env_file_names_for_mode(mode: &str) -> Vec<String> {
+    // The mode is interpolated raw into `.env.{mode}` / `.env.{mode}.local` joined
+    // to the project root, so a value carrying a path separator (`APP_ENV=x/../y`)
+    // would escape the root; restrict the mode charset and treat anything outside
+    // `[A-Za-z0-9_.-]` as no-mode (quietly loads only `.env` / `.env.local`). Real
+    // modes are in-charset; `..` alone can't traverse without a `/`.
+    let mode = if is_safe_mode(mode) { mode } else { "" };
+    let is_test = mode == "test";
 
     let mut files = Vec::new();
-    if !node_env.is_empty() {
-        files.push(format!(".env.{node_env}.local"));
+    if !mode.is_empty() {
+        files.push(format!(".env.{mode}.local"));
     }
     if !is_test {
         files.push(".env.local".to_string());
     }
-    if !node_env.is_empty() {
-        files.push(format!(".env.{node_env}"));
+    if !mode.is_empty() {
+        files.push(format!(".env.{mode}"));
     }
     files.push(".env".to_string());
     files
+}
+
+/// A mode is safe to interpolate into a root-joined `.env.{mode}` path iff it
+/// contains only `[A-Za-z0-9_.-]` — no path separator can appear, so it cannot
+/// traverse out of the project root. An empty mode is trivially safe (no files).
+fn is_safe_mode(mode: &str) -> bool {
+    mode.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
 }
 
 /// The existing `.env*` file paths under `project_root`, in descending priority
@@ -59,8 +112,11 @@ fn env_file_names() -> Vec<String> {
 /// NOTE — precedence inversion: Node's `--env-file` is *last*-writer-wins, the
 /// inverse of this list's *first*-writer-wins order, so the caller must pass
 /// these to Node in reverse for the priorities to line up.
-pub fn discover_env_files(project_root: &Path) -> Vec<std::path::PathBuf> {
-    env_file_names()
+pub fn discover_env_files(
+    project_root: &Path,
+    mode_override: Option<&str>,
+) -> Vec<std::path::PathBuf> {
+    env_file_names(mode_override)
         .iter()
         .map(|name| project_root.join(name))
         .filter(|path| read_env_file(path).is_some())
@@ -100,8 +156,11 @@ pub fn expand_env_map(map: &mut HashMap<String, String>) -> &mut HashMap<String,
 /// restart), so injecting it would freeze the startup value (#207). Only the
 /// expansion-changed keys — which Node's `--env-file` can't reproduce — get
 /// injected.
-pub fn load_env_files_raw(project_root: &Path) -> HashMap<String, String> {
-    load_env_files_raw_reporting(project_root).0
+pub fn load_env_files_raw(
+    project_root: &Path,
+    mode_override: Option<&str>,
+) -> HashMap<String, String> {
+    load_env_files_raw_reporting(project_root, mode_override).0
 }
 
 /// The raw loader, additionally reporting whether a `.env` FILE declared
@@ -110,8 +169,11 @@ pub fn load_env_files_raw(project_root: &Path) -> HashMap<String, String> {
 /// injection path) to warn the user; the plain [`load_env_files_raw`] wrapper
 /// discards it because the watch path defers `NODE_ENV` to Node's own `--env-file`
 /// and so is NOT the one ignoring it — warning there would be false.
-fn load_env_files_raw_reporting(project_root: &Path) -> (HashMap<String, String>, bool) {
-    let files = env_file_names();
+fn load_env_files_raw_reporting(
+    project_root: &Path,
+    mode_override: Option<&str>,
+) -> (HashMap<String, String>, bool) {
+    let files = env_file_names(mode_override);
 
     let mut result = HashMap::new();
     let mut node_env_ignored = false;
@@ -165,8 +227,8 @@ fn warn_node_env_from_dotenv_ignored() {
 /// pairs to inject into the child process environment. Shell env
 /// (from the parent process) always wins — values already set in
 /// the process environment are not overridden.
-pub fn load_env_files(project_root: &Path) -> HashMap<String, String> {
-    let (mut result, node_env_ignored) = load_env_files_raw_reporting(project_root);
+pub fn load_env_files(project_root: &Path, mode_override: Option<&str>) -> HashMap<String, String> {
+    let (mut result, node_env_ignored) = load_env_files_raw_reporting(project_root, mode_override);
 
     // Expand ${VAR} references within values. Multi-pass to handle
     // nested references like A=hello, B=${A}_world, C=${B}_!.
@@ -395,6 +457,71 @@ mod tests {
         );
     }
 
+    /// Mode selection is `--env > APP_ENV` (v0.4): the CLI override wins, else
+    /// `APP_ENV` (non-empty), else no mode. `NODE_ENV` is NOT a mode source —
+    /// `resolve_mode` takes no `NODE_ENV` argument, so it cannot participate.
+    #[test]
+    fn resolve_mode_prefers_override_then_app_env_no_node_env() {
+        let s = |v: &str| Some(v.to_string());
+        // APP_ENV set → APP_ENV.
+        assert_eq!(resolve_mode(None, s("production")), "production");
+        // `--env` override beats APP_ENV.
+        assert_eq!(resolve_mode(s("staging"), s("development")), "staging");
+        // `--env` alone.
+        assert_eq!(resolve_mode(s("production"), None), "production");
+        // Neither set → no mode.
+        assert_eq!(resolve_mode(None, None), "");
+        // Empty override falls through to APP_ENV; empty APP_ENV yields no mode.
+        assert_eq!(resolve_mode(s(""), s("development")), "development");
+        assert_eq!(resolve_mode(s(""), None), "");
+        assert_eq!(resolve_mode(None, s("")), "");
+    }
+
+    /// A mode carrying a path separator (a hostile `APP_ENV`/`NODE_ENV`/`--env`)
+    /// must not build `.env.{mode}` filenames — it would traverse out of the
+    /// project root when joined. Such a value is treated as no-mode (only `.env` /
+    /// `.env.local` load); real modes stay in-charset and are unaffected.
+    #[test]
+    fn out_of_charset_mode_is_treated_as_no_mode() {
+        // Separator-bearing values collapse to the base cascade — no `.env.<x>`.
+        for hostile in ["x/../../etc", "../secrets", "a\\b", "a b", "$(x)"] {
+            assert_eq!(
+                env_file_names_for_mode(hostile),
+                vec![".env.local", ".env"],
+                "hostile mode {hostile:?} must not build a `.env.{{mode}}` name"
+            );
+        }
+        // In-charset values (incl. dots and dashes) remain valid modes.
+        assert!(is_safe_mode("production"));
+        assert!(is_safe_mode("test.ci-1"));
+        assert!(!is_safe_mode("x/../y"));
+    }
+
+    /// The resolved mode drives which `.env.{mode}` files are selected, so the
+    /// precedence table's outcome (which value wins `WHICH`) is `.env.{mode}`
+    /// ranking above `.env`. Highest-priority-first; `.env.{mode}.local` and
+    /// `.env.{mode}` bracket `.env.local`, and `test` mode omits `.env.local`.
+    #[test]
+    fn env_file_names_for_mode_orders_mode_files_above_base() {
+        assert_eq!(
+            env_file_names_for_mode("production"),
+            vec![
+                ".env.production.local",
+                ".env.local",
+                ".env.production",
+                ".env",
+            ]
+        );
+        // Empty mode (neither var set) → only `.env.local` + `.env`, so `.env` wins.
+        assert_eq!(env_file_names_for_mode(""), vec![".env.local", ".env"]);
+        // `test` mode drops `.env.local` (dotenv/Next parity), keyed off the
+        // resolved mode — so `APP_ENV=test` skips it too, not just `NODE_ENV=test`.
+        assert_eq!(
+            env_file_names_for_mode("test"),
+            vec![".env.test.local", ".env.test", ".env"]
+        );
+    }
+
     #[test]
     fn parse_quoted_values() {
         let pairs = parse_env("A=\"hello world\"\nB='single'\n");
@@ -580,7 +707,7 @@ mod tests {
         std::fs::write(dir.join(".env"), "X=1\n").unwrap();
         std::fs::write(dir.join(".env.local"), "X=2\n").unwrap();
 
-        let found = discover_env_files(&dir);
+        let found = discover_env_files(&dir, None);
 
         assert!(
             found.iter().all(|p| p.is_file()),
@@ -620,7 +747,7 @@ mod tests {
         )
         .unwrap();
 
-        let vars = load_env_files(&dir);
+        let vars = load_env_files(&dir, None);
 
         assert_eq!(
             vars.get("DATABASE_URL").map(String::as_str),
@@ -648,8 +775,8 @@ mod tests {
         )
         .unwrap();
 
-        let raw = load_env_files_raw(&dir);
-        let expanded = load_env_files(&dir);
+        let raw = load_env_files_raw(&dir, None);
+        let expanded = load_env_files(&dir, None);
 
         // Plain var: identical in both → the watch path leaves it to `--env-file`.
         assert_eq!(raw.get("PLAIN"), expanded.get("PLAIN"));
@@ -684,7 +811,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(".env"), "NODE_ENV=development\nAPP_KEY=secret\n").unwrap();
 
-        let vars = load_env_files(&dir);
+        let vars = load_env_files(&dir, None);
 
         assert!(
             !vars.contains_key("NODE_ENV"),

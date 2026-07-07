@@ -3,6 +3,6 @@
   "scripts": {
     "leak-nonnode": "printenv SECRET",
     "node-secret": "node -e \"console.log('SECRET=' + (process.env.SECRET ?? 'unset'))\"",
-    "cascade": "NODE_ENV=production node -e \"console.log('ENVFILE=' + (process.env.ENVFILE ?? 'unset'))\""
+    "cascade": "APP_ENV=production node -e \"console.log('ENVFILE=' + (process.env.ENVFILE ?? 'unset'))\""
   }
 }
