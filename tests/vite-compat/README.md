@@ -109,21 +109,28 @@ tests/vite-compat/driver.sh <dir> "<dev-cmd>" "<build-cmd>" <port>
   the process) serves a store-resident `/@fs` module `200` (was `403`).
   Acceptance: `/@fs=200`, `log=no-403`, `patched>=1`, and only the framework
   closure ejected (the rest of the tree stays symlinked).
-- **Nuxt 4 (both rungs).** `nuxt@^4` embeds `vite@7.3.6` (`< 8.1`) AND breaks on
-  transitive undeclared imports the closure alone can't place. The flag
-  disk-materializes the `[nuxt, @nuxt/vite-builder, vite, vue-router,
-  @nuxt/devtools]` closure (rung 1) and hoists the two already-resolved phantom
-  targets within their importers — `@vue/compiler-sfc` into `vue-router`,
-  `unstorage` into `@nuxt/devtools` (rung 2). Acceptance: `nuxt prepare` →
-  "Types generated", `nuxt dev` page `200` with SSR-rendered markup, store
-  `/@fs=200`, `0` errors, bare `nuxt dev` (no nub in the process). The closure is
-  bounded to the Nuxt subtree (`~2.1%` of a realistic 1200-package project), so a
-  large app's unrelated deps keep symlink speed.
+- **Nuxt 4 (project-local, not symlink-GVS).** `nuxt@^4` embeds `vite@7.3.6`
+  (`< 8.1`) AND pulls `vue-router@5`, which declares `@vue/compiler-sfc` an
+  OPTIONAL PEER and unguardedly imports it from its `/vite` unplugin. That peer is
+  the sticking point: the phantom scanner correctly treats an optional peer as NOT
+  a hard phantom, so the rung-2 hoist never targets it (the `unstorage` →
+  `@nuxt/devtools` HARD-phantom hoist DOES fire), and under symlink-GVS there is no
+  store-root public-hoist `node_modules` to catch it — pnpm threads the peer down
+  the Nuxt subtree and links it, nub's resolver does not in this graph, so `nuxt
+  prepare` fails with `Cannot find package '@vue/compiler-sfc'`. So `nuxt` is on
+  `disableGlobalVirtualStoreForPackages` and installs project-local, which builds
+  the `.nub/node_modules/` hidden hoist tree (pnpm-parity public-hoist) that Node's
+  upward walk reaches → the optional peer resolves. Acceptance: `nuxt prepare` →
+  "Types generated", `nuxt dev` page `200` with SSR-rendered markup, `0` errors,
+  bare `nuxt dev` (no nub in the process). The proper symlink-GVS fix is resolver
+  optional-peer-threading parity (a separate, maintainer-owned effort because of
+  its lockfile-churn blast radius).
 
 ## The Nuxt trigger note
 
 `nuxt` is on nub's `disableGlobalVirtualStoreForPackages` trigger (installs
-all-disk, project-local), so as shipped it does NOT run symlink-GVS. The closure
-above lets Nuxt work UNDER symlink-GVS (both its vite gap and its phantom class),
-which makes removing it from the trigger a candidate — but the flag is default-off
-and changing the trigger default is a maintainer decision, not part of this PR.
+all-disk, project-local), so it does NOT run symlink-GVS — this is deliberate (see
+the Nuxt case above): the optional-peer edge Nuxt pulls via `vue-router@5` is not
+placeable under symlink-GVS, and the project-local hidden hoist tree resolves it.
+Keeping Nuxt under symlink-GVS is unblocked only by resolver optional-peer-threading
+parity, which is out of scope here.

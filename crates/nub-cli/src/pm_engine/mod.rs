@@ -2160,9 +2160,26 @@ fn nub_setting_defaults(
             // The whole-install GVS-off last resort — reserved for a store-LOCALITY
             // break (a tool whose resolver can't reach the machine-global store),
             // NOT a phantom-dep class (those the dynamic detector + closure now
-            // eject per-package). `nuxt` was DROPPED: its walk-up is only 2 phantom
-            // edges (~2.3% closure), so it's closure-ejectable at rung 1 —
-            // symlink-GVS works (see [[nuxt-gvs-unlock]]). `parcel` was DROPPED: its
+            // eject per-package). `nuxt` is here because of an OPTIONAL-PEER gap the
+            // per-package closure eject cannot cover: Nuxt pulls `vue-router@5`,
+            // which declares `@vue/compiler-sfc` as an OPTIONAL PEER and unguardedly
+            // imports it from its `/vite` unplugin. pnpm threads that peer down the
+            // Nuxt subtree and links it as a sibling; nub's resolver does not thread
+            // it in this graph, so it stays unlinked. The phantom scanner correctly
+            // classifies an optional peer as NOT a hard phantom, so the rung-2 hoist
+            // never targets it — and under symlink-GVS there is no store-root
+            // public-hoist `node_modules` (it cannot live in a cross-project shared
+            // store), so `nuxt prepare` fails with `Cannot find package
+            // '@vue/compiler-sfc'`. Project-local install builds the
+            // `.nub/node_modules/` hidden hoist tree (pnpm-parity public-hoist) that
+            // Node's upward walk reaches → the optional peer resolves, `nuxt prepare`
+            // succeeds. The proper fix is resolver optional-peer-threading parity
+            // (its lockfile-churn blast radius makes it a separate, maintainer-owned
+            // effort); until then Nuxt installs project-local. (This re-adds `nuxt`,
+            // dropped in #321 on the earlier vue-router@4 true-undeclared analysis —
+            // the current tree resolves vue-router@5, an optional-peer edge the
+            // closure eject does not cover; see [[nuxt-phantom-hoist-fix]].)
+            // `parcel` was DROPPED: its
             // real break was never `.parcelrc` walk-up but a GVS store-dir over-split
             // — the prewarm hashed the widened (all-platform) graph while the link
             // phase hashed the host-filtered one, so parcel's native subtree
@@ -2180,7 +2197,7 @@ fn nub_setting_defaults(
             //   store is out of scope and even DECLARED deps (`@babel/runtime`)
             //   report unresolved. Expo's `@expo/metro-config` is store-aware
             //   (works either way; this only flips it project-local, harmless).
-            "next,react-native".to_string(),
+            "next,nuxt,react-native".to_string(),
         ),
         ("diskMaterializePackages".to_string(), disk_materialize),
     ];
@@ -2809,19 +2826,24 @@ mod tests {
     }
 
     #[test]
-    fn disable_gvs_default_drops_nuxt_and_parcel_and_keeps_the_store_locality_breakers() {
-        // The whole-install GVS-off list is now reserved for store-LOCALITY
-        // breaks. `nuxt` is closure-ejectable at rung 1 ([[nuxt-gvs-unlock]]) so
-        // it was dropped; `parcel` was dropped once its real break — a GVS
-        // store-dir over-split from the prewarm/link graph mismatch — was fixed at
-        // the source (see `run_gvs_prewarm_materializer`). `next` (Turbopack
-        // chroot) and `react-native` (bare-RN Metro realpath crawl) remain
-        // irreducible store-locality breaks.
+    fn disable_gvs_default_covers_nuxt_and_the_store_locality_breakers() {
+        // The whole-install GVS-off list carries the store-LOCALITY breaks plus
+        // `nuxt`. `parcel` was dropped once its real break — a GVS store-dir
+        // over-split from the prewarm/link graph mismatch — was fixed at the source
+        // (see `run_gvs_prewarm_materializer`). `nuxt` is here for an OPTIONAL-PEER
+        // gap the per-package closure eject cannot cover: vue-router@5 declares
+        // `@vue/compiler-sfc` an optional peer + unguardedly imports it, nub's
+        // resolver doesn't thread the peer in the Nuxt graph, and under symlink-GVS
+        // there is no store-root public-hoist to catch it, so `nuxt prepare` fails.
+        // Project-local install builds the `.nub/node_modules/` hidden hoist tree
+        // that resolves it (see [[nuxt-phantom-hoist-fix]]). `next` (Turbopack
+        // chroot) and `react-native` (bare-RN Metro realpath crawl) are irreducible
+        // store-locality breaks.
         let dir = tempfile::tempdir().unwrap();
         let fresh = nub_setting_defaults(None, true, dir.path(), VirtualStoreLocality::Default);
         assert_eq!(
             get(&fresh, "disableGlobalVirtualStoreForPackages"),
-            Some("next,react-native"),
+            Some("next,nuxt,react-native"),
         );
     }
 
