@@ -18,10 +18,14 @@ seam `__NUB_VITE_COMPAT_DISABLE=1` — an undocumented A/B control, not a user k
   the store.
 - **Unit B — dist backport** (Vite < 8.1). nub disk-materializes just the
   `vite` package project-local (CAS store untouched) and codegen-inserts Vite's
-  own 8.1 `.modules.yaml` sniff at the `fs.allow`-default computation site
-  (`let allowDirs = server.fs.allow;` for v6/v7; `[searchForWorkspaceRoot(root)]`
-  for v5). The sniff is YAML-tolerant + PM-agnostic (reads whatever
-  `virtualStoreDir` any tool wrote — never hardcodes nub's path).
+  own 8.1 `.modules.yaml` sniff at the `allowDirs` declaration
+  (`let allowDirs = server.fs.allow;` for v6/v7; `let allowDirs = server.fs?.allow;`
+  for v5), APPENDING the store dir to whatever `fs.allow` resolved to. Appending
+  (not injecting only when `fs.allow` is unset) matches Vite 8.1's native
+  unconditional push, so a framework that sets its own `fs.allow` (VitePress
+  hardcodes one) still gets the store allowed. The sniff is YAML-tolerant +
+  PM-agnostic (reads whatever `virtualStoreDir` any tool wrote — never hardcodes
+  nub's path).
 
 Unit B as shipped disk-materializes vite ONLY when it is a **direct** dep — a
 raw `vite dev` app. A framework that embeds vite **transitively** (Astro 5 pins
