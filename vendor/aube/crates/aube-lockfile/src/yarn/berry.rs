@@ -112,11 +112,16 @@ pub(super) fn parse_berry_str(
         let local_source = match res_protocol {
             "npm" => None,
             "workspace" => {
-                // The root workspace block lives here (`name@workspace:.`)
-                // and is driven by `package.json`, not the lockfile. We
-                // rely on the manifest pass below to populate
-                // `importers["."]`, and skip emitting workspace blocks
-                // as `LockedPackage` entries.
+                // Workspace blocks are importers, not packages: the root
+                // (`name@workspace:.`) and every member (`name@workspace:pkgs/x`).
+                // We never emit them as `LockedPackage` entries — the root
+                // and member importers are rebuilt from their on-disk
+                // `package.json` manifests below (mirroring the classic reader,
+                // #154), resolving each declared range against the specs
+                // recorded here. Recording every workspace descriptor (both
+                // `@x/a@workspace:*` and `@x/a@workspace:packages/a` from a
+                // multi-spec header) is what lets an inter-member `workspace:*`
+                // dep resolve to its sibling's dep_path.
                 for spec in &specs {
                     spec_to_dep_path.insert(spec.clone(), format!("{res_name}@{version}"));
                 }
@@ -312,16 +317,65 @@ pub(super) fn parse_berry_str(
     // descriptor-keyed (`lru-cache@^10.0.1`) resolution keys.
     let resolution_rules = crate::override_match::compile(&manifest.overrides_map());
 
-    // Build direct deps from the manifest, using the yarn berry
-    // convention that a range `"^1.0.0"` corresponds to the spec
-    // `"name@npm:^1.0.0"`. If the manifest range already carries a
-    // protocol prefix (`workspace:*`, `file:./pkgs/foo`, ...), it's
-    // already a valid spec suffix and we try it verbatim first.
-    let mut direct: Vec<DirectDep> = Vec::new();
+    // Discover the workspace members from disk, mirroring the classic reader
+    // (#154). Berry DOES record a `@name@workspace:<path>` block per member, but
+    // it merges each member's `dependencies` + `devDependencies` into one block
+    // field — so the dev/prod split is unrecoverable from the lockfile. Reading
+    // the member manifests instead keeps the split exact and reuses the same
+    // resolution path as the root importer. `member_versions` (name → on-disk
+    // version) backs the workspace-sibling link fallback below.
+    let project_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut member_versions: BTreeMap<String, String> = BTreeMap::new();
+    let mut member_manifests: Vec<(String, aube_manifest::PackageJson)> = Vec::new();
+    if let Some(workspaces) = &manifest.workspaces {
+        for member_dir in super::discover_workspace_members(project_dir, workspaces.patterns()) {
+            let member_pj_path = project_dir.join(&member_dir).join("package.json");
+            let Ok(member_pj) = aube_manifest::PackageJson::from_path(&member_pj_path) else {
+                continue;
+            };
+            if let Some(name) = &member_pj.name {
+                member_versions.insert(
+                    name.clone(),
+                    member_pj.version.clone().unwrap_or_else(|| "0.0.0".into()),
+                );
+            }
+            member_manifests.push((member_dir, member_pj));
+        }
+    }
+
+    // A dep on a workspace SIBLING binds to the local member. Berry usually
+    // records the sibling's `workspace:*` descriptor in `spec_to_dep_path`
+    // (tried first below), but a bare-semver ref to a member has no such spec,
+    // so fall back to matching the member's on-disk version — the same rule as
+    // the classic reader's `workspace_link`. The emitted `dep_path`
+    // (`name@version`) has NO `packages` entry, the convention the linker keys
+    // on to symlink the sibling dir.
+    let workspace_link = |name: &str, range: &str| -> Option<String> {
+        let version = member_versions.get(name)?;
+        let matches = match range
+            .strip_prefix("workspace:")
+            .or_else(|| range.strip_prefix("link:"))
+            .or_else(|| range.strip_prefix("portal:"))
+        {
+            Some("" | "*" | "^" | "~") => true,
+            Some(_) if range.starts_with("link:") || range.starts_with("portal:") => true,
+            Some(rest) => super::version_satisfies(version, rest),
+            None if range.is_empty() || range == "*" => true,
+            None => super::version_satisfies(version, range),
+        };
+        matches.then(|| format!("{name}@{version}"))
+    };
+
+    // Build one importer's direct deps from a manifest, using the yarn berry
+    // convention that a range `"^1.0.0"` maps to the spec `"name@npm:^1.0.0"`. A
+    // range already carrying a protocol (`workspace:*`, `file:./pkgs/foo`) is a
+    // valid spec suffix and tried verbatim first. `importer` keys the skipped-
+    // optional map; a resolved miss falls back to a workspace-sibling link.
     let push_direct = |name: &str,
                        range: &str,
                        dep_type: DepType,
-                       direct: &mut Vec<DirectDep>,
+                       importer: &str,
+                       into: &mut Vec<DirectDep>,
                        skipped: &mut BTreeMap<String, BTreeMap<String, String>>|
      -> Result<(), Error> {
         let resolved = crate::override_match::apply(&resolution_rules, name, range);
@@ -335,7 +389,7 @@ pub(super) fn parse_berry_str(
             if let Some(dep_path) =
                 crate::resolve_dep_spec(candidate, optional, &spec_to_dep_path, &unsupported, path)?
             {
-                direct.push(DirectDep {
+                into.push(DirectDep {
                     name: name.to_string(),
                     dep_path,
                     dep_type,
@@ -349,44 +403,63 @@ pub(super) fn parse_berry_str(
             // platform-filtered optional (drift.rs `skipped_optional_dependencies`).
             if optional && unsupported.contains_key(candidate) {
                 skipped
-                    .entry(".".to_string())
+                    .entry(importer.to_string())
                     .or_default()
                     .insert(name.to_string(), range.to_string());
                 return Ok(());
             }
         }
+        if let Some(dep_path) = workspace_link(name, range) {
+            into.push(DirectDep {
+                name: name.to_string(),
+                dep_path,
+                dep_type,
+                specifier: None,
+            });
+        }
         Ok(())
     };
-    for (name, range) in &manifest.dependencies {
-        push_direct(
-            name,
-            range,
-            DepType::Production,
-            &mut direct,
-            &mut skipped_optional,
-        )?;
-    }
-    for (name, range) in &manifest.dev_dependencies {
-        push_direct(
-            name,
-            range,
-            DepType::Dev,
-            &mut direct,
-            &mut skipped_optional,
-        )?;
-    }
-    for (name, range) in &manifest.optional_dependencies {
-        push_direct(
-            name,
-            range,
-            DepType::Optional,
-            &mut direct,
-            &mut skipped_optional,
-        )?;
-    }
+
+    // Build the direct deps for one manifest (root or member) in dependency-
+    // type order, so a member importer carries its own dev/prod/optional split.
+    let build_importer = |importer: &str,
+                          pj: &aube_manifest::PackageJson,
+                          skipped: &mut BTreeMap<String, BTreeMap<String, String>>|
+     -> Result<Vec<DirectDep>, Error> {
+        let mut out: Vec<DirectDep> = Vec::new();
+        for (name, range) in &pj.dependencies {
+            push_direct(
+                name,
+                range,
+                DepType::Production,
+                importer,
+                &mut out,
+                skipped,
+            )?;
+        }
+        for (name, range) in &pj.dev_dependencies {
+            push_direct(name, range, DepType::Dev, importer, &mut out, skipped)?;
+        }
+        for (name, range) in &pj.optional_dependencies {
+            push_direct(name, range, DepType::Optional, importer, &mut out, skipped)?;
+        }
+        Ok(out)
+    };
 
     let mut importers = BTreeMap::new();
-    importers.insert(".".to_string(), direct);
+    importers.insert(
+        ".".to_string(),
+        build_importer(".", manifest, &mut skipped_optional)?,
+    );
+
+    // Reconstruct each workspace-member importer from its on-disk manifest.
+    // Without this, a frozen install off a berry yarn.lock links only the root
+    // and silently skips every member (the cal.com 114-workspace bug: exit 0,
+    // members absent).
+    for (member_dir, member_pj) in &member_manifests {
+        let member_direct = build_importer(member_dir, member_pj, &mut skipped_optional)?;
+        importers.insert(member_dir.clone(), member_direct);
+    }
 
     Ok(LockfileGraph {
         importers,

@@ -195,7 +195,7 @@ pub(super) fn parse_classic_str(
     let mut member_versions: BTreeMap<String, String> = BTreeMap::new();
     let mut member_manifests: Vec<(String, aube_manifest::PackageJson)> = Vec::new();
     if let Some(workspaces) = &manifest.workspaces {
-        for member_dir in discover_workspace_members(project_dir, workspaces.patterns()) {
+        for member_dir in super::discover_workspace_members(project_dir, workspaces.patterns()) {
             let member_pj_path = project_dir.join(&member_dir).join("package.json");
             let Ok(member_pj) = aube_manifest::PackageJson::from_path(&member_pj_path) else {
                 continue;
@@ -232,9 +232,9 @@ pub(super) fn parse_classic_str(
             // `link:`/`portal:` to a member binds by name; the path tail
             // is the on-disk location, not a version constraint.
             Some(_) if range.starts_with("link:") || range.starts_with("portal:") => true,
-            Some(rest) => version_satisfies(version, rest),
+            Some(rest) => super::version_satisfies(version, rest),
             None if range.is_empty() || range == "*" => true,
-            None => version_satisfies(version, range),
+            None => super::version_satisfies(version, range),
         };
         matches.then(|| format!("{name}@{version}"))
     };
@@ -371,65 +371,6 @@ pub(super) fn parse_classic_str(
         skipped_optional_dependencies: skipped_optional,
         ..Default::default()
     })
-}
-
-/// Does `version` satisfy the semver `range`? An empty/whitespace range
-/// means "any" (npm/yarn/pnpm treat it as `*`; `node_semver` rejects it).
-/// Mirrors the resolver's `version_satisfies` for the workspace-link
-/// match — a bare uncached parse, since the workspace-sibling path runs
-/// only over the handful of member-to-member deps, not a resolver hot loop.
-fn version_satisfies(version: &str, range: &str) -> bool {
-    let range = if range.trim().is_empty() { "*" } else { range };
-    let (Ok(v), Ok(r)) = (
-        node_semver::Version::parse(version),
-        node_semver::Range::parse(range),
-    ) else {
-        return false;
-    };
-    v.satisfies(&r)
-}
-
-/// Expand the root manifest's `workspaces` globs against the on-disk
-/// tree, returning each member's project-relative directory (POSIX
-/// `/`-separated, the importer-key form) that contains a `package.json`.
-/// Mirrors npm/yarn-classic workspace globbing: a `packages/*` pattern
-/// matches direct child directories; an explicit `packages/app` matches
-/// that one directory.
-fn discover_workspace_members(project_dir: &Path, patterns: &[String]) -> Vec<String> {
-    let mut members: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for pattern in patterns {
-        // Negation patterns (`!packages/excluded`) and the root itself
-        // aren't member sources here.
-        if pattern.starts_with('!') || pattern == "." {
-            continue;
-        }
-        let glob_pat = project_dir.join(pattern);
-        let Some(glob_str) = glob_pat.to_str() else {
-            continue;
-        };
-        let Ok(paths) = glob::glob(glob_str) else {
-            continue;
-        };
-        for entry in paths.flatten() {
-            if !entry.is_dir() || !entry.join("package.json").is_file() {
-                continue;
-            }
-            let Ok(rel) = entry.strip_prefix(project_dir) else {
-                continue;
-            };
-            // Importer keys are POSIX-relative (`packages/app`), never
-            // the host's `\`-separated form.
-            let rel_posix = rel
-                .components()
-                .map(|c| c.as_os_str().to_string_lossy())
-                .collect::<Vec<_>>()
-                .join("/");
-            if !rel_posix.is_empty() {
-                members.insert(rel_posix);
-            }
-        }
-    }
-    members.into_iter().collect()
 }
 
 #[derive(Debug)]
@@ -629,7 +570,11 @@ fn classic_git_source(resolved: Option<&str>) -> Option<LocalSource> {
 /// berry does. `resolved` is the block's `resolved` URL — the only place the
 /// pinned git commit lives — passed through so a git range resolves to a
 /// proper `LocalSource::Git` instead of an abort.
-pub(super) fn classic_local_source(spec: &str, name: &str, resolved: Option<&str>) -> ClassicSource {
+pub(super) fn classic_local_source(
+    spec: &str,
+    name: &str,
+    resolved: Option<&str>,
+) -> ClassicSource {
     let Some(range) = spec.strip_prefix(name).and_then(|r| r.strip_prefix('@')) else {
         // Not a `name@…` spec (malformed block); keep the historical
         // registry default rather than inventing an unsupported source.
@@ -638,8 +583,10 @@ pub(super) fn classic_local_source(spec: &str, name: &str, resolved: Option<&str
     // A git range is resolvable: pin it from the block's `resolved` URL.
     // Falls back to `Unsupported("git")` only when no commit is recorded.
     let git = || {
-        classic_git_source(resolved)
-            .map_or_else(|| ClassicSource::Unsupported("git".to_string()), ClassicSource::Local)
+        classic_git_source(resolved).map_or_else(
+            || ClassicSource::Unsupported("git".to_string()),
+            ClassicSource::Local,
+        )
     };
     match range.split_once(':') {
         Some(("link", body)) => {

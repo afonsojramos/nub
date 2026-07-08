@@ -1917,8 +1917,9 @@ fn classic_git_dep_resolves_to_git_source_under_default_embedder() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     let sha = "abcdef0123456789abcdef0123456789abcdef01";
     let spec = format!("git+https://github.com/u/r.git#{sha}");
-    let content =
-        format!("# yarn lockfile v1\n\n\"foo@{spec}\":\n  version \"1.0.0\"\n  resolved \"{spec}\"\n");
+    let content = format!(
+        "# yarn lockfile v1\n\n\"foo@{spec}\":\n  version \"1.0.0\"\n  resolved \"{spec}\"\n"
+    );
     std::fs::write(tmp.path(), &content).unwrap();
     let manifest = make_manifest(&[("foo", &spec)], &[]);
     let graph = parse(tmp.path(), &manifest).expect("default embedder must not fatal");
@@ -1972,11 +1973,17 @@ fn classic_git_deps_read_back_as_resolvable_git_sources() {
     );
     let graph = parse(tmp.path(), &manifest).expect("git deps must parse, not abort");
 
-    let by_name: BTreeMap<&str, &LockedPackage> =
-        graph.packages.values().map(|p| (p.name.as_str(), p)).collect();
+    let by_name: BTreeMap<&str, &LockedPackage> = graph
+        .packages
+        .values()
+        .map(|p| (p.name.as_str(), p))
+        .collect();
 
     let Some(LocalSource::Git(ms)) = &by_name["ms"].local_source else {
-        panic!("ms must be a git source, got {:?}", by_name["ms"].local_source);
+        panic!(
+            "ms must be a git source, got {:?}",
+            by_name["ms"].local_source
+        );
     };
     assert_eq!(ms.url, "https://github.com/vercel/ms.git");
     assert_eq!(ms.resolved, "1c6264b795492e8fdecbc82cb8802fcfbfc08d26");
@@ -2024,7 +2031,10 @@ fn classic_local_source_classification() {
         is("foo@file:./x.tgz", None),
         ClassicSource::Local(_)
     ));
-    assert!(matches!(is("foo@portal:./x", None), ClassicSource::Local(_)));
+    assert!(matches!(
+        is("foo@portal:./x", None),
+        ClassicSource::Local(_)
+    ));
     // Git deps resolve from the block's `resolved` URL. A `git+…#<sha>` URL
     // → `LocalSource::Git`; a hosted-shorthand's codeload archive →
     // `RemoteTarball { git_hosted: true }`. Both the explicit-protocol and the
@@ -2078,4 +2088,162 @@ proptest::proptest! {
             ClassicSource::Registry
         ));
     }
+}
+
+/// A berry (v2+) yarn.lock records a `@name@workspace:<path>` block per
+/// member, but merges each member's `dependencies` + `devDependencies` into
+/// one block field. The reader reconstructs member importers from the on-disk
+/// member manifests instead (like the classic reader), so the dev/prod split
+/// is exact. Before the fix a frozen install linked only the root and silently
+/// skipped every member (the cal.com 114-workspace bug: exit 0, members absent).
+#[test]
+fn test_berry_member_importer_split_by_dep_type() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("package.json"),
+        r#"{ "name": "root", "private": true, "workspaces": ["packages/*"] }"#,
+    )
+    .unwrap();
+    let app = root.join("packages/app");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::write(
+        app.join("package.json"),
+        r#"{ "name": "@x/app", "version": "1.0.0",
+             "dependencies": { "is-odd": "3.0.1" },
+             "devDependencies": { "is-number": "6.0.0" } }"#,
+    )
+    .unwrap();
+
+    let lock = root.join("yarn.lock");
+    std::fs::write(
+        &lock,
+        r#"__metadata:
+  version: 8
+  cacheKey: 10c0
+
+"@x/app@workspace:packages/app":
+  version: 0.0.0-use.local
+  resolution: "@x/app@workspace:packages/app"
+  dependencies:
+    is-number: "npm:6.0.0"
+    is-odd: "npm:3.0.1"
+  languageName: unknown
+  linkType: soft
+
+"is-number@npm:6.0.0":
+  version: 6.0.0
+  resolution: "is-number@npm:6.0.0"
+  languageName: node
+  linkType: hard
+
+"is-odd@npm:3.0.1":
+  version: 3.0.1
+  resolution: "is-odd@npm:3.0.1"
+  dependencies:
+    is-number: "npm:^6.0.0"
+  languageName: node
+  linkType: hard
+
+"root@workspace:.":
+  version: 0.0.0-use.local
+  resolution: "root@workspace:."
+  languageName: unknown
+  linkType: soft
+"#,
+    )
+    .unwrap();
+
+    let manifest = aube_manifest::PackageJson::from_path(&root.join("package.json")).unwrap();
+    let graph = parse(&lock, &manifest).unwrap();
+
+    let member = graph
+        .importers
+        .get("packages/app")
+        .expect("member importer must be reconstructed from disk");
+    let odd = member
+        .iter()
+        .find(|d| d.name == "is-odd")
+        .expect("prod dep");
+    let num = member
+        .iter()
+        .find(|d| d.name == "is-number")
+        .expect("dev dep");
+    assert_eq!(odd.dep_path, "is-odd@3.0.1");
+    assert_eq!(odd.dep_type, DepType::Production);
+    // The lockfile merges dep types into one field; reading the manifest keeps
+    // the split exact — is-number stays a devDependency.
+    assert_eq!(num.dep_type, DepType::Dev);
+}
+
+/// A berry member that depends on a workspace SIBLING via `workspace:*` links
+/// to the local member: the reconstructed importer carries a DirectDep whose
+/// `dep_path` (`name@version`) has NO `packages` entry, the convention the
+/// linker keys on to symlink the sibling rather than fetch it.
+#[test]
+fn test_berry_member_links_workspace_sibling() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("package.json"),
+        r#"{ "name": "root", "private": true, "workspaces": ["packages/*"] }"#,
+    )
+    .unwrap();
+    for (member, body) in [
+        (
+            "app",
+            r#"{ "name": "@x/app", "version": "1.0.0", "dependencies": { "@x/utils": "workspace:*" } }"#,
+        ),
+        ("utils", r#"{ "name": "@x/utils", "version": "1.0.0" }"#),
+    ] {
+        let mdir = root.join("packages").join(member);
+        std::fs::create_dir_all(&mdir).unwrap();
+        std::fs::write(mdir.join("package.json"), body).unwrap();
+    }
+    let lock = root.join("yarn.lock");
+    std::fs::write(
+        &lock,
+        r#"__metadata:
+  version: 8
+  cacheKey: 10c0
+
+"@x/app@workspace:packages/app":
+  version: 0.0.0-use.local
+  resolution: "@x/app@workspace:packages/app"
+  dependencies:
+    "@x/utils": "workspace:*"
+  languageName: unknown
+  linkType: soft
+
+"@x/utils@workspace:*, @x/utils@workspace:packages/utils":
+  version: 0.0.0-use.local
+  resolution: "@x/utils@workspace:packages/utils"
+  languageName: unknown
+  linkType: soft
+
+"root@workspace:.":
+  version: 0.0.0-use.local
+  resolution: "root@workspace:."
+  languageName: unknown
+  linkType: soft
+"#,
+    )
+    .unwrap();
+
+    let manifest = aube_manifest::PackageJson::from_path(&root.join("package.json")).unwrap();
+    let graph = parse(&lock, &manifest).unwrap();
+
+    let app = graph
+        .importers
+        .get("packages/app")
+        .expect("app member importer must be reconstructed");
+    let utils = app
+        .iter()
+        .find(|d| d.name == "@x/utils")
+        .expect("the sibling workspace dep must survive as a DirectDep");
+    assert!(
+        !graph.packages.contains_key(&utils.dep_path),
+        "a workspace-sibling dep must NOT have a packages entry"
+    );
+    assert!(graph.importers.contains_key("packages/utils"));
 }
