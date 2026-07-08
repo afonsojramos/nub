@@ -739,7 +739,16 @@ impl LockfileGraph {
                 continue;
             };
             for (child_name, child_version) in &pkg.dependencies {
-                let child_key = format!("{child_name}@{child_version}");
+                // Resolve across reader conventions (yarn full dep_path,
+                // npm/pnpm tail, git/tarball URL); `None` = edge outside the
+                // graph, skip. A raw `name@tail` reconstruction doubled the
+                // name for yarn's full-dep_path values and under-walked the
+                // closure — see `resolve_dep_edge`.
+                let Some(child_key) =
+                    resolve_dep_edge(child_name, child_version, |k| self.packages.contains_key(k))
+                else {
+                    continue;
+                };
                 if reachable.insert(child_key.clone()) {
                     queue.push_back(child_key);
                 }
@@ -794,10 +803,17 @@ impl LockfileGraph {
         let mut importers_of: HashMap<String, Vec<&str>> = HashMap::new();
         for (parent_dep_path, pkg) in &self.packages {
             for (child_name, child_tail) in &pkg.dependencies {
-                importers_of
-                    .entry(format!("{child_name}@{child_tail}"))
-                    .or_default()
-                    .push(parent_dep_path.as_str());
+                // Resolve across reader conventions so a yarn full-dep_path
+                // edge maps to the real child key (a raw `name@tail` doubled
+                // it); `None` = edge outside the graph, skip.
+                if let Some(child_key) =
+                    resolve_dep_edge(child_name, child_tail, |k| self.packages.contains_key(k))
+                {
+                    importers_of
+                        .entry(child_key)
+                        .or_default()
+                        .push(parent_dep_path.as_str());
+                }
             }
         }
 

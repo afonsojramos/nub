@@ -372,10 +372,19 @@ pub(crate) fn link_dep_bins(
         // empty on disk.
 
         for (child_name, child_version) in &pkg.dependencies {
-            // Mirror the linker's self-ref guard from
-            // `materialize_into`: a package that depends on its own
-            // dep_path is a graph artefact, not a real edge.
-            let child_dep_path = format!("{child_name}@{child_version}");
+            // Resolve the edge to its graph key across reader conventions —
+            // in lockstep with the linker (a raw `name@tail` doubled yarn's
+            // full-dep_path values, so a yarn transitive dep's bins never got
+            // linked). `None` = not a real graph node; skip.
+            let Some(child_dep_path) =
+                aube_lockfile::resolve_dep_edge(child_name, child_version, |k| {
+                    graph.packages.contains_key(k)
+                })
+            else {
+                continue;
+            };
+            // Mirror the linker's self-ref guard from `materialize_into`: a
+            // package that depends on its own dep_path is a graph artefact.
             if child_dep_path == *dep_path && child_name == &pkg.name {
                 continue;
             }
