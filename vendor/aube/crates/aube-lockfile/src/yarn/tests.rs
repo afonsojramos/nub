@@ -687,6 +687,61 @@ fn test_parse_berry_applies_root_resolution_to_transitive_edge() {
     );
 }
 
+/// A `resolutions: {pkg: "patch:pkg@<ver>#./.yarn/patches/<file>"}` pin
+/// resolves to the patch block AND records the patch. Yarn writes the
+/// block header with a trailing `::locator=…` qualifier the resolution
+/// value lacks, so a verbatim match misses and the patched package drops
+/// from the importer (cal.com's `libphonenumber-js` absent at `apps/web`).
+/// The qualifier-stripped descriptor must resolve.
+#[test]
+fn test_parse_berry_resolutions_patch_locator_resolves_and_records_patch() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let content = r#"__metadata:
+  version: 8
+  cacheKey: 10c0
+
+"libphonenumber-js@npm:1.12.38":
+  version: 1.12.38
+  resolution: "libphonenumber-js@npm:1.12.38"
+  checksum: 10c0/aaa
+  languageName: node
+  linkType: hard
+
+"libphonenumber-js@patch:libphonenumber-js@1.12.38#./.yarn/patches/libphonenumber-js+1.12.38.patch::locator=root%40workspace%3A.":
+  version: 1.12.38
+  resolution: "libphonenumber-js@patch:libphonenumber-js@npm%3A1.12.38#./.yarn/patches/libphonenumber-js+1.12.38.patch::version=1.12.38&hash=18a67d&locator=root%40workspace%3A."
+  checksum: 10c0/bbb
+  languageName: node
+  linkType: hard
+"#;
+    std::fs::write(tmp.path(), content).unwrap();
+
+    let mut manifest = make_manifest(&[("libphonenumber-js", "^1.12.38")], &[]);
+    manifest.extra.insert(
+        "resolutions".to_string(),
+        serde_json::json!({
+            "libphonenumber-js": "patch:libphonenumber-js@1.12.38#./.yarn/patches/libphonenumber-js+1.12.38.patch"
+        }),
+    );
+
+    let graph = parse(tmp.path(), &manifest).unwrap();
+
+    let root = graph.importers.get(".").unwrap();
+    let dep = root
+        .iter()
+        .find(|d| d.name == "libphonenumber-js")
+        .expect("resolutions patch: pin must resolve the direct dep, not drop it");
+    assert_eq!(dep.dep_path, "libphonenumber-js@1.12.38");
+    assert_eq!(
+        graph
+            .patched_dependencies
+            .get("libphonenumber-js@1.12.38")
+            .map(String::as_str),
+        Some("./.yarn/patches/libphonenumber-js+1.12.38.patch"),
+        "the patch file must be recorded so the linker applies it at materialize"
+    );
+}
+
 /// Blocks for the project's own workspace entry shouldn't become
 /// `LockedPackage`s — they're the root importer, not a
 /// resolved dep. Skipping them keeps the graph shape identical to

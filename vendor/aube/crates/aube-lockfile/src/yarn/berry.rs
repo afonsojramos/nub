@@ -215,6 +215,22 @@ pub(super) fn parse_berry_str(
 
         for spec in &specs {
             spec_to_dep_path.insert(spec.clone(), dep_path.clone());
+            // A `patch:` block header carries `::locator=…` (and sometimes
+            // `::version=…&hash=…`) qualifiers that a resolution's patch value
+            // and a transitive patch edge do NOT — yarn appends them when it
+            // writes the lock. Register the qualifier-stripped descriptor too,
+            // or a `resolutions: {pkg: "patch:pkg@<ver>#./.yarn/patches/…"}`
+            // pin (or a transitive edge to the patched package) misses the
+            // suffixed header and the patched package silently drops from the
+            // importer (cal.com's `libphonenumber-js` absent at `apps/web`).
+            // The base encoding (`npm%3A` vs bare) is preserved verbatim from
+            // the resolution value into the header, so a plain prefix strip
+            // matches without any URL-decoding.
+            if let Some((stripped, _)) = spec.split_once("::")
+                && stripped.contains("@patch:")
+            {
+                spec_to_dep_path.insert(stripped.to_string(), dep_path.clone());
+            }
         }
 
         // Transitive deps: `name: "protocol:range"`. We store the raw
