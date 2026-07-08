@@ -483,17 +483,19 @@ Vite is the exception that keeps the shared store. Its dev server gates real-pat
 
 ### Offline installs
 
-Like pnpm, Nub relinks files from the global store into `node_modules` via reflink (APFS/btrfs) or hardlink (ext4) when the store already holds every package — no re-download, no byte-for-byte copy. The benchmark below measures the warm reinstall case: `node_modules` is removed, packages are already on disk, and the installer rebuilds the project layout.
+Like pnpm, Nub relinks from the global store into `node_modules` when the store already holds every package — no re-download, no byte-for-byte copy. With the default shared virtual store the relink is one symlink per package rather than one link per file. The benchmark below measures the warm reinstall case on a large tree (1,168 packages, 81,398 files): `node_modules` is removed between runs, packages are already on disk, no network. It runs on Linux, where Bun and Nub's hoisted mode both link with per-file hardlinks, so the hoisted row is a same-layout, same-syscall comparison; the default row is the same install with the per-package relink.
 
 <Bench
-  label="warm reinstall · TanStack Start · macOS"
+  label="warm reinstall · 1168 packages · Linux (ubuntu-latest)"
   accent="pink"
-  max={5316}
+  max={12945}
+  caption="hyperfine, 25 runs / 6 warmup, near-idle ubuntu-latest runner · bun 1.3.14, pnpm 10.34.4, npm on Node 24."
   rows={[
-    { cmd: 'nub install', ms: 171, us: true },
-    { cmd: 'bun install', ms: 686, ratio: 4.0 },
-    { cmd: 'pnpm install', ms: 3193, ratio: 18.7 },
-    { cmd: 'npm ci', ms: 5316, ratio: 31.1 },
+    { cmd: 'nub install', ms: 346, us: true },
+    { cmd: 'nub install --node-linker hoisted', ms: 1461, ratio: 4.2 },
+    { cmd: 'bun install', ms: 1896, ratio: 5.5 },
+    { cmd: 'pnpm install', ms: 3453, ratio: 10 },
+    { cmd: 'npm ci', ms: 12945, ratio: 37.4 },
   ]}
   source="https://github.com/nubjs/nub/tree/main/tests/bench/install"
 />
