@@ -1,5 +1,5 @@
 ---
-title: "Node.js and the phantom dependency problem; or, how we built a 4x faster package manager"
+title: "Node.js and the phantom dependency problem; or, how we built a 5x faster package manager"
 description: One copy of every package per machine, symlinked into every project — and the mechanisms that make that layout work across the ecosystem.
 author: The Nub Team
 date: 2026-07-07T12:00:00Z
@@ -211,20 +211,22 @@ The default, though, is the global store, with the scanner, the Vite compat, and
 
 ## Final results
 
-All together, Nub can safely symlink the vast majority of packages into your project-local `node_modules`, while surgically falling back to a classic hardlink approach for any problematic dependencies. The final result: symlink-based linkers are finally feasible in JavaScript, and warm installs are up to 4x faster.
+All together, Nub can safely symlink the vast majority of packages into your project-local `node_modules`, while surgically falling back to a classic hardlink approach for any problematic dependencies. The final result: symlink-based linkers are finally feasible in JavaScript, and warm installs are up to 5x faster.
 
-The fixture: a real TanStack Start starter (Vite + React, ~313 packages), installed warm — store populated, `node_modules` empty:
+The fixture is a large tree — 1,168 packages, 81,398 files — installed warm: store populated, frozen lockfile, `node_modules` wiped between runs, no network. It runs on Linux because Linux is the shared primitive: Bun and Nub's hoisted mode both link with per-file hardlinks there, so the comparison is syscall-for-syscall. The two Nub rows isolate the two claims — with `--node-linker hoisted`, Nub produces Bun's exact flat layout with the same per-file hardlink calls; the default row is the same install with the one-symlink-per-package relink this post is about.
 
 <Bench
-  label="warm install · TanStack Start · macOS"
+  label="warm install · 1168 packages · Linux (ubuntu-latest)"
   source="https://github.com/nubjs/nub/tree/main/tests/bench/install"
   accent="pink"
-  max={5316}
+  max={12945}
+  caption="hyperfine, 25 runs / 6 warmup, near-idle ubuntu-latest runner · bun 1.3.14, pnpm 10.34.4, npm on Node 24."
   rows={[
-    { cmd: 'nub install', ms: 171, us: true },
-    { cmd: 'bun install', ms: 686, ratio: 4.0 },
-    { cmd: 'pnpm install', ms: 3193, ratio: 18.7 },
-    { cmd: 'npm ci', ms: 5316, ratio: 31.1 },
+    { cmd: 'nub install', ms: 346, us: true },
+    { cmd: 'nub install --node-linker hoisted', ms: 1461, ratio: 4.2 },
+    { cmd: 'bun install', ms: 1896, ratio: 5.5 },
+    { cmd: 'pnpm install', ms: 3453, ratio: 10 },
+    { cmd: 'npm ci', ms: 12945, ratio: 37.4 },
   ]}
 />
 
