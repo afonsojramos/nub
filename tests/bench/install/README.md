@@ -69,13 +69,14 @@ Report median and σ. σ-overlap between tools is a tie, not a win.
 
 ## Fixtures
 
-Fixtures live under `tests/bench/install/fixtures/`. Lockfiles are committed so each tool resolves consistently:
+Fixtures live under `tests/bench/install/fixtures/`. Lockfiles are committed so each tool resolves consistently, and each harness strips the foreign lockfiles from a tool's isolated workdir so every tool installs from its OWN lockfile:
 
-- `pnpm-lock.yaml` for Nub and pnpm
+- `nub.lock` for Nub — its native lockfile, so the nub leg exercises nub's own install path, not the `pnpm-lock.yaml` compat-read
+- `pnpm-lock.yaml` for pnpm
 - `bun.lock` for Bun
 - `package-lock.json` for npm where supported
 
-Regenerate pnpm and Bun lockfiles:
+Regenerate the nub, pnpm, and Bun lockfiles:
 
 ```bash
 bash tests/bench/install/gen-fixtures.sh
