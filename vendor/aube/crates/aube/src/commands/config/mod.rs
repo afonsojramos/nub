@@ -1010,7 +1010,7 @@ mod tests {
         let _lock = config_test_lock();
         aube_settings::set_embedder_defaults(vec![(
             "virtualStoreDir".to_string(),
-            "node_modules/.nub".to_string(),
+            "node_modules/.store".to_string(),
         )]);
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path();
@@ -1020,7 +1020,7 @@ mod tests {
 
         assert_eq!(
             get_cmd::find_value(&entries, &aliases).as_deref(),
-            Some("node_modules/.nub"),
+            Some("node_modules/.store"),
             "config get must report embedder defaults when no higher source overrides them"
         );
 
@@ -1029,7 +1029,7 @@ mod tests {
             seen.get("virtualStoreDir")
                 .or_else(|| seen.get("virtual-store-dir"))
                 .map(String::as_str),
-            Some("node_modules/.nub"),
+            Some("node_modules/.store"),
             "config list must include embedder defaults"
         );
     }

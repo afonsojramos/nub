@@ -1,7 +1,7 @@
 //! Vite symlink-GVS serving compat (issue #315).
 //!
 //! Under nub's default global virtual store a package's realpath is the
-//! machine-global store (`~/.cache/nub/pm/virtual-store/…`), OUTSIDE the project
+//! machine-global store (`~/.cache/nub/pm/store/…`), OUTSIDE the project
 //! root. Vite's dev server realpath-checks every `/@fs`-served module against
 //! `server.fs.allow` (default `[workspaceRoot]`), so a store-resident dep served
 //! raw (framework client entries, dev-toolbar modules, SSR/optimizeDeps-excluded
@@ -80,7 +80,7 @@ fn compat_disabled(raw: Option<&str>) -> bool {
 /// Vite reaches the graph two ways, and both are handled: as a DIRECT dep (a raw
 /// `vite` app / a `vite dev` CLI project — the top-level `node_modules/vite`),
 /// and TRANSITIVELY as a framework's embedded engine (Astro/SvelteKit/VitePress
-/// — the `.nub/vite@*` isolated-store entries, no top-level symlink). A
+/// — the `.store/vite@*` isolated-store entries, no top-level symlink). A
 /// library-embedded framework is itself store-resident and loads ITS Vite via a
 /// store-to-store sibling symlink (the shared virtual-store copy, NOT the
 /// project-local ejected copy), so the dist backport cannot reach it CAS-safely
@@ -130,7 +130,7 @@ struct ViteCopy {
 }
 
 /// Enumerate every distinct Vite package in the install: the top-level
-/// `node_modules/vite` (direct dep) plus each `node_modules/.nub/vite@*`
+/// `node_modules/vite` (direct dep) plus each `node_modules/.store/vite@*`
 /// isolated-store entry (transitive/library-embedded). Deduplicated by realpath;
 /// each entry carries its version and whether it is project-local.
 fn discover_vite(node_modules: &Path) -> Vec<ViteCopy> {
@@ -143,7 +143,7 @@ fn discover_vite(node_modules: &Path) -> Vec<ViteCopy> {
         &mut seen,
         &mut out,
     );
-    if let Ok(entries) = std::fs::read_dir(node_modules.join(".nub")) {
+    if let Ok(entries) = std::fs::read_dir(node_modules.join(super::PROJECT_VIRTUAL_STORE_LEAF)) {
         for e in entries.flatten() {
             if e.file_name().to_string_lossy().starts_with("vite@") {
                 let pkg = e.path().join("node_modules").join("vite");
@@ -230,13 +230,15 @@ pub(crate) fn vite_lt_8_1(version: &str) -> bool {
     minor.and_then(|m| m.parse::<u32>().ok()).unwrap_or(0) < 1
 }
 
-/// nub's global virtual-store directory (`<cache>/virtual-store`, where `<cache>`
-/// is embedder-namespaced to `~/.cache/nub/pm`). This is the realpath prefix of
+/// nub's global virtual-store directory (`<cache>/store`, where `<cache>` is
+/// embedder-namespaced to `~/.cache/nub/pm`). This is the realpath prefix of
 /// every store-resident served module, so it is the value Vite must allow. The
+/// leaf name comes from the active embedder (`store` under nub), matching what
+/// `aube_store::Store::virtual_store_dir` writes, so the two never drift. The
 /// embedder profile is registered by the time install runs, so
 /// `aube_store::dirs::cache_dir()` resolves the nub namespace.
 fn global_virtual_store_dir() -> Option<PathBuf> {
-    aube_store::dirs::cache_dir().map(|c| c.join(aube_store::VIRTUAL_STORE_SUBDIR))
+    aube_store::dirs::cache_dir().map(|c| c.join(aube_util::embedder().virtual_store_subdir))
 }
 
 /// Unit A. Write `<node_modules>/.modules.yaml` as JSON `{"virtualStoreDir":…}`.

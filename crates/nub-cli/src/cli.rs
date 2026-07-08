@@ -168,12 +168,31 @@ fn env_file_flag_present() -> bool {
     ENV_FILE_PRESENT.get().copied().unwrap_or(false)
 }
 
+/// Whether `--no-env-file` was passed. It means "load ZERO env files": eager
+/// `.env*` auto-discovery is suppressed AND any explicit `--env-file` is ignored
+/// (`--no-env-file` WINS over `--env-file`, decided 2026-07-07). All non-env
+/// augmentation (TS/JSX/module hooks) is unaffected. Flag-only, no env-var
+/// companion and no tree-wide inheritance — the same per-process boundary as
+/// `--env-file` (a child `nub`/`node` it spawns does not inherit the suppression).
+static NO_ENV_FILE: OnceLock<bool> = OnceLock::new();
+
+/// True iff the user passed `--no-env-file`. The authoritative kill-switch read
+/// by every env-file consumer ([`merge_child_env`], [`overlay_env_file_vars`],
+/// [`apply_env_file_vars`], and the auto-discovery load sites).
+fn no_env_file() -> bool {
+    NO_ENV_FILE.get().copied().unwrap_or(false)
+}
+
 /// Overlay the `--env-file` vars onto an env map bound for a child's
 /// `Command::env`. Shell env still wins (skip keys already in this process's
 /// environment); `--env-file` overrides `.env` (insert over existing entries).
 /// `--env-file` vars are thus handled uniformly with `.env` vars — both flow
 /// through the same per-spawn `Command::env` application.
 fn overlay_env_file_vars(env_map: &mut HashMap<String, String>) {
+    // `--no-env-file` wins over `--env-file`: overlay nothing.
+    if no_env_file() {
+        return;
+    }
     if let Some(vars) = ENV_FILE_VARS.get() {
         for (k, v) in vars {
             if env::var_os(k).is_none() {
@@ -193,13 +212,20 @@ fn overlay_env_file_vars(env_map: &mut HashMap<String, String>) {
 /// `auto_env` is the already-loaded `.env*` map (callers pass `load_env_files`'s
 /// result, which honors NODE_ENV + ${VAR} expansion); `env_file_present` is the
 /// flag-presence signal; `explicit_vars` is `ENV_FILE_VARS` (the parsed
-/// `--env-file` contents). This is a pure function over its inputs so the
-/// suppression contract can be unit-tested without spawning a child.
+/// `--env-file` contents); `no_env_file` is the `--no-env-file` kill-switch. This
+/// is a pure function over its inputs so the suppression contract can be
+/// unit-tested without spawning a child.
 fn merge_child_env(
     auto_env: HashMap<String, String>,
     env_file_present: bool,
     explicit_vars: &HashMap<String, String>,
+    no_env_file: bool,
 ) -> HashMap<String, String> {
+    // `--no-env-file` WINS over everything: load ZERO env files — both auto-
+    // discovery and explicit `--env-file` are suppressed (decided 2026-07-07).
+    if no_env_file {
+        return HashMap::new();
+    }
     // Explicit `--env-file` opts out of auto-discovery: start from an empty map,
     // not the auto-loaded one, so none of the four `.env*` files leak through.
     let mut env_map = if env_file_present {
@@ -243,6 +269,10 @@ fn watch_inject_vars<'a>(
 /// (`nubx` non-node launchers, the dlx fallback) that don't build an env map.
 /// Same precedence as [`overlay_env_file_vars`].
 fn apply_env_file_vars(cmd: &mut std::process::Command) {
+    // `--no-env-file` wins over `--env-file`: apply nothing.
+    if no_env_file() {
+        return;
+    }
     if let Some(vars) = ENV_FILE_VARS.get() {
         for (k, v) in vars {
             if env::var_os(k).is_none() {
@@ -1170,6 +1200,9 @@ fn run_nub() -> Result<i32> {
     // yielded vars (an empty file still counts as intent). Drives suppression of
     // the eager `.env*` auto-discovery.
     let mut env_file_present = false;
+    // `--no-env-file`: load zero env files. Wins over `--env-file` regardless of
+    // order (both are captured, the flag decides at the end of the scan).
+    let mut no_env_file = false;
 
     let mut i = 0;
     while i < raw_args.len() {
@@ -1238,6 +1271,12 @@ fn run_nub() -> Result<i32> {
             s if s.starts_with("--loglevel=") => {
                 loglevel_val = Some(s["--loglevel=".len()..].to_string());
             }
+            // `--no-env-file` suppresses ALL env-file loading (auto-discovery +
+            // any explicit `--env-file`). Consumed here so it never reaches Node
+            // (which has no such flag); after the entrypoint it forwards to the
+            // script (the three-position rule). Wins over `--env-file` regardless
+            // of order — the two flags may both appear, this decides at scan end.
+            "--no-env-file" => no_env_file = true,
             s if s == "--env-file"
                 || s.starts_with("--env-file=")
                 || s == "--env-file-if-exists"
@@ -1245,7 +1284,7 @@ fn run_nub() -> Result<i32> {
             {
                 // `--env-file-if-exists` mirrors Node v22: load the file if present,
                 // skip SILENTLY when it is absent — vs `--env-file`, which errors on
-                // a missing file. Everything else is identical: same first-writer
+                // a missing file. Everything else is identical: same last-writer
                 // merge, same `${VAR}` expansion, and the flag's presence opts the
                 // run out of eager `.env*` auto-discovery either way (even when the
                 // if-exists target turns out to be absent — the user named explicit
@@ -1284,12 +1323,12 @@ fn run_nub() -> Result<i32> {
                         // explicit --env-file flag strips backtick-quoted values
                         // like Node's parser, matching the .env auto-load path.
                         for (k, v) in nub_core::workspace::env::parse_env(&content) {
-                            // First-writer-wins across multiple `--env-file` flags
-                            // (`or_insert`). Whether nub should instead be
-                            // last-writer-wins (matching Node's own `--env-file`
-                            // merge) is a separate open question, intentionally left
-                            // unchanged by the auto-discovery-suppression change.
-                            env_file_vars.entry(k).or_insert(v);
+                            // Last-writer-wins across multiple `--env-file` flags,
+                            // matching Node: "subsequent files override pre-existing
+                            // variables defined in previous files" (doc/api/cli.md).
+                            // Shell env still wins over all of them — enforced later
+                            // in `overlay_env_file_vars` (skips keys already set).
+                            env_file_vars.insert(k, v);
                         }
                     } else {
                         eprintln!("nub: cannot read env file: {file_path}");
@@ -1372,6 +1411,14 @@ fn run_nub() -> Result<i32> {
     // the expansion load_env_files applies on the non-watch run path.
     nub_core::workspace::env::expand_env_map(&mut env_file_vars);
 
+    // Env hygiene (Deno parity): ignore runtime-control vars (NODE_OPTIONS et al.)
+    // from the explicit `--env-file` map too, so no env-file-sourced value silently
+    // reconfigures the spawned Node — uniform with the auto-loaded `.env*` strip in
+    // env.rs, and matching Deno, which ignores its control vars from `--env-file`.
+    let denied_env_file_keys =
+        nub_core::workspace::env::strip_denied_env_file_keys(&mut env_file_vars);
+    nub_core::workspace::env::warn_denied_env_file_keys(&denied_env_file_keys);
+
     // Capture --env-file vars for per-child Command::env application (A19): no
     // process-env mutation, so no `unsafe { env::set_var }` and no data race if a
     // dep threads during init. Shell-wins / `.env`-override precedence is applied
@@ -1380,6 +1427,8 @@ fn run_nub() -> Result<i32> {
     // Record flag presence so the run/watch paths can suppress eager `.env*`
     // auto-discovery when the user named explicit env file(s).
     let _ = ENV_FILE_PRESENT.set(env_file_present);
+    // Record `--no-env-file` so every env-file consumer loads nothing.
+    let _ = NO_ENV_FILE.set(no_env_file);
 
     SHOW_WARNINGS.store(show_warnings, Ordering::Relaxed);
     SILENT.store(silent, Ordering::Relaxed);
@@ -2169,7 +2218,7 @@ fn run_nubx() -> Result<i32> {
     // re-dispatch to `nub run`). The classifier is `crate::nubx_resolve::classify`;
     // this function only maps each route to its runner. See that module for why the
     // two mechanisms are needed (clap fails-closed on a future Node flag).
-    let args: Vec<String> = env::args().skip(1).collect();
+    let mut args: Vec<String> = env::args().skip(1).collect();
 
     // `--help`/`--version` are nubx's own flags only when they appear BEFORE the
     // subject (the three-position rule: a flag after the subject reaches the
@@ -2191,6 +2240,60 @@ fn run_nubx() -> Result<i32> {
             }
             _ => {}
         }
+    }
+
+    // `--no-env-file` in the LEADING region. Because it WINS over `--env-file`,
+    // and the standalone-nubx File tier would otherwise FORWARD a leading
+    // `--env-file`/`--env-file-if-exists` to Node (which loads it), the whole
+    // `--env-file*` family is stripped alongside `--no-env-file` — otherwise
+    // `--no-env-file` fails to win on this surface (the Nub-entry path already
+    // captures those flags itself, so the leak is nubx-only). Both scans below
+    // account for the space-form value token so a flag's value is never taken as
+    // the subject; the leading-only scope preserves a post-subject occurrence as
+    // the program's own arg.
+    let is_env_file_value_flag = |a: &str| a == "--env-file" || a == "--env-file-if-exists";
+    let mut no_env_file_seen = false;
+    let mut idx = 0;
+    while idx < args.len() {
+        let a = args[idx].as_str();
+        if a == "--" || !a.starts_with('-') {
+            break; // subject / separator
+        }
+        if a == "--no-env-file" {
+            no_env_file_seen = true;
+        } else if is_env_file_value_flag(a) {
+            idx += 1; // its value is not a subject — skip it
+        }
+        idx += 1;
+    }
+    if no_env_file_seen {
+        let _ = NO_ENV_FILE.set(true);
+        let mut stripped = Vec::with_capacity(args.len());
+        let mut in_leading = true;
+        let mut idx = 0;
+        while idx < args.len() {
+            let a = args[idx].as_str();
+            if in_leading && (a == "--" || !a.starts_with('-')) {
+                in_leading = false;
+            }
+            if in_leading {
+                if a == "--no-env-file" {
+                    idx += 1;
+                    continue;
+                }
+                if is_env_file_value_flag(a) {
+                    idx += 2; // drop the flag and its value token
+                    continue;
+                }
+                if a.starts_with("--env-file=") || a.starts_with("--env-file-if-exists=") {
+                    idx += 1;
+                    continue;
+                }
+            }
+            stripped.push(args[idx].clone());
+            idx += 1;
+        }
+        args = stripped;
     }
 
     let cwd = env::current_dir().ok();
@@ -2430,10 +2533,11 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
 
     // .env loading: eager for all non-compat invocations per wiki/runtime/env-loading.md —
     // UNLESS the user passed `--env-file`, which suppresses auto-discovery entirely
-    // (only the named file(s) load; the maintainer, 2026-06-15). `merge_child_env` applies the
-    // gate. --env-file vars apply even in compat mode (explicit user flag).
+    // (only the named file(s) load; the maintainer, 2026-06-15), OR `--no-env-file`,
+    // which suppresses everything. `merge_child_env` applies the gate. --env-file
+    // vars apply even in compat mode (explicit user flag); --no-env-file wins.
     let project = nub_core::workspace::detect::detect_project(cwd);
-    let auto_env = if !compat_mode {
+    let auto_env = if !compat_mode && !no_env_file() {
         project
             .as_ref()
             .map(|p| nub_core::workspace::env::load_env_files(&p.root))
@@ -2445,6 +2549,7 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
         auto_env,
         env_file_flag_present(),
         ENV_FILE_VARS.get().unwrap_or(&HashMap::new()),
+        no_env_file(),
     );
 
     // Bin-exec parity with `nub run`: when this spawn is nub LAUNCHING a resolved
@@ -4401,10 +4506,12 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     // — neither the `discover_env_files` `--env-file` Node args nor the pre-expanded
     // `load_env_files` map are populated, so only the user's explicit file(s) reach
     // the child. This keeps `nub --watch --env-file …` consistent with the direct
-    // file runner.
+    // file runner. `--no-env-file` suppresses BOTH the auto args and the explicit
+    // `--env-file` overlay — the watched Node receives no `--env-file` args at all.
     let env_file_present = env_file_flag_present();
+    let no_env_file = no_env_file();
     let project = nub_core::workspace::detect::detect_project(&cwd);
-    let env_file_paths = if env_file_present {
+    let env_file_paths = if env_file_present || no_env_file {
         Vec::new()
     } else {
         project
@@ -4417,10 +4524,11 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     // single read (rather than `load_env_files` + a second `load_env_files_raw`)
     // avoids re-parsing every file twice and closes the TOCTOU window where a file
     // changing between two reads could spuriously inject a plain var.
-    let raw_env = if env_file_present {
+    let raw_env = if env_file_present || no_env_file {
         // `--env-file` suppresses auto-discovery: no auto `--env-file` args reach
         // Node, so injection is the only delivery channel — leave `raw_env` empty
-        // so the inject loop injects every var (see `watch_inject_vars`).
+        // so the inject loop injects every var (see `watch_inject_vars`). Under
+        // `--no-env-file` `merge_child_env` returns empty, so nothing is injected.
         HashMap::new()
     } else {
         project
@@ -4440,6 +4548,7 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         auto_env,
         env_file_present,
         ENV_FILE_VARS.get().unwrap_or(&HashMap::new()),
+        no_env_file,
     );
 
     let nub_binary = nub_core::node::spawn::current_nub_binary()?;
@@ -5918,6 +6027,7 @@ nub {v} — the all-in-one Node.js toolkit
   --color[=<when>]     color mode: auto (default), always, never
   --env-file <file>    load environment variables from <file>
   --env-file-if-exists <file>  like --env-file, but skip silently if <file> is absent
+  --no-env-file        load no env files: no `.env*` auto-discovery, no --env-file
   --node               run on plain Node, no augmentation (the compat escape hatch)
   -v, --version        print the nub version
   -h, --help           print help (`-h` curated, `--help` this full reference)
@@ -7907,7 +8017,7 @@ mod tests {
         let explicit = HashMap::from([("NUB_TEST_BAZ".to_string(), "from_explicit".to_string())]);
 
         // (a) flag present → autos suppressed, only the explicit var survives.
-        let merged = merge_child_env(auto(), true, &explicit);
+        let merged = merge_child_env(auto(), true, &explicit, false);
         assert_eq!(
             merged.get("NUB_TEST_BAZ").map(String::as_str),
             Some("from_explicit"),
@@ -7919,7 +8029,7 @@ mod tests {
         );
 
         // (b) no flag → autos load, explicit map is empty so nothing else appears.
-        let merged = merge_child_env(auto(), false, &HashMap::new());
+        let merged = merge_child_env(auto(), false, &HashMap::new(), false);
         assert_eq!(
             merged.get("NUB_TEST_FOO").map(String::as_str),
             Some("from_dotenv")
@@ -7933,7 +8043,7 @@ mod tests {
         // explicit file's value that wins, never a leaked auto value (autos are gone).
         let explicit_override =
             HashMap::from([("NUB_TEST_FOO".to_string(), "from_explicit".to_string())]);
-        let merged = merge_child_env(auto(), true, &explicit_override);
+        let merged = merge_child_env(auto(), true, &explicit_override, false);
         assert_eq!(
             merged.get("NUB_TEST_FOO").map(String::as_str),
             Some("from_explicit"),
@@ -7942,6 +8052,15 @@ mod tests {
         assert!(
             !merged.contains_key("NUB_TEST_BAR"),
             "non-overridden auto var stays suppressed; got {merged:?}"
+        );
+
+        // (d) `--no-env-file` WINS over everything: no autos, and the explicit
+        // `--env-file` map is ignored too — the child gets ZERO env-file vars,
+        // even when `--env-file` was also present (decided 2026-07-07).
+        let merged = merge_child_env(auto(), true, &explicit, true);
+        assert!(
+            merged.is_empty(),
+            "--no-env-file must suppress both auto-discovery and explicit --env-file; got {merged:?}"
         );
     }
 

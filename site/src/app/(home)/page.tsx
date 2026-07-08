@@ -1157,10 +1157,9 @@ function HypermanagerBand() {
             title={<>Drop-in <HeadingCode>pnpm</HeadingCode> compatibility</>}
             body={
               <>
-                Nub&rsquo;s <Mono>install</Mono>{' '}and <Mono>add</Mono>{' '}accept pnpm&rsquo;s flags
-                with the same spelling and semantics, down to advanced features like the workspace
-                catalog. Swap <Mono>pnpm</Mono>{' '}for <Mono>nub</Mono>{' '}and your install commands
-                run unchanged.
+                Every package-manager command accepts pnpm&rsquo;s flags with the same spelling
+                and semantics, down to advanced features like the workspace catalog. Swap{' '}
+                <Mono>pnpm</Mono>{' '}for <Mono>nub</Mono>{' '}and your commands run unchanged.
               </>
             }
             visual={

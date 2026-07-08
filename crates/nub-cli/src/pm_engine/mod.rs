@@ -635,8 +635,8 @@ pub(crate) fn engine_session(dir: Option<&Path>) -> Result<EngineSession> {
 /// (GVS off, isolation kept). `nub ci` is the frozen, ephemeral, deploy-oriented
 /// install; its `node_modules` is almost always COPY-relocated (multi-stage
 /// Docker) or thrown away, and a machine-global virtual store makes that tree
-/// non-relocatable — every `.nub/<dep>` becomes an absolute symlink into
-/// `~/.cache/nub/pm/virtual-store` that a `COPY --from` leaves dangling (#241).
+/// non-relocatable — every `.store/<dep>` becomes an absolute symlink into
+/// `~/.cache/nub/pm/store` that a `COPY --from` leaves dangling (#241).
 /// Forcing the store project-local yields the self-contained, COPY-safe tree
 /// `CI=1 nub install` already produces, while keeping the isolated layout's
 /// phantom-dep protection. An explicit user `enableGlobalVirtualStore`/
@@ -742,7 +742,7 @@ enum ConfigScopeNoise {
 /// Where the isolated layout's virtual store materializes. `Default` engages
 /// the machine-global virtual store (the shared, cross-project fast path) per
 /// the embedder default; `ProjectLocal` forces GVS off so the store lands
-/// inside `node_modules/.nub` (real dirs + relative symlinks) — a self-
+/// inside `node_modules/.store` (real dirs + relative symlinks) — a self-
 /// contained, COPY-relocatable tree. Only `nub ci` requests `ProjectLocal`
 /// (see [`engine_session_ci`]); isolation/phantom-dep protection is preserved
 /// either way.
@@ -1220,6 +1220,17 @@ pub(crate) fn scope_warning_uses_dim() -> bool {
 /// epics/v0.2-aube). A `packageManager`/`devEngines` pin always outranks this:
 /// the UA impersonates the pinned version when one exists.
 pub(crate) const PNPM_PARITY_VERSION: &str = "11.3.0";
+
+/// The project-local virtual-store directory leaf under `node_modules/`.
+/// `.store` is the vendor-neutral isolated-store convention (npm isolated-mode
+/// RFC-0042, Yarn-berry's pnpm-linker `pnpmStoreFolder`, cnpm), so tools that
+/// walk `node_modules` for a project root — simple-git-hooks and its class —
+/// recognize it as an install marker; the former `.nub` leaf was invisible to
+/// them. Single source of truth for the name: `nub_setting_defaults` sets
+/// `virtualStoreDir`/`stateDir` to `node_modules/<leaf>`, and vite_compat scans
+/// it. Standalone aube is unaffected — its default stays `.aube`; this is a
+/// nub-embedder value.
+pub(crate) const PROJECT_VIRTUAL_STORE_LEAF: &str = ".store";
 
 /// Compose the lifecycle-script UA product tokens for the resolved role —
 /// everything before the `<os> <arch>` tail the engine appends. The dialect is
@@ -1946,11 +1957,11 @@ fn read_file_head(path: &Path, max_bytes: usize) -> std::io::Result<String> {
 ///   of any kind) writes nub's neutral `nub.lock` (`=aube`); every other
 ///   surface writes `pnpm-lock.yaml` (`=pnpm`) for drop-in interop. See
 ///   [`nub_setting_defaults`]'s `truly_fresh` arm.
-/// - `virtualStoreDir` / `stateDir` = `node_modules/.nub` — the isolated
-///   store (and the engine's install-state sidecar) live under `.nub`.
+/// - `virtualStoreDir` / `stateDir` = `node_modules/.store` — the isolated
+///   store (and the engine's install-state sidecar) live under `.store`.
 ///   Corner: this replaces the engine's `<modulesDir>/.aube` derivation, so
 ///   a project that renames `modulesDir` without setting `virtualStoreDir`
-///   gets the store at `node_modules/.nub` rather than `<modulesDir>/.nub`.
+///   gets the store at `node_modules/.store` rather than `<modulesDir>/.store`.
 /// - `storeDir` = `$XDG_DATA_HOME/nub/store` (else `~/.local/share/nub/store`)
 ///   — the global CAS store lives in nub's own XDG namespace, not aube's
 ///   (the engine appends its `v1` schema suffix, so content lands at
@@ -2091,7 +2102,7 @@ fn strip_yarnrc_value(rest: &str) -> &str {
 ///   longer vetoes the shared store — so the global virtual store engages
 ///   wherever it's active (off-CI, no next/nuxt/parcel trigger, no explicit
 ///   `enableGlobalVirtualStore=false`) with NO hidden tree, and the pnpm-parity
-///   hidden hoist tree (`node_modules/.nub/node_modules/`) is built wherever GVS
+///   hidden hoist tree (`node_modules/.store/node_modules/`) is built wherever GVS
 ///   is OFF (CI, `nub ci`, a trigger, an explicit GVS opt-out, dlx), restoring
 ///   ambient `@types/*` resolution for store-resident packages (#286). The ONE
 ///   carve-out is injected deps (`dependenciesMeta.*.injected`): they need the
@@ -2118,10 +2129,11 @@ fn nub_setting_defaults(
     // ejects them through #319's ancestor-closure, subsuming the old 14-entry
     // const (incl. the singleton-hazard adapters the closure now makes sound). So
     // this embedder default carries ONLY the #315 vite eject; empty otherwise
-    // (aube's `parse_string_list` drops the empty entry). A user's own
-    // `diskMaterializePackages` still wins — the
-    // embedder default is the lowest precedence tier — so the additive escape
-    // hatch is intact.
+    // (aube's `parse_string_list` drops the empty entry). nub exposes NO
+    // user-facing `diskMaterializePackages` knob (maintainer 2026-07-07): the
+    // detector is the sole eject mechanism, and nub's hook drops every user-source
+    // seed name (`phantom_closure::nub_internal_seed`), keeping only this internal
+    // vite entry. (Standalone aube installs no hook and still honors the knob.)
     //
     // Vite symlink-GVS compat (#315): eject the `vite` package project-local so
     // its dist can be patched with the backported fs.allow sniff (< 8.1) without
@@ -2140,21 +2152,21 @@ fn nub_setting_defaults(
         && vite_compat::enabled()
         && vite_compat::manifest_declares_vite(detected.map(|d| d.dir.as_path()).unwrap_or(cwd))
     {
-        "vite".to_string()
+        // Draw from the hook's allowlist so the embedder default and the seed the
+        // hook keeps ([`phantom_closure::nub_internal_seed`]) can't drift.
+        phantom_closure::NUB_INTERNAL_DISK_MATERIALIZE_SEED.join(",")
     } else {
         String::new()
     };
+    let store_dir = format!("node_modules/{PROJECT_VIRTUAL_STORE_LEAF}");
     let mut defaults = vec![
         (
             "defaultLockfileFormat".to_string(),
             fresh_format.to_string(),
         ),
         ("defaultTrust".to_string(), "true".to_string()),
-        (
-            "virtualStoreDir".to_string(),
-            "node_modules/.nub".to_string(),
-        ),
-        ("stateDir".to_string(), "node_modules/.nub".to_string()),
+        ("virtualStoreDir".to_string(), store_dir.clone()),
+        ("stateDir".to_string(), store_dir),
         (
             "disableGlobalVirtualStoreForPackages".to_string(),
             // The whole-install GVS-off last resort — reserved for a store-LOCALITY
@@ -2214,9 +2226,9 @@ fn nub_setting_defaults(
     }
     // `nub ci` forces the virtual store PROJECT-LOCAL by pushing an explicit
     // `enableGlobalVirtualStore=false` (GVS off). With GVS off and the default
-    // `hoist=true`, the isolated linker yields real `node_modules/.nub/<dep>`
+    // `hoist=true`, the isolated linker yields real `node_modules/.store/<dep>`
     // dirs + relative symlinks AND the pnpm-parity hidden hoist tree
-    // (`node_modules/.nub/node_modules/`) — a self-contained tree that survives a
+    // (`node_modules/.store/node_modules/`) — a self-contained tree that survives a
     // multi-stage-Docker `COPY --from`, unlike the machine-global store the
     // default install engages (#241). Isolation (phantom-dep protection) is
     // unchanged; only the store LOCATION moves. Embedder-tier, so an explicit
@@ -2959,7 +2971,7 @@ mod tests {
 
     #[test]
     fn setting_defaults_always_carry_the_nub_identity_settings() {
-        // Every engine command gets the `.nub` store/state location and the
+        // Every engine command gets the `.store` store/state location and the
         // nub-namespaced global dirs regardless of detection; the non-truly-
         // fresh surfaces also get the pnpm lockfile fresh-write default (the
         // truly-fresh `aube`/`lock.yaml` flip is covered separately). (These
@@ -2985,8 +2997,11 @@ mod tests {
                 VirtualStoreLocality::Default,
             );
             assert_eq!(get(&defaults, "defaultLockfileFormat"), Some("pnpm"));
-            assert_eq!(get(&defaults, "virtualStoreDir"), Some("node_modules/.nub"));
-            assert_eq!(get(&defaults, "stateDir"), Some("node_modules/.nub"));
+            assert_eq!(
+                get(&defaults, "virtualStoreDir"),
+                Some("node_modules/.store")
+            );
+            assert_eq!(get(&defaults, "stateDir"), Some("node_modules/.store"));
             // The global store lands in nub's XDG data namespace (dev boxes
             // always resolve a home dir, so the entry is present here).
             let store = get(&defaults, "storeDir").expect("storeDir default");

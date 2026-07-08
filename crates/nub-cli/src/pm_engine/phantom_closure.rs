@@ -7,22 +7,26 @@
 //! it — otherwise a store-resident importer keeps resolving the un-materialized
 //! shared-store copy, a silent singleton split (two realpaths, two module
 //! instances). This hook expands aube's flat disk-materialize seed into a
-//! graph-aware plan against the resolved lockfile:
+//! graph-aware plan against the resolved lockfile — the ancestor-closure
+//! (rung 1). Each seed grows to [`LockfileGraph::importer_closure`] — the seed
+//! UNION every package that transitively imports it. Bounded to the affected
+//! subtree by construction (unrelated top-level subtrees are not importers),
+//! measured 0.3–2.1% of real large trees. Also SUBSUMES the #315
+//! library-embedded-vite<8.1 residual: an embedded vite<8.1 (a framework's
+//! transitive engine, no direct-dep symlink) is auto-detected and its
+//! `[framework…vite]` closure ejected, so #318's dist sniff patch reaches a
+//! now-project-local vite.
 //!
-//! - **Rung 1 — ancestor-closure.** Each seed grows to
-//!   [`LockfileGraph::importer_closure`] — the seed UNION every package that
-//!   transitively imports it. Bounded to the affected subtree by construction
-//!   (unrelated top-level subtrees are not importers), measured 0.3–2.1% of real
-//!   large trees. Also SUBSUMES the #315 library-embedded-vite<8.1 residual: an
-//!   embedded vite<8.1 (a framework's transitive engine, no direct-dep symlink)
-//!   is auto-detected and its `[framework…vite]` closure ejected, so #318's dist
-//!   sniff patch reaches a now-project-local vite.
-//! - **Rung 2 — hoist-within.** For a transitively-phantom importer whose
-//!   undeclared target the closure alone can't place, the already-resolved target
-//!   is hoisted as an extra sibling within the importer's own materialized
-//!   `node_modules`.
+//! Undeclared phantoms an ejected member imports are resolved by the linker's
+//! COLLECTIVE project-local hidden hoist tree over the whole ejected set (see
+//! `aube_linker::link_hidden_hoist`): each ejected member's realpath is
+//! project-local, so Node's upward `node_modules` walk from inside it passes
+//! through `.nub/node_modules/`, a blanket first-write-wins alias for every graph
+//! package — detection-free and pnpm-parity. So this hook only needs to grow the
+//! eject set; it records no per-importer target hoist. (This replaced the former
+//! per-importer hoist-within mechanism.)
 //!
-//! The phantom importers + their undeclared targets are the DYNAMIC output of the
+//! The phantom importers are the DYNAMIC output of the
 //! extract-time per-version scanner (`crate::dynamic_phantom`, the PRODUCER): it
 //! scans each fetched version's real published code for unguarded undeclared
 //! imports and writes a per-content verdict sidecar. This hook (the CONSUMER)
@@ -37,11 +41,10 @@
 //! pre-productionization pure-symlink behavior. All policy lives here; aube owns
 //! only the neutral seam + the graph primitive.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 
 use aube_linker::DiskMaterializePlan;
 use aube_lockfile::{LockedPackage, LockfileGraph};
-use nub_phantom_scan::ScanResult;
 use rayon::prelude::*;
 
 /// The SINGLE phantom-eject arm — [`crate::dynamic_phantom::enabled`] — shared
@@ -68,12 +71,44 @@ pub(crate) fn register() {
     aube_linker::set_disk_materialize_expand_hook(Box::new(expand));
 }
 
+/// nub's own embedder-default names that may seed the eject set. nub exposes NO
+/// user-facing `diskMaterializePackages` knob (maintainer 2026-07-07): the dynamic
+/// phantom detector is the sole eject mechanism, so a hand-listed package is
+/// redundant. The resolved seed still carries nub's INTERNAL vite #315 embedder
+/// default ([`super::mod::nub_setting_defaults`]) — kept so the phantom-eject
+/// opt-out (no-hook) path still ejects vite<8.1 — but every OTHER name arrived
+/// from a user source (`.npmrc`/env/`pnpm-workspace.yaml`) and is dropped by
+/// [`nub_internal_seed`]. Standalone aube installs no hook and honors the full
+/// seed verbatim, so its `diskMaterializePackages` knob is unaffected.
+///
+/// SHARED with [`super::nub_setting_defaults`], which seeds exactly this name as
+/// the embedder default — sourcing both from one const so a future internal
+/// default can't be added in one place and silently dropped by the other.
+pub(super) const NUB_INTERNAL_DISK_MATERIALIZE_SEED: &[&str] = &["vite"];
+
+/// Keep only nub's own embedder-default seed names, dropping every user-source
+/// entry — the mechanism that retires the user-facing `diskMaterializePackages`
+/// knob under nub while leaving standalone aube's byte-for-byte.
+fn nub_internal_seed(resolved_seed: &[String]) -> Vec<String> {
+    resolved_seed
+        .iter()
+        .filter(|n| NUB_INTERNAL_DISK_MATERIALIZE_SEED.contains(&n.as_str()))
+        .cloned()
+        .collect()
+}
+
 /// The hook entry: read the per-version scanner's sidecars (the store-IO half)
 /// then hand off to the pure planner. Split so [`plan_from_flags`] — all the
 /// closure/seed policy — is unit-tested with injected flags and never touches
-/// the host store.
+/// the host store. The resolved seed is first filtered to nub's internal names
+/// ([`nub_internal_seed`]) so a user's `diskMaterializePackages` value has no
+/// effect under nub.
 fn expand(graph: &LockfileGraph, seed_names: &[String]) -> DiskMaterializePlan {
-    plan_from_flags(graph, seed_names, &dynamic_phantom_flags(graph))
+    plan_from_flags(
+        graph,
+        &nub_internal_seed(seed_names),
+        &dynamic_phantom_flags(graph),
+    )
 }
 
 /// Pure planner: resolved graph + flat seed + dynamic phantom flags → graph-aware
@@ -124,15 +159,14 @@ fn plan_from_flags(
     let mut seed_names_set: HashSet<&str> = seed_names.iter().copied().collect();
 
     // Dynamic phantom source (the per-version scanner's sidecars) — the replacement
-    // for the retired hand-curated map. `dynamic_targets` keeps each SURVIVING
-    // importer's undeclared targets keyed by dep_path, for the rung-2 hoist; only
-    // survivors are kept, so a hoist only ever lands in a package the seed actually
-    // materializes.
-    let mut dynamic_targets: BTreeMap<&str, &[String]> = BTreeMap::new();
+    // for the retired hand-curated map. Each SURVIVING flagged importer seeds the
+    // eject closure by NAME; the collective project-local hidden hoist tree the
+    // linker builds over the ejected set (see `aube_linker::link_hidden_hoist`)
+    // then resolves every undeclared phantom for those members via Node's walk-up,
+    // so no per-importer target hoist is recorded.
     for (dep_path, name, targets) in flags {
         if should_seed(targets, &direct_dep_names(dep_path, graph), is_top_level) {
             seed_names_set.insert(name.as_str());
-            dynamic_targets.insert(dep_path.as_str(), targets.as_slice());
         }
     }
 
@@ -179,28 +213,17 @@ fn plan_from_flags(
         }
     }
 
-    // Rung-2 hoist map: for each closure member that is a surviving dynamically-
-    // flagged importer, resolve its undeclared target(s) to a dep_path present in
-    // the graph and record importer_dep_path → [target_dep_paths]. A survivor is
-    // seeded by name, so its dep_path is in the closure by construction; iterating
-    // the closure keeps this aligned to what actually materializes.
-    let mut hoist_within: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for dep_path in &closure {
-        let Some(targets) = dynamic_targets.get(dep_path.as_str()) else {
-            continue;
-        };
-        let resolved: Vec<String> = targets
-            .iter()
-            .filter_map(|t| resolve_target_dep_path(graph, t))
-            .collect();
-        if !resolved.is_empty() {
-            hoist_within.insert(dep_path.clone(), resolved);
-        }
-    }
-
+    // Undeclared phantoms — every class the retired per-importer hoist used to
+    // place (a scanner-flagged undeclared import; a statically-imported but
+    // optional peer like `vue-router/vite` → `@vue/compiler-sfc`) — are now
+    // resolved uniformly by the linker's collective project-local hidden hoist
+    // tree over the ejected set: each ejected member's realpath is project-local,
+    // so Node's upward walk from inside it passes through `.nub/node_modules/`,
+    // which carries a blanket first-write-wins alias for every graph package.
+    // Detection-free and pnpm-parity, so this planner only needs to grow the
+    // eject set (rung 1) — it records no per-importer target hoist.
     DiskMaterializePlan {
         names: names.into_iter().collect(),
-        hoist_within,
     }
 }
 
@@ -244,18 +267,16 @@ fn dynamic_phantom_flags(graph: &LockfileGraph) -> Vec<(String, String, Vec<Stri
             // producer's backfill does, so npm-alias deps resolve to the right blob.
             let index =
                 store.load_index(pkg.registry_name(), &pkg.version, pkg.integrity.as_deref())?;
-            let fingerprint = aube_store::index_content_fingerprint(&index);
-            // Derive the sidecar path through the SAME helper the producer writes
-            // with, so the fingerprint keying and the scanner-version segment
-            // cannot drift between the two halves.
-            let bytes = std::fs::read(crate::dynamic_phantom::sidecar_path(
-                &sidecar_dir,
-                &fingerprint,
-            ))
-            .ok()?;
-            // nub-cli CAN depend on the scanner crate, so the sidecar deserializes
-            // straight into the typed `ScanResult` (no cross-fork string coupling).
-            let result: ScanResult = serde_json::from_slice(&bytes).ok()?;
+            // Read the cached verdict, or SCAN the loaded index on-demand when no
+            // sidecar exists yet — the warm-cache-first-install gap. The extract
+            // hook writes a sidecar only on a fresh FETCH and the backfill reads
+            // only the PRE-EXISTING lockfile, so a warm-cached package with no
+            // sidecar (GC'd, or cached by a pre-eject-default nub) on a first
+            // install/add would otherwise reach this decision with no verdict and
+            // never seed its eject (leaving it symlinked, its phantom 404'ing).
+            // `cached_or_scan_verdict` scans + caches here so the decision is
+            // correct at the point the resolved graph + CAS index are both in hand.
+            let result = crate::dynamic_phantom::cached_or_scan_verdict(&sidecar_dir, &index)?;
             if !result.has_unguarded_phantom {
                 return None;
             }
@@ -323,7 +344,7 @@ fn should_seed(
 /// it reachable, which let a depth-≥2 phantom target (`@crawlee/basic` →
 /// `@crawlee/core` → `@apify/datastructures`, #280) wrongly SKIP its eject and
 /// break. Depth-≥2 and absent targets now fall through to SEED — the safe
-/// direction (the ejected copy hoists the target in as a real sibling, rung 2).
+/// direction (the ejected copy resolves the target via the collective hidden tree).
 ///
 /// Reads `dependencies` ONLY: per [`LockedPackage`]'s contract that map is the
 /// resolved edge set with ACTIVE optionals and RESOLVED peer versions already
@@ -342,19 +363,6 @@ fn direct_dep_names(root_dep_path: &str, graph: &LockfileGraph) -> HashSet<Strin
         }
     }
     names
-}
-
-/// Resolve a target package NAME to a dep_path present in the graph. `packages`
-/// is a `BTreeMap`, so `.find` yields the lexically-first matching dep_path —
-/// deterministic, and unambiguous for the single-version phantom classes. The
-/// scanner reports targets by name; per-version target dep_paths would need the
-/// scanner to also record the resolved coordinate.
-fn resolve_target_dep_path(graph: &LockfileGraph, target_name: &str) -> Option<String> {
-    graph
-        .packages
-        .iter()
-        .find(|(_, pkg)| pkg.name == target_name)
-        .map(|(dep_path, _)| dep_path.clone())
 }
 
 #[cfg(test)]
@@ -485,16 +493,32 @@ mod tests {
     fn no_seeds_yields_empty_plan() {
         let g = graph(&[("lodash@4.17.21", "lodash", &[])]);
         let plan = plan_from_flags(&g, &[], &[]);
-        assert!(plan.names.is_empty() && plan.hoist_within.is_empty());
+        assert!(plan.names.is_empty());
     }
 
     #[test]
-    fn dynamic_flag_seeds_importer_and_records_hoist() {
+    fn user_seed_names_are_dropped_only_internal_vite_survives() {
+        // The user-facing `diskMaterializePackages` knob is retired under nub: a
+        // value the user set in `.npmrc`/env/`pnpm-workspace.yaml` reaches the hook
+        // merged with nub's internal vite embedder default, and the filter must keep
+        // ONLY vite. So a hand-listed `lodash`/`@hookform/resolvers` is dropped
+        // (the detector, not a manual list, ejects real phantoms).
+        let kept = nub_internal_seed(&[
+            "lodash".to_string(),
+            "vite".to_string(),
+            "@hookform/resolvers".to_string(),
+        ]);
+        assert_eq!(kept, vec!["vite".to_string()]);
+        assert!(nub_internal_seed(&["lodash".to_string()]).is_empty());
+    }
+
+    #[test]
+    fn dynamic_flag_seeds_importer() {
         // The now-default path: a phantom adapter (`@hookform/resolvers`)
-        // statically imports an undeclared `zod`. The target isn't reachable
-        // within the adapter's own subtree, so `should_seed` SEEDS it; rung-2
-        // resolves `zod` to its dep_path and records the hoist into the adapter's
-        // materialized `node_modules`.
+        // statically imports an undeclared `zod`. The target isn't reachable within
+        // the adapter's own subtree, so `should_seed` SEEDS it (ejects it). The
+        // collective hidden tree then resolves the undeclared `zod` at link time —
+        // the planner only needs to grow the eject set, not record a target hoist.
         let g = graph(&[
             ("@hookform/resolvers@1.0.0", "@hookform/resolvers", &[]),
             ("zod@3.0.0", "zod", &[]),
@@ -508,14 +532,37 @@ mod tests {
         let names: HashSet<&str> = plan.names.iter().map(String::as_str).collect();
         assert!(
             names.contains("@hookform/resolvers"),
-            "the flagged phantom importer is seeded"
+            "the flagged phantom importer is seeded (ejected)"
         );
-        assert_eq!(
-            plan.hoist_within
-                .get("@hookform/resolvers@1.0.0")
-                .map(Vec::as_slice),
-            Some(["zod@3.0.0".to_string()].as_slice()),
-            "rung-2 records the undeclared target's hoist"
+    }
+
+    #[test]
+    fn optional_peer_host_still_ejects_via_embedded_vite() {
+        // Nuxt shape at the planner boundary: vue-router embeds vite<8.1 (so its
+        // ancestor-closure ejects) and declares `@vue/compiler-sfc` an OPTIONAL
+        // peer that its `/vite` subpath statically imports. The eject is what
+        // matters — once vue-router is project-local, the collective hidden tree
+        // resolves the undeclared `@vue/compiler-sfc` for it (the reachability the
+        // store-resident realpath walk lacked under GVS, the `nuxt prepare` crash).
+        // The planner records no per-importer hoist.
+        let mut g = graph(&[
+            ("vue-router@5.1.0", "vue-router", &[("vite", "7.0.0")]),
+            ("vite@7.0.0", "vite", &[]),
+            ("@vue/compiler-sfc@3.5.39", "@vue/compiler-sfc", &[]),
+        ]);
+        let vr = g.packages.get_mut("vue-router@5.1.0").unwrap();
+        vr.peer_dependencies
+            .insert("@vue/compiler-sfc".to_string(), "^3.5.34".to_string());
+        vr.peer_dependencies_meta.insert(
+            "@vue/compiler-sfc".to_string(),
+            aube_lockfile::PeerDepMeta { optional: true },
+        );
+
+        let plan = plan_from_flags(&g, &[], &[]);
+        let names: HashSet<&str> = plan.names.iter().map(String::as_str).collect();
+        assert!(
+            names.contains("vue-router"),
+            "the embedded-vite<8.1 closure ejects vue-router: {names:?}"
         );
     }
 
@@ -614,11 +661,12 @@ mod tests {
         // `core`, and `core` declares `datastructures` (depth 2 from `basic`).
         // `basic` phantom-imports `datastructures`, which is NOT a symlinked sibling
         // in `basic`'s own private node_modules under isolated layout, so the
-        // un-ejected copy cannot resolve it — the flag MUST SEED (eject + rung-2
-        // hoist), never skip as "transitively reachable". `datastructures` is absent
-        // from the (empty) project top level, so only the depth fix drives the seed.
-        // FAILS before the fix (multi-hop BFS marks `datastructures` reachable →
-        // SKIP → `basic` absent from the plan); passes after.
+        // un-ejected copy cannot resolve it — the flag MUST SEED (eject), never skip
+        // as "transitively reachable". `datastructures` is absent from the (empty)
+        // project top level, so only the depth fix drives the seed. FAILS before the
+        // fix (multi-hop BFS marks `datastructures` reachable → SKIP → `basic` absent
+        // from the plan); passes after. Once `basic` is ejected the collective hidden
+        // tree resolves the undeclared `datastructures` for it.
         let g = graph(&[
             ("basic@1.0.0", "basic", &[("core", "1.0.0")]),
             ("core@1.0.0", "core", &[("datastructures", "2.0.0")]),
@@ -634,11 +682,6 @@ mod tests {
         assert!(
             names.contains("basic"),
             "depth-2 phantom target must SEED the importer, not skip: {names:?}"
-        );
-        assert_eq!(
-            plan.hoist_within.get("basic@1.0.0").map(Vec::as_slice),
-            Some(["datastructures@2.0.0".to_string()].as_slice()),
-            "rung-2 hoists the depth-2 target into the ejected importer"
         );
     }
 
@@ -659,7 +702,7 @@ mod tests {
         )];
         let plan = plan_from_flags(&g, &[], &flags);
         assert!(
-            plan.names.is_empty() && plan.hoist_within.is_empty(),
+            plan.names.is_empty(),
             "a depth-1-satisfied phantom target stays skipped: {:?}",
             plan.names
         );

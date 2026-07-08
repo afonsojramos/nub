@@ -23,15 +23,28 @@ export const metadata: Metadata = {
   },
 };
 
+// Newest first: by date, then by release version so same-day releases (two posts
+// sharing a `date`) still order by version rather than falling back to glob order.
+function versionRank(url: string): number {
+  const m = url.match(/nub-(\d+)-(\d+)-(\d+)/);
+  if (!m) return 0;
+  const [, major, minor, patch] = m;
+  return Number(major) * 1_000_000 + Number(minor) * 1_000 + Number(patch);
+}
+
 export default function BlogIndex() {
   // `date` accepts an ISO 8601 UTC timestamp (e.g. 2026-07-07T12:00:00Z) to
-  // order same-day posts; a date-only value parses as UTC midnight. The URL
-  // tiebreak only guards against nondeterministic file order on genuine ties.
-  const posts = [...blog.getPages()].sort(
-    (a, b) =>
+  // order same-day posts; a date-only value parses as UTC midnight. Same-day
+  // release posts tie-break by version; the URL compare is a last-resort guard
+  // against nondeterministic file order.
+  const posts = [...blog.getPages()].sort((a, b) => {
+    const byDate =
       new Date(b.data.date ?? 0).getTime() -
-        new Date(a.data.date ?? 0).getTime() || b.url.localeCompare(a.url),
-  );
+      new Date(a.data.date ?? 0).getTime();
+    if (byDate !== 0) return byDate;
+    const byVersion = versionRank(b.url) - versionRank(a.url);
+    return byVersion !== 0 ? byVersion : b.url.localeCompare(a.url);
+  });
 
   return (
     <div className="mx-auto max-w-3xl px-6 py-24">

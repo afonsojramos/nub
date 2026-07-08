@@ -9,7 +9,7 @@ else
   CARGO_FLAGS =
 endif
 
-.PHONY: build addon addon-fast install-dev uninstall-dev test test-node-matrix clean npm-build npm-publish npm-publish-dry
+.PHONY: build addon addon-fast install-dev uninstall-dev test test-node-matrix bench clean npm-build npm-publish npm-publish-dry
 
 build: addon
 	$(CARGO) build $(CARGO_FLAGS)
@@ -75,6 +75,12 @@ test:
 # downloads each Node under ~/.cache/nub-test-node. See the script header.
 test-node-matrix:
 	@bash wiki/scripts/test-node-matrix.sh
+
+# Warm-install benchmark table (nub vs bun/pnpm/npm). The script's staleness guard
+# builds a current release binary if target/release/nub is missing or stale, so
+# `make bench` is one command = build-if-needed + run. Pass args: make bench ARGS="--fixture t3 --runs 12"
+bench:
+	@bash tests/bench/install/run-4way.sh $(ARGS)
 
 clean:
 	$(CARGO) clean

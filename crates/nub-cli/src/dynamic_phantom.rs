@@ -41,7 +41,7 @@
 use std::path::{Path, PathBuf};
 
 use aube_store::{PackageIndex, index_content_fingerprint};
-use nub_phantom_scan::scan_index;
+use nub_phantom_scan::{ScanResult, scan_index};
 use rayon::prelude::*;
 
 /// Whether dynamic phantom detection + ancestor-closure eject is armed.
@@ -154,42 +154,99 @@ fn scan_and_cache(dir: &Path, index: &PackageIndex) {
     if sidecar.exists() {
         return;
     }
-    // The versioned subdir (`sidecar`'s parent) is where both the temp and the
-    // final sidecar live, so the atomic rename stays within one directory.
-    let Some(subdir) = sidecar.parent() else {
-        return;
-    };
+    if let Some(result) = scan_of_index(index) {
+        write_sidecar_atomic(&sidecar, &fingerprint, &result);
+    }
+}
 
+/// Read a package's cached phantom verdict, or SCAN it on-demand (and cache the
+/// result) when no sidecar exists yet. The link-time CONSUMER
+/// ([`crate::pm_engine::phantom_closure`]) calls this so its eject decision is
+/// correct REGARDLESS of whether a sidecar was pre-written.
+///
+/// Why the on-demand scan is load-bearing (the warm-cache-first-install gap):
+/// the two sidecar PRODUCERS both miss a real case. The extract hook writes a
+/// sidecar only on a genuine tarball FETCH, and [`backfill_from_lockfile`] reads
+/// the PRE-EXISTING lockfile — so a package WARM in the CAS with no sidecar
+/// (GC'd, or cached by a pre-eject-default nub) on the FIRST install/add of a
+/// project (no lockfile yet, warm reuse ⇒ no fetch) reaches link with no sidecar.
+/// Treating that as "no eject" left the package symlinked to the shared store and
+/// its undeclared phantom 404'd (`nuxt prepare` → `Cannot find package 'scule'`).
+/// Scanning here at the link-time decision point — where the resolved graph and
+/// the loaded CAS index are both in hand — closes it for every path at once
+/// (install/add/update, first or Nth, GC'd or pre-eject-default cache).
+///
+/// Best-effort like the producers: a torn/corrupt sidecar or a scan failure
+/// degrades to "no eject", never a crash or a false break. The write-on-scan
+/// reuses [`scan_and_cache`]'s atomic publish, so a subsequent install hits the
+/// warm sidecar (the scan cost is paid once per content-fingerprint).
+pub(crate) fn cached_or_scan_verdict(dir: &Path, index: &PackageIndex) -> Option<ScanResult> {
+    let fingerprint = index_content_fingerprint(index);
+    let sidecar = sidecar_path(dir, &fingerprint);
+    if let Ok(bytes) = std::fs::read(&sidecar)
+        && let Ok(result) = serde_json::from_slice::<ScanResult>(&bytes)
+    {
+        return Some(result);
+    }
+    // No (or unreadable) sidecar → scan the already-loaded index now, cache it,
+    // and use the verdict for this install's eject decision.
+    let result = scan_of_index(index)?;
+    write_sidecar_atomic(&sidecar, &fingerprint, &result);
+    Some(result)
+}
+
+/// Scan a package's CAS-backed index into a [`ScanResult`], panic-guarded.
+///
+/// Panic-safety rests on the scan being panic-free BY CONSTRUCTION, not on the
+/// `catch_unwind`: oxc reports an unparseable/hostile file via a return flag (not
+/// an unwind), `serde`/`fs` return `Result`, and the graph walk is depth- and
+/// size-bounded — so a crafted tarball degrades to a scan miss, never a crash.
+/// The `catch_unwind` is a redundant guard that only engages under an unwinding
+/// profile (dev/test); the shipped release profile is `panic = "abort"`, where it
+/// is inert. Do not treat it as a production safety net.
+fn scan_of_index(index: &PackageIndex) -> Option<ScanResult> {
     // `StoredFile.store_path` is the absolute CAS blob; the scanner resolves the
     // reachable graph over the relpath key set and reads content from the blobs.
     let files: Vec<(String, PathBuf)> = index
         .iter()
         .map(|(rel, file)| (rel.clone(), file.store_path.clone()))
         .collect();
-    let Some(result) =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| scan_index(&files)))
-            .ok()
-            .flatten()
-    else {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| scan_index(&files)))
+        .ok()
+        .flatten()
+}
+
+/// Persist a scan verdict to its per-content sidecar via an atomic temp+rename.
+///
+/// The serialized JSON is the [`nub_phantom_scan::ScanResult`], read back by the
+/// CONSUMER ([`crate::pm_engine::phantom_closure`]) — which, being in nub-cli,
+/// deserializes it into the typed `ScanResult` (no cross-fork string coupling).
+/// Best-effort: any fs failure simply leaves no sidecar (a scan miss reads as "no
+/// eject"). Shared by the extract-hook/backfill producer ([`scan_and_cache`]) and
+/// the link-time [`cached_or_scan_verdict`] so both publish identically.
+fn write_sidecar_atomic(sidecar: &Path, fingerprint: &str, result: &ScanResult) {
+    // The versioned subdir (`sidecar`'s parent) is where both the temp and the
+    // final sidecar live, so the atomic rename stays within one directory.
+    let Some(subdir) = sidecar.parent() else {
         return;
     };
-    if let Ok(bytes) = serde_json::to_vec(&result) {
-        let _ = std::fs::create_dir_all(subdir);
-        // Atomic publish: write a per-call-unique temp then rename, so a
-        // concurrent installer's linker never observes a half-written sidecar.
-        // (The reader already degrades a torn read to "no eject" and self-heals,
-        // but rename closes the window.) The temp name carries the pid AND a
-        // process-wide sequence: two rayon tasks scanning the SAME content
-        // fingerprint — an npm-alias and its real package share one CAS index, so
-        // the backfill can enqueue both — must not write the same temp path.
-        // Concurrent renames of the same content to the same target are
-        // last-writer-wins and byte-identical.
-        static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let tmp = subdir.join(format!("{fingerprint}.{}.{seq}.tmp", std::process::id()));
-        if std::fs::write(&tmp, &bytes).is_ok() && std::fs::rename(&tmp, &sidecar).is_err() {
-            let _ = std::fs::remove_file(&tmp);
-        }
+    let Ok(bytes) = serde_json::to_vec(result) else {
+        return;
+    };
+    let _ = std::fs::create_dir_all(subdir);
+    // Atomic publish: write a per-call-unique temp then rename, so a concurrent
+    // installer's linker never observes a half-written sidecar. (The reader
+    // already degrades a torn read to "no eject" and self-heals, but rename
+    // closes the window.) The temp name carries the pid AND a process-wide
+    // sequence: two rayon tasks scanning the SAME content fingerprint — an
+    // npm-alias and its real package share one CAS index, so the backfill can
+    // enqueue both — must not write the same temp path. Concurrent renames of the
+    // same content to the same target are last-writer-wins and byte-identical.
+    static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = subdir.join(format!("{fingerprint}.{}.{seq}.tmp", std::process::id()));
+    if std::fs::write(&tmp, &bytes).is_ok() && std::fs::rename(&tmp, sidecar).is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
 }
 
@@ -379,5 +436,77 @@ mod tests {
         for off in [Some("1"), Some("true"), Some("YES"), Some(" on ")] {
             assert!(eject_disabled(off), "internal seam disables for {off:?}");
         }
+    }
+
+    /// The warm-cache-first-install fix: the link-time consumer must SCAN a
+    /// package on-demand when its sidecar is missing (and cache the result),
+    /// rather than treat a missing sidecar as "no eject". Before the fix a
+    /// warm-cached phantom package with no sidecar (GC'd / pre-eject-default
+    /// cache) on a first install/add stayed symlinked and its phantom 404'd
+    /// (`nuxt prepare` → `Cannot find package 'scule'`). Exercises the real
+    /// store-IO path: a CAS `PackageIndex` built from a package that statically
+    /// imports an UNDECLARED dependency.
+    #[test]
+    fn cached_or_scan_verdict_scans_on_missing_sidecar_then_serves_cache() {
+        use aube_store::Store;
+        let base = std::env::temp_dir().join(format!(
+            "nub-cached-verdict-{}-{}",
+            std::process::id(),
+            // per-call unique so parallel tests don't share the fixture
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        let pkg = base.join("pkg");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(
+            pkg.join("package.json"),
+            r#"{"name":"demo","main":"index.js","dependencies":{"declared":"1"}}"#,
+        )
+        .unwrap();
+        // Reachable main-graph code: a declared dep + an UNDECLARED phantom.
+        std::fs::write(
+            pkg.join("index.js"),
+            "import 'undeclared-phantom'; const d = require('declared');",
+        )
+        .unwrap();
+
+        let store = Store::at(base.join("store/files"));
+        let index = store.import_directory(&pkg).unwrap();
+        let sidecar_dir = base.join("phantom");
+        let sidecar = sidecar_path(&sidecar_dir, &index_content_fingerprint(&index));
+
+        // No sidecar yet — the exact gap: extract hook (no fetch) + backfill (no
+        // lockfile) both missed it. The consumer must scan on-demand.
+        assert!(!sidecar.exists(), "precondition: no sidecar written yet");
+        let v =
+            cached_or_scan_verdict(&sidecar_dir, &index).expect("scan-on-miss yields a verdict");
+        assert!(
+            v.has_unguarded_phantom,
+            "the undeclared import must be flagged on the scan-on-miss path"
+        );
+        assert!(
+            v.targets.iter().any(|t| t.name == "undeclared-phantom"),
+            "the phantom target is recorded: {:?}",
+            v.targets
+        );
+        assert!(
+            sidecar.exists(),
+            "the on-demand scan is cached for the next warm hit"
+        );
+
+        // The second call SERVES THE CACHE, not a rescan — proven by destroying the
+        // CAS blobs a rescan would read; the cached sidecar read must still return
+        // the verdict (the fingerprint is a pure function of the in-memory index).
+        let _ = std::fs::remove_dir_all(base.join("store"));
+        let v2 = cached_or_scan_verdict(&sidecar_dir, &index).expect("cached verdict served");
+        assert!(
+            v2.has_unguarded_phantom && v2.targets.iter().any(|t| t.name == "undeclared-phantom"),
+            "a warm sidecar hit returns the same verdict without rescanning"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

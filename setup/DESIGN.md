@@ -16,7 +16,7 @@ The central fact that reshapes everything: **nub already does jobs (1) and (3) i
 | Provisioned Node toolchains: `<cache>/node/<version>/` (dir name IS the version) | `discovery.rs:817`; `wiki/commands/node-versions.md:33` |
 | PM engine cache (packuments, git-clone, node-gyp): `$XDG_CACHE_HOME/nub/pm` | `pm_engine/identity.rs:60-65` (`cache_namespace="nub/pm"`) |
 | Global CAS store: `$XDG_DATA_HOME/nub/store/v1` else `~/.local/share/nub/store/v1` | `identity.rs:66-68`, `mod.rs:1427` (`data_namespace="nub"`, `storeDir`) |
-| Per-project virtual store: `node_modules/.nub` | `mod.rs:1422` (`virtualStoreDir`) |
+| Per-project virtual store: `node_modules/.store` | `mod.rs` `PROJECT_VIRTUAL_STORE_LEAF` → `nub_setting_defaults` (`virtualStoreDir`) |
 | Bare `nub node install` provisions the project pin (manual form of the implicit path) | `node-versions.md:33` |
 | `nub <file>` / `nub install` auto-provision the pinned Node if absent | `node-versions.md:15,65` |
 | Node-version files read: `.node-version` (precedence #1), `.nvmrc`, `package.json` `engines.node`/`volta`/`packageManager` | `node-versions.md:44`, `discovery.rs:123` |
@@ -82,7 +82,7 @@ $XDG_CACHE_HOME/nub/pm           # packument cache, git-clone cache, node-gyp to
 $XDG_CACHE_HOME/nub/node         # provisioned Node toolchains (else ~/.cache/nub/node)
 ```
 
-Do NOT cache `node_modules/.nub` (the per-project virtual store) — it's reconstructed from the CAS store on each install and is cheap to relink; caching it fights nub's own reflink/relink path.
+Do NOT cache `node_modules/.store` (the per-project virtual store) — it's reconstructed from the CAS store on each install and is cheap to relink; caching it fights nub's own reflink/relink path.
 
 > **Correction (2026-06-16 verification pass):** the PM packument cache may NOT land at `$XDG_CACHE_HOME/nub/pm`. `store_config_family.rs:16-19` documents a KNOWN GAP — `cacheDir` can't ride the embedder-defaults tier at the pinned aube API, so the engine's `cache` operates on `<XDG_CACHE_HOME>/aube/…`. The `nub/pm` namespace is *configured* but the packument cache specifically escapes it. The load-bearing cache layers are the **store** (`nub store path`, `$XDG_DATA_HOME/nub/store/v1`) and the **Node toolchain** (`<cache>/node`) — derive both at runtime, never hardcode. Treat the PM-cache dir as best-effort (packuments are small + re-fetchable; a wrong path is a cheap miss, not breakage), and resolve the `nub/pm`-vs-`aube/` ambiguity (or drop that cache line) before flipping `cache` default to `true`.
 
@@ -250,7 +250,7 @@ Recommended: a `v0` branch (or lightweight tag) the release workflow advances to
 3. **Accept and ignore `token` / `check-latest` / `architecture` / `mirror` / `mirror-token` in v1** (setup-node compatibility).
 4. **`cache` default** (HQ2) — `false` (opt-in, pnpm-like) vs `true` (aggressive, setup-node-like). **Recommend: `false` for v1, flip after the smoke matrix proves the paths.**
 5. **`cache` is a boolean, not a pm-name enum** (HQ2) — confirm nub's single-store model means we diverge from `setup-node`'s `cache: npm|yarn|pnpm`. **Recommend: boolean.**
-6. **Cache the three dirs** (`store/v1`, `pm`, `node`), NOT `node_modules/.nub`; key on lockfile + node-version with the `restore-keys` ladder (HQ2). **Recommend: as specified.**
+6. **Cache the three dirs** (`store/v1`, `pm`, `node`), NOT `node_modules/.store`; key on lockfile + node-version with the `restore-keys` ladder (HQ2). **Recommend: as specified.**
 7. **Reuse `NODE_AUTH_TOKEN`** (not `NUB_AUTH_TOKEN`) for the `.npmrc` auth token (HQ3). **Recommend: reuse — ecosystem convention, brand-clean, drop-in.**
 8. **Emit `node-version` output unconditionally** (extra `nub node which` per run) vs only when provisioning happened (HQ4). **Recommend: unconditional — cheap, preserves contract.**
 9. **Create + maintain a floating `v0` ref** separate from `v0.0.x` (release-process, but blocks adoption). **Recommend: do it before promoting the action.**

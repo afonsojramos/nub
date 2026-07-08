@@ -53,6 +53,24 @@ fn run_install(dir: &Path, args: &[&str]) -> (String, String, i32) {
     )
 }
 
+/// Like [`run_install`], but with `CI=true` in the environment so the
+/// install hits nub's CI-aware frozen-mode auto-default.
+fn run_install_ci(dir: &Path, args: &[&str]) -> (String, String, i32) {
+    let out = Command::new(nub_binary())
+        .args(args)
+        .current_dir(dir)
+        .env("CI", "true")
+        .env("XDG_DATA_HOME", pm_tmpdir("xdg-data"))
+        .env("XDG_CACHE_HOME", pm_tmpdir("xdg-cache"))
+        .output()
+        .expect("failed to spawn nub");
+    (
+        String::from_utf8_lossy(&out.stdout).to_string(),
+        String::from_utf8_lossy(&out.stderr).to_string(),
+        out.status.code().unwrap_or(-1),
+    )
+}
+
 /// Offline guard for the `#[ignore]` network tests: true when the registry
 /// answers a TCP connect within 3s.
 fn registry_reachable() -> bool {
@@ -68,7 +86,7 @@ fn registry_reachable() -> bool {
 
 /// Truly-fresh project (no lockfile, no PM declaration, no pnpm-named file):
 /// nub claims identity via the neutral lockfile only. The engine resolves, links
-/// the isolated (pnpm-style) layout under `node_modules/.nub`, and writes nub's
+/// the isolated (pnpm-style) layout under `node_modules/.store`, and writes nub's
 /// neutral `nub.lock` — the quiet identity marker. It must NOT auto-stamp
 /// `packageManager` / `devEngines` into `package.json`: that exclusivity claim
 /// is reserved for the explicit `nub pm use nub` command.
@@ -97,7 +115,7 @@ fn install_truly_fresh_project_claims_nub_identity() {
     );
 
     // Isolated layout: the top-level entry is a symlink into the virtual
-    // store, which nub relocates to `node_modules/.nub`.
+    // store, which nub relocates to `node_modules/.store`.
     let dep = dir.join("node_modules/is-positive");
     assert!(
         dep.join("package.json").is_file(),
@@ -105,17 +123,24 @@ fn install_truly_fresh_project_claims_nub_identity() {
     );
     assert!(
         dep.symlink_metadata().unwrap().file_type().is_symlink(),
-        "no-lockfile projects default to the isolated layout (symlink into .nub)"
+        "no-lockfile projects default to the isolated layout (symlink into .store)"
     );
     let target = std::fs::read_link(&dep).unwrap();
     assert!(
-        target.to_string_lossy().contains(".nub/"),
-        "the virtual store must live under node_modules/.nub, got: {}",
+        target.to_string_lossy().contains(".store/"),
+        "the virtual store must live under node_modules/.store, got: {}",
         target.display()
     );
     assert!(
         !dir.join("node_modules/.aube").exists(),
         "no .aube directory may materialize"
+    );
+
+    // A patch-free install writes no applied-patches sidecar (an empty `{}`
+    // manifest is information-free clutter; a missing file reads back the same).
+    assert!(
+        !dir.join("node_modules/.nub-applied-patches.json").exists(),
+        "a patch-free install must not write an empty applied-patches sidecar"
     );
 
     assert!(
@@ -351,12 +376,12 @@ fn install_with_package_lock_isolates_and_preserves_the_npm_lockfile() {
         "is-positive must be installed: stderr: {stderr}"
     );
     // npm/yarn/bun incumbents now default to the isolated layout (the GVS flip):
-    // a declared dep is a top-level SYMLINK into the `.nub` virtual store, not a
+    // a declared dep is a top-level SYMLINK into the `.store` virtual store, not a
     // real directory. (GVS engagement itself is off-CI-gated, but the isolated
     // symlink layout holds regardless.)
     assert!(
         dep.symlink_metadata().unwrap().file_type().is_symlink(),
-        "package-lock projects default to the isolated layout (a symlink into .nub)"
+        "package-lock projects default to the isolated layout (a symlink into .store)"
     );
     assert!(
         dir.join("package-lock.json").is_file(),
@@ -493,6 +518,73 @@ fn install_refuses_to_mutate_a_drifted_yarn_lock() {
     assert!(
         !dir.join("aube-lock.yaml").exists(),
         "the gate must not leave an aube-lock.yaml behind"
+    );
+}
+
+/// pnpm parity (`opts.ci && !opts.lockfileOnly`): under `CI=true` nub
+/// auto-selects frozen mode for a plain install, but a `--lockfile-only`
+/// run is exempt — it exists to regenerate the lock, so it re-resolves a
+/// drifted manifest and rewrites the lock instead of erroring. Regression
+/// for the CI-frozen-default swallowing `--lockfile-only`. The contrast
+/// arm proves the auto-default is unchanged for a non-lockfile-only run.
+#[test]
+#[ignore = "network: resolves is-positive@{1.0.0,3.1.0} from the npm registry"]
+fn ci_lockfile_only_regenerates_a_drifted_lock() {
+    if !registry_reachable() {
+        eprintln!("skipping: registry.npmjs.org unreachable");
+        return;
+    }
+
+    // Seed a project whose nub.lock pins is-positive@1.0.0, then bump the
+    // manifest to 3.1.0 so the lock is drifted (stale) relative to it.
+    let seed = |tag: &str| -> PathBuf {
+        let dir = pm_tmpdir(tag);
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"name":"drift","version":"1.0.0","dependencies":{"is-positive":"1.0.0"}}"#,
+        )
+        .unwrap();
+        let (out, err, code) = run_install(&dir, &["install"]);
+        assert_eq!(code, 0, "seed install must succeed: {out}\n{err}");
+        assert!(
+            dir.join("nub.lock").is_file(),
+            "seed writes nub.lock: {err}"
+        );
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"name":"drift","version":"1.0.0","dependencies":{"is-positive":"3.1.0"}}"#,
+        )
+        .unwrap();
+        dir
+    };
+
+    // `--lockfile-only` under CI: exempt from the frozen auto-default, so
+    // it re-resolves the bumped 3.1.0 spec and rewrites the lock, rc=0.
+    let dir = seed("lockonly");
+    let (out, err, code) = run_install_ci(&dir, &["install", "--lockfile-only"]);
+    assert_eq!(
+        code, 0,
+        "CI=true install --lockfile-only must regenerate a drifted lock, not error: {out}\n{err}"
+    );
+    let lock = std::fs::read_to_string(dir.join("nub.lock")).unwrap();
+    assert!(
+        lock.contains("3.1.0"),
+        "the lock must be re-resolved to the bumped 3.1.0 spec: {lock}"
+    );
+
+    // Contrast: a plain install under CI stays frozen and rejects the same
+    // drift — the auto-default is unchanged for non-lockfile-only runs.
+    let dir2 = seed("plain");
+    let (_out2, err2, code2) = run_install_ci(&dir2, &["install"]);
+    assert_ne!(
+        code2, 0,
+        "CI=true plain install must still auto-freeze and reject a drifted lock: {err2}"
+    );
+    // Pin the failure to the frozen-drift path (not an unrelated network/store
+    // error), so the contrast can't pass vacuously.
+    assert!(
+        err2.contains("ERR_NUB_OUTDATED_LOCKFILE"),
+        "the rejection must be the frozen outdated-lockfile error: {err2}"
     );
 }
 
@@ -820,9 +912,9 @@ fn wildcard_peer_binds_resolved_major_not_registry_highest() {
 
     // The isolated store keys every resolved version as `@babel+core@<ver>`;
     // @babel/core declares no peers so its own dirs carry no peer suffix.
-    let store = dir.join("node_modules/.nub");
+    let store = dir.join("node_modules/.store");
     let babel_majors: Vec<String> = std::fs::read_dir(&store)
-        .expect("virtual store must exist under node_modules/.nub")
+        .expect("virtual store must exist under node_modules/.store")
         .filter_map(|e| e.ok())
         .filter_map(|e| e.file_name().into_string().ok())
         .filter_map(|n| n.strip_prefix("@babel+core@").map(str::to_string))

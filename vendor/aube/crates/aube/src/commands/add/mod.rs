@@ -92,6 +92,18 @@ pub struct AddArgs {
     /// Skip lifecycle scripts (no-op; aube already skips by default).
     #[arg(long, hide = true)]
     pub ignore_scripts: bool,
+    /// Resolve and write the lockfile (and `package.json`), but skip
+    /// linking `node_modules`.
+    ///
+    /// The manifest still gains the new dependency and the lockfile is
+    /// updated to match; only the on-disk `node_modules` link pass is
+    /// skipped. Mirrors `pnpm add --lockfile-only` — handy for tooling
+    /// (Dependabot and friends) that only needs the lockfile refreshed.
+    // Declared here (between `--ignore-scripts` and `--no-save`) to keep
+    // the default-heading long-only flags alphabetically ordered, which
+    // `cli_ordering_tests::test_cli_ordering` enforces.
+    #[arg(long, conflicts_with = "no_save")]
+    pub lockfile_only: bool,
     /// Install without persisting the dependency to `package.json`.
     ///
     /// Snapshots `package.json` and the lockfile, links the named
@@ -211,6 +223,7 @@ pub async fn run(
         ignore_scripts: _,
         no_save,
         ignore_workspace_root_check,
+        lockfile_only,
         save_catalog,
         save_catalog_name,
         allow_build,
@@ -400,6 +413,9 @@ pub async fn run(
     let mut install_opts =
         install::InstallOptions::with_mode(super::chained_frozen_mode(install::FrozenMode::Fix));
     install_opts.osv_transitive_check = true;
+    // `--lockfile-only`: the resolver still runs and the lockfile +
+    // manifest are written, but the linker never touches `node_modules`.
+    install_opts.lockfile_only = lockfile_only;
     let pipeline_result: miette::Result<()> = install::run(install_opts).await;
 
     // 5. Under `--no-save`, restore the snapshotted `package.json` and

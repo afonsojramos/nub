@@ -201,7 +201,7 @@ pub(crate) fn load_global_config_yaml() -> std::collections::BTreeMap<String, ya
 /// to the given default when none was set on the command line.
 pub(crate) fn chained_frozen_mode(default: install::FrozenMode) -> install::FrozenMode {
     match global_frozen_override() {
-        Some(ovr) => install::FrozenMode::from_override(Some(ovr), None),
+        Some(ovr) => install::FrozenMode::from_override(Some(ovr), None, false),
         None => default,
     }
 }
@@ -634,7 +634,7 @@ pub(crate) fn resolve_virtual_store_dir(
     });
     // An embedder-supplied default (keyed by canonical setting name) counts
     // as explicit too — without this check a `virtualStoreDir` registered via
-    // `set_embedder_defaults` (e.g. a host that wants `node_modules/.nub`)
+    // `set_embedder_defaults` (e.g. a host that wants `node_modules/.store`)
     // would be silently discarded in favor of the `<modulesDir>/.aube`
     // derivation, since `resolved::virtual_store_dir` *does* honor the
     // embedder-defaults source via the ctx. Standalone aube registers no

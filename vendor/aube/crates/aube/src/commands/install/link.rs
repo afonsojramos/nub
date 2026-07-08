@@ -169,12 +169,13 @@ pub(super) fn run_link_phase(input: LinkPhaseInput<'_>) -> miette::Result<LinkPh
     let disk_materialize_packages =
         aube_settings::resolved::disk_materialize_packages(settings_ctx);
     // Embedder-pluggable expansion (selective-subtree materialization): a host
-    // (nub) installs a hook that expands the flat seed into a graph-aware plan —
-    // rung 1 grows each seed to its ancestor-closure so a transitively-consumed
-    // package materializes with its importers (no store-resident-consumer split);
-    // rung 2 adds per-package undeclared-phantom-target hoists. Standalone aube
-    // installs no hook, so the plan is the seed verbatim with no hoist —
-    // byte-for-byte the prior behavior.
+    // (nub) installs a hook that expands the flat seed into a graph-aware plan,
+    // growing each seed to its ancestor-closure so a transitively-consumed package
+    // materializes with its importers (no store-resident-consumer split).
+    // Undeclared imports an ejected package makes are then resolved by the linker's
+    // collective project-local hidden hoist tree over the ejected set. Standalone
+    // aube installs no hook, so the plan is the seed verbatim — byte-for-byte the
+    // prior behavior.
     let dm_plan = aube_linker::expand_disk_materialize(graph_for_link, &disk_materialize_packages);
 
     let mut linker = aube_linker::Linker::new(store, strategy)
@@ -201,8 +202,7 @@ pub(super) fn run_link_phase(input: LinkPhaseInput<'_>) -> miette::Result<LinkPh
             cwd,
             graph_for_link.packages.values(),
         ))
-        .with_disk_materialize(&dm_plan.names)
-        .with_phantom_hoist(dm_plan.hoist_within);
+        .with_disk_materialize(&dm_plan.names);
     if let Some(enabled) = use_global_virtual_store_override {
         linker = linker.with_use_global_virtual_store(enabled);
     }

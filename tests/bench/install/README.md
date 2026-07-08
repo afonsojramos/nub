@@ -10,6 +10,8 @@ cargo build --release -p nub-cli
 bash tests/bench/install/run-warm-gvs.sh
 ```
 
+For a single nub/bun/pnpm/npm warm-install table on one fixture (default `tanstack-start`): `bash tests/bench/install/run-4way.sh`.
+
 For the older fixture matrix:
 
 ```bash
@@ -19,7 +21,7 @@ bash tests/bench/install/run.sh --materialized
 
 ## Warm install — GVS eligibility
 
-`nub install`'s warm-install speed comes from its global virtual store. `node_modules` stays project-local, but with GVS on the inner package under `.nub/` is hardlinked from a shared store instead of materialized per project. A warm reinstall becomes a relink against an already-materialized store.
+`nub install`'s warm-install speed comes from its global virtual store. `node_modules` stays project-local, but with GVS on the inner package under `.store/` is hardlinked from a shared store instead of materialized per project. A warm reinstall becomes a relink against an already-materialized store.
 
 The main harness exercises both sides of the compatibility split:
 
@@ -67,13 +69,14 @@ Report median and σ. σ-overlap between tools is a tie, not a win.
 
 ## Fixtures
 
-Fixtures live under `tests/bench/install/fixtures/`. Lockfiles are committed so each tool resolves consistently:
+Fixtures live under `tests/bench/install/fixtures/`. Lockfiles are committed so each tool resolves consistently, and each harness strips the foreign lockfiles from a tool's isolated workdir so every tool installs from its OWN lockfile:
 
-- `pnpm-lock.yaml` for Nub and pnpm
+- `nub.lock` for Nub — its native lockfile, so the nub leg exercises nub's own install path, not the `pnpm-lock.yaml` compat-read
+- `pnpm-lock.yaml` for pnpm
 - `bun.lock` for Bun
 - `package-lock.json` for npm where supported
 
-Regenerate pnpm and Bun lockfiles:
+Regenerate the nub, pnpm, and Bun lockfiles:
 
 ```bash
 bash tests/bench/install/gen-fixtures.sh

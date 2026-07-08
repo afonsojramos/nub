@@ -178,7 +178,7 @@ A project is Nub's own in three cases: it declares Nub through `nub pm use nub`,
 - **Lockfile:** `nub.lock` — the pnpm v9 schema byte-for-byte, under Nub's own basename
 - **Package fields:** `workspaces`, `overrides`, `resolutions`, `patchedDependencies`, `allowBuilds`, `engines.node`, `scripts`
 - **Config and env:** the `.npmrc` cascade, `npm_config_*`, neutral env (`CI`, proxies), plus `NUB_CACHE_DIR`, `NUB_CONCURRENCY`, `NUB_PRIMER_TTL`
-- **Install state:** `node_modules/.nub/`, `.nub-state`, and the global store under Nub's own directories
+- **Install state:** `node_modules/.store/`, `.nub-state`, and the global store under Nub's own directories
 
 A fresh `nub install` records Nub as the manager with a non-locking range — `devEngines.packageManager` set to `{ name: "nub", version: "^<version>", onFail: "warn" }`, never an exact `packageManager` pin. Tools that read `devEngines` by name see the signal, and the caret is a floor, so upgrading Nub just works. To freeze the project at an exact Nub version — the corepack-visible hard pin — opt in with `nub pm use nub@<version>`; the bare `nub pm use nub` writes only the range.
 
@@ -288,6 +288,8 @@ nub add -w <pkg>               # write to the workspace root
 nub add --save-catalog <pkg>   # add into the workspace catalog
 nub add --allow-build=<pkg>    # pre-approve its build scripts for this install
 nub add --no-save <pkg>        # link without persisting to package.json
+nub add <pkg>@<version>        # pin an exact version
+nub add <pkg>@<version> --lockfile-only  # refresh the lockfile, skip node_modules
 ```
 
 ### `nub remove`
@@ -308,6 +310,7 @@ Re-resolves dependencies within their ranges; `--latest` rewrites the `package.j
 ```bash
 nub update                 # up — refresh all deps within range
 nub update <pkg>           # update a single dependency
+nub update <pkg>@<version> # pin one dep to a version, keeping its ^/~ operator
 nub update -L              # --latest: move past the manifest range
 nub update -E -L           # pin the rewritten range to an exact version
 nub update -D              # devDependencies only
@@ -444,7 +447,7 @@ Files materialize into `node_modules` by reflink (APFS/btrfs), hardlink (ext4), 
 
 ### Virtual store
 
-The default `node_modules` layout is **isolated**: direct dependencies sit at the top level, transitive packages link into a per-project virtual store, and phantom dependencies fail instead of resolving by accident. Nub's virtual store is `node_modules/.nub/` (pnpm uses `node_modules/.pnpm/`) — same shape, not byte-shared, so alternating tools relinks the tree.
+The default `node_modules` layout is **isolated**: direct dependencies sit at the top level, transitive packages link into a per-project virtual store, and phantom dependencies fail instead of resolving by accident. Nub's virtual store is `node_modules/.store/` (pnpm uses `node_modules/.pnpm/`) — same shape, not byte-shared, so alternating tools relinks the tree.
 
 Every incumbent defaults to **isolated** — npm, Yarn, and Bun included, alongside pnpm and Nub-identity projects. A project that relies on phantom (undeclared) dependencies opts into the flat, npm-style layout with one line in `.npmrc`:
 
@@ -468,13 +471,7 @@ Either layout resolves the same packages — including type packages (`@types/*`
 
 A few packages statically import a backend you pick at runtime — `@hookform/resolvers/zod` imports the `zod` your app installs, without declaring it. Under the shared store the adapter's real path sits outside the project, so Node's directory walk can't reach that backend and the import throws. Nub materializes those adapters into the project automatically so they resolve, while the rest of the tree keeps sharing.
 
-The same treatment covers packages that write generated code back into their own install directory. Prisma's postinstall runs `prisma generate`, which writes the generated client next to `@prisma/client` on disk — and under the shared store that spot is machine-global, keyed by version rather than by project or schema. Two projects with different Prisma schemas would otherwise share one generated client and silently overwrite each other's models. Nub materializes `@prisma/client` into each project so `generate` stays project-local, matching pnpm.
-
-Add your own with one line in `.npmrc`:
-
-```ini
-diskMaterializePackages[]=my-adapter
-```
+The same treatment covers packages that write generated code back into their own install directory. Prisma's postinstall runs `prisma generate`, which writes the generated client next to `@prisma/client` on disk — and under the shared store that spot is machine-global, keyed by version rather than by project or schema. Two projects with different Prisma schemas would otherwise share one generated client and silently overwrite each other's models. Nub materializes `@prisma/client` into each project so `generate` stays project-local, matching pnpm. This detection is automatic — it scans each package's real published code, so there is no list to maintain.
 
 A bundler that resolves modules by their real path — Metro (bare React Native), Next.js, Parcel — only crawls the project directory, so it can't see the shared store. Nub gives those projects a self-contained, project-local store automatically. Extend the list in `.npmrc`:
 

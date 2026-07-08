@@ -63,9 +63,23 @@ pub(crate) fn write_applied_patches(
     map: &BTreeMap<String, String>,
 ) -> std::io::Result<()> {
     let path = nm_dir.join(applied_patches_sidecar_name());
-    let out = serde_json::to_string(map)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    aube_util::fs_atomic::atomic_write(&path, out.as_bytes())
+    // No patches applied ⇒ no sidecar: an empty `{}` manifest carries no
+    // information (a missing file already reads back as the empty map in
+    // read_applied_patches, so wipe-on-change is unchanged), and writing it
+    // clutters every patch-free `node_modules` with a stray dotfile. Remove a
+    // stale non-empty sidecar too, so `patch-remove`'ing the last patch cleans
+    // up after itself. Best-effort unlink — a missing file is the success case.
+    if map.is_empty() {
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        }
+    } else {
+        let out = serde_json::to_string(map)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        aube_util::fs_atomic::atomic_write(&path, out.as_bytes())
+    }
 }
 
 /// Wipe `.aube/<dep_path>` for any package whose patch fingerprint
@@ -727,6 +741,34 @@ fn split_patch_sections(text: &str) -> Vec<PatchSection> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_patch_set_writes_no_sidecar_and_cleans_a_stale_one() {
+        // A patch-free install must not litter `node_modules` with an empty
+        // `{}` manifest — a missing file already reads back as the empty map,
+        // so the sidecar carries no information. And removing the last patch
+        // (non-empty → empty) must delete the now-stale sidecar.
+        let dir = tempfile::tempdir().unwrap();
+        let nm = dir.path();
+        let sidecar = nm.join(applied_patches_sidecar_name());
+
+        write_applied_patches(nm, &BTreeMap::new()).unwrap();
+        assert!(
+            !sidecar.exists(),
+            "empty patch set must not create the sidecar"
+        );
+
+        let one: BTreeMap<String, String> =
+            [("left-pad@1.0.0".to_string(), "deadbeef".to_string())].into();
+        write_applied_patches(nm, &one).unwrap();
+        assert!(sidecar.exists(), "a real patch set writes the sidecar");
+
+        write_applied_patches(nm, &BTreeMap::new()).unwrap();
+        assert!(
+            !sidecar.exists(),
+            "dropping the last patch must remove the stale sidecar"
+        );
+    }
 
     #[cfg(windows)]
     #[test]

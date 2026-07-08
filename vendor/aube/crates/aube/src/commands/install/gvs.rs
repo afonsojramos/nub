@@ -59,15 +59,16 @@ pub(super) fn planned_global_virtual_store(
         .unwrap_or_else(|| !env_snapshot.iter().any(|(k, _)| k == "CI"))
 }
 
-/// How each isolated-layout `.aube/<dep_path>` entry is materialized on disk.
+/// How the isolated-layout `.aube/<dep_path>` entries are materialized on disk —
+/// a flat three-valued decision.
 ///
 /// Makes the "hidden hoist tree inside the SHARED global store" state
 /// UNREPRESENTABLE (aube issue #6: a bare-name alias inside the shared store is
-/// cross-project-mutable, so a live shared store must never carry one). The
-/// hidden tree is a field only of [`Disk`](Materialization::Disk) — the
-/// project-local real-directory materialization; [`Symlink`](Materialization::Symlink),
-/// which points into the shared store, carries none by construction. This
-/// replaces the former loose `(effective_gvs, build_hidden_tree)` bool pair,
+/// cross-project-mutable, so a live shared store must never carry one): there is
+/// simply no `Symlink`-with-hidden-tree variant. Only the project-local disk
+/// materialization carries the hidden tree, split into two flat sibling variants
+/// (with / without) rather than the former `Disk { hidden_tree: bool }` nesting.
+/// This replaces the former loose `(effective_gvs, build_hidden_tree)` bool pair,
 /// whose `(true, true)` combination was a representable contradiction.
 ///
 /// The write METHOD ([`aube_linker::LinkStrategy`] = `package-import-method`)
@@ -75,15 +76,24 @@ pub(super) fn planned_global_virtual_store(
 /// already-orthogonal axes resolved independently — this type is only the
 /// symlink-vs-disk × hidden-tree decision the `gvs_over_default_hoist` +
 /// `hoist` + `enableGlobalVirtualStore` tangle used to fold into two bools.
+///
+/// (Orthogonal to this type, under GVS the linker still builds a COLLECTIVE
+/// project-local hidden hoist tree over the disk-materialized ejected SUBSET —
+/// see [`aube_linker::Linker::link_hidden_hoist`]. That tree is gated on the
+/// ejected set, not on this enum, and is #6-safe for the same project-local
+/// reason; the [`Symlink`](Self::Symlink) "no hidden tree" here is about the
+/// pnpm-parity whole-graph tree, which the shared store cannot carry.)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Materialization {
     /// Symlink into the shared global virtual store; files live machine-global.
-    /// A hidden hoist tree can't live in a shared store, so there is none.
+    /// The whole-graph hidden hoist tree can't live in a shared store, so there
+    /// is none of it under this variant.
     Symlink,
-    /// Project-local real directories (reflink/hardlink/copy from the CAS).
-    /// `hidden_tree` builds the pnpm-parity `node_modules/.<store>/node_modules/`
-    /// hidden hoist fallback.
-    Disk { hidden_tree: bool },
+    /// Project-local real directories (reflink/hardlink/copy from the CAS) WITH
+    /// the pnpm-parity `node_modules/.<store>/node_modules/` hidden hoist tree.
+    DiskWithHiddenTree,
+    /// Project-local real directories WITHOUT the hidden hoist tree.
+    DiskNoHiddenTree,
 }
 
 impl Materialization {
@@ -117,10 +127,10 @@ impl Materialization {
         };
         if isolated && planned_gvs && !hoist_vetoes_store {
             Self::Symlink
+        } else if resolved_hoist {
+            Self::DiskWithHiddenTree
         } else {
-            Self::Disk {
-                hidden_tree: resolved_hoist,
-            }
+            Self::DiskNoHiddenTree
         }
     }
 
@@ -130,10 +140,11 @@ impl Materialization {
         matches!(self, Self::Symlink)
     }
 
-    /// Whether the isolated linker builds the hidden hoist tree. Never true
-    /// under [`Symlink`](Self::Symlink) — the constraint that motivates the type.
+    /// Whether the isolated linker builds the pnpm-parity whole-graph hidden hoist
+    /// tree. Never true under [`Symlink`](Self::Symlink) — the constraint that
+    /// motivates the type.
     pub(super) fn build_hidden_tree(self) -> bool {
-        matches!(self, Self::Disk { hidden_tree: true })
+        matches!(self, Self::DiskWithHiddenTree)
     }
 }
 
@@ -330,7 +341,7 @@ mod tests {
         // per-project + hidden tree, even off-CI.
         assert_eq!(
             Materialization::resolve(true, true, true, Some(true), NodeLinker::Isolated),
-            Materialization::Disk { hidden_tree: true }
+            Materialization::DiskWithHiddenTree
         );
     }
 

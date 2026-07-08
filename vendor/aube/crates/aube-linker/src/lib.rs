@@ -265,20 +265,13 @@ pub struct Linker {
     /// Matched by exact name against each graph package. Empty for standalone
     /// callers and every existing test → the GVS pass is byte-for-byte
     /// unchanged.
+    /// Undeclared imports an ejected package makes are resolved by the collective
+    /// project-local hidden hoist tree the linker builds over this whole set under
+    /// GVS (see [`Linker::link_hidden_hoist`]) — each ejected package's realpath is
+    /// project-local, so Node's upward walk from inside it passes through
+    /// `.aube/node_modules/`, a blanket alias for every graph package. That
+    /// replaced the former per-importer phantom-target hoist.
     disk_materialize: std::collections::HashSet<String>,
-    /// Rung 2 of selective-subtree materialization: undeclared phantom targets
-    /// to HOIST-WITHIN a disk-materialized package's own `node_modules`, keyed
-    /// by the importer's dep_path → the target dep_paths. A transitively-phantom
-    /// package (`@nuxt/devtools` → the undeclared `unstorage`, `vue-router` →
-    /// the optional-peer-but-unlinked `@vue/compiler-sfc`) doesn't declare the
-    /// import, so once it's disk-materialized its own `node_modules` has no
-    /// sibling for it and Node's walk still 404s. Injecting the target as an
-    /// extra sibling (reusing the materialize sibling-wiring, so the target
-    /// resolves through its existing `.aube/<entry>`) makes the walk succeed.
-    /// The target must already be resolved in the graph (this is reachability,
-    /// not install). Empty for standalone callers and every existing test → the
-    /// materialize pass is byte-for-byte unchanged.
-    phantom_hoist: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 /// Strategy for linking files from the store to node_modules.

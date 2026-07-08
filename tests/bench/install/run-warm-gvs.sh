@@ -80,9 +80,12 @@ setup_workdir() {
   rm -rf "$workdir"
   cp -r "$FIXTURE_DIR/$fixture" "$workdir"
   rm -rf "$workdir/node_modules" 2>/dev/null || true
+  # nub installs from its NATIVE nub.lock, not the pnpm-lock.yaml compat-read — so
+  # strip every foreign lockfile from the nub leg (and nub.lock from the others).
   case "$tool" in
-    pnpm|nub) rm -f "$workdir/bun.lock" "$workdir/bun.lockb" "$workdir/package-lock.json" 2>/dev/null || true ;;
-    bun)      rm -f "$workdir/pnpm-lock.yaml" "$workdir/pnpm-workspace.yaml" "$workdir/package-lock.json" 2>/dev/null || true ;;
+    nub)  rm -f "$workdir/pnpm-lock.yaml" "$workdir/pnpm-workspace.yaml" "$workdir/bun.lock" "$workdir/bun.lockb" "$workdir/package-lock.json" 2>/dev/null || true ;;
+    pnpm) rm -f "$workdir/nub.lock" "$workdir/bun.lock" "$workdir/bun.lockb" "$workdir/package-lock.json" 2>/dev/null || true ;;
+    bun)  rm -f "$workdir/nub.lock" "$workdir/pnpm-lock.yaml" "$workdir/pnpm-workspace.yaml" "$workdir/package-lock.json" 2>/dev/null || true ;;
   esac
 }
 
@@ -127,11 +130,11 @@ run_warm() {
   env -u CI "$NUB" install --frozen-lockfile --cwd "$WD_NUB" 2>&1 | tail -6 || true
 
   # Report which linking path nub actually took. Both GVS-on and GVS-off use the
-  # node_modules/<pkg> -> .nub/<pkg>/node_modules/<pkg> symlink layout, so the
-  # top-level symlink is NOT the signal. The real signal is INSIDE .nub: with GVS
+  # node_modules/<pkg> -> .store/<pkg>/node_modules/<pkg> symlink layout, so the
+  # top-level symlink is NOT the signal. The real signal is INSIDE .store: with GVS
   # ON the inner package is HARDLINKED from the shared global virtual store
   # (nlink>=2); with GVS OFF it is materialized fresh per-project (nlink==1).
-  local inner="$WD_NUB/node_modules/.nub/lodash@4.18.1/node_modules/lodash/package.json"
+  local inner="$WD_NUB/node_modules/.store/lodash@4.18.1/node_modules/lodash/package.json"
   if [[ -f "$inner" ]]; then
     local nlink; nlink=$(stat -f '%l' "$inner" 2>/dev/null || stat -c '%h' "$inner" 2>/dev/null)
     if [[ "${nlink:-1}" -ge 2 ]]; then

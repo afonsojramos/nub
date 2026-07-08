@@ -87,7 +87,16 @@ impl FrozenMode {
     /// Resolve the user's flag combination to a single mode. If no CLI
     /// override is given, honor `preferFrozenLockfile` from the
     /// workspace config; otherwise fall back to the env-aware default.
-    pub fn from_override(cli: Option<FrozenOverride>, yaml_prefer_frozen: Option<bool>) -> Self {
+    ///
+    /// `lockfile_only` gates only the CI-auto-frozen default (see
+    /// [`Self::default_for_env`]); it is irrelevant when an explicit CLI
+    /// override or `preferFrozenLockfile` decides the mode, so callers
+    /// that always pass an override may pass `false`.
+    pub fn from_override(
+        cli: Option<FrozenOverride>,
+        yaml_prefer_frozen: Option<bool>,
+        lockfile_only: bool,
+    ) -> Self {
         match cli {
             Some(FrozenOverride::Frozen) => Self::Frozen,
             Some(FrozenOverride::No) => Self::No,
@@ -95,14 +104,19 @@ impl FrozenMode {
             None => match yaml_prefer_frozen {
                 Some(true) => Self::Prefer,
                 Some(false) => Self::No,
-                None => Self::default_for_env(),
+                None => Self::default_for_env(lockfile_only),
             },
         }
     }
 
     /// pnpm's default: `frozen-lockfile=true` in CI, `prefer-frozen-lockfile=true` otherwise.
-    fn default_for_env() -> Self {
-        if aube_util::env::is_ci() {
+    ///
+    /// A lockfile-only run is exempt from the CI-frozen default: it
+    /// exists to regenerate the lock, so rejecting manifest drift would
+    /// defeat its purpose. Mirrors pnpm's `opts.ci && !opts.lockfileOnly`
+    /// (installing/commands/src/install.ts).
+    fn default_for_env(lockfile_only: bool) -> Self {
+        if aube_util::env::is_ci() && !lockfile_only {
             Self::Frozen
         } else {
             Self::Prefer
@@ -116,19 +130,38 @@ mod tests {
 
     #[test]
     fn cli_frozen_beats_yaml() {
-        let m = FrozenMode::from_override(Some(FrozenOverride::Frozen), Some(false));
+        let m = FrozenMode::from_override(Some(FrozenOverride::Frozen), Some(false), false);
         assert!(matches!(m, FrozenMode::Frozen));
     }
 
     #[test]
     fn yaml_prefer_true_maps_to_prefer() {
-        let m = FrozenMode::from_override(None, Some(true));
+        let m = FrozenMode::from_override(None, Some(true), false);
         assert!(matches!(m, FrozenMode::Prefer));
     }
 
     #[test]
     fn yaml_prefer_false_maps_to_no() {
-        let m = FrozenMode::from_override(None, Some(false));
+        let m = FrozenMode::from_override(None, Some(false), false);
         assert!(matches!(m, FrozenMode::No));
+    }
+
+    // `default_for_env` reads the ambient `CI` env var live, so the
+    // false→Frozen branch is env-coupled and can't be pinned here without
+    // mutating a process global under the parallel runner. Assert only the
+    // env-independent invariant; the CI=true contrast is covered by the
+    // integration test that spawns the binary with a hermetic env.
+    #[test]
+    fn lockfile_only_never_ci_frozen() {
+        // pnpm's `opts.ci && !opts.lockfileOnly`: a lockfile-only run must
+        // never hard-select Frozen regardless of CI — it regenerates the lock.
+        assert!(matches!(
+            FrozenMode::default_for_env(true),
+            FrozenMode::Prefer
+        ));
+        assert!(matches!(
+            FrozenMode::from_override(None, None, true),
+            FrozenMode::Prefer
+        ));
     }
 }
