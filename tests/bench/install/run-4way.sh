@@ -111,7 +111,7 @@ report_nub_layout() {
   rm -rf "$WORK/nub/node_modules"
   ( cd "$WORK/nub" && eval "$ci_env \"$NUB\" install --frozen-lockfile -s" ) >/dev/null 2>&1 || true
   local entry
-  entry="$(find "$WORK/nub/node_modules/.store" -maxdepth 1 -mindepth 1 ! -name '.nub-state' 2>/dev/null | head -1)"
+  entry="$(find "$WORK/nub/node_modules/.store" -maxdepth 1 -mindepth 1 ! -name '.nub-state' -print -quit 2>/dev/null)"
   if [ -z "$entry" ]; then
     echo "  [$label: no .store entries found]"
   elif [ -L "$entry" ]; then
