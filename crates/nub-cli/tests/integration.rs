@@ -3529,7 +3529,11 @@ fn no_env_file_wins_over_env_file_if_exists() {
     .unwrap();
 
     let out = Command::new(nub_binary())
-        .args(["--no-env-file", "--env-file-if-exists=present.env", "app.js"])
+        .args([
+            "--no-env-file",
+            "--env-file-if-exists=present.env",
+            "app.js",
+        ])
         .current_dir(&dir)
         .env("XDG_CACHE_HOME", dir.join("cache"))
         .output()
@@ -3542,6 +3546,50 @@ fn no_env_file_wins_over_env_file_if_exists() {
     assert!(
         stdout.contains("FROMCUSTOM=[]"),
         "--no-env-file must ignore an existing --env-file-if-exists target: {stdout}"
+    );
+}
+
+/// The standalone `nubx` binary forwards `--env-file` to Node itself (it is a
+/// Node value-flag, not captured by nub's own arg loop), so `--no-env-file` must
+/// win by STRIPPING the leading `--env-file*` before Node sees it — otherwise the
+/// flag loses on this one surface. Runs the binary AS `nubx` (argv0 dispatch) to
+/// exercise `run_nubx`. Unix-only (symlink).
+#[cfg(unix)]
+#[test]
+fn no_env_file_wins_over_env_file_on_standalone_nubx() {
+    let dir = unique_test_cache();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let nubx = dir.join("nubx");
+    std::os::unix::fs::symlink(nub_binary(), &nubx).expect("symlink nub -> nubx");
+    std::fs::write(dir.join("package.json"), r#"{"name":"nubx-noenvfile"}"#).unwrap();
+    std::fs::write(dir.join(".env"), "SECRET=from-dotenv\n").unwrap();
+    std::fs::write(dir.join("custom.env"), "FROMCUSTOM=custom-val\n").unwrap();
+    std::fs::write(
+        dir.join("check.js"),
+        "console.log('SECRET=[' + (process.env.SECRET ?? '') + ']');\n\
+         console.log('FROMCUSTOM=[' + (process.env.FROMCUSTOM ?? '') + ']');\n",
+    )
+    .unwrap();
+
+    let out = Command::new(&nubx)
+        .args(["--no-env-file", "--env-file=custom.env", "check.js"])
+        .current_dir(&dir)
+        .env("XDG_CACHE_HOME", dir.join("cache"))
+        .output()
+        .expect("failed to spawn nubx");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(out.status.code(), Some(0), "stderr: {stderr}");
+    assert!(
+        stdout.contains("SECRET=[]"),
+        "standalone nubx --no-env-file must suppress auto `.env`: {stdout}"
+    );
+    assert!(
+        stdout.contains("FROMCUSTOM=[]"),
+        "standalone nubx --no-env-file must win over a forwarded --env-file: {stdout}"
     );
 }
 

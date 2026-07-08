@@ -2220,12 +2220,11 @@ fn run_nubx() -> Result<i32> {
     // two mechanisms are needed (clap fails-closed on a future Node flag).
     let mut args: Vec<String> = env::args().skip(1).collect();
 
-    // `--help`/`--version`/`--no-env-file` are nubx's own flags only when they
-    // appear BEFORE the subject (the three-position rule: a flag after the subject
-    // reaches the resolved runner verbatim — `nubx eslint --help` is eslint's
-    // help). When no subject has been seen yet and one of these leading flags
-    // appears, honor it like `nub --help`/`nub --version`/`nub --no-env-file`.
-    let mut no_env_file_seen = false;
+    // `--help`/`--version` are nubx's own flags only when they appear BEFORE the
+    // subject (the three-position rule: a flag after the subject reaches the
+    // resolved runner verbatim — `nubx eslint --help` is eslint's help). When no
+    // subject has been seen yet and one of these leading flags appears, honor it
+    // like `nub --help`/`nub --version`.
     for arg in &args {
         if arg == "--" || !arg.starts_with('-') {
             break; // subject (or its `--` separator) — stop scanning
@@ -2239,23 +2238,62 @@ fn run_nubx() -> Result<i32> {
                 print_version();
                 return Ok(0);
             }
-            // Record + strip below; this is nub's own flag (Node has no
-            // `--no-env-file`), so it must not reach the file runner's Node argv.
-            "--no-env-file" => no_env_file_seen = true,
             _ => {}
         }
     }
+
+    // `--no-env-file` in the LEADING region. Because it WINS over `--env-file`,
+    // and the standalone-nubx File tier would otherwise FORWARD a leading
+    // `--env-file`/`--env-file-if-exists` to Node (which loads it), the whole
+    // `--env-file*` family is stripped alongside `--no-env-file` — otherwise
+    // `--no-env-file` fails to win on this surface (the Nub-entry path already
+    // captures those flags itself, so the leak is nubx-only). Both scans below
+    // account for the space-form value token so a flag's value is never taken as
+    // the subject; the leading-only scope preserves a post-subject occurrence as
+    // the program's own arg.
+    let is_env_file_value_flag = |a: &str| a == "--env-file" || a == "--env-file-if-exists";
+    let mut no_env_file_seen = false;
+    let mut idx = 0;
+    while idx < args.len() {
+        let a = args[idx].as_str();
+        if a == "--" || !a.starts_with('-') {
+            break; // subject / separator
+        }
+        if a == "--no-env-file" {
+            no_env_file_seen = true;
+        } else if is_env_file_value_flag(a) {
+            idx += 1; // its value is not a subject — skip it
+        }
+        idx += 1;
+    }
     if no_env_file_seen {
         let _ = NO_ENV_FILE.set(true);
-        // Drop the LEADING `--no-env-file` tokens so they never reach Node; one
-        // after the subject is the program's own arg and passes through untouched.
+        let mut stripped = Vec::with_capacity(args.len());
         let mut in_leading = true;
-        args.retain(|arg| {
-            if in_leading && (arg == "--" || !arg.starts_with('-')) {
+        let mut idx = 0;
+        while idx < args.len() {
+            let a = args[idx].as_str();
+            if in_leading && (a == "--" || !a.starts_with('-')) {
                 in_leading = false;
             }
-            !(in_leading && arg == "--no-env-file")
-        });
+            if in_leading {
+                if a == "--no-env-file" {
+                    idx += 1;
+                    continue;
+                }
+                if is_env_file_value_flag(a) {
+                    idx += 2; // drop the flag and its value token
+                    continue;
+                }
+                if a.starts_with("--env-file=") || a.starts_with("--env-file-if-exists=") {
+                    idx += 1;
+                    continue;
+                }
+            }
+            stripped.push(args[idx].clone());
+            idx += 1;
+        }
+        args = stripped;
     }
 
     let cwd = env::current_dir().ok();
