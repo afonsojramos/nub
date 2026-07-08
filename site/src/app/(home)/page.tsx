@@ -1180,36 +1180,42 @@ function HypermanagerBand() {
             body={
               <>
                 Like pnpm, Nub keeps package files in a global content-addressed store and links
-                them into{' '}<Mono>node_modules</Mono>. Nub embeds{' '}
+                them into{' '}<Mono>node_modules</Mono>. The default layout relinks one symlink per
+                package instead of one hardlink per file, so a warm install scales with package
+                count, not file count. Nub embeds{' '}
                 <DocLink href="https://github.com/jdx/aube">aube</DocLink>, a highly optimized
                 Rust-based resolver and linker.
               </>
             }
             visual={
               <div className="nub-code-panel rounded-xl border p-6">
-                {/* Source: tests/bench/install/results/warm-tanstack-start-20260706-115125.json (TanStack Start, 313 deps), warm + frozen + offline, node_modules wiped between runs; hyperfine, 12 timed runs. Lowest-contention of 3 back-to-back runs (all committed); ratios are load-robust, absolute wall-clock is contention-affected and understates nub. */}
+                {/* Source: `large` fixture (1168 packages, 81398 files), warm + frozen + offline, node_modules wiped between runs; hyperfine, 25 runs / 6 warmup, near-idle ubuntu-latest CI. Linux is the honest shared primitive: bun and nub's hoisted mode both link with per-file hardlinks there (macOS forces both onto clonefile). The hoisted row is bun's exact layout + syscall — the same-regime bar; the default row adds the O(packages) GVS relink. bun 1.3.14, pnpm 10.34.4, npm on Node 24. */}
                 <p className="nub-code-muted mb-5 font-mono text-[0.7rem] uppercase tracking-[0.14em]">
-                  warm frozen install · TanStack Start · 313 deps · macOS
+                  warm frozen install · 1168 packages · Linux
                 </p>
                 <BenchBars
                   accent="pink"
-                  max={5316}
+                  max={12945}
                   unit="ms"
                   rows={[
-                    { cmd: 'nub', ms: 171, us: true },
-                    { cmd: 'bun', ms: 686, ratio: 4.0 },
-                    { cmd: 'pnpm', ms: 3193, ratio: 18.7 },
-                    { cmd: 'npm', ms: 5316, ratio: 31.1 },
+                    { cmd: 'nub', ms: 346, us: true },
+                    { cmd: 'nub (hoisted)', ms: 1461, ratio: 4.2 },
+                    { cmd: 'bun', ms: 1896, ratio: 5.5 },
+                    { cmd: 'pnpm', ms: 3453, ratio: 10 },
+                    { cmd: 'npm', ms: 12945, ratio: 37.4 },
                   ]}
                 />
-                <a
-                  href="https://github.com/nubjs/nub/blob/main/tests/bench/install/README.md"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="nub-code-link nub-code-muted mt-3 inline-block py-1.5 font-mono text-[0.7rem] uppercase tracking-[0.14em] underline decoration-dotted underline-offset-4"
-                >
-                  View methodology →
-                </a>
+                <p className="nub-code-muted mt-4 font-mono text-[0.7rem] uppercase tracking-[0.14em]">
+                  ubuntu-latest · hyperfine, 25 runs ·{' '}
+                  <a
+                    href="https://github.com/nubjs/nub/blob/main/tests/bench/install/README.md"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="nub-code-link underline decoration-dotted underline-offset-4"
+                  >
+                    methodology →
+                  </a>
+                </p>
               </div>
             }
           />
