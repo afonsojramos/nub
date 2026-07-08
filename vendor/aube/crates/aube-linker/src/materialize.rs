@@ -1088,13 +1088,61 @@ impl Linker {
     /// install; `can_clonedir` needs it to stat the source volume. We
     /// create it, then probe `trees/` against `pkg_nm_parent`. Returns
     /// the probe result. macOS-only caller.
+    ///
+    /// Both halves are run-invariant, so both are memoized. `create_dir_all`
+    /// of the store `trees/` root only needs to succeed once per process;
+    /// `can_clonedir`'s answer for a `(trees_dir, dst_parent)` pair is fixed
+    /// by the two volumes' `st_dev` + the destination filesystem type, none
+    /// of which change during a run. Uncached, the hoisted link pass calls
+    /// this once per package (hundreds of times), each repeating a
+    /// `create_dir_all` walk + two `metadata` + one `statfs` — pure
+    /// redundant syscalls after the first probe of a given parent. The
+    /// per-parent memo collapses them: a mostly-flat hoisted tree shares one
+    /// `node_modules` parent across most packages, so the probe runs a
+    /// handful of times instead of hundreds. Mirrors `detect_strategy_cross`'s
+    /// process-lifetime cache; the return value is byte-identical either way.
     #[cfg(target_os = "macos")]
     fn ensure_trees_dir_then_probe(&self, pkg_nm_parent: &Path) -> bool {
         let trees_dir = self.store.trees_dir();
-        if std::fs::create_dir_all(&trees_dir).is_err() {
-            return false;
+
+        // `trees/` creation: attempt once per process, memoize success.
+        static TREES_READY: std::sync::OnceLock<
+            std::sync::Mutex<std::collections::HashSet<PathBuf>>,
+        > = std::sync::OnceLock::new();
+        {
+            let ready = TREES_READY.get_or_init(Default::default);
+            let already = ready
+                .lock()
+                .expect("trees-ready cache poisoned")
+                .contains(&trees_dir);
+            if !already {
+                if std::fs::create_dir_all(&trees_dir).is_err() {
+                    return false;
+                }
+                ready
+                    .lock()
+                    .expect("trees-ready cache poisoned")
+                    .insert(trees_dir.clone());
+            }
         }
-        crate::clonedir::can_clonedir(trees_dir.as_path(), pkg_nm_parent)
+
+        // Probe answer keyed on (trees_dir, dst_parent) for the process
+        // lifetime. First-write-wins so a concurrent linker can't clobber.
+        type ProbeKey = (PathBuf, PathBuf);
+        static PROBE_CACHE: std::sync::OnceLock<
+            std::sync::RwLock<std::collections::HashMap<ProbeKey, bool>>,
+        > = std::sync::OnceLock::new();
+        let key = (trees_dir.clone(), pkg_nm_parent.to_path_buf());
+        let cache = PROBE_CACHE.get_or_init(Default::default);
+        if let Some(hit) = cache.read().expect("probe cache poisoned").get(&key) {
+            return *hit;
+        }
+        let result = crate::clonedir::can_clonedir(trees_dir.as_path(), pkg_nm_parent);
+        *cache
+            .write()
+            .expect("probe cache poisoned")
+            .entry(key)
+            .or_insert(result)
     }
 
     /// Build the extracted-tree clone source for a package at
