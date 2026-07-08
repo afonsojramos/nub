@@ -291,6 +291,35 @@ fn bun_transitive_unknown_protocol_dep_is_a_fatal() {
 }
 
 #[test]
+fn bun_hoisted_entry_does_not_mask_a_withheld_nested_one() {
+    // The nested-key walk must treat a withheld `parent/bar` as still
+    // occupying its position in bun's nesting resolution: falling through
+    // to the supported hoisted `bar` would silently hand parent the WRONG
+    // version — the exact divergence the policy refuses.
+    aube_util::set_embedder(&STRICT);
+    let lock = format!(
+        r#"{{
+  "lockfileVersion": 1,
+  "workspaces": {{ "": {{ "dependencies": {{ "parent": "^1.0.0", "bar": "^2.0.0" }} }} }},
+  "packages": {{
+    "parent": ["parent@1.0.0", "", {{ "dependencies": {{ "bar": "exotic:x" }} }}, "{0}"],
+    "parent/bar": ["bar@exotic:x", {{}}],
+    "bar": ["bar@2.0.0", "", {{}}, "{0}"]
+  }}
+}}"#,
+        sri()
+    );
+    let r = parse(&[
+        (
+            "package.json",
+            r#"{"name":"t","dependencies":{"parent":"^1.0.0","bar":"^2.0.0"}}"#,
+        ),
+        ("bun.lock", &lock),
+    ]);
+    assert_unsupported(r, "exotic");
+}
+
+#[test]
 fn bun_transitive_optional_unknown_protocol_is_skipped() {
     aube_util::set_embedder(&STRICT);
     let lock = format!(

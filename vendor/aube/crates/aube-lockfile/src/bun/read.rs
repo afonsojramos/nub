@@ -244,24 +244,28 @@ pub fn parse(path: &Path) -> Result<LockfileGraph, Error> {
             .keys()
             .chain(entry.meta.optional_dependencies.keys())
         {
-            if let Some(target_key) =
-                resolve_nested_bun(key, dep_name, |k| key_info.contains_key(k))
-                && let Some((dname, dver)) = key_info.get(&target_key)
-            {
-                let target_dep_path = format!("{dname}@{dver}");
-                resolved.insert(
-                    dep_name.clone(),
-                    crate::npm::dep_path_tail(dname, &target_dep_path).to_string(),
-                );
-            } else if let Some(u_key) =
-                resolve_nested_bun(key, dep_name, |k| unsupported.contains_key(k))
-            {
-                // The by-name walk lands on an entry withheld as
-                // unsupported: fatal for a required edge, warn+skip for an
-                // optional one (a name in both maps is required). Inert
-                // unless strict — the map is empty otherwise.
-                let optional = !entry.meta.dependencies.contains_key(dep_name);
-                crate::unsupported_edge(&unsupported[&u_key], optional, path)?;
+            // ONE walk over the union of both key sets, so the withheld
+            // entry keeps its position in bun's nesting resolution: a
+            // withheld `parent/foo` must not be shadowed by a supported
+            // hoisted `foo` (that would silently resolve the WRONG
+            // package — the exact divergence this policy exists to
+            // refuse). Union == key_info alone unless strict — the
+            // unsupported map is empty otherwise.
+            if let Some(target_key) = resolve_nested_bun(key, dep_name, |k| {
+                key_info.contains_key(k) || unsupported.contains_key(k)
+            }) {
+                if let Some((dname, dver)) = key_info.get(&target_key) {
+                    let target_dep_path = format!("{dname}@{dver}");
+                    resolved.insert(
+                        dep_name.clone(),
+                        crate::npm::dep_path_tail(dname, &target_dep_path).to_string(),
+                    );
+                } else if let Some(u) = unsupported.get(&target_key) {
+                    // Fatal for a required edge, warn+skip for an optional
+                    // one (a name in both meta maps is required).
+                    let optional = !entry.meta.dependencies.contains_key(dep_name);
+                    crate::unsupported_edge(u, optional, path)?;
+                }
             }
         }
         resolved_by_dep_path.insert(dep_path, resolved);
@@ -320,33 +324,33 @@ pub fn parse(path: &Path) -> Result<LockfileGraph, Error> {
                         direct: &mut Vec<DirectDep>,
                         skipped: &mut BTreeMap<String, BTreeMap<String, String>>|
          -> Result<(), Error> {
-            if let Some(target_key) =
-                resolve_workspace_dep(ws_path, ws_name, name, |k| key_info.contains_key(k))
-                && let Some((dname, dver)) = key_info.get(&target_key)
-            {
-                direct.push(DirectDep {
-                    name: dname.clone(),
-                    dep_path: format!("{dname}@{dver}"),
-                    dep_type,
-                    specifier: Some(specifier.to_string()),
-                });
-                return Ok(());
-            }
-            // The dep's entry was withheld as unsupported: fatal for a
-            // required edge, warn for an optional one — recorded as a
-            // consciously-skipped optional so a frozen install's drift
-            // check tolerates the absent dep (same as a platform-filtered
-            // optional). Inert unless strict — the map is empty otherwise.
-            if let Some(u_key) =
-                resolve_workspace_dep(ws_path, ws_name, name, |k| unsupported.contains_key(k))
-            {
-                let optional = matches!(dep_type, DepType::Optional);
-                crate::unsupported_edge(&unsupported[&u_key], optional, path)?;
-                if optional {
-                    skipped
-                        .entry(importer_path.clone())
-                        .or_default()
-                        .insert(name.to_string(), specifier.to_string());
+            // Same union walk as the transitive pass above: a withheld
+            // scoped override (`<ws>/<dep>`) must not be shadowed by a
+            // supported hoisted entry. When the walk lands on a withheld
+            // entry: fatal for a required edge, warn for an optional one —
+            // recorded as a consciously-skipped optional so a frozen
+            // install's drift check tolerates the absent dep (same as a
+            // platform-filtered optional). Inert unless strict — the
+            // unsupported map is empty otherwise.
+            if let Some(target_key) = resolve_workspace_dep(ws_path, ws_name, name, |k| {
+                key_info.contains_key(k) || unsupported.contains_key(k)
+            }) {
+                if let Some((dname, dver)) = key_info.get(&target_key) {
+                    direct.push(DirectDep {
+                        name: dname.clone(),
+                        dep_path: format!("{dname}@{dver}"),
+                        dep_type,
+                        specifier: Some(specifier.to_string()),
+                    });
+                } else if let Some(u) = unsupported.get(&target_key) {
+                    let optional = matches!(dep_type, DepType::Optional);
+                    crate::unsupported_edge(u, optional, path)?;
+                    if optional {
+                        skipped
+                            .entry(importer_path.clone())
+                            .or_default()
+                            .insert(name.to_string(), specifier.to_string());
+                    }
                 }
             }
             Ok(())
