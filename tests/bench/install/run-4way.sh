@@ -40,6 +40,14 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/nub-4way-XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 for t in nub bun pnpm npm; do cp -R "$FIX" "$WORK/$t"; done
 
+# A fixture ships every lockfile; each tool must install from its OWN. Strip the
+# others so nub (which refuses an ambiguous multi-lockfile project) and the rest
+# resolve the right one — same split as run.sh's setup_workdir.
+rm -f "$WORK/nub/bun.lock"  "$WORK/nub/bun.lockb"  "$WORK/nub/package-lock.json"
+rm -f "$WORK/pnpm/bun.lock" "$WORK/pnpm/bun.lockb" "$WORK/pnpm/package-lock.json"
+rm -f "$WORK/bun/pnpm-lock.yaml" "$WORK/bun/pnpm-workspace.yaml" "$WORK/bun/package-lock.json"
+rm -f "$WORK/npm/bun.lock" "$WORK/npm/bun.lockb" "$WORK/npm/pnpm-lock.yaml" "$WORK/npm/pnpm-workspace.yaml"
+
 echo "== warming each tool's store (untimed) =="
 ( cd "$WORK/nub"  && env -u CI "$NUB" install --frozen-lockfile )
 ( cd "$WORK/bun"  && bun install --frozen-lockfile )
