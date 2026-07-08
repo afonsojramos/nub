@@ -127,9 +127,16 @@ report_nub_layout "nub v0.2" "CI=1"
 echo "== warm install: $FIXTURE =="
 # Five bars: nub v0.3 (GVS on, symlink-into-store relink) vs nub v0.2 (GVS off,
 # per-project materialize — same binary, the path v0.2 shipped) vs bun/pnpm/npm.
-hyperfine --warmup "$WARMUP" --runs "$RUNS" \
+#
+# -N (no intermediate shell): hyperfine execs each command directly instead of via
+# `sh -c`, so a per-run shell spawn (~1-3ms) doesn't compress the ratio between the
+# sub-second tools. Every command is written shell-free: the nub bars use `env` for
+# their var assignment (CI=1 is a shell assignment, not a binary — `env CI=1` is the
+# execable form), and npm — which ignores --prefix and must cd — is wrapped in an
+# explicit `sh -c` (only the slowest tool pays that shell, so the ratio is unaffected).
+hyperfine -N --warmup "$WARMUP" --runs "$RUNS" \
   --command-name "nub v0.3"     --prepare "rm -rf '$WORK/nub/node_modules'"  "env -u CI '$NUB' --cwd '$WORK/nub' install --frozen-lockfile -s" \
-  --command-name "nub v0.2"     --prepare "rm -rf '$WORK/nub/node_modules'"  "CI=1 '$NUB' --cwd '$WORK/nub' install --frozen-lockfile -s" \
+  --command-name "nub v0.2"     --prepare "rm -rf '$WORK/nub/node_modules'"  "env CI=1 '$NUB' --cwd '$WORK/nub' install --frozen-lockfile -s" \
   --command-name "bun install"  --prepare "rm -rf '$WORK/bun/node_modules'"  "bun install --frozen-lockfile --cwd '$WORK/bun'" \
   --command-name "pnpm install" --prepare "rm -rf '$WORK/pnpm/node_modules'" "pnpm install --frozen-lockfile --dir '$WORK/pnpm' --silent" \
-  --command-name "npm ci"       --prepare "rm -rf '$WORK/npm/node_modules'"  "cd '$WORK/npm' && npm ci --offline --ignore-scripts"
+  --command-name "npm ci"       --prepare "rm -rf '$WORK/npm/node_modules'"  "sh -c \"cd '$WORK/npm' && npm ci --offline --ignore-scripts\""
