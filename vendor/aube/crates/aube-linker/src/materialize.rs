@@ -3,7 +3,7 @@ use tracing::{debug, trace, warn};
 use crate::patches::apply_multi_file_patch;
 use crate::sweep::{EntryState, classify_entry_state, mkdirp, try_remove_entry};
 use crate::{Error, LinkStats, LinkStrategy, Linker, sys};
-use aube_lockfile::{LockedPackage, shared_local_dep_path};
+use aube_lockfile::{LockedPackage, LockfileGraph, resolve_dep_edge, shared_local_dep_path};
 use aube_store::{PackageIndex, StoredFile};
 use std::collections::BTreeMap;
 use std::io;
@@ -179,6 +179,10 @@ impl Linker {
     pub fn ensure_in_virtual_store(
         &self,
         dep_path: &str,
+        // Resolves each transitive dep's edge value to its canonical package
+        // key across reader conventions during the sibling-symlink pass (only
+        // `graph.packages` is read). See `materialize_into`.
+        graph: &LockfileGraph,
         pkg: &LockedPackage,
         index: &PackageIndex,
         stats: &mut LinkStats,
@@ -197,6 +201,7 @@ impl Linker {
         self.ensure_in_virtual_store_with_subdir(
             dep_path,
             &subdir,
+            graph,
             pkg,
             index,
             stats,
@@ -213,10 +218,12 @@ impl Linker {
     /// long/scoped/peer-context names). `subdir` MUST equal
     /// `self.virtual_store_subdir(dep_path)`; the public wrapper above
     /// guarantees that for callers that don't already have it.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn ensure_in_virtual_store_with_subdir(
         &self,
         dep_path: &str,
         subdir: &str,
+        graph: &LockfileGraph,
         pkg: &LockedPackage,
         index: &PackageIndex,
         stats: &mut LinkStats,
@@ -252,6 +259,7 @@ impl Linker {
             &tmp_base,
             &self.virtual_store,
             dep_path,
+            graph,
             pkg,
             index,
             stats,
@@ -339,10 +347,12 @@ impl Linker {
     /// only existed in the per-project `.aube/` would leave that
     /// sibling symlink dangling — and Node would resolve whatever
     /// unrelated `<name>` it found walking up the tree.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn ensure_shared_local_in_global_store(
         &self,
         aube_dir: &Path,
         dep_path: &str,
+        graph: &LockfileGraph,
         pkg: &LockedPackage,
         index: &PackageIndex,
         stats: &mut LinkStats,
@@ -355,7 +365,7 @@ impl Linker {
             stats.packages_cached += 1;
             return Ok(());
         }
-        self.ensure_in_virtual_store(dep_path, pkg, index, stats, nested_link_targets)?;
+        self.ensure_in_virtual_store(dep_path, graph, pkg, index, stats, nested_link_targets)?;
         if matches!(state, EntryState::Stale) {
             // A prior install — or an older aube that always
             // materialized git/remote sources per-project — may have
@@ -384,10 +394,12 @@ impl Linker {
     /// install-time materializer to pipeline the link work into the
     /// fetch phase under non-GVS mode, so the dedicated link phase only
     /// has to create top-level `node_modules/<name>` symlinks.
+    #[allow(clippy::too_many_arguments)]
     pub fn ensure_in_aube_dir(
         &self,
         aube_dir: &Path,
         dep_path: &str,
+        graph: &LockfileGraph,
         pkg: &LockedPackage,
         index: &PackageIndex,
         stats: &mut LinkStats,
@@ -406,6 +418,7 @@ impl Linker {
             &tmp_base,
             aube_dir,
             dep_path,
+            graph,
             pkg,
             index,
             stats,
@@ -472,6 +485,10 @@ impl Linker {
         base_dir: &Path,
         final_base_dir: &Path,
         dep_path: &str,
+        // The whole graph, so a transitive dep's VALUE can be resolved to its
+        // canonical package key across every reader convention (see the sibling
+        // symlink loop below). Only `graph.packages` is consulted.
+        graph: &LockfileGraph,
         pkg: &LockedPackage,
         index: &PackageIndex,
         stats: &mut LinkStats,
@@ -652,13 +669,23 @@ impl Linker {
         // a per-project `.aube/<dep_path>` that the caller just
         // ensured is empty), so nothing can be in the way.
         for (dep_name, dep_version) in &pkg.dependencies {
-            // Git / remote-tarball deps are recorded by their resolved
-            // URL spec but keyed in the graph under the short
-            // `name@git+<hash>` / `name@url+<hash>` form. Translate so the
-            // sibling symlink targets the same `dep_path` the package was
-            // materialized under; everything else keeps `name@version`.
-            let dep_dep_path = shared_local_dep_path(dep_name, dep_version)
-                .unwrap_or_else(|| format!("{dep_name}@{dep_version}"));
+            // Resolve the edge VALUE to the canonical package key the dep was
+            // materialized under. Readers disagree on what the value holds — the
+            // yarn readers store the full dep_path (`is-plain-obj@4.1.0`),
+            // npm/pnpm the tail, git/remote-tarball the resolved URL — so the
+            // former inline `name@tail` guess doubled the name for the yarn
+            // convention (`is-plain-obj@is-plain-obj@4.1.0`), pointing the
+            // sibling symlink at a nonexistent `.aube` entry (a dangling link
+            // that breaks resolution). `resolve_dep_edge` tries all three
+            // conventions against the real graph keys; the fallback preserves
+            // today's behavior for an edge that isn't a graph node (a `link:`
+            // target keyed only in `nested_link_targets`, or a pruned optional).
+            let dep_dep_path =
+                resolve_dep_edge(dep_name, dep_version, |k| graph.packages.contains_key(k))
+                    .unwrap_or_else(|| {
+                        shared_local_dep_path(dep_name, dep_version)
+                            .unwrap_or_else(|| format!("{dep_name}@{dep_version}"))
+                    });
             // Skip any dep whose name matches the package being
             // materialized, regardless of version. The symlink would
             // land at `pkg_nm_parent.join(dep_name)` which is exactly

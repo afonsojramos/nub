@@ -345,11 +345,19 @@ fn preferred_root_versions(
             continue;
         }
         for (dep_name, dep_tail) in &pkg.dependencies {
-            let child = aube_lockfile::shared_local_dep_path(dep_name, dep_tail)
-                .unwrap_or_else(|| format!("{dep_name}@{dep_tail}"));
-            if !graph.packages.contains_key(&child) {
+            // Resolve the edge to its graph key across ALL reader conventions:
+            // the yarn readers store the VALUE as the full dep_path
+            // (`is-plain-obj@4.1.0`), npm/pnpm as the tail, git/tarball as the
+            // resolved URL. The former inline `name@tail` guess doubled the name
+            // for the yarn convention (`is-plain-obj@is-plain-obj@4.1.0`) and
+            // silently dropped the whole subtree — cal.com's missing execa
+            // closure. `resolve_dep_edge` is the shared 3-convention resolver the
+            // resolver/install walkers already use.
+            let Some(child) = aube_lockfile::resolve_dep_edge(dep_name, dep_tail, |k| {
+                graph.packages.contains_key(k)
+            }) else {
                 continue;
-            }
+            };
             *counts
                 .entry(dep_name.clone())
                 .or_default()
@@ -402,11 +410,15 @@ pub(crate) fn plan_importer(
                 continue;
             }
             for (dep_name, dep_tail) in &pkg.dependencies {
-                let child_dep_path = aube_lockfile::shared_local_dep_path(dep_name, dep_tail)
-                    .unwrap_or_else(|| format!("{dep_name}@{dep_tail}"));
-                if !graph.packages.contains_key(&child_dep_path) {
+                // 3-convention edge resolution — see the note in
+                // `preferred_root_versions`.
+                let Some(child_dep_path) =
+                    aube_lockfile::resolve_dep_edge(dep_name, dep_tail, |k| {
+                        graph.packages.contains_key(k)
+                    })
+                else {
                     continue;
-                }
+                };
                 queue.push_back((node_idx, plan.root_idx, dep_name.clone(), child_dep_path));
             }
         }
@@ -447,15 +459,15 @@ pub(crate) fn plan_importer(
             HoistingLimits::Dependencies => outcome.node_idx,
         };
         for (dep_name, dep_tail) in &pkg.dependencies {
-            // Git / remote-tarball deps are recorded by their resolved URL
-            // spec but keyed under the short `name@git+<hash>` /
-            // `name@url+<hash>` form, so the verbatim `name@tail` key would
-            // miss `graph.packages` and silently drop the dep's subtree.
-            let child_dep_path = aube_lockfile::shared_local_dep_path(dep_name, dep_tail)
-                .unwrap_or_else(|| format!("{dep_name}@{dep_tail}"));
-            if !graph.packages.contains_key(&child_dep_path) {
+            // 3-convention edge resolution — see the note in
+            // `preferred_root_versions`. Covers the yarn full-dep_path value,
+            // the pnpm tail, and the short-keyed git/remote-tarball form; a
+            // convention mismatch here silently drops the dep's whole subtree.
+            let Some(child_dep_path) = aube_lockfile::resolve_dep_edge(dep_name, dep_tail, |k| {
+                graph.packages.contains_key(k)
+            }) else {
                 continue;
-            }
+            };
             queue.push_back((
                 outcome.node_idx,
                 child_floor,
@@ -547,7 +559,11 @@ fn materialize_hoisted_node(
         None => {
             owned_index = linker
                 .store
-                .load_index(pkg.registry_name(), &pkg.version, linker.index_read_key(pkg))
+                .load_index(
+                    pkg.registry_name(),
+                    &pkg.version,
+                    linker.index_read_key(pkg),
+                )
                 .ok_or_else(|| Error::MissingPackageIndex(dep_path.to_string()))?;
             &owned_index
         }
@@ -792,6 +808,40 @@ mod tests {
     }
 
     #[test]
+    fn full_hoist_places_transitive_closure_for_dep_path_edge_values() {
+        // The yarn readers store a dependency edge's VALUE as the full dep_path
+        // (`bar@1.0.0`), where npm/pnpm store the bare tail (`1.0.0`). The
+        // placement BFS must resolve BOTH conventions to the child's graph key.
+        // The old inline `name@tail` guess doubled the name for the yarn
+        // convention (`bar@bar@1.0.0`), missed `graph.packages`, and silently
+        // dropped the entire subtree — cal.com's missing execa/micromatch
+        // closure under `nodeLinker: node-modules`.
+        let nm = PathBuf::from("/project/node_modules");
+        let mut graph = LockfileGraph::default();
+        // `foo`'s edge value is the full dep_path (the yarn convention); `baz`
+        // is a deeper transitive to prove the whole subtree is walked.
+        graph.packages.insert(
+            "foo@1.0.0".into(),
+            pkg("foo", "1.0.0", &[("bar", "bar@1.0.0")]),
+        );
+        graph.packages.insert(
+            "bar@1.0.0".into(),
+            pkg("bar", "1.0.0", &[("baz", "baz@1.0.0")]),
+        );
+        graph
+            .packages
+            .insert("baz@1.0.0".into(), pkg("baz", "1.0.0", &[]));
+        let root_deps = vec![dep("foo", "foo@1.0.0")];
+
+        let plan = plan_importer(&nm, &root_deps, &graph, HoistingLimits::None).unwrap();
+
+        // The full closure hoists to root; nothing is dropped.
+        assert_eq!(package_dir(&plan, "foo@1.0.0"), nm.join("foo"));
+        assert_eq!(package_dir(&plan, "bar@1.0.0"), nm.join("bar"));
+        assert_eq!(package_dir(&plan, "baz@1.0.0"), nm.join("baz"));
+    }
+
+    #[test]
     fn full_hoist_direct_dep_wins_root_over_transitive_majority() {
         // The importer DIRECTLY depends on foo@1.0.0, while five transitive
         // packages each depend on foo@2.0.0 (the transitive majority). The
@@ -871,9 +921,10 @@ mod tests {
             pkg("bad", "1.0.0", &[("shared", "2.0.0")]),
         );
         for c in ["a", "b", "c"] {
-            graph
-                .packages
-                .insert(format!("{c}@1.0.0"), pkg(c, "1.0.0", &[("shared", "1.0.0")]));
+            graph.packages.insert(
+                format!("{c}@1.0.0"),
+                pkg(c, "1.0.0", &[("shared", "1.0.0")]),
+            );
         }
         graph
             .packages
@@ -1014,8 +1065,12 @@ mod tests {
             "app3@1.0.0".into(),
             pkg("app3", "1.0.0", &[("router", "6.0.0(react@17.0.0)")]),
         );
-        graph.packages.insert(major.into(), pkg_dp("router", major, &[]));
-        graph.packages.insert(minor.into(), pkg_dp("router", minor, &[]));
+        graph
+            .packages
+            .insert(major.into(), pkg_dp("router", major, &[]));
+        graph
+            .packages
+            .insert(minor.into(), pkg_dp("router", minor, &[]));
         let root_deps = vec![
             dep("app3", "app3@1.0.0"),
             dep("app1", "app1@1.0.0"),

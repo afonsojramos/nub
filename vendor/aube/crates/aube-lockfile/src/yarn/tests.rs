@@ -639,6 +639,54 @@ fn test_parse_berry_applies_root_resolution_to_direct_dep() {
     assert_eq!(dep.dep_path, "@types/node@18.19.130");
 }
 
+/// A root `resolutions` pin rewrites a TRANSITIVE descriptor's block key
+/// too, not just a direct dep's: `resolutions: {"picomatch@^2.3.1":
+/// "2.3.2"}` makes yarn key the block `picomatch@npm:2.3.2`, while
+/// micromatch's edge stays `picomatch@npm:^2.3.1`. The reader must apply
+/// the resolution when resolving the transitive edge or the pinned
+/// subtree silently drops from the graph (cal.com's `build-icons`
+/// `Cannot find module 'picomatch'` under a resolutions-pinned tree).
+#[test]
+fn test_parse_berry_applies_root_resolution_to_transitive_edge() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let content = r#"__metadata:
+  version: 8
+  cacheKey: 10c0
+
+"micromatch@npm:^4.0.8":
+  version: 4.0.8
+  resolution: "micromatch@npm:4.0.8"
+  dependencies:
+    picomatch: "npm:^2.3.1"
+  checksum: 10c0/aaa
+  languageName: node
+  linkType: hard
+
+"picomatch@npm:2.3.2":
+  version: 2.3.2
+  resolution: "picomatch@npm:2.3.2"
+  checksum: 10c0/bbb
+  languageName: node
+  linkType: hard
+"#;
+    std::fs::write(tmp.path(), content).unwrap();
+
+    let mut manifest = make_manifest(&[("micromatch", "^4.0.8")], &[]);
+    manifest.extra.insert(
+        "resolutions".to_string(),
+        serde_json::json!({ "picomatch@^2.3.1": "2.3.2" }),
+    );
+
+    let graph = parse(tmp.path(), &manifest).unwrap();
+
+    let micromatch = &graph.packages["micromatch@4.0.8"];
+    assert_eq!(
+        micromatch.dependencies.get("picomatch").map(String::as_str),
+        Some("picomatch@2.3.2"),
+        "resolutions-pinned transitive edge must resolve to the rewritten block key"
+    );
+}
+
 /// Blocks for the project's own workspace entry shouldn't become
 /// `LockedPackage`s — they're the root importer, not a
 /// resolved dep. Skipping them keeps the graph shape identical to

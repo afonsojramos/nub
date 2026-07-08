@@ -268,6 +268,22 @@ pub(super) fn parse_berry_str(
         }
     }
 
+    // A root `resolutions` entry rewrites the descriptor yarn writes
+    // to the lockfile, so the block is keyed by the *resolved* range,
+    // not the manifest range. With `resolutions: {"@types/node":
+    // "18.x"}` and a manifest range of `^18.14`, yarn.lock holds only
+    // `@types/node@npm:18.x`; matching the raw range misses and the dep
+    // is silently dropped. Applied to direct deps in `push_direct` below
+    // AND to transitive edges in the second pass (a `resolutions` pin
+    // rewrites a TRANSITIVE descriptor's block key too — cal.com pins
+    // `picomatch@^2.3.1` to `2.3.2`, so micromatch's `picomatch@^2.3.1`
+    // edge misses the `picomatch@npm:2.3.2` block and drops the whole
+    // subtree). `overrides_map` collects yarn `resolutions` (alongside
+    // npm/pnpm overrides, harmless here); `override_match` handles both
+    // bare-name (`@types/node`) and descriptor-keyed (`lru-cache@^10.0.1`)
+    // resolution keys.
+    let resolution_rules = crate::override_match::compile(&manifest.overrides_map());
+
     // Second pass: resolve raw header specs on each package's
     // `dependencies` / `optional_dependencies` map to canonical dep_paths.
     let mut resolved_deps: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
@@ -286,6 +302,32 @@ pub(super) fn parse_berry_str(
                     path,
                 )? {
                     out.insert(name.clone(), target);
+                    continue;
+                }
+                // Miss: a root `resolutions` may have rewritten this
+                // transitive descriptor's block key (see the note above).
+                // Retry the resolution-rewritten candidate before giving up,
+                // mirroring `push_direct`. `raw_spec` is `name@<tail>`; strip
+                // the `name@` and any `npm:` protocol to get the semver range
+                // `override_match` reasons about.
+                let range = raw_spec
+                    .strip_prefix(&format!("{name}@"))
+                    .unwrap_or(raw_spec);
+                let bare = range.strip_prefix("npm:").unwrap_or(range);
+                if let Some(resolved) = crate::override_match::apply(&resolution_rules, name, bare)
+                {
+                    for candidate in berry_spec_candidates(name, bare, Some(resolved)) {
+                        if let Some(target) = crate::resolve_dep_spec(
+                            &candidate,
+                            optional,
+                            &spec_to_dep_path,
+                            &unsupported,
+                            path,
+                        )? {
+                            out.insert(name.clone(), target);
+                            break;
+                        }
+                    }
                 }
             }
             Ok(out)
@@ -303,19 +345,6 @@ pub(super) fn parse_berry_str(
             pkg.optional_dependencies = deps;
         }
     }
-
-    // A root `resolutions` entry rewrites the descriptor yarn writes
-    // to the lockfile, so the block is keyed by the *resolved* range,
-    // not the manifest range. With `resolutions: {"@types/node":
-    // "18.x"}` and a manifest range of `^18.14`, yarn.lock holds only
-    // `@types/node@npm:18.x`; matching the raw range misses and the dep
-    // is silently dropped from the importer. Apply the resolution to
-    // each direct dep before building its lockfile-spec candidates so
-    // the resolved descriptor is tried too. `overrides_map` collects
-    // yarn `resolutions` (alongside npm/pnpm overrides, harmless here);
-    // `override_match` handles both bare-name (`@types/node`) and
-    // descriptor-keyed (`lru-cache@^10.0.1`) resolution keys.
-    let resolution_rules = crate::override_match::compile(&manifest.overrides_map());
 
     // Discover the workspace members from disk, mirroring the classic reader
     // (#154). Berry DOES record a `@name@workspace:<path>` block per member, but

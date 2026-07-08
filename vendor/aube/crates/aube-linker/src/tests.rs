@@ -385,7 +385,15 @@ fn test_ensure_in_aube_dir_handles_concurrent_same_dep_path() {
                 barrier.wait();
                 let mut stats = LinkStats::default();
                 linker
-                    .ensure_in_aube_dir(&aube_dir, "debug@4.4.0", &pkg, &index, &mut stats, None)
+                    .ensure_in_aube_dir(
+                        &aube_dir,
+                        "debug@4.4.0",
+                        &aube_lockfile::LockfileGraph::default(),
+                        &pkg,
+                        &index,
+                        &mut stats,
+                        None,
+                    )
                     .expect("duplicate materialization should be idempotent");
                 stats
             })
@@ -2061,7 +2069,15 @@ fn clonedir_materialize_matches_per_file_byte_for_byte() {
     let linker = Linker::new_with_gvs(&store, LinkStrategy::Reflink, false);
     let mut stats = LinkStats::default();
     linker
-        .ensure_in_aube_dir(&aube_dir, "pkg@1.2.3", &pkg, &index, &mut stats, None)
+        .ensure_in_aube_dir(
+            &aube_dir,
+            "pkg@1.2.3",
+            &aube_lockfile::LockfileGraph::default(),
+            &pkg,
+            &index,
+            &mut stats,
+            None,
+        )
         .expect("clonedir materialize");
     let entry_name = linker.aube_dir_entry_name("pkg@1.2.3");
     let clonedir_pkg = aube_dir.join(&entry_name).join("node_modules").join("pkg");
