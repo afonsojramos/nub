@@ -37,6 +37,26 @@ NUB=/path/to/target/release/nub bash tests/bench/install/run-warm-gvs.sh
 NUB=/path/to/target/release/nub bash tests/bench/install/run-warm-gvs.sh --fixture gvs-eligible --runs 12 --warmup 3
 ```
 
+## Published numbers (ubuntu-latest CI)
+
+The warm-install numbers on the homepage, the `introducing-nub` blog post, and the install docs come from a dedicated 3-bar harness, `run-hardlink-vs-gvs.sh`, run on a near-idle GitHub Actions `ubuntu-latest` runner. The harness lives on the `bench-adhoc` branch (a [`ci-adhoc-test`](../../../.claude/skills/ci-adhoc-test/SKILL.md)-style branch-scoped probe, not merged to `main`) alongside its workflow: [`.github/workflows/bench-adhoc.yml`](https://github.com/nubjs/nub/blob/bench-adhoc/.github/workflows/bench-adhoc.yml) and [`run-hardlink-vs-gvs.sh`](https://github.com/nubjs/nub/blob/bench-adhoc/tests/bench/install/run-hardlink-vs-gvs.sh).
+
+Protocol: `large` fixture (1,168 packages, 81,398 files), warm CAS store + frozen lockfile, `node_modules` wiped between runs via hyperfine `--prepare` (untimed), no network. `hyperfine -N`, 25 runs / 6 warmup. Tool versions: bun 1.3.14, pnpm 10.34.4, npm on Node 24, nub 0.4.2.
+
+| tool / mode | mean ± σ |
+|---|---|
+| npm | 12.945 s ± 0.269 s |
+| pnpm | 3.453 s ± 0.395 s |
+| bun (flat hoisted, per-file hardlink) | 1.896 s ± 0.166 s |
+| nub — hoisted, hardlink (`--node-linker hoisted`) | 1.461 s ± 0.207 s |
+| nub — default (GVS, O(packages) symlink relink) | 346.1 ms ± 10.5 ms |
+
+Ratios: nub-default is 5.48× faster than bun and 4.22× faster than nub-hoisted; nub-hoisted is 1.30× faster than bun.
+
+The three bars tell a deliberate story, in order: bun is the baseline; `nub --node-linker hoisted` reproduces bun's own layout and per-file hardlink syscall, so that comparison is same-regime, not a different algorithm; the default GVS row then relinks one symlink per package instead of one hardlink per file, which is where the O(packages)-vs-O(files) win comes from. **Linux only, deliberately** — Linux's `auto` package-import-method resolves to a hardlink for both bun and nub, so the two tools share one primitive and the comparison is clean. On macOS `auto` resolves to APFS clonefile for both, which muddies the hardlink-vs-GVS story.
+
+Source: [GitHub Actions run 28922376170](https://github.com/nubjs/nub/actions/runs/28922376170), `hardlink-vs-gvs` job, `bench-adhoc` branch. No hyperfine `--export-json` output exists for this run — `run-hardlink-vs-gvs.sh` doesn't pass `--export-json` — so there is no results JSON to check in for this table; it's transcribed from the job's `hyperfine` log output.
+
 ## Older install matrix
 
 The older `run.sh` matrix covers frozen/offline warm and cold installs across these fixtures.
