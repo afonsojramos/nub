@@ -67,13 +67,12 @@ Why does a seemingly obvious idea keep not working? Because of Node.js's **phant
 
 ## The phantom dependency problem
 
-A phantom dependency is an import of a package the importer doesn't declare in its `package.json`. Many old, unmaintained, and regrettably load-bearing packages in the NPM ecosystem rely on phantom dependencies.
+A phantom dependency is an import of a package the importer doesn't declare in its `package.json`. Many popular packages rely on phantom dependencies, including several that are unmaintained and regrettably load-bearing.
 
 | Package | Downloads/week | Phantom-imports |
 |---|---|---|
 | `es-abstract` | 78M | `for-each` |
 | `jest` | 41M | `jest-config` |
-| `preact` | 22M | `preact-render-to-string` |
 | `react-i18next` | 13M | `babel-plugin-macros` |
 | `@firebase/database` | 12M | `@firebase/app` |
 | `yjs` | 5.9M | `y-protocols` |
