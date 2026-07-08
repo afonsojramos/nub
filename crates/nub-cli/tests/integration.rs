@@ -3435,6 +3435,222 @@ fn env_file_flag_preserves_unquoted_json_value_without_auto_dotenv() {
 }
 
 #[test]
+fn no_env_file_suppresses_auto_dotenv_but_keeps_augmentation() {
+    // `--no-env-file` means "load zero env files": the auto-discovered `.env`
+    // must not reach the child, while the OTHER augmentation stays ON — a `.ts`
+    // entrypoint (type-annotated source) still runs.
+    let dir = unique_test_cache();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("package.json"), r#"{"name":"noenvfile"}"#).unwrap();
+    std::fs::write(dir.join(".env"), "SECRET=from-dotenv\n").unwrap();
+    std::fs::write(
+        dir.join("main.ts"),
+        "const answer: number = 7;\n\
+         console.log('TS=' + answer);\n\
+         console.log('SECRET=[' + (process.env.SECRET ?? '') + ']');\n",
+    )
+    .unwrap();
+
+    let out = Command::new(nub_binary())
+        .arg("--no-env-file")
+        .arg("main.ts")
+        .current_dir(&dir)
+        .env("XDG_CACHE_HOME", dir.join("cache"))
+        .output()
+        .expect("failed to spawn nub");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(out.status.code(), Some(0), "stderr: {stderr}");
+    assert!(
+        stdout.contains("TS=7"),
+        "non-env augmentation (TS enum) must still run under --no-env-file: {stdout}"
+    );
+    assert!(
+        stdout.contains("SECRET=[]"),
+        "--no-env-file must suppress the auto-loaded `.env`: {stdout}"
+    );
+}
+
+#[test]
+fn no_env_file_wins_over_explicit_env_file() {
+    // Precedence (decided 2026-07-07): `--no-env-file` beats `--env-file` — the
+    // explicit file is ignored too, so the child gets ZERO env-file vars.
+    let dir = unique_test_cache();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("package.json"), r#"{"name":"noenvfile-wins"}"#).unwrap();
+    std::fs::write(dir.join(".env"), "SECRET=from-dotenv\n").unwrap();
+    std::fs::write(dir.join("custom.env"), "FROMCUSTOM=custom-val\n").unwrap();
+    std::fs::write(
+        dir.join("app.js"),
+        "console.log('SECRET=[' + (process.env.SECRET ?? '') + ']');\n\
+         console.log('FROMCUSTOM=[' + (process.env.FROMCUSTOM ?? '') + ']');\n",
+    )
+    .unwrap();
+
+    let out = Command::new(nub_binary())
+        .args(["--no-env-file", "--env-file=custom.env", "app.js"])
+        .current_dir(&dir)
+        .env("XDG_CACHE_HOME", dir.join("cache"))
+        .output()
+        .expect("failed to spawn nub");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(out.status.code(), Some(0), "stderr: {stderr}");
+    assert!(
+        stdout.contains("SECRET=[]"),
+        "auto `.env` must stay suppressed under --no-env-file: {stdout}"
+    );
+    assert!(
+        stdout.contains("FROMCUSTOM=[]"),
+        "--no-env-file must ignore the explicit --env-file (precedence): {stdout}"
+    );
+}
+
+#[test]
+fn no_env_file_wins_over_env_file_if_exists() {
+    // `--no-env-file` beats `--env-file-if-exists` too — the whole `--env-file*`
+    // family feeds one collected map that the kill-switch suppresses. The named
+    // file exists (so `-if-exists` would otherwise load it), proving suppression.
+    let dir = unique_test_cache();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("package.json"), r#"{"name":"noenvfile-ifexists"}"#).unwrap();
+    std::fs::write(dir.join("present.env"), "FROMCUSTOM=custom-val\n").unwrap();
+    std::fs::write(
+        dir.join("app.js"),
+        "console.log('FROMCUSTOM=[' + (process.env.FROMCUSTOM ?? '') + ']');\n",
+    )
+    .unwrap();
+
+    let out = Command::new(nub_binary())
+        .args([
+            "--no-env-file",
+            "--env-file-if-exists=present.env",
+            "app.js",
+        ])
+        .current_dir(&dir)
+        .env("XDG_CACHE_HOME", dir.join("cache"))
+        .output()
+        .expect("failed to spawn nub");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(out.status.code(), Some(0), "stderr: {stderr}");
+    assert!(
+        stdout.contains("FROMCUSTOM=[]"),
+        "--no-env-file must ignore an existing --env-file-if-exists target: {stdout}"
+    );
+}
+
+/// The standalone `nubx` binary forwards `--env-file` to Node itself (it is a
+/// Node value-flag, not captured by nub's own arg loop), so `--no-env-file` must
+/// win by STRIPPING the leading `--env-file*` before Node sees it — otherwise the
+/// flag loses on this one surface. Runs the binary AS `nubx` (argv0 dispatch) to
+/// exercise `run_nubx`. Unix-only (symlink).
+#[cfg(unix)]
+#[test]
+fn no_env_file_wins_over_env_file_on_standalone_nubx() {
+    let dir = unique_test_cache();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let nubx = dir.join("nubx");
+    std::os::unix::fs::symlink(nub_binary(), &nubx).expect("symlink nub -> nubx");
+    std::fs::write(dir.join("package.json"), r#"{"name":"nubx-noenvfile"}"#).unwrap();
+    std::fs::write(dir.join(".env"), "SECRET=from-dotenv\n").unwrap();
+    std::fs::write(dir.join("custom.env"), "FROMCUSTOM=custom-val\n").unwrap();
+    std::fs::write(
+        dir.join("check.js"),
+        "console.log('SECRET=[' + (process.env.SECRET ?? '') + ']');\n\
+         console.log('FROMCUSTOM=[' + (process.env.FROMCUSTOM ?? '') + ']');\n",
+    )
+    .unwrap();
+
+    let out = Command::new(&nubx)
+        .args(["--no-env-file", "--env-file=custom.env", "check.js"])
+        .current_dir(&dir)
+        .env("XDG_CACHE_HOME", dir.join("cache"))
+        .output()
+        .expect("failed to spawn nubx");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(out.status.code(), Some(0), "stderr: {stderr}");
+    assert!(
+        stdout.contains("SECRET=[]"),
+        "standalone nubx --no-env-file must suppress auto `.env`: {stdout}"
+    );
+    assert!(
+        stdout.contains("FROMCUSTOM=[]"),
+        "standalone nubx --no-env-file must win over a forwarded --env-file: {stdout}"
+    );
+}
+
+/// `--no-env-file` on the watch path: the `.env*` files are neither handed to the
+/// watched Node as `--env-file` args nor injected via `Command::env`, so the child
+/// sees none of them. The watch loop never exits on its own, so the probe writes
+/// its findings to a sentinel file on its first run; the test polls, then kills
+/// the watcher. Unix-only (uses a process kill), mirroring the NODE_COMPAT watch
+/// test.
+#[cfg(unix)]
+#[test]
+fn no_env_file_suppresses_dotenv_under_watch() {
+    let dir = unique_test_cache();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("package.json"), r#"{"name":"noenvfile-watch"}"#).unwrap();
+    std::fs::write(dir.join(".env"), "WATCH_ENV=from_dotenv\n").unwrap();
+    let out_file = dir.join("probe-out.txt");
+    std::fs::write(
+        dir.join("probe.js"),
+        format!(
+            "const fs=require('fs');\n\
+             fs.writeFileSync({out:?}, 'WATCH_ENV='+(process.env.WATCH_ENV||'')+'\\n');\n",
+            out = out_file.to_string_lossy()
+        ),
+    )
+    .unwrap();
+
+    let mut child = Command::new(nub_binary())
+        .args(["--watch", "--no-env-file", "probe.js"])
+        .current_dir(&dir)
+        .env("XDG_CACHE_HOME", dir.join("cache"))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn nub watch");
+
+    let mut snapshot = None;
+    for _ in 0..100 {
+        if let Ok(s) = std::fs::read_to_string(&out_file)
+            && s.contains("WATCH_ENV=")
+        {
+            snapshot = Some(s);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let snapshot = snapshot.expect("`nub watch` probe never ran (no sentinel file)");
+    assert!(
+        snapshot.contains("WATCH_ENV=\n"),
+        "--no-env-file `nub watch` must NOT hand `.env` to Node: {snapshot:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn env_precedence_with_app_env_mode() {
     // `APP_ENV` selects the mode (`.env.development` here); `NODE_ENV` no longer
     // does (dropped as a mode source — it is the app's own dev/prod variable).
