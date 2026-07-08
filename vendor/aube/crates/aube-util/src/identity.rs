@@ -142,6 +142,16 @@ pub struct Embedder {
     pub cache_namespace: &'static str,
     /// Leaf directory name under the OS data/state root, e.g. `"aube"`.
     pub data_namespace: &'static str,
+    /// Leaf directory name of the machine-global virtual store under the cache
+    /// root, e.g. `"virtual-store"` → `<cache_namespace>/virtual-store`. This is
+    /// the shared, content-materialized dep tree [`Store::virtual_store_dir`](crate)
+    /// symlinks project `node_modules` into — distinct from the *per-project*
+    /// virtual store leaf (`node_modules/.<name>`), which is a resolved setting,
+    /// not an embedder constant. An embedder renames it for a cleaner name (nub:
+    /// `"store"` → `<cache>/store`; it's the actual store, only "virtual" in that
+    /// callers symlink out of it). Default-preserving: standalone aube keeps
+    /// `"virtual-store"` byte-for-byte.
+    pub virtual_store_subdir: &'static str,
     /// Leaf directory under the system config root (`/etc`) for the admin-managed
     /// config file (`/etc/<dir>/managed.toml`), e.g. `Some("aube")` →
     /// `/etc/aube/managed.toml`. `None` skips the system-managed read entirely —
@@ -412,6 +422,7 @@ pub const AUBE: Embedder = Embedder {
     diag_env_prefix: Some("AUBE"),
     cache_namespace: "aube",
     data_namespace: "aube",
+    virtual_store_subdir: "virtual-store",
     managed_config_system_dir: Some("aube"),
     config_namespace: Some("aube"),
     canonical_lockfile_always_wins: true,
@@ -620,6 +631,7 @@ mod tests {
         assert_eq!(id.diag_env_prefix, Some("AUBE"));
         assert_eq!(id.cache_namespace, "aube");
         assert_eq!(id.data_namespace, "aube");
+        assert_eq!(id.virtual_store_subdir, "virtual-store");
         assert_eq!(id.managed_config_system_dir, Some("aube"));
         assert_eq!(id.config_namespace, Some("aube"));
         assert!(id.canonical_lockfile_always_wins);

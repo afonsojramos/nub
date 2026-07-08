@@ -38,6 +38,7 @@ static NO_CHURN_TOOL: Embedder = Embedder {
     diag_env_prefix: Some("NOCHURN"),
     cache_namespace: "nochurn",
     data_namespace: "nochurn",
+    virtual_store_subdir: "virtual-store",
     managed_config_system_dir: Some("nochurn"),
     config_namespace: Some("nochurn"),
     canonical_lockfile_always_wins: true,

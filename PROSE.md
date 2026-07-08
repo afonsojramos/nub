@@ -136,7 +136,7 @@ A migration guide is a flat list of changes optimized for a reader scanning for 
 
 ## Naming and capitalization
 
-**Capitalize "Nub" as a proper noun in prose; use `nub` (lowercase) only inside monospace.** The test: if the word is in running prose — a sentence, a heading, a table cell description — it is "Nub". If it is inside backticks, a fenced code block, a `<code>`/`<pre>`, a URL, a file path, or a package name, it stays lowercase (`nub`, `nubx`, `@nubjs/nub`, `node_modules/.nub`). Compound modifiers follow the same rule — "Nub-identity project" in prose, `` `nub-identity` `` in code. Never "NUB" (all-caps) anywhere.
+**Capitalize "Nub" as a proper noun in prose; use `nub` (lowercase) only inside monospace.** The test: if the word is in running prose — a sentence, a heading, a table cell description — it is "Nub". If it is inside backticks, a fenced code block, a `<code>`/`<pre>`, a URL, a file path, or a package name, it stays lowercase (`nub`, `nubx`, `@nubjs/nub`, `~/.cache/nub`). Compound modifiers follow the same rule — "Nub-identity project" in prose, `` `nub-identity` `` in code. Never "NUB" (all-caps) anywhere.
 
 ---
 
