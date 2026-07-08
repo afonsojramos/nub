@@ -24,10 +24,13 @@ export const metadata: Metadata = {
 };
 
 export default function BlogIndex() {
+  // `date` accepts an ISO 8601 UTC timestamp (e.g. 2026-07-07T12:00:00Z) to
+  // order same-day posts; a date-only value parses as UTC midnight. The URL
+  // tiebreak only guards against nondeterministic file order on genuine ties.
   const posts = [...blog.getPages()].sort(
     (a, b) =>
       new Date(b.data.date ?? 0).getTime() -
-      new Date(a.data.date ?? 0).getTime(),
+        new Date(a.data.date ?? 0).getTime() || b.url.localeCompare(a.url),
   );
 
   return (
