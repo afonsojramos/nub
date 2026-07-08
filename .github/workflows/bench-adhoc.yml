@@ -1,0 +1,92 @@
+name: bench-adhoc (warm-install 5-bar)
+
+# Branch-scoped throwaway probe (ci-adhoc-test skill): runs the committed
+# 4-way/5-bar warm-install bench on NEAR-IDLE CI runners to get clean-sigma
+# numbers the dev box (never idle) cannot. Lives ONLY on the bench-adhoc branch.
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [bench-adhoc]
+
+jobs:
+  bench:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+
+      - name: Build release nub (pure-Rust PM CLI; no N-API addon needed)
+        run: cargo build --release -p nub-cli
+
+      - name: Verify nub version matches workspace
+        run: |
+          ./target/release/nub --version
+          grep -m1 '^version' Cargo.toml
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install hyperfine
+        run: |
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            brew install hyperfine
+          else
+            HF=1.19.0
+            curl -fsSL -o /tmp/hf.deb "https://github.com/sharkdp/hyperfine/releases/download/v${HF}/hyperfine_${HF}_amd64.deb"
+            sudo dpkg -i /tmp/hf.deb
+          fi
+          hyperfine --version
+
+      - name: Tool versions
+        run: |
+          echo "node:  $(node --version)"
+          echo "npm:   $(npm --version)"
+          echo "pnpm:  $(pnpm --version)"
+          echo "bun:   $(bun --version)"
+          echo "hyperfine: $(hyperfine --version)"
+          echo "nub:   $(./target/release/nub --version)"
+
+      - name: Run 5-bar warm-install bench (tanstack-start, 20 runs / 5 warmup)
+        env:
+          NUB: ${{ github.workspace }}/target/release/nub
+        run: |
+          set -o pipefail
+          bash tests/bench/install/run-4way.sh --fixture tanstack-start --runs 20 --warmup 5 2>&1 | tee bench-out.txt
+
+      - name: Publish table to step summary
+        if: always()
+        run: |
+          {
+            echo "## bench-adhoc: warm install (tanstack-start) on ${{ matrix.os }}"
+            echo ""
+            echo "runner load context: near-idle CI runner (clean-sigma)."
+            echo ""
+            echo '```'
+            cat bench-out.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload bench output artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-out-${{ matrix.os }}
+          path: bench-out.txt
