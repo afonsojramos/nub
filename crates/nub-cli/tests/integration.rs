@@ -3512,6 +3512,39 @@ fn no_env_file_wins_over_explicit_env_file() {
     );
 }
 
+#[test]
+fn no_env_file_wins_over_env_file_if_exists() {
+    // `--no-env-file` beats `--env-file-if-exists` too — the whole `--env-file*`
+    // family feeds one collected map that the kill-switch suppresses. The named
+    // file exists (so `-if-exists` would otherwise load it), proving suppression.
+    let dir = unique_test_cache();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("package.json"), r#"{"name":"noenvfile-ifexists"}"#).unwrap();
+    std::fs::write(dir.join("present.env"), "FROMCUSTOM=custom-val\n").unwrap();
+    std::fs::write(
+        dir.join("app.js"),
+        "console.log('FROMCUSTOM=[' + (process.env.FROMCUSTOM ?? '') + ']');\n",
+    )
+    .unwrap();
+
+    let out = Command::new(nub_binary())
+        .args(["--no-env-file", "--env-file-if-exists=present.env", "app.js"])
+        .current_dir(&dir)
+        .env("XDG_CACHE_HOME", dir.join("cache"))
+        .output()
+        .expect("failed to spawn nub");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(out.status.code(), Some(0), "stderr: {stderr}");
+    assert!(
+        stdout.contains("FROMCUSTOM=[]"),
+        "--no-env-file must ignore an existing --env-file-if-exists target: {stdout}"
+    );
+}
+
 /// `--no-env-file` on the watch path: the `.env*` files are neither handed to the
 /// watched Node as `--env-file` args nor injected via `Command::env`, so the child
 /// sees none of them. The watch loop never exits on its own, so the probe writes
