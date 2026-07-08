@@ -30,7 +30,7 @@ The main harness exercises both sides of the compatibility split:
 | GVS eligible | `run-warm-gvs.sh --fixture gvs-eligible` | `nub install` warm-install time vs pnpm where GVS stays on. |
 | GVS ineligible | `run-warm-gvs.sh --fixture gvs-ineligible` | A `next` project where GVS auto-disables and nub is roughly pnpm parity. |
 
-Nub's trigger list is `next`, `nuxt`, and `parcel`. `vite`, `vitepress`, and `@sveltejs/kit` are not triggers in Nub.
+Nub's trigger list is `next` and `react-native`. `vite`, `vitepress`, and `@sveltejs/kit` are not triggers in Nub.
 
 ```bash
 NUB=/path/to/target/release/nub bash tests/bench/install/run-warm-gvs.sh
