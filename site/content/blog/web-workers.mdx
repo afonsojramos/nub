@@ -1,63 +1,81 @@
 ---
 title: "Web Workers, on the Node you already have"
-description: Nub ships the browser-standard Worker — the constructor, messaging, and event surface you write for the web — over the threading primitive Node has always had. It is the feature Node declined, with the Node version you already run.
+description: Nub ships the browser's standard worker API — the constructor, messaging, and event surface you write for the web — on stock Node, down to version 18.19.
 author: The Nub Team
-date: 2026-06-24
+date: 2026-07-07T12:00:00Z
 ---
 
-The browser has had `Worker` for fifteen years. Node never shipped it. Here it is, on stock Node, with no build step for the worker file:
+JavaScript has had a standard API for running code on another thread since 2009: the web's `Worker`.
+
+It is the shape everyone writes. You construct a `Worker` pointing at a file, the file runs on its own thread with its own event loop, and the two sides talk through `postMessage`. This exact pair of files runs unchanged in every major browser, in Deno, and in Bun:
 
 ```ts
-const worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });
+// main.js
+const worker = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
 
 worker.postMessage({ n: 41 });
-worker.onmessage = (ev) => console.log(ev.data); // → 42
+worker.onmessage = (ev) => {
+  console.log(ev.data); // → 42
+  worker.terminate();
+};
 ```
 
 ```ts
-// worker.ts — TypeScript, runs directly
+// worker.js
 self.onmessage = (ev) => self.postMessage(ev.data.n + 1);
 ```
 
-That is the same code a browser runs, the same code Deno and Cloudflare run. With nub it runs on the `node` your project already pins, down to Node 18.19.
+Node is the exception:
 
-## The threading Node never wrapped
+```console
+$ node main.js
+const worker = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
+               ^
+ReferenceError: Worker is not defined
 
-Node has had real threads since 2018, behind `node:worker_threads`. It is a capable, low-level primitive — its own `Worker` class, a `parentPort`, structured-clone message passing. What it is not is the web's `Worker`: a different class, a different constructor signature, a different event surface, and never a browser-shape global. Code that targets the web platform — a routing library, a markdown parser, a piece of WASM glue that spins up a worker — does not run on Node unchanged, because the global it reaches for is not there.
+Node.js v26.2.0
+```
 
-So the ecosystem worked around it. The web-`Worker` shape became the thing you wrote for the browser, for Deno, for Bun, for Cloudflare, and then ported by hand for Node. Browser-standard `Worker` support is the most-upvoted open issue on the `nodejs/node` repository, open since 2022 ([nodejs/node#43583](https://github.com/nodejs/node/issues/43583)). It has not shipped.
+## The most-upvoted issue on Node's tracker
+
+Node is not missing threads. It has had real ones since 2018, behind `node:worker_threads` — a capable, low-level primitive with its own `Worker` class, a `parentPort`, and structured-clone message passing. What it never shipped is the *web's* `Worker`: a different class, a different constructor, a different event surface, and no global. Code written for the web platform — a library that offloads parsing to a worker, WASM glue that spawns a thread behind the scenes — reaches for a global that is not there, and gets ported by hand instead.
+
+Browser-standard `Worker` support is the most-upvoted open issue on the Node repository — [nodejs/node#43583](https://github.com/nodejs/node/issues/43583), open since 2022, ahead of HTTP/3. It has not shipped.
 
 ## Why Node declined
 
-The Node team's position is reasonable. The worker's *child* side — the `DedicatedWorkerGlobalScope` the browser exposes, with `importScripts`, `WorkerNavigator`, `WorkerLocation`, the document/origin model — is a completely different environment from a Node thread. A `Worker` global that looked browser-shaped on the parent but ran a Node environment in the child would set an expectation the runtime cannot fully meet. The maintainers have been explicit that an incomplete userland polyfill is, if anything, an argument *against* pulling the feature into core.
+The Node team's position is reasonable. A worker's *child* side — the `DedicatedWorkerGlobalScope` a browser provides, with `importScripts`, `WorkerNavigator`, `WorkerLocation`, and an origin model — is a different environment from a Node thread, and a global that looked browser-shaped on the parent while running a Node environment in the child would promise more than the runtime can deliver. The maintainers have been explicit that an incomplete polyfill is, if anything, an argument against pulling the feature into core.
 
-That is a sound call for a standard library, where a half-match is worse than a clear "use `node:worker_threads`." It is a different question for a tool whose job is to bridge the web platform and the Node you run. Nub is not core, makes no claim to be a browser, and documents exactly where the wrapper and a browser `Worker` diverge.
+For a standard library, that is a sound call — a half-match is worse than a clear "use `node:worker_threads`." For a tool whose job is to bridge the web platform onto the Node you already run, the calculus is different: make no claim to be a browser, document exactly where the wrapper diverges, and give people the shape they already write. So Nub ships it.
 
-## How it is built
+## The same two files, on stock Node
 
-Nub's `Worker` is a faithful polyfill over `node:worker_threads` — not a fork of Node, not a new runtime, not a patched binary. It rides Node's own extension surfaces: a preload (`runtime/worker-polyfill.mjs`) defines `globalThis.Worker` as an `EventTarget` subclass wrapping a `node:worker_threads.Worker`, and installs the dedicated-worker scope (`self`, `postMessage`, `close`, `addEventListener`, `importScripts`) on top of `parentPort` inside the thread.
+Here is the pair from the top, unchanged, on the `node` your project already pins — down to Node 18.19:
 
-It is **feature-detected**: the polyfill checks `typeof globalThis.Worker` and installs only when no native global is already present, so the day a Node version ships its own `Worker`, nub steps aside. It installs **lazily**, on the first `new Worker(...)`, so a program that never spawns a worker pays nothing at startup. And it is **conformance-tested**: nub's `Worker` runs against a vendored slice of [web-platform-tests](https://github.com/web-platform-tests/wpt) — the `webmessaging` battery, the structured-clone battery over a `MessageChannel`, and the worker-scope event tests — on every supported Node tier in CI. The messaging and structured-clone core passes in full; the handful of divergences are documented and each inherited from the underlying Node primitive.
+```console
+$ nub main.js
+42
+```
+
+And because Nub transpiles every entry it loads, the worker file can be TypeScript — point the constructor at a `.ts` file and go, no build step.
+
+## A polyfill, not a runtime
+
+Nub's `Worker` rides `node:worker_threads` — not a fork of Node, not a new runtime, not a patched binary. A preload defines `globalThis.Worker` as an `EventTarget` subclass wrapping a `node:worker_threads.Worker`, and inside the thread installs the dedicated-worker scope — `self`, `postMessage`, `close`, `importScripts` — on top of `parentPort`.
+
+- **Feature-detected.** It installs only when no native global is present — the day Node ships its own `Worker`, Nub steps aside.
+- **Lazy.** Nothing loads until the first `new Worker(...)`, so a program that never spawns a worker pays nothing at startup.
+- **Conformance-tested.** The surface runs a vendored slice of [web-platform-tests](https://github.com/web-platform-tests/wpt) — the `webmessaging` battery, structured clone over a `MessageChannel`, and the worker-scope event tests — on every supported Node tier in CI. Messaging and structured clone pass in full; the documented exceptions are browser-DOM types Node has no substrate for, like `ImageBitmap` and `OffscreenCanvas`.
 
 ## Using it
 
-Every example below runs on stock Node through nub today.
-
-**A TypeScript worker, no build step.** The worker entry is transpiled like any other nub entry — point at the `.ts` file and go.
-
-```ts
-const worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });
-worker.onmessage = (ev) => console.log("got", ev.data);
-worker.postMessage("ping");
-```
+Everything below runs today under Nub, on stock Node.
 
 **Module or classic.** The default shape is `{ type: "module" }`; pass `{ type: "classic" }` and the worker gets a synchronous `importScripts()`.
 
 ```ts
-const mod = new Worker(new URL("./mod.ts", import.meta.url), { type: "module" });
-
 const classic = new Worker(new URL("./legacy.js", import.meta.url), { type: "classic" });
-// inside legacy.js: importScripts("./helpers.js");
+// inside legacy.js: importScripts("./helpers.js") — fetched and run synchronously, in order
 ```
 
 **An inline worker.** A `data:` URL runs a worker straight from a source string; a `blob:` URL from `URL.createObjectURL` is the WHATWG inline-worker mechanism, snapshotted at `createObjectURL` time.
@@ -72,7 +90,7 @@ const blob = new Worker(
 );
 ```
 
-**`MessageChannel` and `MessagePort`.** Hand a worker one end of a channel and talk over it directly — the ports transfer across the thread boundary.
+**Channels.** Hand a worker one end of a `MessageChannel` and talk over it directly — the ports transfer across the thread boundary.
 
 ```ts
 const { port1, port2 } = new MessageChannel();
@@ -84,7 +102,7 @@ port1.onmessage = (ev) => console.log(ev.data);
 port1.postMessage("over the side channel");
 ```
 
-**`BroadcastChannel`.** Fan a message out to every thread tuned to the same channel name — a native Node global, so it works unchanged.
+**Broadcast.** A `BroadcastChannel` fans a message out to every thread tuned to the same channel name — a native Node global, so it works unchanged.
 
 ```ts
 const channel = new BroadcastChannel("jobs");
@@ -101,28 +119,17 @@ worker.postMessage(buffer, [buffer]);
 console.log(buffer.byteLength); // 0 — transferred, not cloned
 ```
 
-**Offloading CPU-bound work.** The reason workers exist: keep a heavy computation off the thread that serves requests. Spawn the worker, ship it the input, await the result without blocking.
+**Node-style code, on the same handle.** The global also mirrors `node:worker_threads.Worker` — the `EventEmitter` methods, the `online` and `exit` lifecycle events, a `Promise`-returning `terminate()`, and `{ eval: true }` for a raw source string — so web-style and Node-style worker code interoperate on one object.
 
 ```ts
-// main.ts
-const worker = new Worker(new URL("./hash.ts", import.meta.url), { type: "module" });
+const worker = new Worker(
+  `const { parentPort } = require("node:worker_threads");
+   parentPort.on("message", (n) => parentPort.postMessage(n * 2));`,
+  { eval: true },
+);
 
-function hash(payload: ArrayBuffer): Promise<string> {
-  return new Promise((resolve) => {
-    worker.onmessage = (ev) => resolve(ev.data);
-    worker.postMessage(payload, [payload]);
-  });
-}
-```
-
-```ts
-// hash.ts
-import { createHash } from "node:crypto";
-
-self.onmessage = (ev) => {
-  const digest = createHash("sha256").update(Buffer.from(ev.data)).digest("hex");
-  self.postMessage(digest);
-};
+worker.on("message", (n) => console.log(n)); // 42 — the raw value, Node-style
+worker.postMessage(21);
 ```
 
 <Callout title="One worker is one OS thread">
@@ -131,12 +138,12 @@ Each `Worker` is a real OS thread with its own V8 isolate and a fresh module gra
 
 ## No new API to learn, nothing to undo
 
-There is no nub-specific `Worker`. It is the WHATWG Web Workers shape, with Cloudflare's semantics where the spec leaves a gap. The same constructor, the same `postMessage`, the same events you already write for the browser — now running on the Node you already have. Remove nub tomorrow and the worker code that targets the web platform is unchanged; what you lose is the global, falling back to `node:worker_threads`.
+There is no Nub-specific `Worker`. It is the WHATWG Web Workers shape — the same constructor, the same `postMessage`, the same events you already write for the browser — running on the Node you already have. Remove Nub tomorrow and that code is still correct web-platform code; all you lose is the global.
 
 ---
 
 <div className="text-sm text-fd-muted-foreground">
 
-Shipped in [nub v0.2.0](https://github.com/nubjs/nub/releases/tag/v0.2.0). The Worker work landed across [#99](https://github.com/nubjs/nub/pull/99) (the spec-faithful constructor — inline `data:`/`blob:` workers, `name`, error location, classic mode) and [#119](https://github.com/nubjs/nub/pull/119) (the WPT conformance harness and CI leg). Thanks to [@jdalton](https://github.com/jdalton) for the build split and test coverage that the release rode on, [@morinokami](https://github.com/morinokami) for the reports that drove the runtime fixes alongside it, and [@iamnafets](https://github.com/iamnafets) for the issue behind the worker work.
+Worker shipped in [nub v0.2.0](https://github.com/nubjs/nub/releases/tag/v0.2.0), and the surface has grown since: the spec-faithful constructor — inline `data:`/`blob:` workers, `name`, error locations, classic mode — in [#99](https://github.com/nubjs/nub/pull/99), the WPT conformance harness and CI leg in [#119](https://github.com/nubjs/nub/pull/119), and the `node:worker_threads` mirroring in [#256](https://github.com/nubjs/nub/pull/256).
 
 </div>
