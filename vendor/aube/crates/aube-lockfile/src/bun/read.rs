@@ -3,6 +3,7 @@ use super::raw::{BunEntry, RawBunLockfile};
 use super::source::{
     bin_value_to_map, bun_key_to_alias_name, classify_bun_ident,
     rebase_workspace_scoped_local_source, resolve_nested_bun, resolve_workspace_dep, split_ident,
+    unrecognized_protocol,
 };
 use crate::{DepType, DirectDep, Error, LockedPackage, LockfileGraph, PeerDepMeta};
 use std::collections::{BTreeMap, BTreeSet};
@@ -65,6 +66,16 @@ pub fn parse(path: &Path) -> Result<LockfileGraph, Error> {
     // path ("parent/foo") when multiple versions exist.
     let mut key_info: BTreeMap<String, (String, String)> = BTreeMap::new();
     let mut packages: BTreeMap<String, LockedPackage> = BTreeMap::new();
+    // Under `strict_unsupported_source` (nub), an entry whose ident tail
+    // carries a protocol the classifier can't resolve is RECORDED here
+    // (keyed by its bun.lock key) and withheld from `key_info`/`packages`,
+    // instead of being reclassified to a registry `name@version` that 404s
+    // at fetch — the edge sites below (where optionality is known) raise
+    // an eager fatal / warn+skip. Empty (and inert) for standalone aube,
+    // which keeps the reclassify default.
+    let strict = aube_util::embedder().strict_unsupported_source;
+    let mut unsupported: BTreeMap<String, crate::UnsupportedSpec> = BTreeMap::new();
+    let mut skipped_optional: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
 
     for (key, entry) in &entries {
         let Some((raw_name, raw_version)) = split_ident(&entry.ident) else {
@@ -93,6 +104,24 @@ pub fn parse(path: &Path) -> Result<LockfileGraph, Error> {
             &raw_version,
             entry.integrity.as_deref(),
         )?;
+        // A protocol-shaped tail that fell through the classifier means a
+        // source this reader can't resolve. Withhold the entry so the edge
+        // sites below fatal / warn+skip instead of resolving to a bogus
+        // registry pin.
+        if strict
+            && local_source.is_none()
+            && let Some(protocol) = unrecognized_protocol(&raw_version)
+        {
+            unsupported.insert(
+                key.clone(),
+                crate::UnsupportedSpec {
+                    name: name.clone(),
+                    key: entry.ident.clone(),
+                    protocol: protocol.to_string(),
+                },
+            );
+            continue;
+        }
         let local_source = local_source
             .map(|local| rebase_workspace_scoped_local_source(key, local, &workspace_scopes));
         key_info.insert(key.clone(), (name.clone(), version.clone()));
@@ -215,7 +244,8 @@ pub fn parse(path: &Path) -> Result<LockfileGraph, Error> {
             .keys()
             .chain(entry.meta.optional_dependencies.keys())
         {
-            if let Some(target_key) = resolve_nested_bun(key, dep_name, &key_info)
+            if let Some(target_key) =
+                resolve_nested_bun(key, dep_name, |k| key_info.contains_key(k))
                 && let Some((dname, dver)) = key_info.get(&target_key)
             {
                 let target_dep_path = format!("{dname}@{dver}");
@@ -223,6 +253,15 @@ pub fn parse(path: &Path) -> Result<LockfileGraph, Error> {
                     dep_name.clone(),
                     crate::npm::dep_path_tail(dname, &target_dep_path).to_string(),
                 );
+            } else if let Some(u_key) =
+                resolve_nested_bun(key, dep_name, |k| unsupported.contains_key(k))
+            {
+                // The by-name walk lands on an entry withheld as
+                // unsupported: fatal for a required edge, warn+skip for an
+                // optional one (a name in both maps is required). Inert
+                // unless strict — the map is empty otherwise.
+                let optional = !entry.meta.dependencies.contains_key(dep_name);
+                crate::unsupported_edge(&unsupported[&u_key], optional, path)?;
             }
         }
         resolved_by_dep_path.insert(dep_path, resolved);
@@ -275,27 +314,63 @@ pub fn parse(path: &Path) -> Result<LockfileGraph, Error> {
             .then(|| ws_raw.extra.get("name").and_then(serde_json::Value::as_str))
             .flatten();
         let mut direct: Vec<DirectDep> = Vec::new();
-        let push_dep =
-            |name: &str, specifier: &str, dep_type: DepType, direct: &mut Vec<DirectDep>| {
-                if let Some(target_key) = resolve_workspace_dep(ws_path, ws_name, name, &key_info)
-                    && let Some((dname, dver)) = key_info.get(&target_key)
-                {
-                    direct.push(DirectDep {
-                        name: dname.clone(),
-                        dep_path: format!("{dname}@{dver}"),
-                        dep_type,
-                        specifier: Some(specifier.to_string()),
-                    });
+        let push_dep = |name: &str,
+                        specifier: &str,
+                        dep_type: DepType,
+                        direct: &mut Vec<DirectDep>,
+                        skipped: &mut BTreeMap<String, BTreeMap<String, String>>|
+         -> Result<(), Error> {
+            if let Some(target_key) =
+                resolve_workspace_dep(ws_path, ws_name, name, |k| key_info.contains_key(k))
+                && let Some((dname, dver)) = key_info.get(&target_key)
+            {
+                direct.push(DirectDep {
+                    name: dname.clone(),
+                    dep_path: format!("{dname}@{dver}"),
+                    dep_type,
+                    specifier: Some(specifier.to_string()),
+                });
+                return Ok(());
+            }
+            // The dep's entry was withheld as unsupported: fatal for a
+            // required edge, warn for an optional one — recorded as a
+            // consciously-skipped optional so a frozen install's drift
+            // check tolerates the absent dep (same as a platform-filtered
+            // optional). Inert unless strict — the map is empty otherwise.
+            if let Some(u_key) =
+                resolve_workspace_dep(ws_path, ws_name, name, |k| unsupported.contains_key(k))
+            {
+                let optional = matches!(dep_type, DepType::Optional);
+                crate::unsupported_edge(&unsupported[&u_key], optional, path)?;
+                if optional {
+                    skipped
+                        .entry(importer_path.clone())
+                        .or_default()
+                        .insert(name.to_string(), specifier.to_string());
                 }
-            };
+            }
+            Ok(())
+        };
         for (n, spec) in &ws_raw.dependencies {
-            push_dep(n, spec, DepType::Production, &mut direct);
+            push_dep(
+                n,
+                spec,
+                DepType::Production,
+                &mut direct,
+                &mut skipped_optional,
+            )?;
         }
         for (n, spec) in &ws_raw.dev_dependencies {
-            push_dep(n, spec, DepType::Dev, &mut direct);
+            push_dep(n, spec, DepType::Dev, &mut direct, &mut skipped_optional)?;
         }
         for (n, spec) in &ws_raw.optional_dependencies {
-            push_dep(n, spec, DepType::Optional, &mut direct);
+            push_dep(
+                n,
+                spec,
+                DepType::Optional,
+                &mut direct,
+                &mut skipped_optional,
+            )?;
         }
         // Required workspace peers. bun links a workspace's
         // `peerDependencies` entry into that workspace's `node_modules`
@@ -326,7 +401,13 @@ pub fn parse(path: &Path) -> Result<LockfileGraph, Error> {
                     continue;
                 }
                 let spec = spec.as_str().unwrap_or_default();
-                push_dep(n, spec, DepType::Production, &mut direct);
+                push_dep(
+                    n,
+                    spec,
+                    DepType::Production,
+                    &mut direct,
+                    &mut skipped_optional,
+                )?;
             }
         }
         importers.insert(importer_path.clone(), direct);
@@ -401,6 +482,7 @@ pub fn parse(path: &Path) -> Result<LockfileGraph, Error> {
         catalogs: catalogs_map,
         extra_fields: raw.extra,
         workspace_extra_fields,
+        skipped_optional_dependencies: skipped_optional,
         ..Default::default()
     })
 }
