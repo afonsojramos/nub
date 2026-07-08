@@ -80,7 +80,11 @@ pub(crate) fn register() {
 /// from a user source (`.npmrc`/env/`pnpm-workspace.yaml`) and is dropped by
 /// [`nub_internal_seed`]. Standalone aube installs no hook and honors the full
 /// seed verbatim, so its `diskMaterializePackages` knob is unaffected.
-const NUB_INTERNAL_DISK_MATERIALIZE_SEED: &[&str] = &["vite"];
+///
+/// SHARED with [`super::nub_setting_defaults`], which seeds exactly this name as
+/// the embedder default — sourcing both from one const so a future internal
+/// default can't be added in one place and silently dropped by the other.
+pub(super) const NUB_INTERNAL_DISK_MATERIALIZE_SEED: &[&str] = &["vite"];
 
 /// Keep only nub's own embedder-default seed names, dropping every user-source
 /// entry — the mechanism that retires the user-facing `diskMaterializePackages`

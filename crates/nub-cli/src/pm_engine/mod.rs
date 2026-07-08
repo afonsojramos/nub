@@ -2152,7 +2152,9 @@ fn nub_setting_defaults(
         && vite_compat::enabled()
         && vite_compat::manifest_declares_vite(detected.map(|d| d.dir.as_path()).unwrap_or(cwd))
     {
-        "vite".to_string()
+        // Draw from the hook's allowlist so the embedder default and the seed the
+        // hook keeps ([`phantom_closure::nub_internal_seed`]) can't drift.
+        phantom_closure::NUB_INTERNAL_DISK_MATERIALIZE_SEED.join(",")
     } else {
         String::new()
     };
