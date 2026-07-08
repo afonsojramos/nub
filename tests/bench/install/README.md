@@ -10,6 +10,8 @@ cargo build --release -p nub-cli
 bash tests/bench/install/run-warm-gvs.sh
 ```
 
+For a single nub/bun/pnpm/npm warm-install table on one fixture (default `tanstack-start`): `bash tests/bench/install/run-4way.sh`.
+
 For the older fixture matrix:
 
 ```bash
