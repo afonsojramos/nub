@@ -361,6 +361,23 @@ pub(crate) fn resolve_dep_spec(
     let Some(u) = unsupported.get(spec) else {
         return Ok(None);
     };
+    unsupported_edge(u, optional, path)?;
+    Ok(None)
+}
+
+/// Apply the abort-eagerly policy to an edge that resolved to an
+/// [`UnsupportedSpec`], once the edge's optionality is known: warn + skip
+/// for an OPTIONAL edge (`Ok`, matching the incumbent's tolerance of a
+/// missing optional), `Err(UnsupportedSource)` for a non-optional one —
+/// the eager, pre-mutation plan-time refusal. Shared by the yarn readers'
+/// spec-keyed resolution ([`resolve_dep_spec`]) and the bun reader's
+/// by-name nested-key walk, so the warning code and message stay
+/// identical across formats.
+pub(crate) fn unsupported_edge(
+    u: &UnsupportedSpec,
+    optional: bool,
+    path: &std::path::Path,
+) -> Result<(), Error> {
     if optional {
         tracing::warn!(
             code = aube_codes::warnings::WARN_AUBE_LOCKFILE_UNSUPPORTED_SOURCE,
@@ -368,7 +385,7 @@ pub(crate) fn resolve_dep_spec(
             u.name,
             u.protocol,
         );
-        Ok(None)
+        Ok(())
     } else {
         Err(Error::unsupported_source(path, &u.key, &u.protocol))
     }
