@@ -636,7 +636,7 @@ pub(crate) fn engine_session(dir: Option<&Path>) -> Result<EngineSession> {
 /// install; its `node_modules` is almost always COPY-relocated (multi-stage
 /// Docker) or thrown away, and a machine-global virtual store makes that tree
 /// non-relocatable — every `.store/<dep>` becomes an absolute symlink into
-/// `~/.cache/nub/pm/virtual-store` that a `COPY --from` leaves dangling (#241).
+/// `~/.cache/nub/pm/store` that a `COPY --from` leaves dangling (#241).
 /// Forcing the store project-local yields the self-contained, COPY-safe tree
 /// `CI=1 nub install` already produces, while keeping the isolated layout's
 /// phantom-dep protection. An explicit user `enableGlobalVirtualStore`/

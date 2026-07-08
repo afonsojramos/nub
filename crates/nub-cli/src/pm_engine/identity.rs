@@ -170,6 +170,13 @@ pub(crate) const NUB: aube_util::Embedder = aube_util::Embedder {
     diag_env_prefix: Some("NUB"),
     cache_namespace: "nub/pm",
     data_namespace: "nub",
+    // Machine-global store named `store` (→ `~/.cache/nub/pm/store/`). It is the
+    // real, shared store packages materialize into — only "virtual" in that
+    // project `node_modules` symlink OUT of it — so `virtual-store` (pnpm's term
+    // for the flattened per-project tree) never fit. `store` reads clean and,
+    // unlike `.store`, is not the path segment simple-git-hooks slices on.
+    // Cosmetic: the shared-store behavior is identical.
+    virtual_store_subdir: "store",
     managed_config_system_dir: Some("nub"),
     // No branded user/project config file: nub never reads `~/.config/aube/`
     // (or `<cwd>/.config/aube/`) and authors no `~/.config/nub/` of its own —

@@ -28,6 +28,7 @@ static MYTOOL: Embedder = Embedder {
     diag_env_prefix: Some("MYTOOL"),
     cache_namespace: "mytool",
     data_namespace: "mytool",
+    virtual_store_subdir: "virtual-store",
     managed_config_system_dir: Some("mytool"),
     config_namespace: Some("mytool"),
     canonical_lockfile_always_wins: true,

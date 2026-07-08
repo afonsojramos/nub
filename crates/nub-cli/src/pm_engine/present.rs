@@ -126,10 +126,7 @@ pub(crate) fn rewrite_help(text: impl AsRef<str>) -> String {
         (".aube/<dep_path>", ".store/<dep_path>"),
         // The GVS location in engine docs;
         // described structurally — the literal path is engine cache state.
-        (
-            "`~/.cache/aube/virtual-store/`",
-            "the global virtual-store cache",
-        ),
+        ("`~/.cache/aube/virtual-store/`", "the global store cache"),
         // The engine's own config file (config --location docs); described
         // structurally like the GVS path — the literal `.config/aube`
         // location is engine state (re-homing it is an open fork item,

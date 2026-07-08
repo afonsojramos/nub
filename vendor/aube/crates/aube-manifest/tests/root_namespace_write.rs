@@ -34,6 +34,7 @@ static ROOT_TOOL: Embedder = Embedder {
     diag_env_prefix: None,
     cache_namespace: "roottool",
     data_namespace: "roottool",
+    virtual_store_subdir: "virtual-store",
     managed_config_system_dir: Some("roottool"),
     config_namespace: Some("roottool"),
     canonical_lockfile_always_wins: true,

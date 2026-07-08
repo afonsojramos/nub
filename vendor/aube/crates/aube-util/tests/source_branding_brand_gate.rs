@@ -33,6 +33,7 @@ static NUBLIKE: Embedder = Embedder {
     diag_env_prefix: None,
     cache_namespace: "nublike",
     data_namespace: "nublike",
+    virtual_store_subdir: "virtual-store",
     managed_config_system_dir: Some("nublike"),
     config_namespace: Some("nublike"),
     canonical_lockfile_always_wins: false,
