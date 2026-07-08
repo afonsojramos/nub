@@ -2129,10 +2129,11 @@ fn nub_setting_defaults(
     // ejects them through #319's ancestor-closure, subsuming the old 14-entry
     // const (incl. the singleton-hazard adapters the closure now makes sound). So
     // this embedder default carries ONLY the #315 vite eject; empty otherwise
-    // (aube's `parse_string_list` drops the empty entry). A user's own
-    // `diskMaterializePackages` still wins — the
-    // embedder default is the lowest precedence tier — so the additive escape
-    // hatch is intact.
+    // (aube's `parse_string_list` drops the empty entry). nub exposes NO
+    // user-facing `diskMaterializePackages` knob (maintainer 2026-07-07): the
+    // detector is the sole eject mechanism, and nub's hook drops every user-source
+    // seed name (`phantom_closure::nub_internal_seed`), keeping only this internal
+    // vite entry. (Standalone aube installs no hook and still honors the knob.)
     //
     // Vite symlink-GVS compat (#315): eject the `vite` package project-local so
     // its dist can be patched with the backported fs.allow sniff (< 8.1) without
@@ -2151,7 +2152,9 @@ fn nub_setting_defaults(
         && vite_compat::enabled()
         && vite_compat::manifest_declares_vite(detected.map(|d| d.dir.as_path()).unwrap_or(cwd))
     {
-        "vite".to_string()
+        // Draw from the hook's allowlist so the embedder default and the seed the
+        // hook keeps ([`phantom_closure::nub_internal_seed`]) can't drift.
+        phantom_closure::NUB_INTERNAL_DISK_MATERIALIZE_SEED.join(",")
     } else {
         String::new()
     };
