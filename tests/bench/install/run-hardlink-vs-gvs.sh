@@ -97,15 +97,17 @@ trap 'rm -rf "$WORK"' EXIT
 # (issue #71) inside a timed run.
 for t in nub-hoisted nub-gvs bun pnpm npm; do cp -R "$FIX" "$WORK/$t"; done
 
-# A fixture ships every lockfile; each tool must install from its OWN. Strip the
-# others so nub (which refuses an ambiguous multi-lockfile project) and the rest
-# resolve the right one. nub reads pnpm-lock.yaml (lockfile precedence).
+# A fixture ships every lockfile; each tool must install from its OWN, and nub
+# REFUSES a project that carries two lockfiles it could own (nub.lock +
+# pnpm-lock.yaml => ERR_NUB_LOCKFILE_AMBIGUOUS). So each nub dir keeps ONLY
+# nub.lock (nub's native lockfile — the honest nub leg), and every other dir
+# has nub.lock removed. Mirrors run-4way.sh's split.
 for d in nub-hoisted nub-gvs; do
-  rm -f "$WORK/$d/bun.lock" "$WORK/$d/bun.lockb" "$WORK/$d/package-lock.json"
+  rm -f "$WORK/$d/pnpm-lock.yaml" "$WORK/$d/pnpm-workspace.yaml" "$WORK/$d/bun.lock" "$WORK/$d/bun.lockb" "$WORK/$d/package-lock.json"
 done
-rm -f "$WORK/pnpm/bun.lock" "$WORK/pnpm/bun.lockb" "$WORK/pnpm/package-lock.json"
-rm -f "$WORK/bun/pnpm-lock.yaml" "$WORK/bun/pnpm-workspace.yaml" "$WORK/bun/package-lock.json"
-rm -f "$WORK/npm/bun.lock" "$WORK/npm/bun.lockb" "$WORK/npm/pnpm-lock.yaml" "$WORK/npm/pnpm-workspace.yaml"
+rm -f "$WORK/pnpm/nub.lock" "$WORK/pnpm/bun.lock" "$WORK/pnpm/bun.lockb" "$WORK/pnpm/package-lock.json"
+rm -f "$WORK/bun/nub.lock" "$WORK/bun/pnpm-lock.yaml" "$WORK/bun/pnpm-workspace.yaml" "$WORK/bun/package-lock.json"
+rm -f "$WORK/npm/nub.lock" "$WORK/npm/bun.lock" "$WORK/npm/bun.lockb" "$WORK/npm/pnpm-lock.yaml" "$WORK/npm/pnpm-workspace.yaml"
 
 echo "== warming each tool's store (untimed) =="
 ( cd "$WORK/nub-hoisted" && "$NUB" install --frozen-lockfile --node-linker hoisted -s )
@@ -125,11 +127,11 @@ ground_nub_bar() {
   local phaseline
   phaseline="$(NUB_DIAG_FILE="$diag" RUST_LOG=debug "$@" 2>&1 | grep -oE 'phase:link [0-9.]+m?s \([0-9]+ files\)' | tail -1 || true)"
   local hl cl rl cp sm
-  hl=$(grep -c '"name":"link_hardlink"' "$diag" 2>/dev/null || echo 0)
-  cl=$(grep -c '"name":"link_clonedir"' "$diag" 2>/dev/null || echo 0)
-  rl=$(grep -c '"name":"link_reflink"' "$diag" 2>/dev/null || echo 0)
-  cp=$(grep -c '"name":"link_copy"' "$diag" 2>/dev/null || echo 0)
-  sm=$(grep -c '"name":"link_macos_small_copy"' "$diag" 2>/dev/null || echo 0)
+  hl=$(grep -c '"name":"link_hardlink"' "$diag" 2>/dev/null || true)
+  cl=$(grep -c '"name":"link_clonedir"' "$diag" 2>/dev/null || true)
+  rl=$(grep -c '"name":"link_reflink"' "$diag" 2>/dev/null || true)
+  cp=$(grep -c '"name":"link_copy"' "$diag" 2>/dev/null || true)
+  sm=$(grep -c '"name":"link_macos_small_copy"' "$diag" 2>/dev/null || true)
   echo "  [$label]"
   echo "    ${phaseline:-phase:link (not captured)}"
   echo "    per-file link tally: hardlink=$hl  clonedir=$cl  reflink=$rl  copy=$cp  small_copy=$sm"
@@ -137,10 +139,14 @@ ground_nub_bar() {
 
 echo ""
 echo "== strategy grounding (untimed; diag tally) =="
+# NB: no `-s` here — the progress-silent flag also suppresses the RUST_LOG
+# tracing, and the phase:link file-count line rides on it. The NUB_DIAG_FILE
+# JSONL tally is written regardless of -s. (The timed hyperfine bars below keep
+# -s so the progress UI is out of the measurement.)
 ground_nub_bar "$WORK/nub-hoisted" "nub-hoisted-hl (bar 2): expect hardlink==files, clonedir==0" \
-  "$DIAG_DIR/hoisted.jsonl" "$NUB" --cwd "$WORK/nub-hoisted" install --frozen-lockfile --node-linker hoisted -s
+  "$DIAG_DIR/hoisted.jsonl" "$NUB" --cwd "$WORK/nub-hoisted" install --frozen-lockfile --node-linker hoisted
 ground_nub_bar "$WORK/nub-gvs" "nub-gvs (bar 3): expect near-zero per-file links (warm store -> symlink relink)" \
-  "$DIAG_DIR/gvs.jsonl" env -u CI "$NUB" --cwd "$WORK/nub-gvs" install --frozen-lockfile -s
+  "$DIAG_DIR/gvs.jsonl" env -u CI "$NUB" --cwd "$WORK/nub-gvs" install --frozen-lockfile
 # Report node_modules shape (flat real dirs for hoisted; symlink farm for GVS).
 echo "  [layout]"
 if [ -d "$WORK/nub-hoisted/node_modules/react" ] && [ ! -L "$WORK/nub-hoisted/node_modules/react" ]; then
