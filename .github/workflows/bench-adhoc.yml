@@ -90,3 +90,99 @@ jobs:
         with:
           name: bench-out-${{ matrix.os }}
           path: bench-out.txt
+
+  # Honest apples-to-apples: on LINUX (shared hardlink primitive) prove nub's
+  # link machinery matches bun IN BUN'S OWN REGIME (flat hoisted layout +
+  # per-file hardlink), then show GVS is a genuine O(packages) unlock on top.
+  # Linux-only by design — on macOS `auto` resolves to clonefile for BOTH tools,
+  # which muddies a hardlink-vs-GVS comparison.
+  hardlink-vs-gvs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+
+      - name: Build release nub (pure-Rust PM CLI; no N-API addon needed)
+        run: cargo build --release -p nub-cli
+
+      - name: Verify nub version matches workspace
+        run: |
+          ./target/release/nub --version
+          grep -m1 '^version' Cargo.toml
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install hyperfine
+        run: |
+          HF=1.19.0
+          curl -fsSL -o /tmp/hf.deb "https://github.com/sharkdp/hyperfine/releases/download/v${HF}/hyperfine_${HF}_amd64.deb"
+          sudo dpkg -i /tmp/hf.deb
+          hyperfine --version
+
+      - name: Tool versions
+        run: |
+          echo "kernel: $(uname -srm)"
+          echo "node:  $(node --version)"
+          echo "npm:   $(npm --version)"
+          echo "pnpm:  $(pnpm --version)"
+          echo "bun:   $(bun --version)"
+          echo "hyperfine: $(hyperfine --version)"
+          echo "nub:   $(./target/release/nub --version)"
+
+      - name: hardlink-vs-GVS bench — large (fat, GVS-eligible headline)
+        env:
+          NUB: ${{ github.workspace }}/target/release/nub
+        run: |
+          set -o pipefail
+          bash tests/bench/install/run-hardlink-vs-gvs.sh --fixture large --runs 25 --warmup 6 2>&1 | tee bench-hlgvs-large.txt
+
+      - name: hardlink-vs-GVS bench — tanstack-start (continuity data point)
+        if: always()
+        env:
+          NUB: ${{ github.workspace }}/target/release/nub
+        run: |
+          set -o pipefail
+          bash tests/bench/install/run-hardlink-vs-gvs.sh --fixture tanstack-start --runs 25 --warmup 6 2>&1 | tee bench-hlgvs-tanstack.txt
+
+      - name: Publish tables to step summary
+        if: always()
+        run: |
+          {
+            echo "## bench-adhoc: hardlink-vs-GVS (Linux, near-idle CI)"
+            echo ""
+            echo "Bars: **bun** (flat hoisted, per-file hardlink) → **nub-hoisted-hl**"
+            echo "(\`--node-linker hoisted\`: same flat layout + per-file hardlink as bun)"
+            echo "→ **nub-gvs** (default: O(packages) symlink relink into the shared store)."
+            echo "Each nub bar is diag-grounded (link-strategy tally + phase:link file count)."
+            echo ""
+            echo "### large (1168 pkgs, GVS-eligible headline)"
+            echo '```'
+            cat bench-hlgvs-large.txt
+            echo '```'
+            echo "### tanstack-start (313 pkgs, continuity)"
+            echo '```'
+            cat bench-hlgvs-tanstack.txt 2>/dev/null || echo "(not captured)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload hardlink-vs-GVS artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-hlgvs
+          path: bench-hlgvs-*.txt
