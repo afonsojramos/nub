@@ -5447,9 +5447,10 @@ fn dotenv_node_env_stripped_and_app_env_selects_env_file() {
         "nub must warn that a `.env` NODE_ENV was ignored: {err_a}"
     );
 
-    // (b) ambient NODE_ENV=production: passes through untouched but does NOT select
-    //     `.env.production` — NODE_ENV is no longer a mode source. No spurious
-    //     warning (the ambient value wins over the `.env` value before the strip).
+    // (b) ambient NODE_ENV=production (APP_ENV unset): passes through untouched AND
+    //     selects `.env.production` as the clamped fallback (`production` is
+    //     canonical — Next.js/Bun parity). No spurious warning (the ambient value
+    //     wins over the `.env` value before the strip).
     let (out_b, err_b, code_b) = run(Some("production"), None);
     assert_eq!(code_b, 0, "run must succeed; stderr: {err_b}");
     assert!(
@@ -5457,12 +5458,26 @@ fn dotenv_node_env_stripped_and_app_env_selects_env_file() {
         "ambient NODE_ENV must pass through: {out_b}"
     );
     assert!(
-        out_b.contains("PROD=[]"),
-        "ambient NODE_ENV must NOT select `.env.production` (no longer a mode source): {out_b}"
+        out_b.contains("PROD=[prod]"),
+        "canonical ambient NODE_ENV must select `.env.production` (clamped fallback): {out_b}"
     );
     assert!(
         !err_b.contains("ignoring NODE_ENV set in .env"),
         "no warning when an ambient NODE_ENV wins over the `.env` value: {err_b}"
+    );
+
+    // (b2) ambient NODE_ENV=staging: NON-canonical, so it is ignored for file
+    //      selection — only `.env` loads, never `.env.production`. Use APP_ENV for
+    //      arbitrary modes.
+    let (out_b2, err_b2, code_b2) = run(Some("staging"), None);
+    assert_eq!(code_b2, 0, "run must succeed; stderr: {err_b2}");
+    assert!(
+        out_b2.contains("NE=[staging]"),
+        "ambient NODE_ENV must pass through: {out_b2}"
+    );
+    assert!(
+        out_b2.contains("PROD=[]"),
+        "non-canonical NODE_ENV must NOT select a `.env.<mode>` file: {out_b2}"
     );
 
     // (c) APP_ENV=production selects `.env.production` (the mode mechanism), while

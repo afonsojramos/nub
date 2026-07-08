@@ -205,12 +205,13 @@ fn overlay_env_file_vars(env_map: &mut HashMap<String, String>) {
 /// Build the env map for a child, merging eager `.env*` auto-discovery with the
 /// explicit `--env-file` vars. The gate (the maintainer, 2026-06-15): when the user passed
 /// any `--env-file` flag, auto-discovery is **suppressed entirely** — none of the
-/// four auto files (`.env.<NODE_ENV>.local`, `.env.local`, `.env.<NODE_ENV>`,
-/// `.env`) load, and only the explicit file(s) reach the child. With no
-/// `--env-file`, the autos load as before.
+/// four auto files (`.env.<mode>.local`, `.env.local`, `.env.<mode>`, `.env`)
+/// load, and only the explicit file(s) reach the child. With no `--env-file`, the
+/// autos load as before.
 ///
 /// `auto_env` is the already-loaded `.env*` map (callers pass `load_env_files`'s
-/// result, which honors NODE_ENV + ${VAR} expansion); `env_file_present` is the
+/// result, whose `<mode>` comes from `APP_ENV`, else a clamped `NODE_ENV`
+/// fallback, with `${VAR}` expansion); `env_file_present` is the
 /// flag-presence signal; `explicit_vars` is `ENV_FILE_VARS` (the parsed
 /// `--env-file` contents); `no_env_file` is the `--no-env-file` kill-switch. This
 /// is a pure function over its inputs so the suppression contract can be
