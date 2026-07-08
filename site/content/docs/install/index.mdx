@@ -471,13 +471,7 @@ Either layout resolves the same packages — including type packages (`@types/*`
 
 A few packages statically import a backend you pick at runtime — `@hookform/resolvers/zod` imports the `zod` your app installs, without declaring it. Under the shared store the adapter's real path sits outside the project, so Node's directory walk can't reach that backend and the import throws. Nub materializes those adapters into the project automatically so they resolve, while the rest of the tree keeps sharing.
 
-The same treatment covers packages that write generated code back into their own install directory. Prisma's postinstall runs `prisma generate`, which writes the generated client next to `@prisma/client` on disk — and under the shared store that spot is machine-global, keyed by version rather than by project or schema. Two projects with different Prisma schemas would otherwise share one generated client and silently overwrite each other's models. Nub materializes `@prisma/client` into each project so `generate` stays project-local, matching pnpm.
-
-Add your own with one line in `.npmrc`:
-
-```ini
-diskMaterializePackages[]=my-adapter
-```
+The same treatment covers packages that write generated code back into their own install directory. Prisma's postinstall runs `prisma generate`, which writes the generated client next to `@prisma/client` on disk — and under the shared store that spot is machine-global, keyed by version rather than by project or schema. Two projects with different Prisma schemas would otherwise share one generated client and silently overwrite each other's models. Nub materializes `@prisma/client` into each project so `generate` stays project-local, matching pnpm. This detection is automatic — it scans each package's real published code, so there is no list to maintain.
 
 A bundler that resolves modules by their real path — Metro (bare React Native), Next.js, Parcel — only crawls the project directory, so it can't see the shared store. Nub gives those projects a self-contained, project-local store automatically. Extend the list in `.npmrc`:
 

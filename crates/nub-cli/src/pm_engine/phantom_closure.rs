@@ -71,12 +71,40 @@ pub(crate) fn register() {
     aube_linker::set_disk_materialize_expand_hook(Box::new(expand));
 }
 
+/// nub's own embedder-default names that may seed the eject set. nub exposes NO
+/// user-facing `diskMaterializePackages` knob (maintainer 2026-07-07): the dynamic
+/// phantom detector is the sole eject mechanism, so a hand-listed package is
+/// redundant. The resolved seed still carries nub's INTERNAL vite #315 embedder
+/// default ([`super::mod::nub_setting_defaults`]) — kept so the phantom-eject
+/// opt-out (no-hook) path still ejects vite<8.1 — but every OTHER name arrived
+/// from a user source (`.npmrc`/env/`pnpm-workspace.yaml`) and is dropped by
+/// [`nub_internal_seed`]. Standalone aube installs no hook and honors the full
+/// seed verbatim, so its `diskMaterializePackages` knob is unaffected.
+const NUB_INTERNAL_DISK_MATERIALIZE_SEED: &[&str] = &["vite"];
+
+/// Keep only nub's own embedder-default seed names, dropping every user-source
+/// entry — the mechanism that retires the user-facing `diskMaterializePackages`
+/// knob under nub while leaving standalone aube's byte-for-byte.
+fn nub_internal_seed(resolved_seed: &[String]) -> Vec<String> {
+    resolved_seed
+        .iter()
+        .filter(|n| NUB_INTERNAL_DISK_MATERIALIZE_SEED.contains(&n.as_str()))
+        .cloned()
+        .collect()
+}
+
 /// The hook entry: read the per-version scanner's sidecars (the store-IO half)
 /// then hand off to the pure planner. Split so [`plan_from_flags`] — all the
 /// closure/seed policy — is unit-tested with injected flags and never touches
-/// the host store.
+/// the host store. The resolved seed is first filtered to nub's internal names
+/// ([`nub_internal_seed`]) so a user's `diskMaterializePackages` value has no
+/// effect under nub.
 fn expand(graph: &LockfileGraph, seed_names: &[String]) -> DiskMaterializePlan {
-    plan_from_flags(graph, seed_names, &dynamic_phantom_flags(graph))
+    plan_from_flags(
+        graph,
+        &nub_internal_seed(seed_names),
+        &dynamic_phantom_flags(graph),
+    )
 }
 
 /// Pure planner: resolved graph + flat seed + dynamic phantom flags → graph-aware
@@ -462,6 +490,22 @@ mod tests {
         let g = graph(&[("lodash@4.17.21", "lodash", &[])]);
         let plan = plan_from_flags(&g, &[], &[]);
         assert!(plan.names.is_empty());
+    }
+
+    #[test]
+    fn user_seed_names_are_dropped_only_internal_vite_survives() {
+        // The user-facing `diskMaterializePackages` knob is retired under nub: a
+        // value the user set in `.npmrc`/env/`pnpm-workspace.yaml` reaches the hook
+        // merged with nub's internal vite embedder default, and the filter must keep
+        // ONLY vite. So a hand-listed `lodash`/`@hookform/resolvers` is dropped
+        // (the detector, not a manual list, ejects real phantoms).
+        let kept = nub_internal_seed(&[
+            "lodash".to_string(),
+            "vite".to_string(),
+            "@hookform/resolvers".to_string(),
+        ]);
+        assert_eq!(kept, vec!["vite".to_string()]);
+        assert!(nub_internal_seed(&["lodash".to_string()]).is_empty());
     }
 
     #[test]
