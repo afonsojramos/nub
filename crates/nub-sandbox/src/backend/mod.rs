@@ -209,14 +209,15 @@ fn set_proxy_env(command: &mut Command, port: u16) {
 ///
 /// The env axis is enforced by CONSTRUCTION (not an OS primitive): when the policy
 /// enforces env, the child env is cleared and set to exactly the policy's
-/// constructed map. Linux additionally hardens a scrubbed env with two OS primitives
-/// so the withheld secret can't be recovered from a co-resident ancestor — seccomp
-/// denies `ptrace`/`process_vm_readv` (memory scrape) and Landlock closes `/proc`
-/// (the `/proc/<ppid>/environ` file); macOS cannot block the analogous
-/// `KERN_PROCARGS2` sysctl, so its env-scrub is best-effort vs co-resident code (a
-/// launcher-level concern). fs/net enforcement is the backend's job; on an OS whose
-/// backend has not landed, [`generic_apply`] reports them as not-enforced (never
-/// silent).
+/// constructed map. Each OS backend additionally hardens a scrubbed env so the
+/// withheld secret can't be recovered from a co-resident same-uid process: Linux via
+/// seccomp (`ptrace`/`process_vm_readv` deny — memory scrape) + Landlock (`/proc`
+/// close — the `/proc/<ppid>/environ` file); macOS via the Seatbelt env-read closure
+/// (`deny process-info*` + self-restore, which shuts the `KERN_PROCARGS2` argv/env
+/// read). Because the macOS closure lives in the SBPL profile, a policy that withholds
+/// a secret is wrapped even when fs/net are relaxed (see `macos::needs_wrap`). fs/net
+/// enforcement is the backend's job; on an OS whose backend has not landed,
+/// [`generic_apply`] reports them as not-enforced (never silent).
 pub fn apply(policy: &SandboxPolicy, spec: CommandSpec) -> Result<Prepared, Degradation> {
     // Start the per-host egress proxy FIRST (if the policy needs it), so its bound port
     // is threaded into the backend deny-layer (which permits egress ONLY to the proxy

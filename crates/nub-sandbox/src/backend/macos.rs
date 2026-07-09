@@ -19,8 +19,13 @@
 //!   - net:    not-enforced → `(allow network*)`; enforced WITH a proxy → egress
 //!     permitted ONLY to the proxy's loopback port (per-host enforced through it);
 //!     enforced WITHOUT a proxy → the base deny stands (coarse deny, loopback closed).
-//!   - env:    construction, not an SBPL primitive — the child env IS the policy's
-//!     constructed map (handled here when wrapping, mirrored from the skeleton).
+//!   - env:    the child env IS the policy's constructed map (construction, not an
+//!     SBPL primitive — a withheld var is simply absent). BUT a scrubbed secret is
+//!     only genuinely withheld if the child cannot RECOVER it from a co-resident
+//!     same-uid process's environment via `sysctl KERN_PROCARGS2` — so when the
+//!     policy withholds a secret we MUST emit an SBPL profile carrying the env-read
+//!     closure (below), even if fs/net are relaxed. The closure is the macOS twin of
+//!     the Linux `/proc`-close + `ptrace`-deny.
 //!
 //! CANONICALIZATION: the IR matchers are already firmlink-resolved on their literal
 //! prefix by the compiler (`canonicalize_glob_prefix`), and Seatbelt checks the
@@ -69,8 +74,12 @@ pub fn apply(
     spec: CommandSpec,
     proxy_port: Option<u16>,
 ) -> Result<Prepared, Degradation> {
-    if !needs_sandbox(policy) {
-        // No fs/net confinement — just the env-scrub (or nothing).
+    if !needs_wrap(policy) {
+        // Nothing to confine and no withheld secret to protect: the env-scrub is pure
+        // construction (the child gets exactly the constructed map), so no SBPL profile
+        // is needed. env is HONESTLY full here — no secret is being denied the child,
+        // hence nothing to recover cross-process. (When a secret IS withheld,
+        // `needs_wrap` is true and we fall through to emit the env-read closure below.)
         return Ok(Prepared {
             command: base_command(&spec, policy),
             degradation: Degradation::full(),
@@ -125,10 +134,30 @@ fn base_command(spec: &CommandSpec, policy: &SandboxPolicy) -> Command {
     command
 }
 
-/// A profile is emitted only when there is an fs or net axis to enforce. A fully
-/// relaxed fs + non-enforcing net needs no kernel confinement.
+/// Whether an SBPL profile must be emitted. Beyond fs/net confinement, a policy that
+/// WITHHOLDS an env secret also requires a profile: the env-read closure that stops
+/// the child recovering that secret from a co-resident process's environment lives in
+/// the SBPL, so an env-only scrub that hides a secret is not genuinely enforced
+/// without a wrap. (Mirrors the Linux backend, where `env.enforce` likewise engages
+/// the sandbox.) This is what keeps `is_full()` honest: every path that withholds a
+/// secret wraps, so none can report full env enforcement while leaving procargs2 open.
+fn needs_wrap(policy: &SandboxPolicy) -> bool {
+    needs_sandbox(policy) || env_needs_closure(policy)
+}
+
+/// A profile is emitted for an fs or net axis to enforce. A fully relaxed fs +
+/// non-enforcing net needs no kernel confinement (on its own).
 fn needs_sandbox(policy: &SandboxPolicy) -> bool {
     fs_confines(policy) || policy.net.enforce
+}
+
+/// Whether the env axis has a secret to protect cross-process. A passthrough
+/// `{env:true}` (enforce set but nothing withheld) denies the child nothing, so there
+/// is no secret to recover from a sibling — the env-read closure is unnecessary and we
+/// need not wrap for it. Only a scrub that actually WITHHOLDS a var creates the
+/// recovery surface the closure shuts.
+fn env_needs_closure(policy: &SandboxPolicy) -> bool {
+    policy.env.enforce && !policy.env.withheld.is_empty()
 }
 
 /// Whether the fs axis confines anything. A relaxed axis is `default_effect ==
@@ -143,10 +172,36 @@ fn build_profile(policy: &SandboxPolicy, spec: &CommandSpec, proxy_port: Option<
     out.push_str(MACOS_SEATBELT_BASE);
     out.push('\n');
 
+    emit_env_read_closure(&mut out);
     emit_net(policy, proxy_port, &mut out);
     emit_fs(policy, spec, &mut out);
 
     out
+}
+
+/// The macOS env-read closure — the load-bearing security default that stops a
+/// confined child recovering a scrubbed secret from a co-resident same-uid process's
+/// environment. Emitted UNCONDITIONALLY on every wrapped profile, all macOS versions.
+///
+/// The vector: `sysctl KERN_PROCARGS2` (and its `KERN_PROCARGS` twin) return a target
+/// pid's argv+environ. The kernel permits that read iff, for the target, EITHER
+/// `sysctl-read` OR `process-info*` is allowed — a DISJUNCTION, so BOTH arms must be
+/// denied. Under this backend's `(deny default)` only the process-info arm is open:
+///
+/// - sysctl arm: already shut — procargs2's (pid-parameterized, unnameable) sysctl is
+///   not in the base allowlist, and the base allows kern.* only by SPECIFIC NAME
+///   (never a `(sysctl-name-prefix "kern.")`, which WOULD re-admit it). No sysctl rule
+///   is needed here.
+/// - process-info arm: OPEN — `process-info*` is allowed-by-default even under
+///   `(deny default)`, so it must be denied EXPLICITLY. This is that denial.
+///
+/// The self-restore is `(target self)` and nothing wider: `(target others)` leaks a
+/// sibling's env, and `(target same-sandbox)` re-opens the hole (a confined child's
+/// own siblings/children ARE same-sandbox); node needs only self-introspection.
+/// Empirically verified 20/20 with negative controls on macOS 26 (xnu-12377).
+fn emit_env_read_closure(out: &mut String) {
+    out.push_str("(deny process-info*)\n");
+    out.push_str("(allow process-info* (target self))\n");
 }
 
 /// Net axis. Three cases:
@@ -498,10 +553,14 @@ fn sbpl_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-/// Full-enforcement unless net enforces per-host allows but the proxy could NOT be
-/// started (`proxy_port == None`): then the profile coarse-denies and we report
-/// `net-per-host` degraded (fail-safe, not silent). With a proxy the per-host allows
-/// ARE enforced (via SNI/target gating), so enforcement is full.
+/// The degradation for a WRAPPED profile. env is genuinely enforced on this path (the
+/// profile carries the unconditional env-read closure), so it is never reported lost —
+/// and the `!needs_wrap` early-return only fires when no secret is withheld, so no path
+/// reports full env enforcement while leaving procargs2 open. The one degradable axis
+/// is net-per-host: if net enforces per-host allows but the proxy could NOT be started
+/// (`proxy_port == None`) the profile coarse-denies and we report `net-per-host`
+/// degraded (fail-safe, not silent). With a proxy the per-host allows ARE enforced (via
+/// SNI/target gating), so enforcement is full.
 fn degradation(policy: &SandboxPolicy, proxy_port: Option<u16>) -> Degradation {
     let mut deg = Degradation::full();
     if policy.net.enforce
@@ -804,8 +863,54 @@ mod tests {
 
     #[test]
     fn no_sandbox_wrap_when_nothing_confines() {
-        // Relaxed fs + non-enforcing net = env-scrub only, no SBPL.
+        // Relaxed fs + non-enforcing net + no env secret = env-scrub only, no SBPL.
         let p = fs_policy(Effect::Allow, vec![]);
         assert!(!needs_sandbox(&p));
+        assert!(!needs_wrap(&p));
+    }
+
+    #[test]
+    fn env_withholding_a_secret_forces_a_wrap() {
+        // A scrub that WITHHOLDS a var (relaxed fs/net) must still wrap, so the
+        // env-read closure is emitted and the secret can't be recovered cross-process
+        // via KERN_PROCARGS2. A passthrough `{env:true}` (nothing withheld) need not.
+        let mut p = fs_policy(Effect::Allow, vec![]);
+        p.env.enforce = true;
+        assert!(
+            !needs_wrap(&p),
+            "passthrough env withholds nothing → no wrap"
+        );
+        p.env.withheld = vec!["AWS_SECRET_ACCESS_KEY".to_string()];
+        assert!(needs_wrap(&p), "a withheld secret must force the SBPL wrap");
+        assert!(
+            !needs_sandbox(&p),
+            "and it is env — not fs/net — driving it"
+        );
+    }
+
+    #[test]
+    fn every_wrapped_profile_carries_the_env_read_closure() {
+        // The closure is unconditional: any wrapped profile (here: an fs-confining one)
+        // denies process-info* for all-but-self, and NEVER re-grants the same-sandbox
+        // form the base once carried (the env-leak footgun).
+        let p = fs_policy(
+            Effect::Deny,
+            vec![rule("/proj", Effect::Allow, FsAccess::ReadWrite)],
+        );
+        let prof = build_profile(&p, &spec(), None);
+        assert!(prof.contains("(deny process-info*)\n"));
+        assert!(prof.contains("(allow process-info* (target self))"));
+        assert!(
+            !prof.contains("(allow process-info* (target same-sandbox))"),
+            "the same-sandbox process-info grant re-opens the env-read hole"
+        );
+        assert!(
+            !prof.contains("(allow process-info* (target others))"),
+            "target-others leaks a sibling's env"
+        );
+        // The sysctl arm stays shut by deny-default: no broad kern. prefix and no
+        // procargs sysctl is ever allowed (either would re-admit the procargs2 read).
+        assert!(!prof.contains("(sysctl-name-prefix \"kern.\")"));
+        assert!(!prof.contains("kern.procargs"));
     }
 }

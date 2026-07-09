@@ -25,7 +25,12 @@
 (allow process-exec)
 (allow process-fork)
 (allow signal (target same-sandbox))
-(allow process-info* (target same-sandbox))
+; NOTE: process-info* is NOT granted here. It is ALLOWED-BY-DEFAULT even under
+; (deny default), so the builder appends an explicit `(deny process-info*)` +
+; self-restore (the env-read closure) AFTER this base. A `(target same-sandbox)`
+; grant here would be an ENV-LEAK footgun: a sandboxed child's own siblings ARE
+; same-sandbox, so it would let one confined process read another's environment
+; via KERN_PROCARGS2 — the exact hole the closure exists to shut.
 
 ; the standard null device write (char-device guarded)
 (allow file-write-data
