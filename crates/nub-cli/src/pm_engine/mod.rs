@@ -1358,6 +1358,10 @@ fn augmentation_to_lifecycle_overlay(
     aug.apply_localstorage_env(|k, v| {
         overlay.push((OsString::from(k), OsString::from(v)));
     });
+    // Import Text native-defer signal (Node ≥ 26.5.0); inherited by the subtree.
+    aug.apply_native_import_text_env(|k, v| {
+        overlay.push((OsString::from(k), OsString::from(v)));
+    });
     // Pin npm_node_execpath to the provisioned Node — the ABI fix. Independent
     // of the shim: it flows even on the no-shim path so node-gyp never falls
     // back to ambient. (npm_node_execpath stays the REAL binary, not the shim:
@@ -3529,6 +3533,7 @@ mod tests {
             shim_dir: Some("/shim".to_string()),
             node_path: Some(OsString::from("/rt/node_path")),
             neutralize_localstorage: true,
+            native_import_text: true,
         };
         let (overlay, prepends) = augmentation_to_lifecycle_overlay(&aug, "/pinned/bin/node");
 
@@ -3567,6 +3572,11 @@ mod tests {
             Some("1"),
             "neutralize signal must flow to build-script node children when set"
         );
+        assert_eq!(
+            find("__NUB_NATIVE_IMPORT_TEXT").as_deref(),
+            Some("1"),
+            "import-text native-defer signal must flow to build-script node children when set"
+        );
     }
 
     /// No shim set up (re-entrant / broken install) → no NODE override and no
@@ -3581,6 +3591,7 @@ mod tests {
             shim_dir: None,
             node_path: None,
             neutralize_localstorage: false,
+            native_import_text: false,
         };
         let (overlay, prepends) = augmentation_to_lifecycle_overlay(&aug, "/pinned/bin/node");
         assert!(prepends.is_empty());

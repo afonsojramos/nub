@@ -478,6 +478,20 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
             cmd.arg(flag);
         }
 
+        // Import Text: when the injected set carries `--experimental-import-text`
+        // (Node ≥ 26.5.0, not user-negated), signal the preload to DEFER text imports
+        // to Node's native translator. Derived from the actual `inject` vec, not a
+        // version predicate, so the signal is present exactly when the flag is —
+        // never a defer without the flag (which native rejects). The `else` CLEARS a
+        // stale inherited signal (an ancestor on 26.5+ set it) when this spawn does NOT
+        // inject the flag — a user `--no-experimental-import-text`, or a version
+        // downgrade — so the signal tracks the flag authoritatively. See NATIVE_IMPORT_TEXT_ENV.
+        if inject.contains(&"--experimental-import-text") {
+            cmd.env(NATIVE_IMPORT_TEXT_ENV, "1");
+        } else {
+            cmd.env_remove(NATIVE_IMPORT_TEXT_ENV);
+        }
+
         // Web Storage: nub ALWAYS injects `--experimental-webstorage` on the band
         // where that flag is the enabling mechanism (Node 22.4 through <25, i.e.
         // `webstorage_flag_needed`), regardless of whether the user opted into
@@ -1079,6 +1093,11 @@ pub fn compute_augmentation_env(
     // `--localstorage-file`.
     let neutralize_localstorage =
         should_neutralize_localstorage(&node_version, &[], existing_node_options.as_deref());
+    // Import Text native-defer signal (mirror of the direct-spawn site): derived from
+    // the actual `inject` vec so it tracks `--experimental-import-text` exactly —
+    // present iff the flag is injected (Node ≥ 26.5.0, not user-negated). Consumers
+    // apply it via `AugmentationEnv::apply_native_import_text_env`.
+    let native_import_text = inject.contains(&"--experimental-import-text");
     if let Some(existing) = existing_node_options {
         // Snip below-floor version-gated flags out of the inherited NODE_OPTIONS
         // before appending (mirror of the direct-spawn site above) — a gated flag
@@ -1111,6 +1130,7 @@ pub fn compute_augmentation_env(
         shim_dir,
         node_path: vendored_node_path(Some(&preload)),
         neutralize_localstorage,
+        native_import_text,
     })
 }
 
@@ -1129,6 +1149,11 @@ pub struct AugmentationEnv {
     /// apply it via [`AugmentationEnv::apply_localstorage_env`]. See
     /// `should_neutralize_localstorage`.
     pub neutralize_localstorage: bool,
+    /// Whether to set the internal `__NUB_NATIVE_IMPORT_TEXT` env var on the child so
+    /// nub's preload DEFERS `with { type: "text" }` imports to Node's native translator
+    /// (Node ≥ 26.5.0, where nub injected `--experimental-import-text`). Consumers apply
+    /// it via [`AugmentationEnv::apply_native_import_text_env`]. See [`NATIVE_IMPORT_TEXT_ENV`].
+    pub native_import_text: bool,
 }
 
 impl AugmentationEnv {
@@ -1151,6 +1176,17 @@ impl AugmentationEnv {
     pub fn apply_localstorage_env(&self, set_env: impl FnOnce(&str, &str)) {
         if self.neutralize_localstorage {
             set_env(NEUTRALIZE_LOCALSTORAGE_ENV, "1");
+        }
+    }
+
+    /// Apply the Import Text native-defer signal to a child command's environment when
+    /// this augmentation calls for it (sets [`NATIVE_IMPORT_TEXT_ENV`]). A no-op when
+    /// `native_import_text` is false, so consumers can call it unconditionally. Factored
+    /// here so the internal var name lives in exactly one place. Mirrors
+    /// [`AugmentationEnv::apply_localstorage_env`].
+    pub fn apply_native_import_text_env(&self, set_env: impl FnOnce(&str, &str)) {
+        if self.native_import_text {
+            set_env(NATIVE_IMPORT_TEXT_ENV, "1");
         }
     }
 
@@ -1296,6 +1332,30 @@ pub(crate) const VERSION_ENV: &str = "__NUB_VERSION";
 /// `__NUB_*` plumbing var, NOT a user knob — explicitly permitted by the brand
 /// boundary.
 pub(crate) const FORCE_ASYNC_TIER_ENV: &str = "__NUB_FORCE_ASYNC_TIER";
+
+/// Tells nub's fast-tier preload to DEFER `import … with { type: "text" }` to Node's
+/// native text translator instead of serving it with nub's own `loadTextImport`
+/// short-circuit. Set only inside the augment block, coupled to the flag injection:
+/// iff `--experimental-import-text` is in the final inject set (Node ≥ 26.5.0, and the
+/// user did not `--no-`negate it). That coupling is the safety invariant — the preload
+/// must never defer without the flag present (native throws on an unknown `text`
+/// attribute), and a user `--no-experimental-import-text` correctly falls back to nub's
+/// byte-identical impl. Inherited by the augmented subtree (like [`VERSION_ENV`], NOT
+/// deleted by the preload) so re-entrant children — which skip the augment block but
+/// inherit the flag via NODE_OPTIONS — also defer. Under `--node`/`NODE_COMPAT` no flag
+/// is injected and the var is unset, so text imports are unsupported (= plain Node
+/// without the flag). An internal `__NUB_*` plumbing var, NOT a user knob — explicitly
+/// permitted by the brand boundary.
+///
+/// Because the var is never deleted, a stale value can be inherited across a version
+/// DOWNGRADE. Two things keep that safe: the direct-spawn augment block CLEARS it
+/// (`env_remove`) whenever it does not inject the flag, and the preload applies a hard
+/// `>= 26.5.0` floor before honoring it — so a stale signal on an older Node falls back
+/// to nub's byte-identical impl rather than deferring to a translator that isn't there.
+/// (The script-runner/overlay paths set-but-do-not-clear; the preload floor is the
+/// backstop there, and a same-version 26.5 stale signal only surfaces via off-contract
+/// manual `__NUB_*` manipulation — the same inheritance caveat as any high-floor flag.)
+pub(crate) const NATIVE_IMPORT_TEXT_ENV: &str = "__NUB_NATIVE_IMPORT_TEXT";
 
 /// Node versions where the async `module.register` loader's `resolveSync`/
 /// `loadSync` are unimplemented stubs that throw `ERR_METHOD_NOT_IMPLEMENTED`.

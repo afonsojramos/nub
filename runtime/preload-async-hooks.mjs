@@ -88,7 +88,11 @@ export async function load(url, context, nextLoad) {
   // checked BEFORE extension dispatch so `import s from "./c.yaml" with {type:"text"}`
   // returns the raw text, not parsed YAML. shortCircuits, so Node never runs its own
   // unknown-'text'-attribute validation. (Node 18.20+ parses the `with` syntax; the
-  // 18.19.x floor cannot parse it at all — see the import-text thread.)
+  // 18.19.x floor cannot parse it at all — see the import-text thread.) Unconditional
+  // (no native-defer): this async loader-worker path runs on the compat tier (18.19–
+  // 22.14, all below Node 26.5's native `--experimental-import-text`), reachable on a
+  // 26.5+ Node ONLY via a forced async tier (`--no-experimental-require-module`), where
+  // nub's short-circuit is byte-identical to native — so deferring here buys nothing.
   if (context?.importAttributes?.type === "text") return loadTextImport(url);
   const ext = extname(url);
   // node_modules deps are NEVER transpiled (the byte-parity boundary). This guard is

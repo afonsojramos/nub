@@ -410,6 +410,45 @@ mod tests {
     }
 
     #[test]
+    fn import_text_injected_from_26_5() {
+        // `--experimental-import-text` was ADDED in Node 26.5.0 (#62300) and is still
+        // experimental (open-ended band). It does NOT exist below 26.5.0 — injecting it
+        // there is a "bad option" hard-abort (verified on real 26.2.0). Inject on
+        // [26.5.0, ∞), never below; below 26.5 nub serves text imports via its own
+        // runtime augmentation (the preload short-circuit), so the flag's absence there
+        // is correct, not a gap.
+        let f = "--experimental-import-text";
+        assert!(!compute_inject_flags(v(22, 15, 0), &[], None, false).contains(&f));
+        assert!(!compute_inject_flags(v(26, 4, 0), &[], None, false).contains(&f)); // flag absent → would crash
+        assert!(compute_inject_flags(v(26, 5, 0), &[], None, false).contains(&f)); // floor
+        assert!(compute_inject_flags(v(27, 0, 0), &[], None, false).contains(&f)); // open-ended
+        // A user opt-out subtracts it — so spawn.rs won't set the native-defer signal
+        // and nub's own short-circuit serves the import (never a defer without the flag).
+        assert!(
+            !compute_inject_flags(
+                v(26, 5, 0),
+                &["--no-experimental-import-text".to_string()],
+                None,
+                false
+            )
+            .contains(&f)
+        );
+    }
+
+    #[test]
+    fn import_text_stripped_from_node_options_below_26_5() {
+        // A parent nub on 26.5+ injects `--experimental-import-text` into an inherited
+        // NODE_OPTIONS; a child Node below 26.5 can't parse it (exit 9), so the derived
+        // floor (the matrix band's 26.5.0 `lo`) must snip it. Neighbors survive.
+        let opts = "--experimental-import-text --max-old-space-size=4096";
+        assert_eq!(
+            strip_unsupported_node_options(opts, &v(26, 4, 0)),
+            "--max-old-space-size=4096"
+        );
+        assert_eq!(strip_unsupported_node_options(opts, &v(26, 5, 0)), opts);
+    }
+
+    #[test]
     fn user_opt_out_via_argv() {
         let argv = vec!["--no-experimental-vm-modules".to_string()];
         let flags = compute_inject_flags(v(22, 15, 0), &argv, None, false);

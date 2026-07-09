@@ -422,6 +422,23 @@ function makeHooks(core, watchReporting) {
   installUserHookDetector();
   installUserAsyncLoaderDetector();
 
+  // Import Text: on Node >= 26.5.0 nub injects `--experimental-import-text` and signals
+  // here (via NATIVE_IMPORT_TEXT_ENV, set in spawn.rs iff that flag is in the final inject
+  // set) to DEFER `with { type: "text" }` to Node's native text translator rather than
+  // serving it with nub's own `loadTextImport`. Read ONCE at hook construction (like
+  // __NUB_FORCE_ASYNC_TIER, NOT deleted) so a re-entrant child that skips the augment
+  // block but inherits the flag via NODE_OPTIONS still defers. TWO gates, BOTH required:
+  // (1) the signal — coupled to the flag injection, so a user `--no-experimental-import-text`
+  // or a Node with no flag falls back to nub's byte-identical short-circuit; (2) a hard
+  // version floor (>= 26.5.0) — a SAFETY net, since the signal is never deleted and thus
+  // can be inherited across a version DOWNGRADE (an ancestor on 26.5+ set it, this child
+  // runs an older Node with the flag stripped from NODE_OPTIONS). Both gates fail SAFE to
+  // nub's own impl, so we never defer to a native translator that isn't there.
+  const [__nodeMaj, __nodeMin] = process.versions.node.split(".").map((n) => parseInt(n, 10));
+  const nativeImportText =
+    process.env.__NUB_NATIVE_IMPORT_TEXT === "1" &&
+    (__nodeMaj > 26 || (__nodeMaj === 26 && __nodeMin >= 5));
+
   function resolve(specifier, context, nextResolve) {
     const r = core.resolveSpec(specifier, context.parentURL);
     if (r) return r;
@@ -507,10 +524,15 @@ function makeHooks(core, watchReporting) {
     // returns raw text, not parsed YAML. Placed after watch reporting (so a text file
     // gets the same watch treatment as any other), and before the extension/data
     // dispatch (so the attribute wins over the `.txt`/`.yaml`/… data loaders and
-    // Node-native JSON). shortCircuits, so Node's own unknown-'text'-attribute
-    // validation never runs. Mirror of the compat-tier hook in preload-async-hooks.mjs.
-    // (Node 18.20+ parses the `with` syntax; the 18.19.x floor cannot.)
-    if (context?.importAttributes?.type === "text") return core.loadTextImport(url);
+    // Node-native JSON). On Node >= 26.5.0 (nativeImportText) defer to `nextLoad` — Node's
+    // native text translator, enabled by nub's injected `--experimental-import-text`;
+    // keeping the check ahead of extension dispatch means the attribute still wins over
+    // nub's data loaders in BOTH cases. Below that, nub's `loadTextImport` shortCircuits,
+    // so Node's own unknown-'text'-attribute validation never runs. (Node 18.20+ parses
+    // the `with` syntax; the 18.19.x floor cannot.)
+    if (context?.importAttributes?.type === "text") {
+      return nativeImportText ? nextLoad(url, context) : core.loadTextImport(url);
+    }
 
     // A USER resolve hook (a ts-node/tsx-style transpiler registered AFTER nub's
     // own preload hook) claimed this file with the bare 'typescript' format: defer

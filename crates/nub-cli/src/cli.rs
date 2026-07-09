@@ -3723,6 +3723,10 @@ fn build_script_command(
         aug.apply_localstorage_env(|k, v| {
             command.env(k, v);
         });
+        // Import Text native-defer signal (Node ≥ 26.5.0); inherited by the subtree.
+        aug.apply_native_import_text_env(|k, v| {
+            command.env(k, v);
+        });
     }
 
     // Force nub's async tier for a script that runs a foreign async loader
@@ -4939,6 +4943,11 @@ fn apply_exec_augmentation(cmd: &mut std::process::Command, cwd: &Path) {
     // localStorage-neutralize signal (webstorage flag-needed band, no user
     // --localstorage-file); applied before the partial moves of aug below.
     aug.apply_localstorage_env(|k, v| {
+        cmd.env(k, v);
+    });
+    // Import Text native-defer signal (Node ≥ 26.5.0); applied before the partial
+    // moves of aug below.
+    aug.apply_native_import_text_env(|k, v| {
         cmd.env(k, v);
     });
     if let Some((k, val)) = force_async_tier {

@@ -263,6 +263,29 @@ pub static FEATURES: &[Feature] = &[
         ],
         evidence: "flag added 23.6.0 (23.x) / 22.20.0 (22.x backport); Stability 1.0; never default-on through Node 27",
     },
+    // ── Import Text (`import s from "./f" with { type: "text" }`) ────────────
+    // `--experimental-import-text` makes Node's ESM loader honor the `type: "text"`
+    // import attribute on ANY extension, returning the raw file contents as a
+    // default-export string (Node's `textStrategy`). Flag ADDED in Node 26.5.0
+    // (#62300); still experimental and not default-on through Node 27 nightly, so the
+    // band is open-ended. Below 26.5.0 the flag does not exist ("bad option"
+    // hard-abort, verified on 26.2.0), so nub serves text imports via its OWN runtime
+    // augmentation there (the load-hook short-circuit in runtime/preload-common.cjs +
+    // transform-core.mjs `loadTextImport`), which is byte-identical to native (both
+    // TextDecoder default-export, BOM stripped). On [26.5.0, ∞) nub injects the flag
+    // AND its preload DEFERS text imports to Node's native translator — signaled via
+    // the internal `__NUB_NATIVE_IMPORT_TEXT` env var, set in spawn.rs iff this flag
+    // is in the final inject set — riding Node's own surface (augmenter contract).
+    // The experimental warning native emits is already silenced by nub's injected
+    // `--disable-warning=ExperimentalWarning` (≥20.11).
+    Feature {
+        name: "import-text",
+        mitigations: &[(
+            band((26, 5, 0), None),
+            Mitigation::Unflag("--experimental-import-text"),
+        )],
+        evidence: "flag added Node 26.5.0 (#62300); experimental, still flagged through Node 27 nightly",
+    },
     // ── WebSocket global ────────────────────────────────────────────────────
     // Flag-gated on [20.10.0, 22.0.0) — the global exists on 20.10+ and all of the
     // 21.x line behind `--experimental-websocket`, then becomes default-on at
