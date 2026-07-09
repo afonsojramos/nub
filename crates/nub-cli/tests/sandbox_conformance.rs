@@ -122,35 +122,88 @@ fn linux_enforceable() -> bool {
 /// missing-file artifact.
 struct Tree {
     _tmp: TempDir,
+    root: PathBuf,
     proj: PathBuf,
     home: PathBuf,
     outside: PathBuf,
+    /// The probe to launch under the sandbox for THIS tree (see `new`).
+    probe: PathBuf,
 }
 
 impl Tree {
     fn new() -> Self {
-        // /private/tmp on macOS avoids $TMPDIR (= the DARWIN confstr scratch the
-        // backend always write-grants, which would make every write spuriously pass).
+        // Fixture-root placement is per-OS:
+        //   macOS   — /private/tmp, NOT $TMPDIR (= the DARWIN confstr scratch the backend
+        //             always write-grants, which would make every write spuriously pass);
+        //   Windows — directly under C:\: a LowBox child only traverses C:\ by default, so
+        //             a %TEMP% tree under the user profile is unreachable (no AC-SID
+        //             traverse grant without WRITE_DAC on the profile's ancestors) — see
+        //             tests/windows_enforcement.rs;
+        //   else    — the default tempdir.
         let builder = tempfile::Builder::new().prefix("nub-conf-").to_owned();
         let tmp = if cfg!(target_os = "macos") {
             builder.tempdir_in("/private/tmp")
+        } else if cfg!(windows) {
+            builder.tempdir_in("C:\\")
         } else {
             builder.tempdir()
         }
         .expect("tempdir");
-        let root = std::fs::canonicalize(tmp.path()).expect("canonicalize");
+        // Canonicalize off Windows (firmlink on macOS, /tmp symlinks on Linux); on Windows
+        // canonicalize yields a `\\?\` path the matcher/backend don't expect — use the raw
+        // clean `C:\...` path (as windows_enforcement.rs does).
+        let root = if cfg!(windows) {
+            tmp.path().to_path_buf()
+        } else {
+            std::fs::canonicalize(tmp.path()).expect("canonicalize")
+        };
         let proj = root.join("proj");
         let home = root.join("home");
         let outside = root.join("outside");
         for d in [&proj, &home, &outside] {
             std::fs::create_dir_all(d).unwrap();
         }
+        // On Windows the sandboxed child must ALSO be C:\-traversable — the sibling probe
+        // under the CI checkout is unreachable from a LowBox token — so copy it into the
+        // C:\-rooted tree. Elsewhere the sibling is reachable (the program auto-grant + the
+        // system libs it links), so use it in place.
+        let probe = if cfg!(windows) {
+            let dest = root.join(format!("probe{}", std::env::consts::EXE_SUFFIX));
+            std::fs::copy(probe_bin(), &dest).expect("copy probe into the C:\\ tree");
+            dest
+        } else {
+            probe_bin()
+        };
         Tree {
             _tmp: tmp,
+            root,
             proj,
             home,
             outside,
+            probe,
         }
+    }
+
+    /// Serialize `policy` and substitute the fixture-path placeholders
+    /// (`{ROOT}`/`{PROJ}`/`{HOME}`/`{OUT}`) with real forward-slash paths. Forward
+    /// slashes are cross-OS safe: the matcher normalizes `\`→`/` before matching, and a
+    /// JSON string can't carry a raw `\`. `{ROOT}` lets the generous-read fixture scope
+    /// its broad allow to the bounded fixture tree instead of a whole-fs `["..."]` — the
+    /// Linux generous-`**` grant walks every top-level under a MAX_GRANTS budget, so on a
+    /// busy host (a large `/home` checkout in CI) it can overflow before reaching a
+    /// deeply-nested file and fail-closed-deny it; a bounded root keeps the walk
+    /// deterministic while still proving the secret deny-set carves holes in a broad read.
+    fn render_policy(&self, policy: &serde_json::Value) -> String {
+        let mut s = serde_json::to_string(policy).unwrap();
+        for (token, path) in [
+            ("{ROOT}", &self.root),
+            ("{PROJ}", &self.proj),
+            ("{HOME}", &self.home),
+            ("{OUT}", &self.outside),
+        ] {
+            s = s.replace(token, &path.to_string_lossy().replace('\\', "/"));
+        }
+        s
     }
 
     /// Resolve a `proj:`/`home:`/`out:` spec (fs probes) to a concrete path and
@@ -205,11 +258,11 @@ fn run_case(
     target: &str,
 ) -> bool {
     let policy_path = tree.proj.join("__policy.json");
-    std::fs::write(&policy_path, serde_json::to_string(policy).unwrap()).unwrap();
+    std::fs::write(&policy_path, tree.render_policy(policy)).unwrap();
 
     let mut cmd = Command::new(nub_bin());
     cmd.arg("run").arg("--sandbox").arg(&policy_path).arg("--");
-    cmd.arg(probe_bin()).arg(probe);
+    cmd.arg(&tree.probe).arg(probe);
     // `connect` takes host + port as two probe args; everything else is one.
     if probe == "connect" {
         let (host, port) = target.split_once(':').expect("connect target host:port");
