@@ -32,10 +32,15 @@ sockaddr from `/proc/<pid>/mem`, re-validates the notif id, and permits ONLY
 `127.0.0.1:<proxy_port>`. On ALLOW the supervisor OWNS the connect (connects a fresh socket
 to the FIXED proxy address and injects it over the child's fd via `NOTIF_ADDFD` SETFD),
 which makes the allow path TOCTOU-robust against a post-read sockaddr rewrite; DENY returns
-EPERM. The TCP-Fast-Open variant — `sendto`/`sendmsg(MSG_FASTOPEN)`, which initiates a
-connection *without* `connect()` and so dodges both this filter and Landlock — is closed
-alongside it by a seccomp `MSG_FASTOPEN`-flag deny on the send syscalls. See
-`backend/linux_connect_notify.rs` and `backend/linux.rs` (`build_seccomp`).
+EPERM. Two sibling bypasses of the same gate are closed alongside it, both pure seccomp
+(so they hold even where the supervisor is skipped, below): (1) the **TCP-Fast-Open**
+variant — `sendto`/`sendmsg(MSG_FASTOPEN)`, which initiates a connection *without*
+`connect()` — via a `MSG_FASTOPEN`-flag deny on the send syscalls; (2) **non-TCP stream
+protocols** — Landlock's `ConnectTcp` governs only `IPPROTO_TCP`, so an `AF_INET`
+`SOCK_STREAM` socket over SCTP (`IPPROTO_SCTP`) or MPTCP (`IPPROTO_MPTCP`, which is
+default-on and transparently falls back to TCP against any server) would pass the type
+narrowing yet dodge the hook — closed by narrowing the `socket()` protocol (arg2) to TCP
+only. See `backend/linux_connect_notify.rs` and `backend/linux.rs` (`build_seccomp`).
 
 - **Residual bound (narrow, hardened-host only):** the supervisor reads the child's memory
   via `/proc/<pid>/mem`, which yama `ptrace_scope >= 2` forbids even for a parent. On such

@@ -58,9 +58,11 @@ enum NetMode {
     DenyAll,
     /// Per-host via the loopback proxy on `port`. `AF_INET` STREAM sockets are allowed
     /// (so the child can reach the loopback proxy) but narrowed hard: seccomp denies
-    /// AF_INET datagram/raw types (no UDP → no DNS-tunnel/QUIC exfil), Landlock ABI-v4
-    /// `ConnectTcp` pins `connect()` to this port, and `BindTcp` denies explicit `bind()`
-    /// (a bind-less `listen()` autobind is a dominated residual — see [`apply_landlock`]).
+    /// AF_INET datagram/raw types (no UDP → no DNS-tunnel/QUIC exfil) AND non-TCP stream
+    /// protocols (SCTP/MPTCP, which Landlock's IPPROTO_TCP-only `ConnectTcp` would not
+    /// govern), Landlock ABI-v4 `ConnectTcp` pins `connect()` to this port, and `BindTcp`
+    /// denies explicit `bind()` (a bind-less `listen()` autobind is a dominated residual —
+    /// see [`apply_landlock`]).
     ///
     /// The PORT-scoped `ConnectTcp` residual (Landlock cannot filter by address, so a
     /// direct connect to an EXTERNAL host on this port would skip the proxy) is CLOSED by
@@ -527,6 +529,11 @@ fn build_seccomp(net_mode: NetMode) -> Result<BpfProgram, String> {
             // TCP-only ConnectTcp rule, giving unrestricted datagram egress (DNS-tunnel,
             // QUIC, arbitrary UDP C2). So AF_INET is narrowed to SOCK_STREAM only.
             socket_rules.extend(af_inet_non_stream_rules()?);
+            // AND to IPPROTO_TCP only: Landlock's ConnectTcp governs ONLY IPPROTO_TCP, so an
+            // AF_INET SOCK_STREAM socket over SCTP(132) or MPTCP(262) passes the type
+            // narrowing yet dodges the connect hook — arbitrary egress (MPTCP is default-on
+            // and transparently falls back to TCP against any server, a drop-in bypass).
+            socket_rules.push(af_inet_non_tcp_protocol_rule()?);
         }
         rules.insert(i64_from(libc::SYS_socket), socket_rules);
 
@@ -566,6 +573,34 @@ fn build_seccomp(net_mode: NetMode) -> Result<BpfProgram, String> {
     .map_err(|e| format!("seccomp build: {e}"))?
     .try_into()
     .map_err(|e| format!("seccomp compile: {e}"))
+}
+
+/// Deny `socket(AF_INET, _, proto)` for any `proto` other than default (0) or
+/// `IPPROTO_TCP` (6) — one rule ANDing `family == AF_INET`, `proto != 0`, `proto != TCP`.
+/// A whitelist (not an SCTP/MPTCP blacklist) so any future alt stream protocol is caught
+/// too. This is the PRIMARY close for the SCTP/MPTCP egress bypass (kills them at
+/// creation, and — unlike the connect-notify supervisor — is not viability-gated); the
+/// protocol-agnostic `connect()` supervisor is the backstop.
+fn af_inet_non_tcp_protocol_rule() -> Result<SeccompRule, String> {
+    SeccompRule::new(vec![
+        SeccompCondition::new(
+            0,
+            SeccompCmpArgLen::Dword,
+            SeccompCmpOp::Eq,
+            libc::AF_INET as u64,
+        )
+        .map_err(|e| format!("proto family cond: {e}"))?,
+        SeccompCondition::new(2, SeccompCmpArgLen::Dword, SeccompCmpOp::Ne, 0)
+            .map_err(|e| format!("proto ne-default cond: {e}"))?,
+        SeccompCondition::new(
+            2,
+            SeccompCmpArgLen::Dword,
+            SeccompCmpOp::Ne,
+            libc::IPPROTO_TCP as u64,
+        )
+        .map_err(|e| format!("proto ne-tcp cond: {e}"))?,
+    ])
+    .map_err(|e| format!("proto rule: {e}"))
 }
 
 /// Deny a send syscall carrying `MSG_FASTOPEN` (TFO's connect-without-`connect()` flag):

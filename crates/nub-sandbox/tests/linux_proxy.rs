@@ -227,6 +227,15 @@ int main(int argc,char**argv){
         if(write(fd,hello,hl)!=hl){close(fd);return 1;}
         unsigned char e[64]; int r=read(fd,e,sizeof e); close(fd); return (r>0)?0:5;
     }
+    /* Create an AF_INET SOCK_STREAM socket with protocol argv[2] (e.g. IPPROTO_SCTP=132,
+       IPPROTO_MPTCP=262, IPPROTO_TCP=6, default=0). 0=created (allowed), 2=EPERM/EACCES
+       (denied at creation), 1=other errno (e.g. EPROTONOSUPPORT — kernel lacks it). */
+    if(!strcmp(argv[1],"mksock")){
+        int fd=socket(AF_INET,SOCK_STREAM,atoi(argv[2])); int e=errno;
+        if(fd>=0){close(fd);return 0;}
+        if(e==EACCES||e==EPERM)return 2;
+        return 1;
+    }
     /* TCP Fast Open initiates a connection via sendto(MSG_FASTOPEN) WITHOUT calling
        connect() — probing whether it dodges the connect-only enforcement. 0=sendto
        accepted (initiated), 2=EPERM/EACCES (blocked), 1=other errno. */
@@ -318,6 +327,54 @@ fn per_host_proxy_forwards_allowed_drops_denied_blocks_direct() {
         ),
         0,
         "neg-control: unenforced net connects directly"
+    );
+}
+
+#[test]
+fn sctp_and_mptcp_egress_denied_in_proxy_mode() {
+    // Landlock's ConnectTcp governs ONLY IPPROTO_TCP, so an AF_INET SOCK_STREAM socket
+    // over SCTP or MPTCP passes the SOCK_STREAM narrowing yet dodges the connect hook —
+    // arbitrary external egress (MPTCP is default-on and transparently falls back to TCP
+    // against any server, a drop-in for a normal TCP connection). Proxy mode narrows the
+    // socket() protocol to TCP only, so both are denied at creation (pure seccomp — holds
+    // regardless of the connect-notify supervisor's viability). IPPROTO_SCTP=132,
+    // IPPROTO_MPTCP=262, IPPROTO_TCP=6.
+    if skip_without_landlock(4) {
+        return; // proxy mode needs Landlock ABI v4
+    }
+    let f = fixture();
+    let Some(probe) = compile_probe(&f.proj) else {
+        return;
+    };
+    let probe = probe.to_str().unwrap();
+    assert_eq!(
+        f.run(net_policy(), probe, &["mksock", "132"]),
+        2,
+        "SCTP stream socket must be denied at creation in proxy mode"
+    );
+    assert_eq!(
+        f.run(net_policy(), probe, &["mksock", "262"]),
+        2,
+        "MPTCP stream socket must be denied at creation in proxy mode"
+    );
+    // Plain TCP (and the default protocol, which resolves to TCP for SOCK_STREAM) stay
+    // allowed — the proxy path must keep working.
+    assert_eq!(
+        f.run(net_policy(), probe, &["mksock", "6"]),
+        0,
+        "plain TCP stream socket must still be allowed in proxy mode"
+    );
+    assert_eq!(
+        f.run(net_policy(), probe, &["mksock", "0"]),
+        0,
+        "default-protocol stream socket must still be allowed in proxy mode"
+    );
+    // Negative control: MPTCP (default-on, reliably creatable) IS created when net is
+    // unenforced — proving the block above is ours, not a kernel-support artifact.
+    assert_eq!(
+        f.run(json!({ "fs": true }), probe, &["mksock", "262"]),
+        0,
+        "neg-control: unenforced net leaves an MPTCP socket creatable"
     );
 }
 
