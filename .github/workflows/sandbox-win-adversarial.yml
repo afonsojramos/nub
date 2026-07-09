@@ -1,0 +1,34 @@
+# Windows AppContainer — ADVERSARIAL non-fs confinement audit probe. Branch-scoped (NO PR):
+# a push to `probe/win-nonfs-audit` runs the adversarial suite on a real windows-latest
+# runner. Attacks the NON-fs axes (env PROCESS_VM_READ, job breakaway, token privileges,
+# capability leak, coarse-egress completeness, handle inheritance) against the REAL backend
+# and prints a BLOCKED/HOLE verdict per attack. Investigation-scope — not a gate.
+name: sandbox-win-adversarial
+on:
+  workflow_dispatch:
+  push:
+    branches: [probe/win-nonfs-audit]
+jobs:
+  windows-adversarial:
+    runs-on: windows-latest
+    env:
+      # crt-static: the self-reexec probe child is self-contained (no vcruntime DLL dep) so
+      # it starts cleanly under the LowBox token — a host-init crash would read as a false
+      # denial. Matches the conformance workflow's windows leg.
+      RUSTFLAGS: "-C target-feature=+crt-static"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Environment baseline
+        shell: powershell
+        run: |
+          $id=[System.Security.Principal.WindowsIdentity]::GetCurrent()
+          $admin=(New-Object System.Security.Principal.WindowsPrincipal($id)).IsInRole([System.Security.Principal.WindowsBuiltinRole]::Administrator)
+          Write-Host "User: $($id.Name)  IsElevated: $admin  OS: $([System.Environment]::OSVersion.VersionString)"
+      - name: Build the adversarial probe
+        shell: bash
+        run: cargo test -p nub-sandbox --test windows_adversarial --no-run
+      - name: Run the adversarial probe (verdicts in the log; red = a hole was found)
+        shell: bash
+        run: cargo test -p nub-sandbox --test windows_adversarial

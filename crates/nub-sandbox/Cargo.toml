@@ -70,13 +70,28 @@ tempfile = "3"
 # needs a little FFI (token-query + process-liveness) beyond what the lib exposes.
 [target.'cfg(target_os = "windows")'.dev-dependencies.windows-sys]
 version = "0.61"
-features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading"]
+features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_Threading",
+  # windows_adversarial.rs probes: ReadProcessMemory + VirtualQueryEx (foreign-env
+  # scrape), ReadFile/CreateFileW (raw-handle + inheritable-file-handle probes).
+  "Win32_System_Diagnostics_Debug",
+  "Win32_System_Memory",
+  "Win32_Storage_FileSystem",
+]
 
 # The Windows enforcement probe self-reexecs as the AppContainer child, so it owns
 # `main` (dispatch on argv) rather than the libtest harness. windows-latest CI only; a
 # no-op `main` on other hosts.
 [[test]]
 name = "windows_enforcement"
+harness = false
+
+# The adversarial non-fs confinement probe (audit): attacks env-read / job-escape /
+# capability / handle / egress axes against the REAL backend. Same self-reexec shape.
+[[test]]
+name = "windows_adversarial"
 harness = false
 
 [lints]
