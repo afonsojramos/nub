@@ -304,6 +304,119 @@ fn emit_fs(policy: &SandboxPolicy, spec: &CommandSpec, out: &mut String) {
             sbpl_escape(&dir)
         ));
     }
+
+    emit_move_block(policy, out);
+}
+
+/// Close the move/rename secret-relocation bypass (SRT's `generateMoveBlockingRules`).
+/// A secret is protected by a write-DENY on its path, but two macOS holes let a child
+/// relocate the bytes past that path-keyed deny: (1) the trailing confstr
+/// `(allow file-write* <temp>)` grant above is last-match-wins, so it re-opens
+/// unlink/rename on any denied path living under `$TMPDIR`; (2) an anchored deny
+/// (`/proj/.env`) blocks the file `mv` but not `mv proj proj2`, which relocates the whole
+/// containing dir out from under the anchored deny.
+///
+/// INVARIANT (load-bearing): these denies MUST be emitted AFTER the confstr grant so they
+/// win the last-match-wins race, and ONLY the Deny arm + the ancestor-dir chain are
+/// re-denied — NEVER the generous `/` read-cap or the confstr grant itself, either of which
+/// would re-deny the legit `xcrun_db` / `$TMPDIR` scratch write.
+fn emit_move_block(policy: &SandboxPolicy, out: &mut String) {
+    // Fix 1 — re-assert each Deny's unlink/create block. A `(subpath)` deny covers the
+    // denied file/subtree; re-emitting the unlink/create primitives here restores the deny
+    // that the trailing confstr write grant would otherwise override for a `$TMPDIR` secret.
+    for rule in &policy.fs.rules.entries {
+        if rule.effect == Effect::Deny {
+            let term = emit_term(&to_match_term(rule.matcher.as_str()));
+            out.push_str(&format!("(deny file-write-unlink {term})\n"));
+            out.push_str(&format!("(deny file-write-create {term})\n"));
+        }
+    }
+
+    // Fix 2 — ancestor move-block for ANCHORED (literal) denies. Block unlink/create on
+    // every directory from the secret's parent up to (and including) the outermost write-
+    // grant root enclosing it, so renaming a container dir can't relocate the secret past
+    // its anchored deny. Basename-glob denies (`**/.env` → a regex) have no literal
+    // ancestor and are already immune (the basename survives any rename), so they are
+    // skipped. The `(literal P)` denies are EXACT-path — they block renaming dir `P`
+    // itself, never a create/write INSIDE it, so a legit `echo > proj/other.txt` still
+    // works.
+    let grant_roots = write_grant_roots(policy);
+    for rule in &policy.fs.rules.entries {
+        if rule.effect != Effect::Deny {
+            continue;
+        }
+        let MatchTerm::Subpath(denied) = to_match_term(rule.matcher.as_str()) else {
+            continue;
+        };
+        for anc in move_block_ancestors(&denied, &grant_roots) {
+            let lit = format!("(literal \"{}\")", sbpl_escape(&anc));
+            out.push_str(&format!("(deny file-write-unlink {lit})\n"));
+            out.push_str(&format!("(deny file-write-create {lit})\n"));
+        }
+    }
+}
+
+/// The write-granted subpath roots: every rw Allow that survives the dangerous-root
+/// guard, plus the confstr scratch dirs (also `(allow file-write* (subpath …))` grants).
+/// A directory rename can only relocate a secret when the container is writable, so these
+/// roots bound how far up the ancestor move-block must reach.
+fn write_grant_roots(policy: &SandboxPolicy) -> Vec<String> {
+    let mut roots = Vec::new();
+    for rule in &policy.fs.rules.entries {
+        if let (Effect::Allow, FsAccess::ReadWrite) = (rule.effect, rule.access) {
+            let m = to_match_term(rule.matcher.as_str());
+            if is_dangerous_write_root(&m) {
+                continue;
+            }
+            if let MatchTerm::Subpath(p) = m {
+                roots.push(p);
+            }
+        }
+    }
+    roots.extend(confstr_scratch_dirs());
+    roots
+}
+
+/// Ancestor directories to move-block for an anchored deny at `denied`: from the secret's
+/// PARENT up to and including the outermost (shortest) write-grant root that STRICTLY
+/// contains it. Empty when no write grant encloses the deny — no writable container to
+/// rename, so nothing to block (the base denies write on every ancestor).
+fn move_block_ancestors(denied: &str, grant_roots: &[String]) -> Vec<String> {
+    let Some(root) = grant_roots
+        .iter()
+        .filter(|g| path_strictly_contains(g, denied))
+        .min_by_key(|g| g.len())
+    else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut cur = parent_dir(denied);
+    while let Some(dir) = cur {
+        out.push(dir.to_string());
+        if dir == root.as_str() {
+            break;
+        }
+        cur = parent_dir(dir);
+    }
+    out
+}
+
+/// Whether `root` is a strict ancestor directory of `child` (`child` == `root` + `/…`).
+/// Strict (not equal) so a deny whose path equals a grant root is left to the file-level
+/// deny, never walked as its own ancestor.
+fn path_strictly_contains(root: &str, child: &str) -> bool {
+    child
+        .strip_prefix(root)
+        .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// The parent directory of a path as a `&str`, or `None` at the filesystem root. Filters
+/// the empty parent so a top-level entry doesn't yield `""`.
+fn parent_dir(p: &str) -> Option<&str> {
+    Path::new(p)
+        .parent()
+        .and_then(Path::to_str)
+        .filter(|s| !s.is_empty())
 }
 
 /// Top-level roots a write grant must never cover — a `..`-collapsed surface path
@@ -721,6 +834,109 @@ mod tests {
             confstr > cap,
             "confstr grant must follow the write cap-deny"
         );
+    }
+
+    #[test]
+    fn move_block_reasserts_deny_after_confstr_grant() {
+        // Hole #1: a `.env` deny under a generous-read policy is capped by
+        // `(deny file-write* <.env>)`, but the trailing confstr grant re-opens write for a
+        // `$TMPDIR`-resident secret (last-match-wins). The move-block re-emits the
+        // unlink/create denies AFTER the confstr grant so the deny wins the race.
+        let p = fs_policy(
+            Effect::Deny,
+            vec![
+                rule("**", Effect::Allow, FsAccess::Read),
+                rule("**/.env", Effect::Deny, FsAccess::Read),
+            ],
+        );
+        let prof = build_profile(&p, &spec(), None);
+        let confstr = prof
+            .find("(allow file-write* (subpath \"/private/var/folders/")
+            .expect("confstr temp grant present");
+        let unlink = prof
+            .find("(deny file-write-unlink (regex #\"^(.*/)?\\.env$\"))")
+            .expect("re-asserted unlink deny present");
+        let create = prof
+            .find("(deny file-write-create (regex #\"^(.*/)?\\.env$\"))")
+            .expect("re-asserted create deny present");
+        assert!(
+            unlink > confstr && create > confstr,
+            "move-block denies must follow the confstr grant to win last-match-wins"
+        );
+    }
+
+    #[test]
+    fn move_block_does_not_reassert_generous_write_cap() {
+        // The `**` read-only allow emits `(deny file-write* (subpath "/"))`; re-asserting
+        // THAT after the confstr grant would re-deny the whole temp dir and break the
+        // xcrun_db write. Only the Deny arm is re-emitted — no root-subpath unlink/create
+        // deny may appear (which would blanket-block the confstr scratch write).
+        let p = fs_policy(
+            Effect::Deny,
+            vec![
+                rule("**", Effect::Allow, FsAccess::Read),
+                rule("/proj", Effect::Allow, FsAccess::ReadWrite),
+            ],
+        );
+        let prof = build_profile(&p, &spec(), None);
+        assert!(!prof.contains("(deny file-write-unlink (subpath \"/\"))"));
+        assert!(!prof.contains("(deny file-write-create (subpath \"/\"))"));
+        // And the confstr grant is still the last word on the temp dir.
+        assert!(prof.contains("(allow file-write* (subpath \"/private/var/folders/"));
+    }
+
+    #[test]
+    fn move_block_denies_ancestor_dirs_for_anchored_deny() {
+        // Hole #2: a literal deny `/root/proj/.env` blocks the file mv but not
+        // `mv proj proj2`. The ancestor move-block denies unlink/create on `/root/proj`
+        // and `/root` (up to the rw-grant root), so no container rename relocates it.
+        let p = fs_policy(
+            Effect::Deny,
+            vec![
+                rule("**", Effect::Allow, FsAccess::Read),
+                rule("/root", Effect::Allow, FsAccess::ReadWrite),
+                rule("/root/proj/.env", Effect::Deny, FsAccess::Read),
+            ],
+        );
+        let prof = build_profile(&p, &spec(), None);
+        assert!(prof.contains("(deny file-write-unlink (literal \"/root/proj\"))"));
+        assert!(prof.contains("(deny file-write-create (literal \"/root/proj\"))"));
+        assert!(prof.contains("(deny file-write-unlink (literal \"/root\"))"));
+        // The grant root is the stopping point — nothing above it (writable region ends).
+        assert!(!prof.contains("(deny file-write-unlink (literal \"/\"))"));
+    }
+
+    #[test]
+    fn move_block_skips_basename_glob_deny_ancestors() {
+        // A basename-glob deny (`**/.env`) has no literal ancestor and is already immune to
+        // ancestor rename (the basename survives), so Fix 2 emits no `(literal …)` ancestor
+        // denies for it — only the Fix 1 regex re-assertion.
+        let p = fs_policy(
+            Effect::Deny,
+            vec![
+                rule("**", Effect::Allow, FsAccess::Read),
+                rule("/root", Effect::Allow, FsAccess::ReadWrite),
+                rule("**/.env", Effect::Deny, FsAccess::Read),
+            ],
+        );
+        let prof = build_profile(&p, &spec(), None);
+        assert!(!prof.contains("(deny file-write-unlink (literal \"/root\"))"));
+    }
+
+    #[test]
+    fn move_block_no_ancestors_without_enclosing_write_grant() {
+        // An anchored deny with NO write grant enclosing it (read-only project) has no
+        // writable container to rename — emit no ancestor denies.
+        let p = fs_policy(
+            Effect::Deny,
+            vec![
+                rule("**", Effect::Allow, FsAccess::Read),
+                rule("/root/proj/.env", Effect::Deny, FsAccess::Read),
+            ],
+        );
+        let prof = build_profile(&p, &spec(), None);
+        assert!(!prof.contains("(deny file-write-unlink (literal \"/root/proj\"))"));
+        assert!(!prof.contains("(deny file-write-unlink (literal \"/root\"))"));
     }
 
     #[test]
