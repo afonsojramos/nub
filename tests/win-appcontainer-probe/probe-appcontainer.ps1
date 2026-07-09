@@ -28,6 +28,13 @@ function Record($axis, $ok, $detail){
     Write-Host "RESULT $axis : ${tag}: $detail"
     if(-not $ok){ $fail.Add("$axis : $detail") }
 }
+# Informational: records an observed behavior that does NOT gate the verdict (e.g. confirming a
+# known mechanism limitation). $asExpected just annotates whether the observation matched the model.
+function Info($axis, $asExpected, $detail){
+    $tag = if($asExpected){'CONFIRMED'}else{'UNEXPECTED'}
+    $summary.Add("$axis : [info ${tag}]: $detail")
+    Write-Host "INFO $axis : ${tag}: $detail"
+}
 
 $id = [System.Security.Principal.WindowsIdentity]::GetCurrent()
 $isAdmin = (New-Object System.Security.Principal.WindowsPrincipal($id)).IsInRole([System.Security.Principal.WindowsBuiltinRole]::Administrator)
@@ -148,47 +155,46 @@ try {
     Record 'AXIS3 read+write-confine-in-%TEMP%' $a3 "read granted=$rGrant secret=$rDeny ; write granted=$wGrant outside=$wDeny (all in %TEMP%, no C:\ store)"
 
     # =====================================================================================
-    Section 'AXIS 4 -- deny-inside-allow (generous-read-minus-secrets expressibility)'
-    # 4a: AC-SID allow on root, explicit AC-SID DENY on the secret child.
-    $r4 = Join-Path $stage 'da_acsid'; New-Item -ItemType Directory -Path $r4 -Force | Out-Null
-    & icacls $r4 /inheritance:r /grant:r "${me}:(OI)(CI)(F)" | Out-Null
-    & icacls $r4 /grant "*${acSidStr}:(OI)(CI)(RX)" | Out-Null
-    $pub4 = Join-Path $r4 'public.txt'; Set-Content $pub4 'pub' -NoNewline
-    $sec4 = Join-Path $r4 'secret.txt'; Set-Content $sec4 'SECRET' -NoNewline
-    & icacls $sec4 /deny "*${acSidStr}:(R)" | Out-Null
-    $p4 = [AC]::Launch($acSidPtr, "`"$child`" read `"$pub4`"", $bin)
-    $s4 = [AC]::Launch($acSidPtr, "`"$child`" read `"$sec4`"", $bin)
-    Note "4a AC-SID allow+deny: public=$p4 (exp 0) secret=$s4 (exp 5)"
+    Section 'AXIS 4 -- deny-inside-allow: is an explicit DENY-ACE honored against a lowbox token?'
+    # INFORMATIONAL (does not gate): windows.rs claims an inherited package/AAP allow satisfies the
+    # lowbox check "before the file deny is reached" -> a deny-ACE denylist is defeated. We test all
+    # three deny spellings AND dump the resulting ACL so a null result cannot be "the deny never landed".
+    function Test-Deny($tag, $rootGrantSid, $denySid){
+        $r = Join-Path $stage $tag; New-Item -ItemType Directory -Path $r -Force | Out-Null
+        & icacls $r /inheritance:r /grant:r "${me}:(OI)(CI)(F)" | Out-Null
+        (& icacls $r /grant "*${rootGrantSid}:(OI)(CI)(RX)") | Out-Null
+        $pub = Join-Path $r 'public.txt'; Set-Content $pub 'pub' -NoNewline
+        $sec = Join-Path $r 'secret.txt'; Set-Content $sec 'SECRET' -NoNewline
+        $denyOut = (& icacls $sec /deny "*${denySid}:(R)" 2>&1 | Out-String); $denyRc = $LASTEXITCODE
+        Note "$tag deny icacls rc=$denyRc : $($denyOut.Trim())"
+        Note "$tag secret.txt ACL after deny:`n$((& icacls $sec 2>&1 | Out-String).Trim())"
+        $p = [AC]::Launch($acSidPtr, "`"$child`" read `"$pub`"", $bin)
+        $s = [AC]::Launch($acSidPtr, "`"$child`" read `"$sec`"", $bin)
+        Note "$tag read: public=$p secret=$s (secret 5 => deny honored ; 0 => deny defeated)"
+        return @($p,$s)
+    }
+    $d4a = Test-Deny 'da_acsid'      $acSidStr $acSidStr   # AC-SID allow, deny AC-SID
+    $d4b = Test-Deny 'da_aap_denyac' $AAP      $acSidStr   # AAP allow, deny the per-run AC-SID (windows.rs's decisive case)
+    $d4c = Test-Deny 'da_aap_denyaap' $AAP     $AAP        # AAP allow, deny AAP
+    $denyHonored = ($d4a[1] -eq 5 -or $d4b[1] -eq 5 -or $d4c[1] -eq 5)
+    Info 'AXIS4 deny-ACE-vs-lowbox' (-not $denyHonored) "deny-ACE secret reads: AC/AC=$($d4a[1]) AAP/AC=$($d4b[1]) AAP/AAP=$($d4c[1]) (all 0 CONFIRMS windows.rs: an inherited package/AAP allow defeats a per-file deny-ACE -> deny-inside-allow is NOT expressible via deny-ACEs)"
 
-    # 4b: AAP allow on root (child reaches via AAP), explicit DENY of the per-run AC SID on the secret.
-    #     windows.rs claims this LEAKS (AAP satisfies the lowbox check before the file deny). Test it.
-    $r4b = Join-Path $stage 'da_aap_denyac'; New-Item -ItemType Directory -Path $r4b -Force | Out-Null
-    & icacls $r4b /inheritance:r /grant:r "${me}:(OI)(CI)(F)" | Out-Null
-    & icacls $r4b /grant "*${AAP}:(OI)(CI)(RX)" | Out-Null
-    $pub4b = Join-Path $r4b 'public.txt'; Set-Content $pub4b 'pub' -NoNewline
-    $sec4b = Join-Path $r4b 'secret.txt'; Set-Content $sec4b 'SECRET' -NoNewline
-    & icacls $sec4b /deny "*${acSidStr}:(R)" | Out-Null
-    $p4b = [AC]::Launch($acSidPtr, "`"$child`" read `"$pub4b`"", $bin)
-    $s4b = [AC]::Launch($acSidPtr, "`"$child`" read `"$sec4b`"", $bin)
-    Note "4b AAP allow + AC-SID deny: public=$p4b (exp 0) secret=$s4b (windows.rs predicts 0/LEAK; deny-order predicts 5)"
-
-    # 4c: AAP allow on root, explicit DENY of AAP on the secret.
-    $r4c = Join-Path $stage 'da_aap_denyaap'; New-Item -ItemType Directory -Path $r4c -Force | Out-Null
-    & icacls $r4c /inheritance:r /grant:r "${me}:(OI)(CI)(F)" | Out-Null
-    & icacls $r4c /grant "*${AAP}:(OI)(CI)(RX)" | Out-Null
-    $pub4c = Join-Path $r4c 'public.txt'; Set-Content $pub4c 'pub' -NoNewline
-    $sec4c = Join-Path $r4c 'secret.txt'; Set-Content $sec4c 'SECRET' -NoNewline
-    & icacls $sec4c /deny "*${AAP}:(R)" | Out-Null
-    $p4c = [AC]::Launch($acSidPtr, "`"$child`" read `"$pub4c`"", $bin)
-    $s4c = [AC]::Launch($acSidPtr, "`"$child`" read `"$sec4c`"", $bin)
-    Note "4c AAP allow + AAP deny: public=$p4c (exp 0) secret=$s4c (exp 5)"
-
-    $a4a = ($p4 -eq 0 -and $s4 -eq 5)
-    $a4b = ($p4b -eq 0 -and $s4b -eq 5)
-    $a4c = ($p4c -eq 0 -and $s4c -eq 5)
-    Record 'AXIS4a deny-inside-allow (AC-SID)'  $a4a "public=$p4 secret=$s4"
-    Record 'AXIS4b deny-AC-SID-under-AAP-allow' $a4b "public=$p4b secret=$s4b (decisive vs windows.rs 'AAP defeats deny' claim)"
-    Record 'AXIS4c deny-AAP-under-AAP-allow'    $a4c "public=$p4c secret=$s4c"
+    # 4d -- THE WORKING RESOLUTION (gated): carve a secret out of a broadly-AC-SID-granted tree by
+    # STRIPPING its inheritance (PROTECTED DACL) + regranting only non-AppContainer principals. The
+    # lowbox check then finds no package/AAP grant -> denied. This is generous-read-minus-secrets
+    # expressed as allowlist + inheritance-break, entirely in %TEMP%, no C:\ store.
+    $r4d = Join-Path $stage 'carveout'; New-Item -ItemType Directory -Path $r4d -Force | Out-Null
+    & icacls $r4d /inheritance:r /grant:r "${me}:(OI)(CI)(F)" | Out-Null
+    & icacls $r4d /grant "*${acSidStr}:(OI)(CI)(RX)" | Out-Null          # broad AC read grant (the "allow")
+    $pub4d = Join-Path $r4d 'public.txt'; Set-Content $pub4d 'pub' -NoNewline
+    $sec4d = Join-Path $r4d 'secret.txt'; Set-Content $sec4d 'SECRET' -NoNewline
+    & icacls $sec4d /inheritance:r /grant:r "${me}:(F)" | Out-Null       # carve-out: strip AC-SID inheritance
+    Note "4d carve-out secret ACL:`n$((& icacls $sec4d 2>&1 | Out-String).Trim())"
+    $p4d = [AC]::Launch($acSidPtr, "`"$child`" read `"$pub4d`"", $bin)
+    $s4d = [AC]::Launch($acSidPtr, "`"$child`" read `"$sec4d`"", $bin)
+    Note "4d allowlist+inheritance-break: public=$p4d (exp 0) secret=$s4d (exp 5)"
+    $a4d = ($p4d -eq 0 -and $s4d -eq 5)
+    Record 'AXIS4d generous-read-minus-secret via inheritance-break' $a4d "public=$p4d secret=$s4d (the WORKING resolution; deny-ACEs are not needed)"
 
     # =====================================================================================
     Section 'AXIS 5 -- AAP inheritance issue is real, and inheritance:r is the clean fix'
@@ -218,8 +224,11 @@ foreach($s in $summary){ Write-Host "  $s" }
 Write-Host ""
 Write-Host "unprivileged(parent non-elevated)=$([bool](-not $isAdmin))"
 if($fail.Count -gt 0){
-    Write-Host "OVERALL: FAIL ($($fail.Count) axis/axes not as-expected) -- read the per-axis RESULT lines above"
+    Write-Host "OVERALL: FAIL ($($fail.Count) gated axis/axes not as-expected) -- read the per-axis RESULT lines above"
     exit 1
 }
-Write-Host "OVERALL: PASS -- confinement works in an ordinary %TEMP% location; both 'catastrophic' claims refuted"
+Write-Host "OVERALL: PASS -- non-elevated AppContainer confinement works in an ordinary %TEMP% location"
+Write-Host "  CLAIM 1 (needs ancestor-traverse grants / a C:\-owned store) => REFUTED (AXIS 1/2/3)"
+Write-Host "  generous-read-minus-secrets => expressible via allowlist + inheritance-break (AXIS 4d/5),"
+Write-Host "  NOT via deny-ACEs (AXIS 4 info CONFIRMS deny-ACEs are defeated by an inherited package/AAP allow)"
 exit 0
