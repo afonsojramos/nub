@@ -19,6 +19,31 @@ Two kinds of residual appear here:
 
 ## Network
 
+### Egress SSRF: cloud-metadata / link-local blocked; broad RFC1918 is a posture call (partly open by design)
+
+The loopback egress proxy resolves an allowed host and connects to the resolved IP, so an
+allowed hostname whose DNS points at an internal address — or an attacker DNS-*rebinding*
+an allowed domain to one between validation and connect — could reach an off-limits
+address. Two halves:
+
+- **CLOSED — cloud-metadata / link-local + rebinding.** The proxy fails closed at the
+  outbound connect on the IMDS / link-local surface: IPv4 `169.254.0.0/16` (incl. the
+  `169.254.169.254` metadata endpoint), IPv6 link-local `fe80::/10`, and the AWS IPv6 IMDS
+  `fd00:ec2::254` — regardless of what the policy admits. IPv4-in-IPv6 encodings
+  (`::ffff:169.254.169.254`, `::169.254.169.254`) are unmapped before classification, and
+  integer/octal/hex host forms are moot because classification runs on the RESOLVED
+  `IpAddr`, not the child's token. Rebinding is pinned out: the host is resolved exactly
+  once and the connect targets that same address — no re-resolution between check and
+  connect. See `proxy/mod.rs` (`is_blocked_egress_ip`, `connect_upstream`).
+- **OPEN BY DESIGN (maintainer posture call) — broad RFC1918 private ranges.** `10/8`,
+  `172.16/12`, and `192.168/16` are NOT blocked by default. Blocking them wholesale breaks
+  legitimate private-host allowlisting and collides with the deliberate loopback carve
+  (the proxy's own listener and loopback upstreams must stay reachable), so it is a
+  separate posture decision rather than folded into this guard. The seam is clean: a
+  policy/config toggle can extend `is_blocked_egress_ip` to the private ranges when the
+  maintainer decides the default. Until then, private-range egress is admitted iff the
+  active policy admits the host.
+
 ### Linux per-host egress: the port-scoped `ConnectTcp` residual (CLOSED via seccomp user_notify)
 
 Under a per-host allowlist the child is forced through the loopback egress proxy, and

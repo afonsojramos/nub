@@ -29,7 +29,7 @@ use crate::policy::NetPolicy;
 use handshake::{read_request, reply_failure, reply_success};
 use sni::SniScan;
 use std::io::{self, Read, Write};
-use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
@@ -252,8 +252,40 @@ fn finalize_scan(buf: &[u8], decider: &dyn GrantDecider) -> (Vec<u8>, bool) {
     }
 }
 
+/// Egress addresses the proxy must NEVER connect to, even when policy admits the host.
+///
+/// SSRF / DNS-rebinding guard. An allowed hostname that resolves — or an attacker's DNS
+/// rebinds — to the cloud-metadata / link-local surface is refused at the connect. It
+/// covers IPv4 link-local `169.254.0.0/16` (incl. the `169.254.169.254` IMDS endpoint),
+/// IPv6 link-local `fe80::/10`, and the AWS IPv6 IMDS `fd00:ec2::254`; an IPv4-in-IPv6
+/// form (`::ffff:169.254.169.254`, `::169.254.169.254`) is unmapped to its embedded v4
+/// FIRST so the encoding can't smuggle a metadata address past as an IPv6 literal. All
+/// integer/octal/hex host encodings are already normalized away here because we classify
+/// the RESOLVED [`IpAddr`], not the child-supplied token. Loopback is deliberately NOT
+/// blocked (the proxy's own carve is loopback, and a legit upstream may be); broad RFC1918
+/// private-range blocking is a separate maintainer posture call (see LIMITATIONS.md).
+fn is_blocked_egress_ip(ip: IpAddr) -> bool {
+    const AWS_IMDS_V6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254);
+    match ip {
+        IpAddr::V4(v4) => v4.is_link_local(),
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4() {
+                return v4.is_link_local();
+            }
+            // fe80::/10 hand-rolled (`Ipv6Addr::is_unicast_link_local` is still unstable).
+            (v6.segments()[0] & 0xffc0) == 0xfe80 || v6 == AWS_IMDS_V6
+        }
+    }
+}
+
 /// Connect to the upstream target with a timeout. A hostname is resolved here (the
 /// proxy owns DNS — a child-supplied IP for a hostname is never trusted).
+///
+/// ANTI-REBINDING PIN: the name is resolved exactly ONCE into a fixed address list, and
+/// each address is SSRF-classified and connected to as the SAME `SocketAddr` — there is
+/// no second resolution between the check and the connect, so DNS cannot swap in a
+/// metadata IP after validation. A resolved address on the blocked surface is skipped
+/// (fail-closed); a host that resolves ONLY to blocked addresses yields the block error.
 fn connect_upstream(host: &Host, port: u16) -> io::Result<TcpStream> {
     let addrs: Vec<SocketAddr> = match host {
         Host::Ip(ip) => vec![SocketAddr::new(*ip, port)],
@@ -261,6 +293,13 @@ fn connect_upstream(host: &Host, port: u16) -> io::Result<TcpStream> {
     };
     let mut last_err = io::Error::other("no address resolved");
     for addr in addrs {
+        if is_blocked_egress_ip(addr.ip()) {
+            last_err = io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "egress to a link-local/metadata address is blocked",
+            );
+            continue;
+        }
         match TcpStream::connect_timeout(&addr, UPSTREAM_TIMEOUT) {
             Ok(s) => return Ok(s),
             Err(e) => last_err = e,
@@ -346,6 +385,64 @@ mod tests {
             d.decide(&Host::Ip("8.8.8.8".parse().unwrap())),
             Decision::Deny
         );
+    }
+
+    #[test]
+    fn blocks_metadata_and_link_local_egress() {
+        let blocked = [
+            "169.254.169.254",        // AWS/GCP/Azure IMDS (IPv4 link-local)
+            "169.254.0.1",            // link-local edge
+            "fe80::1",                // IPv6 link-local
+            "fe80::a9fe:a9fe",        // IPv6 link-local, arbitrary suffix
+            "febf::1",                // fe80::/10 upper edge
+            "fd00:ec2::254",          // AWS IPv6 IMDS
+            "::ffff:169.254.169.254", // IPv4-mapped metadata (encoding smuggle)
+            "::169.254.169.254",      // IPv4-compat metadata (encoding smuggle)
+        ];
+        for ip in blocked {
+            assert!(
+                is_blocked_egress_ip(ip.parse().unwrap()),
+                "{ip} must be classified as blocked egress"
+            );
+        }
+        // NOT blocked: loopback (the proxy carve + loopback upstreams), public, and —
+        // deliberately, pending the maintainer posture call — RFC1918 private ranges.
+        let allowed = [
+            "127.0.0.1",
+            "::1",
+            "8.8.8.8",
+            "203.0.113.10",
+            "2606:4700:4700::1111",
+            "10.0.0.1",
+            "172.16.0.1",
+            "192.168.1.1", // RFC1918: NOT blocked in this change
+        ];
+        for ip in allowed {
+            assert!(
+                !is_blocked_egress_ip(ip.parse().unwrap()),
+                "{ip} must NOT be classified as blocked egress"
+            );
+        }
+    }
+
+    #[test]
+    fn connect_upstream_denies_link_local_but_reaches_allowed_target() {
+        // Negative control: an allowed (non-blocked) target actually connects.
+        let echo = TcpListener::bind((IpAddr::from([127, 0, 0, 1]), 0)).unwrap();
+        let port = echo.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let _ = echo.accept();
+        });
+        assert!(
+            connect_upstream(&Host::Ip(IpAddr::from([127, 0, 0, 1])), port).is_ok(),
+            "an allowed target must still connect through the guard"
+        );
+
+        // The guard denies a metadata target immediately (PermissionDenied), without
+        // attempting the connect — so a live metadata endpoint would never be reached.
+        let err = connect_upstream(&Host::Ip("169.254.169.254".parse().unwrap()), 80)
+            .expect_err("link-local egress must be blocked");
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
     }
 
     #[test]

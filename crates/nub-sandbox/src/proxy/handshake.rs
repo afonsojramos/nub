@@ -101,7 +101,7 @@ fn read_socks5(stream: &mut (impl Read + Write)) -> io::Result<Request> {
             let mut name = vec![0u8; len[0] as usize];
             stream.read_exact(&mut name)?;
             let name = String::from_utf8(name).map_err(|_| bad("socks5: non-utf8 host"))?;
-            host_from_str(&name)
+            host_from_str(&name)?
         }
         _ => return Err(bad("socks5: unknown address type")),
     };
@@ -178,14 +178,21 @@ fn split_authority(authority: &str) -> io::Result<(Host, u16)> {
     let port: u16 = port_str
         .parse()
         .map_err(|_| bad("http connect: bad port"))?;
-    Ok((host_from_str(host_str), port))
+    Ok((host_from_str(host_str)?, port))
 }
 
-/// Classify a host token as an IP literal or a name.
-fn host_from_str(s: &str) -> Host {
+/// Classify a host token as an IP literal or a name, rejecting control characters.
+///
+/// A CR/LF/NUL (or any other control char) in a host token is never legitimate; allowing
+/// it invites request-smuggling / parse-confusion against the upstream resolver and the
+/// SOCKS/CONNECT framing, so it fails closed at the parse boundary.
+fn host_from_str(s: &str) -> io::Result<Host> {
+    if s.chars().any(|c| c.is_control()) {
+        return Err(bad("host contains control characters"));
+    }
     match s.parse::<IpAddr>() {
-        Ok(ip) => Host::Ip(ip),
-        Err(_) => Host::Name(s.to_string()),
+        Ok(ip) => Ok(Host::Ip(ip)),
+        Err(_) => Ok(Host::Name(s.to_string())),
     }
 }
 
@@ -283,6 +290,28 @@ mod tests {
     #[test]
     fn http_non_connect_is_rejected() {
         let mut d = Duplex::new(b"GET http://x/ HTTP/1.1\r\n\r\n".to_vec());
+        assert!(read_request(&mut d).is_err());
+    }
+
+    #[test]
+    fn socks5_rejects_control_char_in_hostname() {
+        // A NUL embedded in the SOCKS5 domain (request-smuggling / parse-confusion) is
+        // rejected — a legit host token never carries a control char.
+        let mut bytes = vec![0x05, 0x01, 0x00];
+        bytes.extend_from_slice(&[0x05, 0x01, 0x00, 0x03]);
+        let host = b"evil\0.example";
+        bytes.push(host.len() as u8);
+        bytes.extend_from_slice(host);
+        bytes.extend_from_slice(&443u16.to_be_bytes());
+        let mut d = Duplex::new(bytes);
+        assert!(read_request(&mut d).is_err());
+    }
+
+    #[test]
+    fn http_connect_rejects_control_char_in_authority() {
+        // A vertical-tab (a control char `split_whitespace` does not treat as a
+        // delimiter) inside the CONNECT authority is rejected at the parse boundary.
+        let mut d = Duplex::new(b"CONNECT ex\x0bample.com:443 HTTP/1.1\r\n\r\n".to_vec());
         assert!(read_request(&mut d).is_err());
     }
 

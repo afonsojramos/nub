@@ -309,3 +309,41 @@ fn allowed_sni_forwards_denied_sni_dropped_through_proxy() {
         "a denied target is refused (403) by the proxy before connecting"
     );
 }
+
+#[test]
+fn ssrf_metadata_target_dropped_even_when_policy_admits_it() {
+    // SSRF guard: a policy that ADMITS the link-local /16 at gate 1 still cannot reach the
+    // cloud-metadata endpoint — connect_upstream refuses `169.254.169.254`. The negative
+    // control (an admitted loopback echo under the SAME policy forwards) proves this is a
+    // targeted egress block, not a broken tunnel. (That the drop is the GUARD and not a
+    // dead-IP timeout is proven deterministically by the connect_upstream unit test; a
+    // link-local endpoint cannot be stood up to show a would-be-reachable pre-fix path.)
+    let f = fixture();
+    let Some(probe) = compile_probe(&f.proj) else {
+        return;
+    };
+    let echo = echo_server();
+    let port = echo.port().to_string();
+    // Admit BOTH the link-local range (so gate 1 passes for the metadata IP) and loopback.
+    let policy =
+        json!({ "fs": true, "net": ["169.254.0.0/16", "127.0.0.0/8", "*.allowed.example"] });
+
+    assert_eq!(
+        f.run(
+            policy.clone(),
+            &probe,
+            &["proxysni", "169.254.169.254", "80", "api.allowed.example"]
+        ),
+        5,
+        "metadata target must be dropped at connect even though gate 1 admits it"
+    );
+    assert_eq!(
+        f.run(
+            policy,
+            &probe,
+            &["proxysni", "127.0.0.1", &port, "api.allowed.example"]
+        ),
+        0,
+        "neg-control: an admitted loopback target still forwards under the same policy"
+    );
+}
