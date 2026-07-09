@@ -556,6 +556,19 @@ pub(super) async fn update_manifest_for_add(
         place_dep_in_manifest(&mut manifest, pkg_name_for_manifest, specifier, &opts);
     }
 
+    // Pre-flight the catalog write target BEFORE mutating the dependent
+    // manifest. Under nub identity the catalog cannot live in the
+    // pnpm-named workspace YAML (the next resolve refuses to read it),
+    // so it must land in `workspaces.catalog` in package.json; resolving
+    // + validating the target here means a `--save-catalog` that can't
+    // land its entry fails before rewriting the manifest to an
+    // unresolvable `catalog:` reference (issue #369).
+    let catalog_target = if catalog_upserts.is_empty() {
+        None
+    } else {
+        Some(crate::commands::catalogs::resolve_catalog_write_target(cwd)?)
+    };
+
     // Write the updated package.json. Under `--no-save` callers still
     // write the mutated manifest to disk for the duration of the
     // resolver + install pipeline (both re-read from disk), then
@@ -565,17 +578,13 @@ pub(super) async fn update_manifest_for_add(
         eprintln!("Updated package.json");
     }
 
-    // Apply queued `--save-catalog` upserts. Lands once at the end of
-    // the per-package loop so the workspace yaml is rewritten at most
-    // once per command — `edit_workspace_yaml` no-ops when nothing
-    // structural changes (preserving comments under filtered/recursive
-    // re-runs that all target the same catalog).
-    if !catalog_upserts.is_empty() {
-        let yaml_root = crate::dirs::find_workspace_yaml_root(cwd)
-            .or_else(|| crate::dirs::find_workspace_root(cwd))
-            .unwrap_or_else(|| cwd.to_path_buf());
-        let yaml_path = aube_manifest::workspace::workspace_yaml_target(&yaml_root);
-        crate::commands::catalogs::upsert_catalog_entries(&yaml_path, &catalog_upserts)?;
+    // Apply queued `--save-catalog` upserts to the pre-resolved target.
+    // Lands once at the end of the per-package loop so the target is
+    // rewritten at most once per command — the yaml/manifest writers
+    // no-op when nothing structural changes (preserving comments/format
+    // under filtered/recursive re-runs that all target the same catalog).
+    if let Some(target) = &catalog_target {
+        crate::commands::catalogs::apply_catalog_upserts(target, &catalog_upserts)?;
     }
 
     Ok(())
