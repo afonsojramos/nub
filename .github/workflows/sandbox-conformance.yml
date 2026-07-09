@@ -78,4 +78,6 @@ jobs:
       - name: Windows AppContainer enforcement
         shell: bash
         run: cargo test -p nub-sandbox --test windows_enforcement
-      # CLI-seam matrix step added once tests/sandbox_conformance.rs lands.
+      - name: Windows CLI-seam conformance matrix
+        shell: bash
+        run: cargo test -p nub-cli --test sandbox_conformance

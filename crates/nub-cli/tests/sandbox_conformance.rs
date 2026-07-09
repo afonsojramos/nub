@@ -102,9 +102,13 @@ fn linux_enforceable() -> bool {
     if abi >= 2 {
         return true;
     }
+    let required = matches!(
+        std::env::var("NUB_SANDBOX_REQUIRE_LANDLOCK").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    );
     assert!(
-        std::env::var_os("NUB_SANDBOX_REQUIRE_LANDLOCK").is_none(),
-        "NUB_SANDBOX_REQUIRE_LANDLOCK=1 but no Landlock ABI>=2 — fs/net conformance \
+        !required,
+        "NUB_SANDBOX_REQUIRE_LANDLOCK set but no Landlock ABI>=2 — fs/net conformance \
          cannot be proven on this kernel (real-kernel gate)"
     );
     false

@@ -3,6 +3,7 @@
   "policy": { "net": false },
   "relaxed": { "net": true },
   "cases": [
+    { "probe": "read", "target": "proj:live.txt", "expect": true },
     { "probe": "connect", "target": "1.1.1.1:443", "expect": false }
   ]
 }

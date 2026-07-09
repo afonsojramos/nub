@@ -223,14 +223,16 @@ const NPM_CONFIG_PREFIX: &str = "npm_config_";
 /// a registry CREDENTIAL rather than a build hint. Grounds .fray/sandbox.md thread
 /// #6: registry auth never rides the lifecycle env — env-scrub's whole point for the
 /// credential class. Covers the bare legacy keys (`_auth`, `_authToken`, `_password`,
-/// `email`) AND the registry-scoped `//host/:_auth…`/`:_password`/`:email` forms,
-/// both matched case-insensitively as a substring so bare and scoped shapes fall to
-/// one rule. `_auth` subsumes the `_authToken` form (it is a substring of it). The
-/// kept build hints (`npm_config_target`/`arch`/`runtime`/`nodedir`/`python`/…)
-/// contain none of these markers, so nothing legitimate is caught.
+/// `email`) AND the registry-scoped `//host/:_auth…`/`:_password`/`:email` forms.
+/// `_auth`/`_password` carry a leading underscore, so as substrings they can't hit a
+/// build hint (`_author`/`always-auth` are not build hints, and no hint embeds
+/// `_auth`/`_password`). `email` has no such anchor, so it is matched ONLY as the
+/// whole key or a registry-scoped `:email` suffix — otherwise it would wrongly scrub
+/// a hint like `npm_config_nodemailer_binary_host_mirror`. Kept build hints
+/// (`target`/`arch`/`runtime`/`nodedir`/`python`/`*_binary_host_mirror`/…) match none.
 fn is_npm_config_credential(remainder: &str) -> bool {
     let r = remainder.to_ascii_lowercase();
-    r.contains("_auth") || r.contains("_password") || r.contains("email")
+    r.contains("_auth") || r.contains("_password") || r == "email" || r.ends_with(":email")
 }
 
 /// Build the curated-baseline child env from the ambient env (the `sandbox: true`
@@ -350,6 +352,9 @@ mod tests {
             ("npm_config_arch", "arm64"),
             ("npm_config_runtime", "node"),
             ("npm_config_registry", "https://registry.npmjs.org/"),
+            // A build hint whose package name embeds "email" — must NOT be scrubbed by
+            // the anchored `email` marker (regression guard for the unanchored form).
+            ("npm_config_nodemailer_binary_host_mirror", "https://x/"),
             ("npm_config__auth", "aGVsbG86d29ybGQ="),
             ("npm_config__authToken", "npm_LEAK"),
             ("npm_config__password", "hunter2"),
@@ -370,6 +375,7 @@ mod tests {
             "npm_config_arch",
             "npm_config_runtime",
             "npm_config_registry",
+            "npm_config_nodemailer_binary_host_mirror",
         ] {
             assert!(out.contains_key(k), "build hint {k} must pass");
         }

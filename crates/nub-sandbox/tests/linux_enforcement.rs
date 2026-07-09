@@ -44,9 +44,13 @@ fn skip_without_landlock() -> bool {
     if landlock_available() {
         return false;
     }
+    let required = matches!(
+        std::env::var("NUB_SANDBOX_REQUIRE_LANDLOCK").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    );
     assert!(
-        std::env::var_os("NUB_SANDBOX_REQUIRE_LANDLOCK").is_none(),
-        "NUB_SANDBOX_REQUIRE_LANDLOCK=1 but this kernel exposes no Landlock ABI>=2 — \
+        !required,
+        "NUB_SANDBOX_REQUIRE_LANDLOCK set but this kernel exposes no Landlock ABI>=2 — \
          enforcement cannot be proven here (conformance real-kernel gate)"
     );
     true

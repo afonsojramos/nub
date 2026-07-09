@@ -23,15 +23,35 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tempfile::TempDir;
 
-fn landlock_available() -> bool {
+/// Landlock ABI level (0 if the syscall is unavailable). ABI>=2 = fs/net rulesets,
+/// ABI>=4 = `ConnectTcp` (per-host egress).
+fn landlock_abi() -> libc::c_long {
     const SYS: libc::c_long = 444;
     let abi = unsafe { libc::syscall(SYS, std::ptr::null::<libc::c_void>(), 0usize, 1u64) };
-    abi >= 2
+    abi.max(0)
 }
-fn landlock_net() -> bool {
-    const SYS: libc::c_long = 444;
-    let abi = unsafe { libc::syscall(SYS, std::ptr::null::<libc::c_void>(), 0usize, 1u64) };
-    abi >= 4
+
+/// True when the caller should SKIP (Landlock ABI below `min`). Under a truthy
+/// `NUB_SANDBOX_REQUIRE_LANDLOCK` — the conformance real-kernel leg, which runs this
+/// suite — a missing capability PANICS instead, so a hollow skip can't read as green.
+fn skip_without_landlock(min: libc::c_long) -> bool {
+    if landlock_abi() >= min {
+        return false;
+    }
+    assert!(
+        !require_landlock(),
+        "NUB_SANDBOX_REQUIRE_LANDLOCK set but Landlock ABI < {min} — proxy conformance \
+         cannot be proven on this kernel (real-kernel gate)"
+    );
+    true
+}
+
+/// A truthy `NUB_SANDBOX_REQUIRE_LANDLOCK` (`1`/`true`/`yes`).
+fn require_landlock() -> bool {
+    matches!(
+        std::env::var("NUB_SANDBOX_REQUIRE_LANDLOCK").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    )
 }
 
 fn echo_server() -> SocketAddr {
@@ -204,7 +224,7 @@ fn net_policy() -> Value {
 
 #[test]
 fn per_host_proxy_forwards_allowed_drops_denied_blocks_direct() {
-    if !landlock_net() {
+    if skip_without_landlock(4) {
         return; // per-host needs Landlock ABI v4
     }
     let f = fixture();
@@ -262,7 +282,7 @@ fn udp_and_inbound_bind_denied_in_proxy_mode() {
     // would dodge the TCP-only proxy gate: a UDP socket (DNS-tunnel/QUIC exfil) and an
     // explicit TCP bind() (the deliberate inbound-listener exfil channel). A bind-less
     // listen() autobind is a documented dominated residual, not asserted here.
-    if !landlock_net() {
+    if skip_without_landlock(4) {
         return;
     }
     let f = fixture();
@@ -297,7 +317,7 @@ fn udp_and_inbound_bind_denied_in_proxy_mode() {
 
 #[test]
 fn af_unix_egress_closed_under_net_deny() {
-    if !landlock_available() {
+    if skip_without_landlock(2) {
         return;
     }
     let f = fixture();
@@ -329,7 +349,7 @@ fn node_fork_ipc_survives_net_deny() {
     // The decisive empirical check: denying socket(AF_UNIX) must NOT break node's fork
     // IPC, which rides socketpair(AF_UNIX) (kept allowed). Under net:false the outer
     // node spawns a child over an IPC channel and exchanges a message.
-    if !landlock_available() {
+    if skip_without_landlock(2) {
         return;
     }
     let node = "/usr/local/bin/node";
