@@ -314,19 +314,30 @@ pub(crate) fn resolve_catalog_write_target(cwd: &Path) -> miette::Result<Catalog
         ));
     }
     let manifest_root = crate::dirs::find_workspace_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
+    let manifest_path = manifest_root.join("package.json");
+    // The catalog is written into an EXISTING package.json. Require it in
+    // the pre-flight so the apply (which runs AFTER the dependent manifest
+    // is written) cannot fail on a missing target and leave a dangling
+    // `catalog:` reference behind — this keeps the #369 guarantee from
+    // silently depending on the embedder's `workspace_yaml`/root-discovery
+    // shape.
+    if !manifest_path.is_file() {
+        return Err(miette::miette!(
+            "cannot save to a catalog: no package.json found at the workspace root ({})",
+            manifest_root.display()
+        ));
+    }
     // A bare-string `workspaces` cannot carry the object-form `catalog`
     // key. Reject up front so the pre-flight fails before any manifest
     // mutation rather than half-way through.
-    let manifest = crate::commands::load_manifest_or_default(&manifest_root)?;
+    let manifest = crate::commands::load_manifest(&manifest_path)?;
     if matches!(manifest.workspaces, Some(aube_manifest::Workspaces::String(_))) {
         return Err(miette::miette!(
             "cannot save to a catalog: package.json#workspaces is a bare string; \
              convert it to an array or object form to hold a `workspaces.catalog`"
         ));
     }
-    Ok(CatalogWriteTarget::Manifest(
-        manifest_root.join("package.json"),
-    ))
+    Ok(CatalogWriteTarget::Manifest(manifest_path))
 }
 
 /// Apply queued catalog entries to a pre-resolved [`CatalogWriteTarget`].
@@ -342,7 +353,8 @@ pub(crate) fn apply_catalog_upserts(
 
 /// Insert-only upsert of catalog entries into the neutral
 /// `workspaces.catalog(s)` object of a package.json, preserving the
-/// file's formatting and key order via [`update_manifest_json_object`].
+/// file's top-level key order via [`update_manifest_json_object`]
+/// (indentation is re-normalized, as with every aube manifest edit).
 /// Mirrors [`upsert_catalog_entries`]' never-overwrite semantics.
 /// Normalizes an array-form `workspaces` into the object form (packages
 /// preserved) so it can carry a catalog — the same shape `nub pm use
