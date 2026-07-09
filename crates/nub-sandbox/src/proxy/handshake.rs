@@ -309,9 +309,11 @@ mod tests {
 
     #[test]
     fn http_connect_rejects_control_char_in_authority() {
-        // A vertical-tab (a control char `split_whitespace` does not treat as a
-        // delimiter) inside the CONNECT authority is rejected at the parse boundary.
-        let mut d = Duplex::new(b"CONNECT ex\x0bample.com:443 HTTP/1.1\r\n\r\n".to_vec());
+        // A NUL inside the CONNECT authority survives `split_whitespace` (it is not
+        // whitespace) and reaches the host token, where the control-char check rejects
+        // it — the parse-confusion hardening. (A whitespace-class control like \x0b would
+        // instead be swallowed by the tokenizer, so NUL is the faithful exercise.)
+        let mut d = Duplex::new(b"CONNECT ex\x00ample.com:443 HTTP/1.1\r\n\r\n".to_vec());
         assert!(read_request(&mut d).is_err());
     }
 

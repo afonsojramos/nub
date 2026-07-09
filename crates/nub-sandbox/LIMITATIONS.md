@@ -43,6 +43,14 @@ address. Two halves:
   policy/config toggle can extend `is_blocked_egress_ip` to the private ranges when the
   maintainer decides the default. Until then, private-range egress is admitted iff the
   active policy admits the host.
+- **OPEN residual (impractical) — NAT64 / 6to4 IPv6 embeddings of link-local.** A
+  link-local address wrapped in the NAT64 well-known prefix (`64:ff9b::169.254.169.254`)
+  or 6to4 (`2002:a9fe:a9fe::`) is NOT unwrapped, so it dodges the block. Reaching IMDS this
+  way needs a NAT64/6to4 *translating gateway* on-path routing to a link-local target —
+  absent in a normal cloud environment — so it is not a practical metadata reach. Left
+  unblocked rather than partly-covered because only the well-known prefixes are detectable
+  (a network-specific NAT64 `/96` is not), and partial coverage would misrepresent the
+  guarantee. Same `is_blocked_egress_ip` seam if the threat model later wants it.
 
 ### Linux per-host egress: the port-scoped `ConnectTcp` residual (CLOSED via seccomp user_notify)
 
