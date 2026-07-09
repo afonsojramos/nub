@@ -1,0 +1,77 @@
+# Cross-platform sandbox CONFORMANCE — the done-gate. Real OS enforcement proven on
+# macOS (Seatbelt), real-kernel Linux (Landlock+seccomp), and Windows (AppContainer),
+# each axis paired with a NEGATIVE CONTROL so a hollow/no-op enforcement cannot pass.
+# Branch-scoped (NO PR required): a push to `sandbox-primitives` touching the engine,
+# the CLI seam, or this file runs it. Supersedes the Windows-only
+# sandbox-win-enforcement.yml (folded into the `windows` leg here).
+#
+# Two layers share ONE committed fixture matrix:
+#   - the CLI-seam conformance matrix drives the real `nub run --sandbox <file> -- <probe>`
+#     end-to-end (crates/nub-cli/tests/sandbox_conformance.rs);
+#   - the per-backend enforcement tests assert library-internal facts the black-box
+#     probe can't reach (Degradation honesty, canonicalization traps, seccomp syscalls).
+#
+# `workflow_dispatch` is inert until this file reaches the default branch (GitHub only
+# registers dispatch from default); the `push` trigger is what fires it on the branch.
+name: sandbox-conformance
+on:
+  workflow_dispatch:
+  push:
+    branches: [sandbox-primitives]
+    paths:
+      - "crates/nub-sandbox/**"
+      - "crates/nub-cli/**"
+      - ".github/workflows/sandbox-conformance.yml"
+jobs:
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: macOS Seatbelt enforcement (per-backend + proxy)
+        run: cargo test -p nub-sandbox --test macos_enforcement --test macos_proxy
+      # CLI-seam matrix step added once tests/sandbox_conformance.rs lands.
+
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      # Print the kernel + Landlock ABI up front: the done-gate depends on this hosted
+      # runner ACTUALLY enforcing Landlock (a LinuxKit VM would not) — surface it.
+      - name: Kernel + Landlock baseline
+        run: |
+          uname -a
+          echo "landlock lsm: $(cat /sys/kernel/security/lsm 2>/dev/null)"
+          ls -l /sys/kernel/security/landlock 2>/dev/null || echo "no landlock securityfs node"
+      # REQUIRE_LANDLOCK turns a hollow skip into a hard failure — this leg's whole job
+      # is to prove Landlock enforces here, so "skipped" must never read as green.
+      - name: Linux Landlock+seccomp enforcement (per-backend + proxy)
+        env:
+          NUB_SANDBOX_REQUIRE_LANDLOCK: "1"
+        run: cargo test -p nub-sandbox --test linux_enforcement --test linux_proxy
+      # CLI-seam matrix step added once tests/sandbox_conformance.rs lands.
+
+  windows:
+    runs-on: windows-latest
+    env:
+      # crt-static makes the self-reexec probe child self-contained (no vcruntime DLL
+      # dependency), so it starts cleanly under the LowBox token — a host-init crash
+      # would otherwise read as a false denial.
+      RUSTFLAGS: "-C target-feature=+crt-static"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Environment baseline
+        shell: powershell
+        run: |
+          $id=[System.Security.Principal.WindowsIdentity]::GetCurrent()
+          $admin=(New-Object System.Security.Principal.WindowsPrincipal($id)).IsInRole([System.Security.Principal.WindowsBuiltinRole]::Administrator)
+          Write-Host "User: $($id.Name)  IsElevated: $admin  OS: $([System.Environment]::OSVersion.VersionString)"
+      - name: Windows AppContainer enforcement
+        shell: bash
+        run: cargo test -p nub-sandbox --test windows_enforcement
+      # CLI-seam matrix step added once tests/sandbox_conformance.rs lands.

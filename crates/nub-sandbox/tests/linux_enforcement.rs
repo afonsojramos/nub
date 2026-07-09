@@ -36,6 +36,22 @@ fn landlock_available() -> bool {
     abi >= 2
 }
 
+/// Returns true when the caller should SKIP (no Landlock on this kernel). Under
+/// `NUB_SANDBOX_REQUIRE_LANDLOCK=1` — set by the conformance-CI real-kernel leg — a
+/// missing Landlock PANICS instead: a hollow skip must never read as green on the
+/// runner whose whole job is to prove Landlock enforces there.
+fn skip_without_landlock() -> bool {
+    if landlock_available() {
+        return false;
+    }
+    assert!(
+        std::env::var_os("NUB_SANDBOX_REQUIRE_LANDLOCK").is_none(),
+        "NUB_SANDBOX_REQUIRE_LANDLOCK=1 but this kernel exposes no Landlock ABI>=2 — \
+         enforcement cannot be proven here (conformance real-kernel gate)"
+    );
+    true
+}
+
 struct Fixture {
     _tmp: TempDir,
     root: PathBuf,
@@ -126,7 +142,7 @@ const SH: &str = "/bin/sh";
 
 #[test]
 fn read_confine_allows_project_denies_outside() {
-    if !landlock_available() {
+    if skip_without_landlock() {
         return;
     }
     let f = fixture();
@@ -156,7 +172,7 @@ fn read_confine_allows_project_denies_outside() {
 
 #[test]
 fn generous_read_denies_dotenv() {
-    if !landlock_available() {
+    if skip_without_landlock() {
         return;
     }
     let f = fixture();
@@ -188,7 +204,7 @@ fn generous_read_denies_dotenv() {
 
 #[test]
 fn new_secret_paths_denied_under_generous_read() {
-    if !landlock_available() {
+    if skip_without_landlock() {
         return;
     }
     let f = fixture();
@@ -248,7 +264,7 @@ fn new_secret_paths_denied_under_generous_read() {
 
 #[test]
 fn write_confine_allows_target_denies_rest() {
-    if !landlock_available() {
+    if skip_without_landlock() {
         return;
     }
     let f = fixture();
@@ -279,7 +295,7 @@ fn write_confine_allows_target_denies_rest() {
 
 #[test]
 fn confine_not_dodgeable_via_symlink_or_dotdot() {
-    if !landlock_available() {
+    if skip_without_landlock() {
         return;
     }
     let f = fixture();
@@ -306,7 +322,7 @@ fn confine_not_dodgeable_via_symlink_or_dotdot() {
 
 #[test]
 fn ancestor_proc_environ_is_unreadable() {
-    if !landlock_available() {
+    if skip_without_landlock() {
         return;
     }
     let f = fixture();
@@ -344,7 +360,7 @@ fn ancestor_proc_environ_is_unreadable() {
 
 #[test]
 fn env_scrub_alone_closes_proc_even_with_fs_relaxed() {
-    if !landlock_available() {
+    if skip_without_landlock() {
         return;
     }
     let f = fixture();
@@ -380,7 +396,7 @@ fn env_scrub_alone_closes_proc_even_with_fs_relaxed() {
 
 #[test]
 fn env_passthrough_does_not_close_proc() {
-    if !landlock_available() {
+    if skip_without_landlock() {
         return;
     }
     let f = fixture();
@@ -404,7 +420,7 @@ fn env_passthrough_does_not_close_proc() {
 
 #[test]
 fn env_scrub_strips_secret_keeps_baseline() {
-    if !landlock_available() {
+    if skip_without_landlock() {
         return;
     }
     let f = fixture();
@@ -487,7 +503,7 @@ int main(int argc, char** argv) {
 
 #[test]
 fn seccomp_denies_net_ptrace_and_vmread() {
-    if !landlock_available() {
+    if skip_without_landlock() {
         return;
     }
     let f = fixture();
@@ -538,7 +554,7 @@ fn seccomp_denies_net_ptrace_and_vmread() {
 
 #[test]
 fn enforcement_is_full_on_a_landlock_kernel() {
-    if !landlock_available() {
+    if skip_without_landlock() {
         return;
     }
     let f = fixture();
