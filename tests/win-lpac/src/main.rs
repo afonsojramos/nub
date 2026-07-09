@@ -177,6 +177,43 @@ mod win {
                 launch(&exe, &["__child__", "read", &secret.to_string_lossy()], &exe_dir, ac_sid, true, &[]));
         }
 
+        // ── G: nub's REAL carve mechanism under LPAC — a broad INHERITABLE AC-SID allow
+        //    on the tree, secrets carved by WITHHOLDING the AC-SID grant (protected DACL,
+        //    AAP-only) OR a SEPARATE-call AC-SID deny-ACE on the inherited grant. Answers
+        //    whether deny-inside-allow is expressible under LPAC without the same-SID
+        //    deny+allow merge confound F hit.
+        {
+            let dir = mktree("G_carve");
+            let pubf = dir.join("pub.txt");
+            let withhold = dir.join("withhold.txt");
+            let denyace = dir.join("denyace.txt");
+            std::fs::write(&pubf, b"public").unwrap();
+            std::fs::write(&withhold, b"SECRET").unwrap();
+            std::fs::write(&denyace, b"SECRET").unwrap();
+            // Root: broad INHERITABLE AC-SID allow + AAP allow. pub + denyace inherit both.
+            set_protected_dacl(&dir, &[
+                owner_fc(),
+                (ac_sid, GENERIC_READ | GENERIC_EXECUTE, SET_ACCESS, true),
+                (sid(AAP_SID), GENERIC_READ | GENERIC_EXECUTE, SET_ACCESS, true),
+            ]);
+            // withhold.txt: protected DACL that OMITS the AC-SID (inheritance broken); only
+            // owner + AAP. Under LPAC AAP is inert → AC-SID withheld → denied.
+            set_protected_dacl(&withhold, &[
+                owner_fc(),
+                (sid(AAP_SID), GENERIC_READ | GENERIC_EXECUTE, SET_ACCESS, false),
+            ]);
+            // denyace.txt: inherits the broad AC-SID allow; add a SEPARATE-call AC-SID deny.
+            add_ace(&denyace, ac_sid, GENERIC_READ | GENERIC_EXECUTE, DENY_ACCESS, false).ok();
+            report("G.lpac.pub      (broad inheritable grant, LPAC — EXPECT 0)",
+                launch(&exe, &["__child__", "read", &pubf.to_string_lossy()], &exe_dir, ac_sid, true, &[]));
+            report("G.lpac.withhold (AC-SID withheld via protected DACL, LPAC — 5=carve-by-withhold WORKS)",
+                launch(&exe, &["__child__", "read", &withhold.to_string_lossy()], &exe_dir, ac_sid, true, &[]));
+            report("G.lpac.denyace  (separate-call AC-SID deny on inherited allow, LPAC — 5=deny-ACE carve WORKS)",
+                launch(&exe, &["__child__", "read", &denyace.to_string_lossy()], &exe_dir, ac_sid, true, &[]));
+            report("G.std.withhold  (AAP-only, std AC — EXPECT 0 via AAP)",
+                launch(&exe, &["__child__", "read", &withhold.to_string_lossy()], &exe_dir, ac_sid, false, &[]));
+        }
+
         // ── E: node.exe viability under LPAC ──
         if let Some(node) = which("node.exe") {
             let node_dir = node.parent().unwrap().to_path_buf();
