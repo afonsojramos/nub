@@ -24,7 +24,7 @@
 #![cfg(target_os = "linux")]
 
 use crate::backend::linux_grants::{self, DerivedGrants, Grant, GrantKind, fs_confines};
-use crate::backend::{CommandSpec, Degradation, Prepared};
+use crate::backend::{CommandSpec, Degradation, Prepared, linux_connect_notify};
 use crate::policy::{Effect, SandboxPolicy};
 use landlock::{
     ABI, AccessFs, AccessNet, BitFlags, CompatLevel, Compatible, NetPort, PathBeneath, PathFd,
@@ -35,6 +35,7 @@ use seccompiler::{
     SeccompRule, TargetArch,
 };
 use std::collections::BTreeMap;
+use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -61,13 +62,14 @@ enum NetMode {
     /// `ConnectTcp` pins `connect()` to this port, and `BindTcp` denies explicit `bind()`
     /// (a bind-less `listen()` autobind is a dominated residual — see [`apply_landlock`]).
     ///
-    /// RESIDUAL (bounded, documented — Landlock cannot filter by address): `ConnectTcp`
-    /// is PORT-scoped, not IP-scoped, so a direct TCP connect to an EXTERNAL host that
-    /// happens to listen on the ephemeral proxy port is not blocked. The port is random
-    /// per run; exploiting it needs an attacker-controlled server on that exact port.
-    /// Fully closing it needs a netns/veth (rejected here) or seccomp user-notify (a
-    /// larger mechanism) — surfaced as a follow-up, not silently claimed closed. macOS
-    /// (Seatbelt address+port carve) has no equivalent gap.
+    /// The PORT-scoped `ConnectTcp` residual (Landlock cannot filter by address, so a
+    /// direct connect to an EXTERNAL host on this port would skip the proxy) is CLOSED by
+    /// the seccomp `USER_NOTIF` `connect()` supervisor in [`linux_connect_notify`], which
+    /// permits only `127.0.0.1:<port>`; its TCP-Fast-Open twin (`sendto(MSG_FASTOPEN)`,
+    /// which connects without `connect()`) is closed by the `MSG_FASTOPEN` deny in
+    /// [`build_seccomp`]. The one narrow residual left is on yama `ptrace_scope >= 2`
+    /// hosts, where the supervisor cannot read the child's memory and is skipped (the
+    /// bounded port-scoped bypass then remains). macOS (address+port carve) has no gap.
     Proxy(u16),
 }
 
@@ -94,6 +96,7 @@ pub fn apply(
             command,
             degradation: Degradation::full(),
             proxy: None,
+            connect_notify: None,
         });
     }
 
@@ -211,6 +214,28 @@ pub fn apply(
         reason: Some(e),
     })?;
 
+    // ── connect-notify supervisor (Proxy mode only) ─────────────────────────────
+    // Close the port-scoped ConnectTcp residual: the child's pre_exec installs a 2nd
+    // seccomp filter (connect→USER_NOTIF) and hands its listener fd back over a
+    // pre-created socketpair; the parent runs a supervisor that permits only the
+    // loopback proxy. `handoff_fds` (Copy) rides into the closure; the parent end +
+    // proxy port ride on `Prepared` for the run. Skipped where non-viable (arch /
+    // yama ptrace_scope ≥ 2 / a socketpair error) — the documented bounded residual
+    // then remains, per-host egress unaffected.
+    let mut connect_notify: Option<linux_connect_notify::ConnectNotify> = None;
+    let mut handoff_fds: Option<(RawFd, RawFd)> = None;
+    if let NetMode::Proxy(port) = net_mode
+        && linux_connect_notify::viable()
+        && let Ok((parent_sock, child_sock)) = linux_connect_notify::make_socketpair()
+    {
+        handoff_fds = Some((child_sock.as_raw_fd(), parent_sock.as_raw_fd()));
+        connect_notify = Some(linux_connect_notify::ConnectNotify::new(
+            parent_sock,
+            child_sock,
+            port,
+        ));
+    }
+
     // SAFETY: the closure runs post-fork/pre-exec. nub may host a tokio runtime, so
     // strictly only async-signal-safe work is sound here; in practice the child is
     // single-threaded post-fork and this open/landlock/seccomp sequence is the
@@ -229,6 +254,13 @@ pub fn apply(
                     .map_err(std::io::Error::other)?;
             }
             seccompiler::apply_filter(&seccomp).map_err(std::io::Error::other)?;
+            // Install the connect→USER_NOTIF filter LAST and hand its listener fd to the
+            // parent. After the EPERM filter (which allows seccomp/sendmsg/close), so the
+            // handoff syscalls flow; connect gets USER_NOTIF (lower RET value than the
+            // EPERM filter's ALLOW → wins), foreign-ABI stays KILLed by the EPERM filter.
+            if let Some((child_raw, parent_raw)) = handoff_fds {
+                linux_connect_notify::install_and_handoff(child_raw, parent_raw)?;
+            }
             Ok(())
         });
     }
@@ -237,6 +269,7 @@ pub fn apply(
         command,
         degradation: deg,
         proxy: None,
+        connect_notify,
     })
 }
 
@@ -505,6 +538,22 @@ fn build_seccomp(net_mode: NetMode) -> Result<BpfProgram, String> {
 
         // io_uring bypasses socket()/connect() entirely — deny its setup when confined.
         rules.insert(i64_from(libc::SYS_io_uring_setup), Vec::new());
+
+        if let NetMode::Proxy(_) = net_mode {
+            // TCP Fast Open initiates a connection via sendto/sendmsg(MSG_FASTOPEN)
+            // WITHOUT calling connect(), dodging BOTH the connect-notify supervisor and
+            // Landlock's connect-only ConnectTcp hook — a direct external-egress bypass on
+            // the proxy port (VM-verified: reaches an external host). Deny the flag on
+            // every send syscall; legit proxy traffic uses a plain connect()+write, never
+            // TFO. `flags` arg index: sendto/sendmmsg = arg3, sendmsg = arg2.
+            for (nr, flags_arg) in [
+                (i64_from(libc::SYS_sendto), 3u8),
+                (i64_from(libc::SYS_sendmsg), 2u8),
+                (i64_from(libc::SYS_sendmmsg), 3u8),
+            ] {
+                rules.insert(nr, vec![msg_fastopen_rule(flags_arg)?]);
+            }
+        }
     }
 
     // mismatch_action = Allow (unlisted syscalls flow); match_action = EPERM.
@@ -517,6 +566,23 @@ fn build_seccomp(net_mode: NetMode) -> Result<BpfProgram, String> {
     .map_err(|e| format!("seccomp build: {e}"))?
     .try_into()
     .map_err(|e| format!("seccomp compile: {e}"))
+}
+
+/// Deny a send syscall carrying `MSG_FASTOPEN` (TFO's connect-without-`connect()` flag):
+/// match `(flags & MSG_FASTOPEN) == MSG_FASTOPEN` on the given arg index. `MSG_FASTOPEN`
+/// is `0x2000_0000` (not always surfaced by libc); legit flag combos never set that bit.
+fn msg_fastopen_rule(flags_arg: u8) -> Result<SeccompRule, String> {
+    const MSG_FASTOPEN: u64 = 0x2000_0000;
+    SeccompRule::new(vec![
+        SeccompCondition::new(
+            flags_arg,
+            SeccompCmpArgLen::Dword,
+            SeccompCmpOp::MaskedEq(MSG_FASTOPEN),
+            MSG_FASTOPEN,
+        )
+        .map_err(|e| format!("tfo cond: {e}"))?,
+    ])
+    .map_err(|e| format!("tfo rule: {e}"))
 }
 
 /// One seccomp rule per family, matching `socket(domain == family)` (arg0). An empty

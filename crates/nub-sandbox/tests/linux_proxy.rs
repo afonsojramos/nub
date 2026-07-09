@@ -54,6 +54,15 @@ fn require_landlock() -> bool {
     )
 }
 
+/// yama `ptrace_scope` (0 if the LSM is absent → unrestricted). The connect-notify
+/// supervisor reads a direct-child's `/proc/<pid>/mem`, which needs scope ≤ 1.
+fn ptrace_scope() -> i32 {
+    std::fs::read_to_string("/proc/sys/kernel/yama/ptrace_scope")
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0)
+}
+
 fn echo_server() -> SocketAddr {
     let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let addr = listener.local_addr().unwrap();
@@ -145,6 +154,7 @@ fn compile_probe(dir: &Path) -> Option<PathBuf> {
 // proxysni <tgt> <port> <sni> 0=forwarded 5=dropped 1=err. Reads HTTP_PROXY.
 const PROBE_C: &str = r#"
 #include <arpa/inet.h>
+#include <errno.h>
 #include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -153,6 +163,9 @@ const PROBE_C: &str = r#"
 #include <sys/time.h>
 #include <sys/un.h>
 #include <unistd.h>
+#ifndef MSG_FASTOPEN
+#define MSG_FASTOPEN 0x20000000
+#endif
 
 static int dial(const char* ip, int port) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -214,6 +227,38 @@ int main(int argc,char**argv){
         if(write(fd,hello,hl)!=hl){close(fd);return 1;}
         unsigned char e[64]; int r=read(fd,e,sizeof e); close(fd); return (r>0)?0:5;
     }
+    /* TCP Fast Open initiates a connection via sendto(MSG_FASTOPEN) WITHOUT calling
+       connect() — probing whether it dodges the connect-only enforcement. 0=sendto
+       accepted (initiated), 2=EPERM/EACCES (blocked), 1=other errno. */
+    if(!strcmp(argv[1],"tfo")){
+        int pp=proxy_port(); if(!pp)return 1;
+        int fd=socket(AF_INET,SOCK_STREAM,0); if(fd<0)return 1;
+        struct timeval tv={.tv_sec=3,.tv_usec=0};
+        setsockopt(fd,SOL_SOCKET,SO_SNDTIMEO,&tv,sizeof tv);
+        struct sockaddr_in a; memset(&a,0,sizeof a);
+        a.sin_family=AF_INET; a.sin_port=htons(pp); inet_pton(AF_INET,argv[2],&a.sin_addr);
+        char buf[1]={'x'};
+        int r=sendto(fd,buf,1,MSG_FASTOPEN,(struct sockaddr*)&a,sizeof a); int e=errno; close(fd);
+        if(r>=0)return 0;
+        if(e==EACCES||e==EPERM)return 2;
+        return 1;
+    }
+    /* Direct connect to argv[2] ON THE PROXY PORT (read from HTTP_PROXY): the
+       connect-notify residual. 0=connected, 2=EPERM/EACCES (blocked by the
+       supervisor), 1=other failure. */
+    if(!strcmp(argv[1],"residual")){
+        int pp=proxy_port(); if(!pp)return 1;
+        int fd=socket(AF_INET,SOCK_STREAM,0); if(fd<0)return 1;
+        struct timeval tv={.tv_sec=3,.tv_usec=0};
+        setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&tv,sizeof tv);
+        setsockopt(fd,SOL_SOCKET,SO_SNDTIMEO,&tv,sizeof tv);
+        struct sockaddr_in a; memset(&a,0,sizeof a);
+        a.sin_family=AF_INET; a.sin_port=htons(pp); inet_pton(AF_INET,argv[2],&a.sin_addr);
+        int r=connect(fd,(struct sockaddr*)&a,sizeof a); int e=errno; close(fd);
+        if(r==0)return 0;
+        if(e==EACCES||e==EPERM)return 2;
+        return 1;
+    }
     return 1;
 }
 "#;
@@ -273,6 +318,62 @@ fn per_host_proxy_forwards_allowed_drops_denied_blocks_direct() {
         ),
         0,
         "neg-control: unenforced net connects directly"
+    );
+}
+
+#[test]
+fn tcp_fast_open_egress_denied_in_proxy_mode() {
+    // TCP Fast Open — sendto(MSG_FASTOPEN) — initiates a TCP connection WITHOUT calling
+    // connect(), so it dodges BOTH the connect-notify supervisor and Landlock's
+    // connect-only ConnectTcp hook: a direct external-egress bypass on the proxy port
+    // (VM-verified to reach an external host when unblocked). Proxy mode denies the
+    // MSG_FASTOPEN flag wholesale on the send syscalls — legit proxy traffic uses a plain
+    // connect()+write, never TFO — so the flag is a safe scalar seccomp can match (the
+    // address it cannot). This is pure seccomp, so it holds regardless of the supervisor's
+    // viability (no ptrace_scope guard needed).
+    if skip_without_landlock(4) {
+        return; // proxy mode needs Landlock ABI v4
+    }
+    let f = fixture();
+    let Some(probe) = compile_probe(&f.proj) else {
+        return;
+    };
+    let probe = probe.to_str().unwrap();
+    assert_eq!(
+        f.run(net_policy(), probe, &["tfo", "192.0.2.1"]),
+        2,
+        "TFO to an external host on the proxy port must be EPERM'd in proxy mode"
+    );
+}
+
+#[test]
+fn direct_connect_to_external_on_proxy_port_is_denied() {
+    // The connect-notify close: Landlock's ConnectTcp pins egress to the proxy PORT but
+    // not its ADDRESS, so in-sandbox code could `connect()` straight to an external host
+    // ON that port and skip the proxy. The seccomp USER_NOTIF supervisor closes it —
+    // permitting ONLY 127.0.0.1:<proxy_port>. Same proxy port, two addresses: the
+    // loopback proxy is allowed (the legit path), an external address is EPERM'd. This
+    // ADDRESS-level distinction is exactly what the port-only Landlock rule cannot make.
+    if skip_without_landlock(4) {
+        return; // per-host (and thus the supervisor) needs Landlock ABI v4
+    }
+    if ptrace_scope() > 1 {
+        return; // supervisor can't read the child's mem under a hardened ptrace_scope
+    }
+    let f = fixture();
+    let Some(probe) = compile_probe(&f.proj) else {
+        return;
+    };
+    let probe = probe.to_str().unwrap();
+    assert_eq!(
+        f.run(net_policy(), probe, &["residual", "127.0.0.1"]),
+        0,
+        "connect to the loopback proxy on the proxy port is allowed (the legit path)"
+    );
+    assert_eq!(
+        f.run(net_policy(), probe, &["residual", "192.0.2.1"]),
+        2,
+        "direct connect to an EXTERNAL host on the proxy port is EPERM'd (residual closed)"
     );
 }
 
@@ -371,5 +472,43 @@ setTimeout(()=>process.exit(done?0:7), 5000);
     assert_eq!(
         code, 0,
         "node fork IPC (socketpair) must survive net-deny (got {code})"
+    );
+}
+
+#[test]
+fn nonblocking_client_reaches_proxy_under_connect_notify() {
+    // The connect-notify supervisor owns an ALLOWED connect and injects a fresh socket
+    // over the child's fd (NOTIF_ADDFD). It must preserve the child's O_NONBLOCK, or a
+    // non-blocking client (Node/libuv) would be handed a blocking fd and stall its event
+    // loop. This drives a real libuv client through the proxy under the supervisor: node
+    // connects to the loopback proxy (non-blocking), CONNECTs to an allowed upstream, and
+    // must read the proxy's `200` — proving the injected fd behaves non-blocking.
+    if skip_without_landlock(4) {
+        return; // per-host (and the supervisor) needs Landlock ABI v4
+    }
+    if ptrace_scope() > 1 {
+        return; // supervisor non-viable under a hardened ptrace_scope
+    }
+    let node = "/usr/local/bin/node";
+    if !Path::new(node).exists() {
+        return;
+    }
+    let f = fixture();
+    let echo = echo_server(); // 127.0.0.1:<port> — an allowed upstream (127.0.0.0/8)
+    let target = format!("127.0.0.1:{}", echo.port());
+    let script = r#"
+const net = require('net');
+const pport = parseInt(process.env.HTTP_PROXY.split(':').pop(), 10);
+const s = net.connect(pport, '127.0.0.1');
+let buf = '';
+s.on('connect', () => s.write(`CONNECT ${process.argv[1]} HTTP/1.1\r\nHost: x\r\n\r\n`));
+s.on('data', d => { buf += d; if (buf.includes('\r\n\r\n')) { s.destroy(); process.exit(buf.startsWith('HTTP/1.1 200') ? 0 : 5); } });
+s.on('error', () => process.exit(3));
+setTimeout(() => process.exit(7), 5000);
+"#;
+    let code = f.run(net_policy(), node, &["-e", script, &target]);
+    assert_eq!(
+        code, 0,
+        "non-blocking node client must reach the proxy through the injected fd (got {code})"
     );
 }

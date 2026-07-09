@@ -19,27 +19,33 @@ Two kinds of residual appear here:
 
 ## Network
 
-### Linux `ConnectTcp` is port-scoped, not IP-scoped (bounded per-host bypass)
+### Linux per-host egress: the port-scoped `ConnectTcp` residual (CLOSED via seccomp user_notify)
 
 Under a per-host allowlist the child is forced through the loopback egress proxy, and
 Landlock ABI-v4 `ConnectTcp` pins `connect()` to the proxy's port. Landlock has **no
-address filter**, so a direct TCP `connect()` to an *external* host that happens to
-listen on the (random, per-run) ephemeral proxy port is not blocked — a bounded bypass
-of the per-host gate.
+address filter**, so historically a direct TCP `connect()` to an *external* host on the
+(random, per-run) proxy port bypassed the per-host gate. **This is now closed** by a
+seccomp `USER_NOTIF` supervisor over `connect()`: a filter installed in the child's
+pre_exec (raw `seccomp(…, NEW_LISTENER)`, unprivileged under `no_new_privs`) routes every
+`connect()` to a notification the nub PARENT services — it reads the child's destination
+sockaddr from `/proc/<pid>/mem`, re-validates the notif id, and permits ONLY
+`127.0.0.1:<proxy_port>`. On ALLOW the supervisor OWNS the connect (connects a fresh socket
+to the FIXED proxy address and injects it over the child's fd via `NOTIF_ADDFD` SETFD),
+which makes the allow path TOCTOU-robust against a post-read sockaddr rewrite; DENY returns
+EPERM. The TCP-Fast-Open variant — `sendto`/`sendmsg(MSG_FASTOPEN)`, which initiates a
+connection *without* `connect()` and so dodges both this filter and Landlock — is closed
+alongside it by a seccomp `MSG_FASTOPEN`-flag deny on the send syscalls. See
+`backend/linux_connect_notify.rs` and `backend/linux.rs` (`build_seccomp`).
 
-- **Why bounded — but real for a determined attacker:** the exploit is not "guess the
-  one random port"; a determined attacker points in-sandbox code at a C2 server that
-  **listens across the whole ephemeral port range**, so whichever port the run drew is
-  covered. That still requires the C2 to be inbound-reachable from the sandbox AND to run
-  a broad listener — materially harder than the now-closed UDP/DNS hole, but not merely
-  theoretical. UDP/DNS and inbound `bind()` are separately denied (seccomp
-  `AF_INET`+`SOCK_STREAM`-only via per-type `MaskedEq`), so this port-scoped TCP connect
-  is the one remaining egress edge. macOS (address+port carve) and Windows have no
-  equivalent gap.
-- **Where fixed:** seccomp `user_notify` (inspect the `connect()` sockaddr in a
-  supervisor) or a netns/veth pair (rejected — needs userns, unavailable on the stock
-  targets). Either is the only full close; a larger mechanism, a build-jail-thread call.
-  Documented in `backend/linux.rs` (`NetMode`), honestly not-claimed-closed.
+- **Residual bound (narrow, hardened-host only):** the supervisor reads the child's memory
+  via `/proc/<pid>/mem`, which yama `ptrace_scope >= 2` forbids even for a parent. On such
+  hosts the supervisor is skipped (`viable()` is false) and the pre-existing port-scoped
+  `ConnectTcp` residual remains — per-host egress keeps working rather than breaking. The
+  default `ptrace_scope <= 1` closes it fully. No capability-floor change: `USER_NOTIF`
+  (≥5.0) and `NOTIF_ADDFD` (≥5.9) sit below the Landlock-v4 (6.7) kernel floor proxy mode
+  already requires. macOS (address+port carve) and Windows have no equivalent gap.
+- **The same supervisor pattern extends to inbound** (`listen()`/`bind()` — the bind-less
+  `listen()` autobind residual below): a future hardening slot, not wired now.
 
 ### Linux bind-less `listen()` autobind (P3, strictly dominated)
 

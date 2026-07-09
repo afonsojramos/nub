@@ -35,6 +35,11 @@ mod macos;
 #[cfg(target_os = "linux")]
 mod linux;
 
+// The unprivileged seccomp USER_NOTIF supervisor that closes the port-scoped
+// ConnectTcp residual in NetMode::Proxy (Linux-only mechanism; see the module doc).
+#[cfg(target_os = "linux")]
+mod linux_connect_notify;
+
 // The Windows AppContainer backend. Compiled on Windows (its real consumer) and
 // under `test` on any host — so its OS-agnostic IR→plan derivation (grant carve,
 // capability selection, dangerous-root guard) is unit-tested on the macOS dev host
@@ -132,6 +137,13 @@ pub struct Prepared {
     /// value stops the listener. `None` when net is unconfined or coarse-deny (no
     /// proxy needed). Set by [`apply`], not the per-OS backends.
     pub(crate) proxy: Option<EgressProxy>,
+    /// Linux per-host connect-notify supervisor (closes the ConnectTcp port residual).
+    /// When `Some`, [`Prepared::status`] spawns `command`, receives the child's seccomp
+    /// listener fd, and runs the supervisor for the child's lifetime instead of a plain
+    /// `command.status()`. Set only by [`linux::apply`] in `NetMode::Proxy` (and only
+    /// where the supervisor is viable); `None` otherwise.
+    #[cfg(target_os = "linux")]
+    pub(crate) connect_notify: Option<linux_connect_notify::ConnectNotify>,
     /// Windows AppContainer launch plan — the backend owns spawn+wait+teardown when
     /// this is `Some`. Absent (or on other OSes) → [`Prepared::status`] spawns
     /// `command`.
@@ -152,6 +164,12 @@ impl Prepared {
         #[cfg(target_os = "windows")]
         if let Some(launch) = self.launch.take() {
             return launch.run();
+        }
+        // Linux per-host: run the connect-notify supervisor over the child's lifetime.
+        // `self` (holding `self.proxy`) outlives this call, so the egress proxy stays up.
+        #[cfg(target_os = "linux")]
+        if let Some(cn) = self.connect_notify.take() {
+            return cn.run(&mut self.command);
         }
         self.command.status()
     }
