@@ -5141,6 +5141,16 @@ fn npm_upgrade_command(target: &str) -> String {
     format!("npm install -g {NPM_PACKAGE}@{target}")
 }
 
+/// The Homebrew self-upgrade refreshes the tap before upgrading (#375):
+/// `brew upgrade` evaluates the formula from the LOCAL tap checkout, and only
+/// `brew update` refreshes it — without the refresh a stale tap clone reports
+/// the installed version as newest and never sees a published release. The two
+/// invocations are split (not a shelled-out `&&`) so nub controls exit-code
+/// semantics: `brew update` is best-effort, `brew upgrade` is authoritative.
+const HOMEBREW_UPDATE_ARGS: &[&str] = &["update"];
+const HOMEBREW_UPGRADE_ARGS: &[&str] = &["upgrade", "nub"];
+const HOMEBREW_UPGRADE_DISPLAY: &str = "brew update && brew upgrade nub";
+
 /// Build the OS-correct `Command` that runs the npm-channel self-upgrade.
 ///
 /// npm is not a native executable: on Windows it is the `npm.cmd` batch shim,
@@ -5200,7 +5210,7 @@ fn run_upgrade(version: Option<&str>, dry_run: bool, _yes: bool) -> Result<i32> 
             }
             UpgradeChannel::Homebrew => {
                 println!("would upgrade to {target} via homebrew");
-                println!("  command: brew upgrade nub");
+                println!("  command: {HOMEBREW_UPGRADE_DISPLAY}");
             }
             UpgradeChannel::SelfOwned { install_dir } => {
                 println!("would upgrade to {target} via self-owned (~/.nub)");
@@ -5263,10 +5273,25 @@ fn run_upgrade(version: Option<&str>, dry_run: bool, _yes: bool) -> Result<i32> 
             Ok(code)
         }
         UpgradeChannel::Homebrew => {
-            println!("running `brew upgrade nub`");
+            println!("running `{HOMEBREW_UPGRADE_DISPLAY}`");
+            // `brew update` first (#375): `brew upgrade` evaluates the formula
+            // from the un-refreshed local tap, so a stale clone reports the
+            // installed version as newest and never sees a published release.
+            // Best-effort — a transient refresh failure must not block the
+            // upgrade, whose own exit code stays authoritative.
+            let update_ok = std::process::Command::new("brew")
+                .args(HOMEBREW_UPDATE_ARGS)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if !update_ok {
+                eprintln!(
+                    "warning: `brew update` did not succeed; the tap may be stale \
+                     and the upgrade may not find a newer version."
+                );
+            }
             let status = std::process::Command::new("brew")
-                .arg("upgrade")
-                .arg("nub")
+                .args(HOMEBREW_UPGRADE_ARGS)
                 .status()?;
             let code = nub_core::node::spawn::exit_code_from_status(&status);
             if code == 0 {
@@ -8732,6 +8757,23 @@ mod tests {
         assert_eq!(
             detect_channel(Path::new("/some/random/place/nub")),
             UpgradeChannel::Unknown
+        );
+    }
+
+    // #375 regression guard: the Homebrew upgrade refreshes the tap FIRST.
+    // `brew upgrade` alone reads the un-refreshed local tap, so a stale clone
+    // reports "already installed" and never sees a published release. The
+    // display string and the two arg vecs must agree that `brew update`
+    // precedes `brew upgrade nub`.
+    #[test]
+    fn homebrew_upgrade_refreshes_tap_before_upgrading() {
+        assert_eq!(HOMEBREW_UPDATE_ARGS, &["update"]);
+        assert_eq!(HOMEBREW_UPGRADE_ARGS, &["upgrade", "nub"]);
+        let update_at = HOMEBREW_UPGRADE_DISPLAY.find("brew update").unwrap();
+        let upgrade_at = HOMEBREW_UPGRADE_DISPLAY.find("brew upgrade").unwrap();
+        assert!(
+            update_at < upgrade_at,
+            "brew update must precede brew upgrade in {HOMEBREW_UPGRADE_DISPLAY:?}"
         );
     }
 
