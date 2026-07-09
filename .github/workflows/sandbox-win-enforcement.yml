@@ -1,0 +1,39 @@
+# Windows AppContainer backend — REAL enforcement probe on a real windows-latest
+# runner. Branch-scoped (NO PR required): a push to `sandbox-primitives` touching the
+# crate or this file runs the probe. It drives nub's OWN backend (apply → status →
+# WindowsLaunch::run) and asserts per-axis confinement with negative controls
+# (crates/nub-sandbox/tests/windows_enforcement.rs). Mirrors the standalone probe that
+# validated the mechanism (tests/sandbox-win-probes/, run 28276213658), now exercising
+# the real code. The full conformance suite (a later phase) will fold this in.
+#
+# `workflow_dispatch` is inert until this file reaches the default branch (GitHub only
+# registers dispatch from the default branch); the `push` trigger is what fires it here.
+name: sandbox-win-enforcement
+on:
+  workflow_dispatch:
+  push:
+    branches: [sandbox-primitives]
+    paths:
+      - "crates/nub-sandbox/**"
+      - ".github/workflows/sandbox-win-enforcement.yml"
+jobs:
+  enforcement:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Environment baseline
+        shell: powershell
+        run: |
+          $id=[System.Security.Principal.WindowsIdentity]::GetCurrent()
+          $admin=(New-Object System.Security.Principal.WindowsPrincipal($id)).IsInRole([System.Security.Principal.WindowsBuiltinRole]::Administrator)
+          Write-Host "User: $($id.Name)  IsElevated: $admin  OS: $([System.Environment]::OSVersion.VersionString)"
+      # crt-static makes the self-reexec probe child self-contained (no vcruntime DLL
+      # dependency), so it starts cleanly under the LowBox token — a host-init crash
+      # would otherwise read as a false denial.
+      - name: Windows AppContainer enforcement probe
+        shell: bash
+        env:
+          RUSTFLAGS: "-C target-feature=+crt-static"
+        run: cargo test -p nub-sandbox --test windows_enforcement

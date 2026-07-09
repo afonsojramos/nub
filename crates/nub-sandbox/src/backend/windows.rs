@@ -204,6 +204,53 @@ fn fs_confines(fs: &FsPolicy) -> bool {
     fs.rules.default_effect != Effect::Allow || !fs.rules.entries.is_empty()
 }
 
+/// The ancestor directories that must be made AC-traversable so the LowBox child can
+/// REACH each granted leaf. A LowBox token does NOT bypass traverse checking (proven
+/// by the CI probe: a work dir under `%TEMP%` is unreachable because the
+/// `C:\Users\<user>` chain grants traverse only to `Users`, which an AppContainer SID
+/// is not in), so a leaf grant alone is insufficient — every ancestor up to the drive
+/// root needs a traverse (execute-only) grant. The DRIVE ROOT itself is excluded: `C:\`
+/// is AC-traversable by default (same probe), and mutating the drive-root ACL is both
+/// unnecessary and heavy-handed. Ancestors that are themselves a granted leaf are
+/// skipped (their stronger read/modify grant already admits traverse). Deduplicated.
+fn ancestor_traverse_dirs(read: &[PathBuf], write: &[PathBuf]) -> Vec<PathBuf> {
+    let leaves: Vec<&PathBuf> = read.iter().chain(write.iter()).collect();
+    let mut out: Vec<PathBuf> = Vec::new();
+    for leaf in &leaves {
+        // `ancestors()` yields the path itself first; skip it. STOP at the drive root
+        // (`C:\`) — never touch it. Drive-root detection is string-based (not
+        // `Path::parent`), so the logic is identical on the Windows target and the host
+        // where it's unit-tested (the host would not treat `C:` as a drive root).
+        for anc in leaf.ancestors().skip(1) {
+            if is_drive_root(anc) {
+                break;
+            }
+            let anc = anc.to_path_buf();
+            // A leaf already carries a read/modify grant (which includes traverse).
+            if leaves.iter().any(|l| **l == anc) {
+                continue;
+            }
+            if !out.contains(&anc) {
+                out.push(anc);
+            }
+        }
+    }
+    out
+}
+
+/// Whether a path is a Windows drive root (`C:`, `C:\`, `C:/`) or an empty root remnant.
+/// String-based so it's OS-independent (the host's `Path` semantics don't recognize a
+/// drive letter, which would otherwise make the ancestor walk host-dependent).
+fn is_drive_root(p: &Path) -> bool {
+    let Some(s) = p.to_str() else { return false };
+    let s = s.trim_end_matches(['/', '\\']);
+    if s.is_empty() {
+        return true;
+    }
+    let b = s.as_bytes();
+    b.len() == 2 && b[1] == b':' && b[0].is_ascii_alphabetic()
+}
+
 // ── the apply() entry (Windows-only: constructs Prepared.launch) ────────────────
 
 #[cfg(target_os = "windows")]
@@ -404,6 +451,13 @@ mod launch {
     const GENERIC_WRITE: u32 = 0x4000_0000;
     const GENERIC_EXECUTE: u32 = 0x2000_0000;
     const DELETE: u32 = 0x0001_0000;
+    // Directory-specific rights for an ancestor traverse-only grant: FILE_TRAVERSE (the
+    // "execute" right that lets a token pass THROUGH a dir) + FILE_READ_ATTRIBUTES (stat
+    // it en route). No FILE_LIST_DIRECTORY ⇒ the child can pass through but not enumerate.
+    const FILE_TRAVERSE: u32 = 0x0020;
+    const FILE_READ_ATTRIBUTES: u32 = 0x0080;
+    // ACE_FLAGS: applies to this object only (no inheritance).
+    const NO_INHERITANCE: u32 = 0x0;
     // SE_GROUP_ENABLED — a capability SID in SECURITY_CAPABILITIES must be enabled.
     const SE_GROUP_ENABLED: u32 = 0x4;
     // The well-known internetClient capability SID.
@@ -430,19 +484,46 @@ mod launch {
             // profile-owned SID pointer surviving.
             let sid_copy = copy_sid(ac_sid)?;
 
-            // 2. Grant inheritable allow-ACEs; `_aces` revokes them on drop (declared
-            //    before the job ⇒ revoked after the tree is reaped, before profile del).
+            // 2. Grant the allow-ACEs; `_aces` revokes them on drop (declared before
+            //    the job ⇒ revoked after the tree is reaped, before profile delete).
+            //    Leaf read/write grants are INHERITABLE (cover the subtree); ancestor
+            //    grants are traverse-only + NON-inheritable (pass-through, no listing of
+            //    the ancestor's other children). A REVOKE_ACCESS teardown on the unique
+            //    SID removes exactly our ACEs from every path, whatever the access mask.
             let mut granted: Vec<std::path::PathBuf> = Vec::new();
+            for dir in super::ancestor_traverse_dirs(&self.read_grants, &self.write_grants) {
+                if set_ace(
+                    &dir,
+                    ac_sid,
+                    FILE_TRAVERSE | FILE_READ_ATTRIBUTES,
+                    GRANT_ACCESS,
+                    false,
+                )
+                .is_ok()
+                {
+                    granted.push(dir);
+                }
+            }
             for dir in &self.read_grants {
-                if grant_ace(dir, ac_sid, GENERIC_READ | GENERIC_EXECUTE).is_ok() {
+                if set_ace(
+                    dir,
+                    ac_sid,
+                    GENERIC_READ | GENERIC_EXECUTE,
+                    GRANT_ACCESS,
+                    true,
+                )
+                .is_ok()
+                {
                     granted.push(dir.clone());
                 }
             }
             for dir in &self.write_grants {
-                let _ = grant_ace(
+                let _ = set_ace(
                     dir,
                     ac_sid,
                     GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | DELETE,
+                    GRANT_ACCESS,
+                    true,
                 );
                 if !granted.contains(dir) {
                     granted.push(dir.clone());
@@ -740,15 +821,18 @@ mod launch {
         Ok(job)
     }
 
-    /// Add an inheritable (container+object) allow-ACE granting `sid` `access` on `path`.
-    fn grant_ace(path: &Path, sid: PSID, access: u32) -> io::Result<()> {
-        set_ace(path, sid, access, GRANT_ACCESS)
-    }
+    /// Remove every ACE for `sid` on `path` (teardown). REVOKE_ACCESS ignores the
+    /// access mask + inheritance and matches purely on the trustee, so a unique per-run
+    /// SID's ACEs go cleanly wherever we placed them.
     fn revoke_ace(path: &Path, sid: PSID) -> io::Result<()> {
-        set_ace(path, sid, 0, REVOKE_ACCESS)
+        set_ace(path, sid, 0, REVOKE_ACCESS, false)
     }
 
-    fn set_ace(path: &Path, sid: PSID, access: u32, mode: i32) -> io::Result<()> {
+    /// Add/remove an ACE granting `sid` `access` on `path`. `inherit` ⇒ the ACE is
+    /// container+object inheritable (a leaf subtree grant); otherwise it applies to
+    /// `path` alone (an ancestor traverse grant). Additive — reads the existing DACL and
+    /// merges, never clobbering other ACEs.
+    fn set_ace(path: &Path, sid: PSID, access: u32, mode: i32, inherit: bool) -> io::Result<()> {
         let wpath = to_wide_path(path);
         let mut old_dacl: *mut ACL = std::ptr::null_mut();
         let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
@@ -773,7 +857,11 @@ mod launch {
         let mut ea: EXPLICIT_ACCESS_W = unsafe { std::mem::zeroed() };
         ea.grfAccessPermissions = access;
         ea.grfAccessMode = mode;
-        ea.grfInheritance = CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE;
+        ea.grfInheritance = if inherit {
+            CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE
+        } else {
+            NO_INHERITANCE
+        };
         ea.Trustee = TRUSTEE_W {
             pMultipleTrustee: std::ptr::null_mut(),
             MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
@@ -1035,6 +1123,29 @@ mod tests {
         assert_eq!(literal_subtree("**"), None);
         assert_eq!(literal_subtree("/**"), None);
         assert_eq!(literal_subtree("/"), None);
+    }
+
+    #[test]
+    fn ancestor_traverse_excludes_leaves_and_drive_root() {
+        // A leaf nested under a user profile: every ancestor up to (not incl.) the drive
+        // root is traverse-granted so the LowBox child can reach the leaf; `C:/` is not.
+        let read = vec![PathBuf::from("C:/Users/me/proj/pkg")];
+        let anc = ancestor_traverse_dirs(&read, &[]);
+        assert_eq!(
+            anc,
+            vec![
+                PathBuf::from("C:/Users/me/proj"),
+                PathBuf::from("C:/Users/me"),
+                PathBuf::from("C:/Users"),
+            ],
+            "ancestors up to but excluding the drive root"
+        );
+        // A leaf that is itself an ancestor of another leaf is not double-granted.
+        let read = vec![PathBuf::from("C:/root/bin"), PathBuf::from("C:/root/work")];
+        let anc = ancestor_traverse_dirs(&read, &[]);
+        assert_eq!(anc, vec![PathBuf::from("C:/root")]);
+        // A drive-root-direct leaf needs no ancestor grant (C:/ is AC-traversable).
+        assert!(ancestor_traverse_dirs(&[PathBuf::from("C:/work")], &[]).is_empty());
     }
 
     #[test]

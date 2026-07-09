@@ -1,0 +1,567 @@
+//! Windows AppContainer backend — REAL enforcement probe (windows-latest CI only).
+//!
+//! Drives the REAL backend (`apply` → `Prepared::status` → `WindowsLaunch::run`): each
+//! case compiles a policy, launches a child into the AppContainer, and asserts the
+//! LowBox token allowed or denied the action. Every confinement assertion is paired
+//! with a NEGATIVE CONTROL (the axis lifted → the same action succeeds) so a pass can't
+//! be hollow. Mirrors the CI-validated standalone probe (`tests/sandbox-win-probes/`,
+//! run 28276213658) but exercises nub's own code, not a PowerShell harness.
+//!
+//! `harness = false`: this binary is BOTH the test runner AND the probe child — a
+//! `__sbxchild__ <role>` invocation acts as the child (read/write/connect/getenv/token/
+//! spawnchild/sleep → an exit-code contract), any other invocation runs the cases. The
+//! self-reexec avoids a separate compiled child, and args survive env-scrub (env does
+//! not), so the child learns its role even under a scrubbed environment.
+//!
+//! TRAVERSAL: a LowBox child does not bypass traverse checking, and only `C:\` is
+//! AC-traversable by default — so the whole fixture lives under a fresh `C:\nub-sbx-*`
+//! root and the backend's ancestor-traverse grants carry the child down to the leaves.
+
+#[cfg(not(target_os = "windows"))]
+fn main() {
+    // Non-Windows host: nothing to enforce. (`harness = false` needs a `main`.)
+}
+
+#[cfg(target_os = "windows")]
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("__sbxchild__") {
+        std::process::exit(win::child_main(&args[2..]));
+    }
+    match win::run_enforcement() {
+        Ok(()) => println!("ALL WINDOWS ENFORCEMENT PROBES PASSED"),
+        Err(n) => {
+            eprintln!("{n} WINDOWS ENFORCEMENT PROBE(S) FAILED");
+            std::process::exit(1);
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+mod win {
+    use nub_sandbox::policy::{
+        CanonGlob, Effect, EnvPolicy, FsAccess, FsPolicy, FsRule, FsRuleSet, NetPolicy, PidPolicy,
+        SandboxPolicy, TmpMode,
+    };
+    use nub_sandbox::{CommandSpec, apply};
+    use std::collections::BTreeMap;
+    use std::net::{SocketAddr, TcpStream};
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
+
+    // ── the probe child ─────────────────────────────────────────────────────────
+
+    /// The child's exit-code contract (read by the parent). Distinct codes so a denial
+    /// is never confused with a crash: 0 ok, 4 env-absent, 5 access-denied, 6 timeout,
+    /// 9 other-error, 10/11 token-not-as-expected.
+    pub fn child_main(a: &[String]) -> i32 {
+        match a.first().map(String::as_str) {
+            Some("read") => match std::fs::read(&a[1]) {
+                Ok(_) => 0,
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => 5,
+                Err(_) => 9,
+            },
+            Some("write") => match std::fs::write(&a[1], b"x") {
+                Ok(_) => 0,
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => 5,
+                Err(_) => 9,
+            },
+            Some("connect") => connect(&a[1], a[2].parse().unwrap_or(0)),
+            Some("getenv") => match std::env::var(&a[1]) {
+                Ok(_) => 0,
+                Err(_) => 4,
+            },
+            Some("token") => token_check(),
+            Some("spawnchild") => spawn_grandchild(&a[1]),
+            Some("sleep") => {
+                std::thread::sleep(Duration::from_secs(90));
+                0
+            }
+            _ => 2,
+        }
+    }
+
+    fn connect(host: &str, port: u16) -> i32 {
+        let Ok(addr) = format!("{host}:{port}").parse::<SocketAddr>() else {
+            return 9;
+        };
+        match TcpStream::connect_timeout(&addr, Duration::from_secs(8)) {
+            Ok(_) => 0,
+            // 10013 == WSAEACCES — the AppContainer egress block.
+            Err(e) if e.raw_os_error() == Some(10013) => 5,
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => 6,
+            Err(_) => 9,
+        }
+    }
+
+    /// Spawn a detached grandchild (`sleep`), record its pid, exit — so the parent can
+    /// prove the Job reaped the grandchild after the direct child was gone.
+    fn spawn_grandchild(marker: &str) -> i32 {
+        let Ok(exe) = std::env::current_exe() else {
+            return 9;
+        };
+        match std::process::Command::new(exe)
+            .args(["__sbxchild__", "sleep"])
+            .spawn()
+        {
+            Ok(child) => {
+                let _ = std::fs::write(marker, child.id().to_string());
+                0
+            }
+            Err(_) => 9,
+        }
+    }
+
+    /// Prove the child is a genuine standard-user AppContainer: `TokenIsAppContainer==1`
+    /// AND not elevated. Exit 0 both hold; 10 not-AppContainer; 11 AppContainer-but-
+    /// elevated (surfaces a surprise rather than passing it).
+    fn token_check() -> i32 {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::Security::{
+            GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation, TokenIsAppContainer,
+        };
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+        // SAFETY: standard token-query sequence; buffers are exactly sized for the DWORD
+        // / TOKEN_ELEVATION each class returns.
+        unsafe {
+            let mut tok = std::ptr::null_mut();
+            if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut tok) == 0 {
+                return 9;
+            }
+            let mut is_ac: u32 = 0;
+            let mut ret = 0u32;
+            let ok_ac = GetTokenInformation(
+                tok,
+                TokenIsAppContainer,
+                std::ptr::from_mut(&mut is_ac).cast(),
+                4,
+                &mut ret,
+            );
+            let mut elev = TOKEN_ELEVATION { TokenIsElevated: 0 };
+            let ok_el = GetTokenInformation(
+                tok,
+                TokenElevation,
+                std::ptr::from_mut(&mut elev).cast(),
+                std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+                &mut ret,
+            );
+            CloseHandle(tok);
+            if ok_ac == 0 || ok_el == 0 {
+                return 9;
+            }
+            println!(
+                "CHILD token IsAppContainer={is_ac} IsElevated={}",
+                elev.TokenIsElevated
+            );
+            if is_ac != 1 {
+                10
+            } else if elev.TokenIsElevated != 0 {
+                11
+            } else {
+                0
+            }
+        }
+    }
+
+    fn is_alive(pid: u32) -> bool {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        // SAFETY: open by pid for query only; STILL_ACTIVE (259) ⇒ alive (the sleeper
+        // never exits with 259 on its own).
+        unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if h.is_null() {
+                return false;
+            }
+            let mut code = 0u32;
+            let ok = GetExitCodeProcess(h, &mut code);
+            CloseHandle(h);
+            ok != 0 && code == 259
+        }
+    }
+
+    // ── the fixture ───────────────────────────────────────────────────────────────
+
+    struct Fixture {
+        root: PathBuf,
+        child: PathBuf,
+        work: PathBuf,
+        vault: PathBuf,
+        allowed: PathBuf,
+        secret: PathBuf,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            // A fresh C:\-rooted tree (only C:\ is AC-traversable; %TEMP% is not).
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let root = PathBuf::from(format!("C:\\nub-sbx-{nonce:x}"));
+            let bin = root.join("bin");
+            let work = root.join("work");
+            let vault = root.join("vault");
+            std::fs::create_dir_all(&bin).unwrap();
+            std::fs::create_dir_all(&work).unwrap();
+            std::fs::create_dir_all(&vault).unwrap();
+            // The child is a copy of THIS binary under bin/ (so its ancestors are only
+            // the root + C:\, both reachable — not the CI checkout dir under D:\a\…).
+            let child = bin.join("child.exe");
+            std::fs::copy(std::env::current_exe().unwrap(), &child).unwrap();
+            let allowed = work.join("allowed.txt");
+            std::fs::write(&allowed, b"this-is-fine").unwrap();
+            let secret = vault.join("secret.env");
+            std::fs::write(&secret, b"TOPSECRET_TOKEN=do-not-leak").unwrap();
+            Fixture {
+                root,
+                child,
+                work,
+                vault,
+                allowed,
+                secret,
+            }
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// The canonical-IR spelling of a real path (forward slashes — what the compiler
+    /// emits and the backend re-nativizes).
+    fn canon(p: &Path) -> String {
+        p.to_string_lossy().replace('\\', "/")
+    }
+
+    // ── policy builders (direct IR — full control over each axis) ─────────────────
+
+    fn read_confine(read: &[&Path], write: &[&Path]) -> SandboxPolicy {
+        let mut entries = Vec::new();
+        for r in read {
+            entries.push(rule(r, Effect::Allow, FsAccess::Read));
+        }
+        for w in write {
+            entries.push(rule(w, Effect::Allow, FsAccess::ReadWrite));
+        }
+        SandboxPolicy {
+            fs: FsPolicy {
+                rules: FsRuleSet {
+                    entries,
+                    default_effect: Effect::Deny,
+                },
+                tmp: TmpMode::Private,
+            },
+            net: NetPolicy::default(),
+            env: EnvPolicy::default(),
+            pid: PidPolicy::default(),
+        }
+    }
+
+    fn rule(p: &Path, effect: Effect, access: FsAccess) -> FsRule {
+        FsRule {
+            matcher: CanonGlob(canon(p)),
+            effect,
+            access,
+        }
+    }
+
+    fn relaxed_fs() -> FsPolicy {
+        FsPolicy {
+            rules: FsRuleSet {
+                entries: Vec::new(),
+                default_effect: Effect::Allow,
+            },
+            tmp: TmpMode::Shared,
+        }
+    }
+
+    /// A minimal env map the AppContainer child needs to start + the caller's marker.
+    fn base_env(extra: &[(&str, &str)]) -> BTreeMap<String, String> {
+        let mut m = BTreeMap::new();
+        for k in [
+            "SystemRoot",
+            "windir",
+            "SystemDrive",
+            "ComSpec",
+            "PATHEXT",
+            "TEMP",
+            "TMP",
+        ] {
+            if let Ok(v) = std::env::var(k) {
+                m.insert(k.to_string(), v);
+            }
+        }
+        if let Ok(v) = std::env::var("Path") {
+            m.insert("Path".to_string(), v);
+        }
+        for (k, v) in extra {
+            m.insert(k.to_string(), v.to_string());
+        }
+        m
+    }
+
+    // ── the run helpers ───────────────────────────────────────────────────────────
+
+    fn code(policy: &SandboxPolicy, program: &Path, args: &[&str]) -> i32 {
+        let spec = CommandSpec::new(program.as_os_str()).args(args.iter().copied());
+        let prepared = apply(policy, spec).expect("apply");
+        prepared.status().expect("status").code().unwrap_or(-1)
+    }
+
+    /// Assert a child exit code; on mismatch, record a failure line.
+    fn expect(fails: &mut u32, label: &str, got: i32, want: i32) {
+        if got == want {
+            println!("PASS {label} (exit {got})");
+        } else {
+            *fails += 1;
+            eprintln!("FAIL {label}: exit {got}, expected {want}");
+        }
+    }
+    fn expect_in(fails: &mut u32, label: &str, got: i32, want: &[i32]) {
+        if want.contains(&got) {
+            println!("PASS {label} (exit {got})");
+        } else {
+            *fails += 1;
+            eprintln!("FAIL {label}: exit {got}, expected one of {want:?}");
+        }
+    }
+
+    // ── the cases ─────────────────────────────────────────────────────────────────
+
+    pub fn run_enforcement() -> Result<(), u32> {
+        let f = Fixture::new();
+        let mut fails = 0u32;
+        let child = f.child.clone();
+        let a = |s: &str| s.to_string();
+
+        // In-AppContainer proof — the child reports its own token. Load-bearing: without
+        // this a "denied" could be a launch failure, not confinement.
+        let confine = read_confine(&[&f.work], &[]);
+        expect(
+            &mut fails,
+            "child is a standard-user AppContainer (TokenIsAppContainer=1, not elevated)",
+            code(&confine, &child, &["__sbxchild__", "token"]),
+            0,
+        );
+
+        // ── fs read-confine ──────────────────────────────────────────────────────
+        expect(
+            &mut fails,
+            "read allowed file (NC-B: child can read where granted)",
+            code(
+                &confine,
+                &child,
+                &["__sbxchild__", "read", &a(&canon_native(&f.allowed))],
+            ),
+            0,
+        );
+        expect_in(
+            &mut fails,
+            "read secret DENIED (KEY: default-deny vault unreachable)",
+            code(
+                &confine,
+                &child,
+                &["__sbxchild__", "read", &a(&canon_native(&f.secret))],
+            ),
+            &[5, 9],
+        );
+        // NC: relaxed fs (not sandboxing → plain spawn) reads the secret fine.
+        let relaxed = SandboxPolicy {
+            fs: relaxed_fs(),
+            ..Default::default()
+        };
+        expect(
+            &mut fails,
+            "NC read secret under relaxed fs (readable absent confinement)",
+            code(
+                &relaxed,
+                &child,
+                &["__sbxchild__", "read", &a(&canon_native(&f.secret))],
+            ),
+            0,
+        );
+
+        // ── fs write-confine ─────────────────────────────────────────────────────
+        let wc = read_confine(&[&f.work], &[&f.work]);
+        let inside = f.work.join("w.txt");
+        let outside = f.vault.join("w.txt");
+        expect(
+            &mut fails,
+            "write inside granted dir (NC-B)",
+            code(
+                &wc,
+                &child,
+                &["__sbxchild__", "write", &a(&canon_native(&inside))],
+            ),
+            0,
+        );
+        expect(
+            &mut fails,
+            "write outside DENIED",
+            code(
+                &wc,
+                &child,
+                &["__sbxchild__", "write", &a(&canon_native(&outside))],
+            ),
+            5,
+        );
+
+        // ── coarse egress ────────────────────────────────────────────────────────
+        // Both legs run UNDER the AppContainer (fs read-confine engages it); only the
+        // internetClient capability differs, isolating it as the cause.
+        let mut net_deny = read_confine(&[&f.work], &[]);
+        net_deny.net = NetPolicy {
+            enforce: true,
+            rules: Vec::new(),
+            default_effect: Effect::Deny,
+        };
+        expect_in(
+            &mut fails,
+            "egress DENIED without internetClient (WSAEACCES/timeout)",
+            code(
+                &net_deny,
+                &child,
+                &["__sbxchild__", "connect", "1.1.1.1", "443"],
+            ),
+            &[5, 6],
+        );
+        expect(
+            &mut fails,
+            "NC egress ALLOWED with internetClient (net unconfined)",
+            code(
+                &confine,
+                &child,
+                &["__sbxchild__", "connect", "1.1.1.1", "443"],
+            ),
+            0,
+        );
+
+        // ── env-scrub ────────────────────────────────────────────────────────────
+        // SAFETY: single-threaded test main; set the ambient secret the child would
+        // inherit absent enforcement.
+        unsafe { std::env::set_var("NUB_SBX_SECRET", "sk-leak") };
+        let mut scrub = read_confine(&[&f.work], &[]);
+        scrub.env = EnvPolicy {
+            enforce: true,
+            constructed: base_env(&[("NUB_SBX_ALLOWED", "yes")]),
+            schema: Vec::new(),
+            withheld: vec!["NUB_SBX_SECRET".to_string()],
+        };
+        expect(
+            &mut fails,
+            "scrubbed child does NOT see the secret (absent)",
+            code(
+                &scrub,
+                &child,
+                &["__sbxchild__", "getenv", "NUB_SBX_SECRET"],
+            ),
+            4,
+        );
+        expect(
+            &mut fails,
+            "scrubbed child DOES see the allowlisted var (present)",
+            code(
+                &scrub,
+                &child,
+                &["__sbxchild__", "getenv", "NUB_SBX_ALLOWED"],
+            ),
+            0,
+        );
+        // NC: env not enforced → child inherits the parent env → sees the secret.
+        expect(
+            &mut fails,
+            "NC env not enforced → secret visible (inherited)",
+            code(
+                &confine,
+                &child,
+                &["__sbxchild__", "getenv", "NUB_SBX_SECRET"],
+            ),
+            0,
+        );
+
+        // ── process-reap (Job Object KILL_ON_JOB_CLOSE) ──────────────────────────
+        job_reap(&mut fails, &f);
+
+        if fails == 0 { Ok(()) } else { Err(fails) }
+    }
+
+    /// The sandboxed run reaps the grandchild when `status()` closes the Job handle; the
+    /// plain (no-Job) spawn leaves it alive — the difference IS the reap.
+    fn job_reap(fails: &mut u32, f: &Fixture) {
+        let marker = f.work.join("gc.pid");
+        let wc = read_confine(&[&f.work], &[&f.work]);
+        let rc = code(
+            &wc,
+            &f.child,
+            &["__sbxchild__", "spawnchild", &canon_native(&marker)],
+        );
+        if rc != 0 {
+            *fails += 1;
+            eprintln!("FAIL job-reap setup: spawnchild exit {rc}");
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+        let gc_pid: u32 = std::fs::read_to_string(&marker)
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0);
+        if gc_pid == 0 {
+            *fails += 1;
+            eprintln!("FAIL job-reap: grandchild pid not recorded");
+            return;
+        }
+        if is_alive(gc_pid) {
+            *fails += 1;
+            eprintln!("FAIL job-reap: grandchild {gc_pid} still alive after Job close");
+        } else {
+            println!("PASS job-reap: grandchild reaped on Job close");
+        }
+
+        // NC: a plain (unsandboxed, no Job) spawn of the same scenario leaves the
+        // grandchild alive after the direct child exits — proving the reap is the Job's.
+        let marker2 = f.work.join("gc2.pid");
+        let out = std::process::Command::new(&f.child)
+            .args(["__sbxchild__", "spawnchild", &canon_native(&marker2)])
+            .status();
+        if out.map(|s| s.success()).unwrap_or(false) {
+            std::thread::sleep(Duration::from_millis(500));
+            if let Ok(pid) = std::fs::read_to_string(&marker2).and_then(|s| {
+                s.trim()
+                    .parse::<u32>()
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+            }) {
+                if is_alive(pid) {
+                    println!("PASS job-reap NC: unsandboxed grandchild outlives parent");
+                    kill(pid);
+                } else {
+                    *fails += 1;
+                    eprintln!("FAIL job-reap NC: grandchild not alive (control broken)");
+                }
+            }
+        }
+    }
+
+    fn kill(pid: u32) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_TERMINATE, TerminateProcess,
+        };
+        // SAFETY: best-effort cleanup of the leftover NC grandchild.
+        unsafe {
+            let h = OpenProcess(PROCESS_TERMINATE, 0, pid);
+            if !h.is_null() {
+                TerminateProcess(h, 1);
+                CloseHandle(h);
+            }
+        }
+    }
+
+    /// A real (backslash) path as a string for passing to the child as an arg.
+    fn canon_native(p: &Path) -> String {
+        p.to_string_lossy().into_owned()
+    }
+}
