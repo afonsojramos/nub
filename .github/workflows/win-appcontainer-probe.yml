@@ -1,0 +1,67 @@
+# Throwaway ground-truth probe for the nub Windows AppContainer file-access model. Verifies (or
+# refutes) two "catastrophic" claims in crates/nub-sandbox (sandbox-primitives): (1) a LowBox token
+# does NOT bypass traverse checking, so confined work dirs must live under a C:\-owned store; (2)
+# deny-inside-allow (generous-read-minus-secrets) is inexpressible. Branch-scoped: runs on push to
+# probe/win-appcontainer -- NO PR required. Standalone; does NOT touch crates/nub-sandbox.
+name: win-appcontainer-probe
+on:
+  workflow_dispatch:
+  push:
+    branches: [probe/win-appcontainer]
+    paths:
+      - 'tests/win-appcontainer-probe/**'
+      - '.github/workflows/win-appcontainer-probe.yml'
+jobs:
+  probe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: ASCII guard (PS 5.1 mis-decodes non-ASCII in .ps1/.cs)
+        shell: powershell
+        run: |
+          $bad=@()
+          Get-ChildItem -Path tests/win-appcontainer-probe -File -Include *.ps1,*.cs -Recurse | ForEach-Object {
+            $bytes=[System.IO.File]::ReadAllBytes($_.FullName)
+            for($i=0;$i -lt $bytes.Length;$i++){ if($bytes[$i] -gt 127){ $bad+="$($_.Name) @byte $i"; break } }
+          }
+          if($bad.Count -gt 0){ Write-Host "NON-ASCII bytes found:`n$($bad -join "`n")"; exit 1 }
+          Write-Host "ASCII guard OK"
+      - name: Environment / elevation baseline
+        shell: powershell
+        run: |
+          $id=[System.Security.Principal.WindowsIdentity]::GetCurrent()
+          $admin=(New-Object System.Security.Principal.WindowsPrincipal($id)).IsInRole([System.Security.Principal.WindowsBuiltinRole]::Administrator)
+          Write-Host "User: $($id.Name)"
+          Write-Host "IsElevated(admin): $admin"
+          Write-Host "OS: $([System.Environment]::OSVersion.VersionString)"
+          Write-Host "--- parent whoami /priv ---"; whoami /priv
+      - name: 'Leg A -- mechanism proof (elevated; child-token axes are elevation-independent)'
+        id: legA
+        continue-on-error: true
+        shell: powershell
+        run: ./tests/win-appcontainer-probe/probe-appcontainer.ps1
+      - name: 'Leg B -- unprivileged proof (throwaway standard user via Secondary Logon)'
+        id: legB
+        continue-on-error: true
+        shell: powershell
+        run: ./tests/win-appcontainer-probe/run-deelevated.ps1 ./tests/win-appcontainer-probe/probe-appcontainer.ps1
+      - name: Summary
+        if: always()
+        shell: powershell
+        run: |
+          Write-Host "Leg A (mechanism, elevated):        ${{ steps.legA.outcome }}"
+          Write-Host "Leg B (unprivileged, standard user): ${{ steps.legB.outcome }}"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "## nub Windows AppContainer file-access probe"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "| Leg | Outcome |"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "|---|---|"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "| A - mechanism (elevated) | ${{ steps.legA.outcome }} |"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "| B - unprivileged (standard user) | ${{ steps.legB.outcome }} |"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "success = every axis as-expected (both catastrophic claims refuted); read the leg log for per-axis RESULT lines."
+      - name: Gate (green only if BOTH legs pass every axis)
+        if: always()
+        shell: powershell
+        run: |
+          $a='${{ steps.legA.outcome }}'; $b='${{ steps.legB.outcome }}'
+          Write-Host "legA=$a legB=$b"
+          if($a -ne 'success' -or $b -ne 'success'){ Write-Host "GATE: not all-green -- read the per-axis RESULT/SUMMARY lines in each leg log"; exit 1 }
+          Write-Host "GATE OK: both legs passed every axis"
