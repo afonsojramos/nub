@@ -246,17 +246,42 @@ fn lockfile_write_is_noop(
     // closure reads from its source graph's `patched_dependency_hashes`
     // (selector `name@version` → sha256 hex), matching how the link /
     // materialize paths derive their patch fingerprints.
-    let graph_patch = |name: &str, version: &str| -> Option<String> {
-        graph
-            .patched_dependency_hashes
-            .get(&format!("{name}@{version}"))
-            .cloned()
+    // The declared keys carried into `patched_dependency_hashes` may be
+    // ranges / `*` / bare names, so a package's fold hash is found by
+    // resolving its concrete `name@version` through the patch groups,
+    // not by a direct `name@version` lookup. An invalid range here means
+    // the graph is unwritable as-is — return `false` (treat as NOT
+    // equivalent) so the caller proceeds to the real write, which
+    // surfaces the branded error rather than silently suppressing it.
+    // A per-package conflict resolves to `None` (swallowed): the two
+    // graphs then fold differently and the write proceeds, again
+    // deferring the error to the writer.
+    let Ok(graph_groups) = crate::patch_groups::PatchGroups::build(
+        graph.patched_dependency_hashes.keys().map(String::as_str),
+    ) else {
+        return false;
     };
-    let existing_patch = |name: &str, version: &str| -> Option<String> {
+    let Ok(existing_groups) = crate::patch_groups::PatchGroups::build(
         existing
             .patched_dependency_hashes
-            .get(&format!("{name}@{version}"))
-            .cloned()
+            .keys()
+            .map(String::as_str),
+    ) else {
+        return false;
+    };
+    let graph_patch = |name: &str, version: &str| -> Option<String> {
+        graph_groups
+            .resolve(name, version)
+            .ok()
+            .flatten()
+            .and_then(|source_key| graph.patched_dependency_hashes.get(source_key).cloned())
+    };
+    let existing_patch = |name: &str, version: &str| -> Option<String> {
+        existing_groups
+            .resolve(name, version)
+            .ok()
+            .flatten()
+            .and_then(|source_key| existing.patched_dependency_hashes.get(source_key).cloned())
     };
     crate::graph_hash::graph_identity_hash_with_patches(graph, &no_build, &graph_patch)
         == crate::graph_hash::graph_identity_hash_with_patches(
@@ -985,6 +1010,19 @@ pub enum Error {
         /// The unsupported protocol token (`git`, `jsr`, `exec`, …).
         protocol: String,
     },
+    /// Two `patchedDependencies` version ranges both match one resolved
+    /// package, so the patch is ambiguous. Mirrors pnpm's
+    /// `PATCH_KEY_CONFLICT`. `message`/`hint` are pre-rendered by
+    /// [`crate::patch_groups::PatchKeyConflict`] so the wording stays in
+    /// one place.
+    #[error("{message}")]
+    #[diagnostic(code(ERR_AUBE_PATCH_KEY_CONFLICT), help("{hint}"))]
+    PatchKeyConflict { message: String, hint: String },
+    /// A `patchedDependencies` key's non-`*` version selector is not a
+    /// valid semver range. Mirrors pnpm's `PATCH_NON_SEMVER_RANGE`.
+    #[error("{0}")]
+    #[diagnostic(code(ERR_AUBE_PATCH_NON_SEMVER_RANGE))]
+    PatchNonSemverRange(String),
     /// Deserialization failure with a byte offset into the source
     /// content, so miette's `fancy` handler can draw a pointer at the
     /// offending byte of the lockfile. Reuses `aube_manifest`'s

@@ -62,6 +62,8 @@ pub const ERR_AUBE_GIT_ERROR: &str = "ERR_AUBE_GIT_ERROR";
 // ── linker ──────────────────────────────────────────────────────────
 pub const ERR_AUBE_LINK_FAILED: &str = "ERR_AUBE_LINK_FAILED";
 pub const ERR_AUBE_PATCH_FAILED: &str = "ERR_AUBE_PATCH_FAILED";
+#[rustfmt::skip] pub const ERR_AUBE_PATCH_KEY_CONFLICT: &str = "ERR_AUBE_PATCH_KEY_CONFLICT";
+#[rustfmt::skip] pub const ERR_AUBE_PATCH_NON_SEMVER_RANGE: &str = "ERR_AUBE_PATCH_NON_SEMVER_RANGE";
 pub const ERR_AUBE_MISSING_PACKAGE_INDEX: &str = "ERR_AUBE_MISSING_PACKAGE_INDEX";
 pub const ERR_AUBE_UNSAFE_INDEX_KEY: &str = "ERR_AUBE_UNSAFE_INDEX_KEY";
 pub const ERR_AUBE_UNSAFE_PACKAGE_NAME: &str = "ERR_AUBE_UNSAFE_PACKAGE_NAME";
@@ -401,6 +403,18 @@ pub const ALL: &[CodeMeta] = &[
         category: category::LINKER,
         description: "Applying a `pnpm.patchedDependencies` patch failed.",
         exit_code: Some(60),
+    },
+    CodeMeta {
+        name: ERR_AUBE_PATCH_KEY_CONFLICT,
+        category: category::LINKER,
+        description: "Two `patchedDependencies` version ranges both match one resolved package.",
+        exit_code: None,
+    },
+    CodeMeta {
+        name: ERR_AUBE_PATCH_NON_SEMVER_RANGE,
+        category: category::LINKER,
+        description: "A `patchedDependencies` key's version selector is not a valid semver range.",
+        exit_code: None,
     },
     CodeMeta {
         name: ERR_AUBE_LINK_FAILED,

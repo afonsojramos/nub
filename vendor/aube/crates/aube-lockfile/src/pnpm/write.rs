@@ -91,19 +91,43 @@ pub fn write(path: &Path, graph: &LockfileGraph, manifest: &PackageJson) -> Resu
     // without a recorded hash (bun.lock conversions, pnpm v8 lockfiles)
     // get no suffix, matching the hash-less bare-path block we emit
     // for them.
-    let patched_by_dep_path: BTreeMap<&str, &str> = graph
-        .packages
-        .iter()
-        .filter(|(_, pkg)| pkg.local_source.is_none())
-        .filter_map(|(dep_path, pkg)| {
-            let selector = format!("{}@{}", pkg.name, pkg.version);
-            graph
-                .patched_dependency_hashes
-                .get(&selector)
-                .filter(|_| graph.patched_dependencies.contains_key(&selector))
-                .map(|hash| (dep_path.as_str(), hash.as_str()))
-        })
+    // The declared patch keys may be exact, a range, `*`, or a bare
+    // name; resolve each REGISTRY package's concrete `name@version` to
+    // the patch that applies (pnpm's `getPatchInfo`) so the suffix lands
+    // on the right resolved version. Groups build from the DEDUPED union
+    // of both selector maps — a key present in both would otherwise
+    // double-push into a range group and manufacture a false conflict.
+    // The suffix is stamped only when the winning source key carries
+    // both a hash and a path (the `{ hash, path }` block form). For
+    // all-exact keys the resolved source key equals `name@version`, so
+    // this is byte-identical to the pre-resolution lookup.
+    let patch_selectors: std::collections::BTreeSet<&str> = graph
+        .patched_dependency_hashes
+        .keys()
+        .chain(graph.patched_dependencies.keys())
+        .map(String::as_str)
         .collect();
+    let patch_groups = crate::patch_groups::PatchGroups::build(patch_selectors.into_iter())
+        .map_err(|e| Error::PatchNonSemverRange(e.message()))?;
+    let mut patched_by_dep_path: BTreeMap<&str, &str> = BTreeMap::new();
+    for (dep_path, pkg) in &graph.packages {
+        if pkg.local_source.is_some() {
+            continue;
+        }
+        let source_key =
+            patch_groups
+                .resolve(&pkg.name, &pkg.version)
+                .map_err(|c| Error::PatchKeyConflict {
+                    message: c.message(),
+                    hint: c.hint(),
+                })?;
+        if let Some(source_key) = source_key
+            && let Some(hash) = graph.patched_dependency_hashes.get(source_key)
+            && graph.patched_dependencies.contains_key(source_key)
+        {
+            patched_by_dep_path.insert(dep_path.as_str(), hash.as_str());
+        }
+    }
     // Translate a *flat* peer reference from aube's internal FS-safe
     // hashed dep_path (`request@url+<hash>` / `request@git+<hash>`) to the
     // resolved spec pnpm writes inside a peer suffix

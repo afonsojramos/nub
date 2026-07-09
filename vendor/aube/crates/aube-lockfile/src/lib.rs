@@ -7,6 +7,7 @@ mod io;
 pub mod merge;
 pub mod npm;
 mod override_match;
+pub mod patch_groups;
 pub mod pnpm;
 mod source;
 pub mod yarn;

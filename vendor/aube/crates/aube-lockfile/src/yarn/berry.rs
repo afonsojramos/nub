@@ -796,6 +796,26 @@ pub fn write_berry(
     // specifiers in the same map.
     let canonical = crate::build_canonical_map(graph);
 
+    // Berry's `patch:` protocol keys resolutions by the concrete
+    // `name@version`, but the declared patch keys may be ranges / `*` /
+    // bare names. Resolve them against the graph up front (pnpm's
+    // `getPatchInfo`) so the exact `spec_key()` lookups below find the
+    // patch instead of silently dropping it from the emitted lockfile.
+    // For all-exact keys this equals `graph.patched_dependencies`.
+    let resolved_patched = crate::patch_groups::resolve_patched_by_version(
+        &graph.patched_dependencies,
+        &graph.packages,
+    )
+    .map_err(|e| match e {
+        crate::patch_groups::PatchResolveError::InvalidRange(r) => {
+            Error::PatchNonSemverRange(r.message())
+        }
+        crate::patch_groups::PatchResolveError::Conflict(c) => Error::PatchKeyConflict {
+            message: c.message(),
+            hint: c.hint(),
+        },
+    })?;
+
     // `extra_specs[canonical_key]` is the set of range-form
     // specifiers (e.g. `"foo@npm:^1.0.0"`) that should appear in the
     // block header alongside the exact `foo@npm:1.2.3` one. Collecting
@@ -830,10 +850,10 @@ pub fn write_berry(
         };
         let manifest_spec = format_berry_spec(&dep.name, range);
         let pkg = canonical.get(&canonical_key).copied().unwrap();
-        if patch_spec_matches(&manifest_spec, pkg, &graph.patched_dependencies) {
+        if patch_spec_matches(&manifest_spec, pkg, &resolved_patched) {
             patch_specs.insert(canonical_key.clone(), manifest_spec.clone());
         }
-        let exact_spec = berry_exact_spec(pkg, &graph.patched_dependencies, &patch_specs);
+        let exact_spec = berry_exact_spec(pkg, &resolved_patched, &patch_specs);
         if manifest_spec != exact_spec {
             extra_specs
                 .entry(canonical_key)
@@ -854,11 +874,10 @@ pub fn write_berry(
                 continue;
             };
             let manifest_spec = format_berry_spec(dep_name, range);
-            if patch_spec_matches(&manifest_spec, target_pkg, &graph.patched_dependencies) {
+            if patch_spec_matches(&manifest_spec, target_pkg, &resolved_patched) {
                 patch_specs.insert(target.clone(), manifest_spec.clone());
             }
-            let exact_spec =
-                berry_exact_spec(target_pkg, &graph.patched_dependencies, &patch_specs);
+            let exact_spec = berry_exact_spec(target_pkg, &resolved_patched, &patch_specs);
             if manifest_spec != exact_spec {
                 extra_specs.entry(target).or_default().insert(manifest_spec);
             }
@@ -901,7 +920,7 @@ pub fn write_berry(
         // (a package nothing in this graph references by range — rare, e.g.
         // an orphaned transitive) do we fall back to the exact spec so the
         // block still has a parseable header.
-        let exact_spec = berry_exact_spec(pkg, &graph.patched_dependencies, &patch_specs);
+        let exact_spec = berry_exact_spec(pkg, &resolved_patched, &patch_specs);
         let mut header_specs: Vec<String> = Vec::new();
         if let Some(extras) = extra_specs.get(canonical_key) {
             for s in extras {
@@ -948,7 +967,7 @@ pub fn write_berry(
             &pkg.dependencies,
             &pkg.declared_dependencies,
             &canonical,
-            &graph.patched_dependencies,
+            &resolved_patched,
             &patch_specs,
         );
         write_berry_dep_map(
@@ -957,7 +976,7 @@ pub fn write_berry(
             &pkg.optional_dependencies,
             &pkg.declared_dependencies,
             &canonical,
-            &graph.patched_dependencies,
+            &resolved_patched,
             &patch_specs,
         );
         write_berry_peer_deps(&mut out, &pkg.peer_dependencies);
