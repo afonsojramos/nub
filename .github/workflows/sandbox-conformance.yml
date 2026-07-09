@@ -17,47 +17,14 @@ name: sandbox-conformance
 on:
   workflow_dispatch:
   push:
-    branches: [sandbox-primitives]
+    # THROWAWAY probe branch only — Windows-only verification of the F2/F4/F1 review
+    # follow-ups. (macOS/linux legs dropped here to conserve CI; real matrix on sandbox-primitives.)
+    branches: [probe/win-ac-backend]
     paths:
       - "crates/nub-sandbox/**"
       - "crates/nub-cli/**"
       - ".github/workflows/sandbox-conformance.yml"
 jobs:
-  macos:
-    runs-on: macos-14
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - name: macOS Seatbelt enforcement (per-backend + proxy)
-        run: cargo test -p nub-sandbox --test macos_enforcement --test macos_proxy
-      - name: macOS CLI-seam conformance matrix
-        run: cargo test -p nub-cli --test sandbox_conformance
-
-  linux:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      # Print the kernel + Landlock ABI up front: the done-gate depends on this hosted
-      # runner ACTUALLY enforcing Landlock (a LinuxKit VM would not) — surface it.
-      - name: Kernel + Landlock baseline
-        run: |
-          uname -a
-          echo "landlock lsm: $(cat /sys/kernel/security/lsm 2>/dev/null)"
-          ls -l /sys/kernel/security/landlock 2>/dev/null || echo "no landlock securityfs node"
-      # REQUIRE_LANDLOCK turns a hollow skip into a hard failure — this leg's whole job
-      # is to prove Landlock enforces here, so "skipped" must never read as green.
-      - name: Linux Landlock+seccomp enforcement (per-backend + proxy)
-        env:
-          NUB_SANDBOX_REQUIRE_LANDLOCK: "1"
-        run: cargo test -p nub-sandbox --test linux_enforcement --test linux_proxy
-      - name: Linux CLI-seam conformance matrix
-        env:
-          NUB_SANDBOX_REQUIRE_LANDLOCK: "1"
-        run: cargo test -p nub-cli --test sandbox_conformance
-
   windows:
     runs-on: windows-latest
     env:
