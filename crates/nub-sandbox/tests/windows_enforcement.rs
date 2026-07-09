@@ -89,7 +89,10 @@ mod win {
     /// (`GetHandleInformation`) AND `WaitForSingleObject(_, 0)` must return signaled —
     /// the parent creates the event manual-reset + signaled, so only our event (or a
     /// vanishingly-rare signaled-waitable collision) passes both. Exit 0 = inherited,
-    /// 7 = not.
+    /// 7 = not. NOTE: under the AppContainer's strict handle checking the invalid-handle
+    /// case does not even reach the `7` return — `GetHandleInformation` on the
+    /// not-inherited value RAISES STATUS_INVALID_HANDLE and the OS terminates the child;
+    /// the caller treats that termination as equivalent to `7` (both = not inherited).
     fn check_handle(hex: &str) -> i32 {
         use windows_sys::Win32::Foundation::{GetHandleInformation, HANDLE, WAIT_OBJECT_0};
         use windows_sys::Win32::System::Threading::WaitForSingleObject;
@@ -727,17 +730,23 @@ mod win {
         //    (PROC_THREAD_ATTRIBUTE_HANDLE_LIST), NOT an arbitrary inheritable handle nub
         //    holds. NC: a raw inherit-ALL spawn DOES pass the same handle, proving it's
         //    genuinely inheritable — so the sandbox leg's non-inheritance is the scoping. ─
+        // A not-inherited handle manifests two ways, BOTH proving non-inheritance: the
+        // child returns 7 (GetHandleInformation reports the value invalid) OR — observed
+        // on windows-latest — the AppContainer's strict handle checking TERMINATES the
+        // child with STATUS_INVALID_HANDLE for touching an invalid handle. The NC
+        // (inherited) leg reaches the handle and returns 0.
+        const STATUS_INVALID_HANDLE: i32 = 0xC000_0008u32 as i32;
         let event = create_inheritable_event();
         if event.is_null() {
             fails += 1;
             eprintln!("FAIL handle-scoping setup: CreateEventW failed");
         } else {
             let harg = format!("0x{:x}", event as usize);
-            expect(
+            expect_in(
                 &mut fails,
                 "sandboxed child does NOT inherit nub's extra handle (scoped to stdio)",
                 code(&confine, &child, &["__sbxchild__", "checkhandle", &harg]),
-                7,
+                &[7, STATUS_INVALID_HANDLE],
             );
             expect(
                 &mut fails,
