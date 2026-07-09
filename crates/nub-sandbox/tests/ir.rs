@@ -138,7 +138,17 @@ fn apply_degradation_reflects_backend_capability() {
             );
         }
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    // Windows (AppContainer) has a real backend too: a literal read-confine grant
+    // (`./x`) + coarse deny-all net (`net: false`, no Allow rules) are both fully
+    // expressible, so nothing is degraded.
+    #[cfg(target_os = "windows")]
+    assert!(
+        d.is_full(),
+        "Windows AppContainer enforces literal read-confine + coarse deny-all net"
+    );
+    // Any OS with no wired backend still runs the env-scrub skeleton, which honestly
+    // reports fs + net as not-enforced.
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         assert!(!d.is_full(), "skeleton does not enforce fs/net");
         assert!(d.lost.contains(&"fs".to_string()));

@@ -40,7 +40,7 @@
 //! `Prepared::status()` calls [`WindowsLaunch::run`], which owns setup → spawn → wait
 //! → RAII teardown.
 
-use crate::policy::{Effect, FsAccess, FsPolicy};
+use crate::policy::{Effect, FsAccess, FsPolicy, FsRule};
 // Referenced only by the Windows-gated `apply`; the host build (module-under-test)
 // never names it.
 #[cfg(target_os = "windows")]
@@ -71,23 +71,23 @@ pub(crate) struct WindowsLaunch {
 /// What the allowlist model could NOT express for a policy, so the caller can be told.
 #[derive(Debug, Default, PartialEq)]
 struct FsDegrade {
-    /// A generous-read base (`default_effect == Allow`) — allowlist can't express
-    /// read-all-minus-secrets; reads are confined to the explicit allow-set instead.
+    /// A generous-read base (`default_effect == Allow`, OR a whole-fs `**` Allow entry
+    /// — the shape the compiler actually emits for `"..."`/`sandbox: true`). The
+    /// allowlist can't express read-all-minus-secrets; reads are confined to the
+    /// explicit allow-set instead.
     generous_read: bool,
     /// An embedded-glob read allow — can't be a single inheritable ACE; skipped
     /// (fail-safe over-confinement rather than widening a grant to its literal prefix,
     /// which could expose a sibling secret).
     glob_read_unenforced: bool,
-    /// A read DENY that lands inside a granted read subtree — an inheritable allow
-    /// defeats it (the same class of trap the AAP denylist hits), so the deny is not
-    /// honored. Never happens for a pure own-dir build-jail grant.
-    deny_inside_grant: bool,
 }
 
 /// Derive the AppContainer read/write grants from the fs IR. Only LITERAL subtrees can
 /// be expressed as an inheritable ACE; the read-confine (`default_effect == Deny`)
 /// posture maps faithfully, while a generous-read base or an embedded-glob allow can't
 /// and is reported via [`FsDegrade`] (fail-safe: over-confine + name it, never widen).
+/// (The deny-shadowing check is done by [`deny_shadows_grant`] in `apply`, AFTER the
+/// program-dir grant is folded into the read set.)
 fn derive_grants(fs: &FsPolicy) -> (Vec<PathBuf>, Vec<PathBuf>, FsDegrade) {
     let mut read = Vec::new();
     let mut write = Vec::new();
@@ -97,44 +97,98 @@ fn derive_grants(fs: &FsPolicy) -> (Vec<PathBuf>, Vec<PathBuf>, FsDegrade) {
     };
 
     for rule in &fs.rules.entries {
-        match rule.effect {
-            Effect::Allow => match literal_subtree(rule.matcher.as_str()) {
-                Some(dir) => {
-                    if !read.contains(&dir) {
-                        read.push(dir.clone());
-                    }
-                    if rule.access == FsAccess::ReadWrite
-                        && !is_dangerous_write_root(&dir)
-                        && !write.contains(&dir)
-                    {
-                        write.push(dir);
-                    }
+        // Denies are implicit in the allowlist (ungranted = denied); their one hole (a
+        // deny inside a granted subtree) is checked in `apply` post-program-dir.
+        if rule.effect == Effect::Deny {
+            continue;
+        }
+        match literal_subtree(rule.matcher.as_str()) {
+            Some(dir) => {
+                if !read.contains(&dir) {
+                    read.push(dir.clone());
                 }
-                // An embedded-glob or whole-fs allow has no safe literal subtree to
-                // grant: skip it (over-confine) rather than widen to a prefix that
-                // could expose a sibling secret. A whole-fs `**` allow is the generous
-                // base, already flagged by `generous_read` — only a NON-whole-fs glob
-                // is a distinct over-confinement to surface.
-                None if has_glob_meta(rule.matcher.as_str())
-                    && !is_whole_fs(rule.matcher.as_str()) =>
+                if rule.access == FsAccess::ReadWrite
+                    && !is_dangerous_write_root(&dir)
+                    && !write.contains(&dir)
                 {
-                    degrade.glob_read_unenforced = true;
-                }
-                None => {}
-            },
-            // Denies are implicit in the allowlist (ungranted = denied). The one hole:
-            // a deny INSIDE a subtree we grant read — the inheritable allow-ACE defeats
-            // it. Detect + report; it cannot be carved on Windows.
-            Effect::Deny => {
-                if let Some(dpath) = literal_subtree(rule.matcher.as_str())
-                    && read.iter().any(|g| dpath.starts_with(g))
-                {
-                    degrade.deny_inside_grant = true;
+                    write.push(dir);
                 }
             }
+            // A whole-fs `**` Allow is the generous-read base (what the compiler emits
+            // for `"..."`/`sandbox: true` alongside a Deny base) — the allowlist can't
+            // express it, so degrade and confine to the explicit allow-set. A NON-whole-
+            // fs embedded glob is a distinct over-confinement (skipped, not widened).
+            None if is_whole_fs(rule.matcher.as_str()) => degrade.generous_read = true,
+            None if has_glob_meta(rule.matcher.as_str()) => degrade.glob_read_unenforced = true,
+            None => {}
         }
     }
     (read, write, degrade)
+}
+
+/// Whether any read DENY could match a path inside a granted read subtree — an
+/// inheritable read-allow on the grant DEFEATS such a deny on Windows (the same class
+/// of trap the AAP denylist hits), so it cannot be carved and must be reported. The
+/// rule is sound and conservative: a depth-independent glob deny (`**/.env`) shadows
+/// EVERY grant, and a deny whose literal prefix is inside a grant (or vice-versa)
+/// shadows it. Matching is case-insensitive (Windows paths are). Run with the FULL read
+/// set (incl. the program-dir grant), since a deny landing under it is defeated too.
+fn deny_shadows_grant(entries: &[FsRule], read_grants: &[PathBuf]) -> bool {
+    if read_grants.is_empty() {
+        return false;
+    }
+    for rule in entries {
+        if rule.effect != Effect::Deny {
+            continue;
+        }
+        let g = rule.matcher.as_str();
+        // A depth-independent glob deny (no literal prefix before the first `**`, e.g.
+        // `**/.env`) can match inside any granted subtree.
+        let prefix = literal_prefix(g);
+        if prefix.is_empty() {
+            return true;
+        }
+        let dp = PathBuf::from(prefix);
+        if read_grants
+            .iter()
+            .any(|grant| path_prefixes(grant, &dp) || path_prefixes(&dp, grant))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// The literal directory prefix of a glob — the leading run of full, glob-free path
+/// components (e.g. `C:/proj/*.pem` → `C:/proj`, `**/.env` → ``, `C:/x` → `C:/x`).
+fn literal_prefix(glob: &str) -> String {
+    if !has_glob_meta(glob) {
+        return glob.to_string();
+    }
+    let mut kept: Vec<&str> = Vec::new();
+    for comp in glob.split('/') {
+        if has_glob_meta(comp) {
+            break;
+        }
+        kept.push(comp);
+    }
+    kept.join("/")
+}
+
+/// Whether `a` is a path-prefix of `b` (component-wise, case-insensitive).
+fn path_prefixes(a: &Path, b: &Path) -> bool {
+    let mut bc = b.components();
+    for ac in a.components() {
+        match bc.next() {
+            Some(bcomp) => {
+                if !ac.as_os_str().eq_ignore_ascii_case(bcomp.as_os_str()) {
+                    return false;
+                }
+            }
+            None => return false,
+        }
+    }
+    true
 }
 
 /// Whether a canonical IR glob contains glob metacharacters.
@@ -321,7 +375,10 @@ pub(crate) fn apply(
                 .to_string()
         });
     }
-    if fs_degrade.deny_inside_grant {
+    // A read deny landing inside a granted subtree (incl. the program-dir grant) can't
+    // be carved on Windows — the inheritable read-allow defeats it. Checked with the
+    // FULL read set (after the program dir is folded in).
+    if deny_shadows_grant(&policy.fs.rules.entries, &read_grants) {
         deg.lost.push("fs-read-deny".to_string());
         reason.get_or_insert_with(|| {
             "a read deny landing inside a granted subtree can't be carved on Windows \
@@ -420,6 +477,7 @@ mod launch {
     use std::path::Path;
     use std::process::ExitStatus;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Mutex, MutexGuard};
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LocalFree, WAIT_OBJECT_0};
     use windows_sys::Win32::Security::Authorization::{
         ConvertStringSidToSidW, EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW,
@@ -430,8 +488,8 @@ mod launch {
         CreateAppContainerProfile, DeleteAppContainerProfile,
     };
     use windows_sys::Win32::Security::{
-        ACL, CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, OBJECT_INHERIT_ACE,
-        PSECURITY_DESCRIPTOR, PSID, SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES,
+        ACL, CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, FreeSid, GetLengthSid,
+        OBJECT_INHERIT_ACE, PSECURITY_DESCRIPTOR, PSID, SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES,
     };
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
@@ -466,6 +524,12 @@ mod launch {
     /// Monotonic per-process counter so concurrent launches never collide on the
     /// AppContainer profile name (combined with pid + a time nonce).
     static LAUNCH_CTR: AtomicU64 = AtomicU64::new(0);
+
+    /// Serializes the per-path DACL read-modify-write in [`set_ace`]. Concurrent launches
+    /// can grant/revoke traverse on a SHARED ancestor (e.g. `C:\Users\<me>`); without
+    /// this, two non-atomic RMWs race and one run's ACE is lost (its leaf then
+    /// unreachable). A single global lock is ample — ACL edits are brief and rare.
+    static ACL_LOCK: Mutex<()> = Mutex::new(());
 
     impl WindowsLaunch {
         /// Own the full spawn lifecycle: create a per-run AppContainer profile, grant
@@ -612,13 +676,12 @@ mod launch {
             }
             let _ = cap_sid_owned; // held alive until here
 
-            // 7. Assign to the job BEFORE resuming, so the child (and any descendant it
-            //    spawns) is captured; then resume and wait.
+            // 7. Assign to the job while the child is still SUSPENDED, and only resume
+            //    once it is contained — so a child that spawns a descendant can never do
+            //    so outside the Job. On assign failure, terminate the still-suspended
+            //    child (it never ran) and fail closed.
             let assign_ok = unsafe { AssignProcessToJobObject(job, pi.hProcess) };
-            unsafe { ResumeThread(pi.hThread) };
             if assign_ok == 0 {
-                // Could not contain the tree — reap what we have and fail closed rather
-                // than let an unreaped tree run.
                 unsafe {
                     windows_sys::Win32::System::Threading::TerminateProcess(pi.hProcess, 1);
                     CloseHandle(pi.hThread);
@@ -626,6 +689,7 @@ mod launch {
                 }
                 return Err(io::Error::other("AssignProcessToJobObject failed"));
             }
+            unsafe { ResumeThread(pi.hThread) };
 
             let code = unsafe {
                 if WaitForSingleObject(pi.hProcess, INFINITE) != WAIT_OBJECT_0 {
@@ -672,10 +736,14 @@ mod launch {
     }
     impl Drop for ProfileGuard {
         fn drop(&mut self) {
-            // DeleteAppContainerProfile also frees the SID CreateAppContainerProfile
-            // returned, so we do NOT FreeSid separately (double-free otherwise).
-            unsafe { DeleteAppContainerProfile(self.name.as_ptr()) };
-            let _ = self.sid;
+            // DeleteAppContainerProfile removes the profile (registry/on-disk state) but
+            // does NOT free the SID buffer; per MSDN the SID from
+            // CreateAppContainerProfile must be released with FreeSid. Independent calls,
+            // no double-free.
+            unsafe {
+                DeleteAppContainerProfile(self.name.as_ptr());
+                FreeSid(self.sid);
+            }
         }
     }
 
@@ -704,16 +772,19 @@ mod launch {
         }
     }
 
-    /// An initialized PROC_THREAD_ATTRIBUTE_LIST (heap Vec-backed) freed on drop.
+    /// An initialized PROC_THREAD_ATTRIBUTE_LIST, backed by a pointer-aligned buffer
+    /// (a `Vec<usize>`, not `Vec<u8>`, so the opaque list is suitably aligned), freed on
+    /// drop.
     struct ProcThreadAttrList {
-        buf: Vec<u8>,
+        buf: Vec<usize>,
     }
     impl ProcThreadAttrList {
         fn new(count: u32) -> io::Result<Self> {
             let mut size: usize = 0;
             // First call sizes the list (expected to "fail" setting size).
             unsafe { InitializeProcThreadAttributeList(std::ptr::null_mut(), count, 0, &mut size) };
-            let mut buf = vec![0u8; size];
+            let words = size.div_ceil(std::mem::size_of::<usize>()).max(1);
+            let mut buf = vec![0usize; words];
             let ok = unsafe {
                 InitializeProcThreadAttributeList(buf.as_mut_ptr().cast(), count, 0, &mut size)
             };
@@ -789,7 +860,7 @@ mod launch {
 
     /// Copy a PSID's bytes into an owned buffer (GetLengthSid).
     fn copy_sid(sid: PSID) -> io::Result<Vec<u8>> {
-        let len = unsafe { windows_sys::Win32::Security::GetLengthSid(sid) } as usize;
+        let len = unsafe { GetLengthSid(sid) } as usize;
         if len == 0 {
             return Err(io::Error::last_os_error());
         }
@@ -833,6 +904,9 @@ mod launch {
     /// `path` alone (an ancestor traverse grant). Additive — reads the existing DACL and
     /// merges, never clobbering other ACEs.
     fn set_ace(path: &Path, sid: PSID, access: u32, mode: i32, inherit: bool) -> io::Result<()> {
+        // Serialize the DACL RMW across concurrent launches (see ACL_LOCK). Poison-
+        // tolerant: a prior panicked holder left no invariant broken here.
+        let _lock: MutexGuard<'_, ()> = ACL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let wpath = to_wide_path(path);
         let mut old_dacl: *mut ACL = std::ptr::null_mut();
         let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
@@ -967,9 +1041,15 @@ mod launch {
     }
 
     /// Build a UTF-16 double-NUL-terminated environment block from the constructed map.
+    /// Entries are ordered case-INSENSITIVELY by key — the block ordering Windows
+    /// expects (the source `BTreeMap` is case-sensitive, so a lowercase key like
+    /// `windir` would otherwise sort after all-uppercase keys and violate the
+    /// convention).
     fn build_env_block(env: &std::collections::BTreeMap<String, String>) -> Vec<u16> {
+        let mut pairs: Vec<(&String, &String)> = env.iter().collect();
+        pairs.sort_by_key(|a| a.0.to_ascii_uppercase());
         let mut block: Vec<u16> = Vec::new();
-        for (k, v) in env {
+        for (k, v) in pairs {
             block.extend(k.encode_utf16());
             block.push(u16::from(b'='));
             block.extend(v.encode_utf16());
@@ -1061,6 +1141,29 @@ mod tests {
     }
 
     #[test]
+    fn whole_fs_allow_entry_degrades_generous_read() {
+        // The shape the compiler ACTUALLY emits for `"..."` / `sandbox: true`: a Deny
+        // base + a whole-fs `**` Allow ENTRY (+ secret denies). It must degrade, not be
+        // silently dropped as a no-op grant.
+        let p = fs(
+            Effect::Deny,
+            vec![
+                rule("**", Effect::Allow, FsAccess::Read),
+                rule("**/.env", Effect::Deny, FsAccess::Read),
+            ],
+        );
+        let (read, _write, deg) = derive_grants(&p);
+        assert!(
+            read.is_empty(),
+            "a whole-fs `**` allow yields no literal grant"
+        );
+        assert!(
+            deg.generous_read,
+            "a whole-fs `**` Allow ENTRY must degrade fs-read (not silently drop)"
+        );
+    }
+
+    #[test]
     fn embedded_glob_allow_is_skipped_not_widened() {
         // `C:/proj/*.pem` must NOT widen to a `C:/proj` read grant (would expose a
         // sibling secret); it is skipped + flagged (fail-safe over-confinement).
@@ -1077,21 +1180,26 @@ mod tests {
     }
 
     #[test]
-    fn deny_inside_a_granted_subtree_is_reported() {
-        // Grant read on C:/proj, deny C:/proj/secret — the inheritable allow defeats
-        // the deny on Windows, so it must be surfaced (not silently unenforced).
-        let p = fs(
-            Effect::Deny,
-            vec![
-                rule("C:/proj", Effect::Allow, FsAccess::ReadWrite),
-                rule("C:/proj/secret", Effect::Deny, FsAccess::Read),
-            ],
-        );
-        let (_read, _write, deg) = derive_grants(&p);
-        assert!(
-            deg.deny_inside_grant,
-            "a deny inside a granted subtree must be reported"
-        );
+    fn deny_shadowed_by_a_grant_is_detected() {
+        let grants = vec![PathBuf::from("C:/proj")];
+        // A LITERAL deny inside a granted subtree — inheritable allow defeats it.
+        let literal = vec![rule("C:/proj/secret", Effect::Deny, FsAccess::Read)];
+        assert!(deny_shadows_grant(&literal, &grants));
+        // A GLOBBED deny inside the grant (`C:/proj/*.pem`) — the earlier gap: its
+        // literal prefix `C:/proj` is the grant, so it's shadowed.
+        let globbed = vec![rule("C:/proj/*.pem", Effect::Deny, FsAccess::Read)];
+        assert!(deny_shadows_grant(&globbed, &grants));
+        // A DEPTH-INDEPENDENT deny (`**/.env`) matches inside every grant.
+        let depth_indep = vec![rule("**/.env", Effect::Deny, FsAccess::Read)];
+        assert!(deny_shadows_grant(&depth_indep, &grants));
+        // Case-insensitive: `C:/PROJ/...` still shadows the `C:/proj` grant.
+        let cased = vec![rule("C:/PROJ/secret", Effect::Deny, FsAccess::Read)];
+        assert!(deny_shadows_grant(&cased, &grants));
+        // A deny OUTSIDE every grant is enforced by default-deny — not shadowed.
+        let outside = vec![rule("C:/other/secret", Effect::Deny, FsAccess::Read)];
+        assert!(!deny_shadows_grant(&outside, &grants));
+        // No grants ⇒ nothing to shadow.
+        assert!(!deny_shadows_grant(&depth_indep, &[]));
     }
 
     #[test]
