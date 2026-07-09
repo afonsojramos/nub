@@ -70,6 +70,10 @@ mod win {
             Some("privs") => dump_privileges(),
             // Count capability SIDs (S-1-15-3-*) in this token; exit = the count (capped 90).
             Some("caps") => count_capabilities(),
+            // Report package-SID membership: 30 if ALL APPLICATION PACKAGES (S-1-15-2-1) is
+            // present (a STANDARD AppContainer — reaches any AAP-granted object), 0 if only
+            // ALL RESTRICTED APPLICATION PACKAGES (S-1-15-2-2, an LPAC — tighter).
+            Some("pkgsids") => report_package_sids(),
             // Attempt to break out of the Job via CREATE_BREAKAWAY_FROM_JOB.
             //   0  = breakaway DENIED (good)   21 = breakaway SUCCEEDED (escape; pid → marker)
             Some("breakaway") => attempt_breakaway(&a[1]),
@@ -355,6 +359,72 @@ mod win {
         }
     }
 
+    /// Report package-SID membership. Returns 30 if ALL APPLICATION PACKAGES (S-1-15-2-1) is
+    /// present (a STANDARD AppContainer — can reach any object whose ACL grants AAP), 0 if it
+    /// is absent (e.g. an LPAC that carries only ALL RESTRICTED APPLICATION PACKAGES,
+    /// S-1-15-2-2). Prints every S-1-15-2-* package SID's second subauthority.
+    fn report_package_sids() -> i32 {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::Security::{
+            GetSidIdentifierAuthority, GetSidSubAuthority, GetSidSubAuthorityCount,
+            GetTokenInformation, SID_AND_ATTRIBUTES, TOKEN_GROUPS, TOKEN_QUERY, TokenGroups,
+        };
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+        // SAFETY: token-group enumeration; buffer sized by the first call.
+        unsafe {
+            let mut tok = std::ptr::null_mut();
+            if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut tok) == 0 {
+                return 9;
+            }
+            let mut len = 0u32;
+            GetTokenInformation(tok, TokenGroups, std::ptr::null_mut(), 0, &mut len);
+            if len == 0 {
+                CloseHandle(tok);
+                return 9;
+            }
+            let mut buf = vec![0u8; len as usize];
+            if GetTokenInformation(tok, TokenGroups, buf.as_mut_ptr().cast(), len, &mut len) == 0 {
+                CloseHandle(tok);
+                return 9;
+            }
+            CloseHandle(tok);
+            let tg = &*(buf.as_ptr() as *const TOKEN_GROUPS);
+            let count = tg.GroupCount as usize;
+            let arr = std::slice::from_raw_parts(
+                std::ptr::addr_of!(tg.Groups) as *const SID_AND_ATTRIBUTES,
+                count,
+            );
+            let mut has_aap = false;
+            for g in arr {
+                let sid = g.Sid;
+                if sid.is_null() {
+                    continue;
+                }
+                let ia = GetSidIdentifierAuthority(sid);
+                if ia.is_null() || (*ia).Value[5] != 15 {
+                    continue;
+                }
+                let sub0 = *GetSidSubAuthority(sid, 0);
+                if sub0 != 2 {
+                    continue; // 2 = package SID family; 3 = capabilities (handled by `caps`)
+                }
+                let subcount = *GetSidSubAuthorityCount(sid);
+                let sub1 = if subcount >= 2 { *GetSidSubAuthority(sid, 1) } else { u32::MAX };
+                let label = match sub1 {
+                    1 => " (ALL APPLICATION PACKAGES)",
+                    2 => " (ALL RESTRICTED APPLICATION PACKAGES)",
+                    _ => " (specific package SID)",
+                };
+                println!("CHILD package SID S-1-15-2-{sub1}{label}");
+                if sub1 == 1 {
+                    has_aap = true;
+                }
+            }
+            if has_aap { 30 } else { 0 }
+        }
+    }
+
     /// Attempt to spawn a sleeper OUTSIDE the Job via CREATE_BREAKAWAY_FROM_JOB. On success,
     /// record the escapee's pid to `marker` (the parent then checks it outlives the Job).
     fn attempt_breakaway(marker: &str) -> i32 {
@@ -485,37 +555,37 @@ mod win {
     /// Attempt ReadFile on a raw numeric handle value the parent held open (a file handle to
     /// the secret). If the handle-list scoping worked, the value is invalid in the child.
     fn use_raw_handle(hex: &str, needle: &str) -> i32 {
-        use windows_sys::Win32::Foundation::HANDLE;
-        use windows_sys::Win32::Storage::FileSystem::ReadFile;
+        use std::io::Read;
+        use std::mem::ManuallyDrop;
+        use std::os::windows::io::FromRawHandle;
         let Ok(val) = usize::from_str_radix(hex.trim_start_matches("0x"), 16) else {
             return 9;
         };
-        let h = val as HANDLE;
+        // Wrap the numeric handle as a File WITHOUT taking ownership (ManuallyDrop ⇒ no
+        // CloseHandle side-effect on a collided/foreign value). An un-inherited value reads
+        // as an error; a collided value reads some OTHER object (caught by the content check).
+        // SAFETY: from_raw_handle only wraps the value; the read is fallible, not a deref.
+        let f = ManuallyDrop::new(unsafe { std::fs::File::from_raw_handle(val as *mut _) });
         let mut buf = [0u8; 128];
-        let mut read = 0u32;
-        // SAFETY: ReadFile on a numeric handle; an un-inherited value fails (no deref of ours).
-        let ok = unsafe {
-            ReadFile(
-                h,
-                buf.as_mut_ptr().cast(),
-                buf.len() as u32,
-                &mut read,
-                std::ptr::null_mut(),
-            )
-        };
-        if ok != 0 && read > 0 {
-            let got = &buf[..read as usize];
-            if got.windows(needle.len()).any(|w| w == needle.as_bytes()) {
-                println!("CHILD usehandle READ the SECRET via inherited handle (LEAK)");
-                return 0;
+        match (&*f).read(&mut buf) {
+            Ok(n) if n > 0 => {
+                if buf[..n].windows(needle.len()).any(|w| w == needle.as_bytes()) {
+                    println!("CHILD usehandle READ the SECRET via inherited handle (LEAK)");
+                    0
+                } else {
+                    println!("CHILD usehandle read {n} bytes but NOT the secret (handle-value collision, no leak)");
+                    7
+                }
             }
-            // Read succeeded on some OTHER object (handle-value collision) — not a leak.
-            println!("CHILD usehandle read {read} bytes but NOT the secret (handle-value collision, no leak)");
-            return 7;
+            Ok(_) => {
+                println!("CHILD usehandle read 0 bytes (handle not usable)");
+                7
+            }
+            Err(e) => {
+                println!("CHILD usehandle read failed err={:?} (handle not usable)", e.raw_os_error());
+                7
+            }
         }
-        let e = std::io::Error::last_os_error();
-        println!("CHILD usehandle ReadFile failed err={:?} (handle not usable)", e.raw_os_error());
-        7
     }
 
     // ── liveness + kill helpers ─────────────────────────────────────────────────────
@@ -925,6 +995,26 @@ mod win {
         r.note(
             "capabilities-net-unconfined (NC)",
             &format!("capability-SID count={caps_open} (expect 1 = internetClient)"),
+        );
+
+        // ── 6b. AppContainer type — STANDARD (has ALL APPLICATION PACKAGES) vs LPAC ───
+        // A standard AppContainer carries ALL APPLICATION PACKAGES (S-1-15-2-1), so it can
+        // reach ANY object (file/registry/named-object/pipe) whose ACL grants AAP — a wider
+        // reachable set than an LPAC (which carries only ALL RESTRICTED APPLICATION PACKAGES
+        // and reaches nothing without an explicit RESTRICTED grant or a held capability).
+        // Surfaced as a NOTE: this is a hardening posture the maintainer owns, not a broken
+        // guarantee (the fs read-confine already assumes user secrets carry no AAP grant).
+        let (_d, pkg) = run(&confine, &child, &["__sbxadv__", "pkgsids"]);
+        r.note(
+            "appcontainer-type (standard vs LPAC)",
+            &format!(
+                "child exit {pkg} ({})",
+                match pkg {
+                    30 => "STANDARD AppContainer — carries ALL APPLICATION PACKAGES; reaches any AAP-granted object",
+                    0 => "LPAC-class — no ALL APPLICATION PACKAGES membership (tighter)",
+                    _ => "inconclusive",
+                }
+            ),
         );
 
         // ── 7. Coarse egress completeness — UDP external ────────────────────────────
