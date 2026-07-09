@@ -26,6 +26,15 @@ static class ProbeChild {
     [DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)] static extern bool ConvertSidToStringSid(IntPtr sid, out IntPtr str);
     [DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)] static extern bool LookupPrivilegeName(string sys, ref LUID luid, StringBuilder name, ref int cch);
     [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr h);
+    // -- ascendant-env read surface (openparent) --
+    [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+    [DllImport("kernel32.dll", SetLastError=true)] static extern bool CloseHandle(IntPtr h);
+    [DllImport("kernel32.dll", SetLastError=true)] static extern bool ReadProcessMemory(IntPtr h, IntPtr addr, byte[] buf, IntPtr size, out IntPtr read);
+    [DllImport("ntdll.dll")] static extern int NtQueryInformationProcess(IntPtr h, int cls, ref PROCESS_BASIC_INFORMATION info, int len, out int ret);
+    const uint PROCESS_VM_READ = 0x0010, PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+    [StructLayout(LayoutKind.Sequential)] struct PROCESS_BASIC_INFORMATION {
+        public IntPtr ExitStatus, PebBaseAddress, AffinityMask, BasePriority, UniqueProcessId, InheritedFromUniqueProcessId;
+    }
 
     const uint TOKEN_QUERY = 0x0008;
     const int TokenPrivileges = 3, TokenIntegrityLevel = 25, TokenIsAppContainer = 29, TokenAppContainerSid = 31;
@@ -109,6 +118,45 @@ static class ProbeChild {
         }
     }
 
+    // Read a pointer-sized value from another process.
+    static IntPtr ReadPtr(IntPtr h, long addr) {
+        byte[] b = new byte[IntPtr.Size]; IntPtr rd;
+        if (!ReadProcessMemory(h, (IntPtr)addr, b, (IntPtr)b.Length, out rd) || rd.ToInt64() != b.Length) return IntPtr.Zero;
+        return (IntPtr)BitConverter.ToInt64(b, 0);
+    }
+    // Ascendant-env read: OpenProcess(PROCESS_VM_READ|QUERY_LIMITED) on `pid`, walk the PEB
+    // to the environment block, and search it for `secret`. Exit contract:
+    //   5 = OpenProcess DENIED (the confinement result -- no handle, nothing readable)
+    //   0 = secret READ from the target's env (LEAK)
+    //   6 = handle GRANTED but the PEB/env read failed (OpenProcess NOT blocked -- concern)
+    //   7 = handle granted + env read but secret not present (control would fail if this hits)
+    static int OpenParent(uint pid, string secret) {
+        IntPtr h = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+        if (h == IntPtr.Zero) {
+            Console.WriteLine("CHILD openparent OpenProcess DENIED err=" + Marshal.GetLastWin32Error());
+            return 5;
+        }
+        try {
+            var pbi = new PROCESS_BASIC_INFORMATION(); int ret;
+            int st = NtQueryInformationProcess(h, 0, ref pbi, Marshal.SizeOf(typeof(PROCESS_BASIC_INFORMATION)), out ret);
+            if (st != 0 || pbi.PebBaseAddress == IntPtr.Zero) { Console.WriteLine("CHILD openparent NtQIP fail st=0x" + st.ToString("X")); return 6; }
+            // x64 offsets: PEB+0x20 = ProcessParameters; RTL_USER_PROCESS_PARAMETERS+0x80 = Environment.
+            IntPtr pp = ReadPtr(h, pbi.PebBaseAddress.ToInt64() + 0x20);
+            if (pp == IntPtr.Zero) { Console.WriteLine("CHILD openparent read ProcessParameters fail"); return 6; }
+            IntPtr env = ReadPtr(h, pp.ToInt64() + 0x80);
+            if (env == IntPtr.Zero) { Console.WriteLine("CHILD openparent read Environment ptr fail"); return 6; }
+            var sb = new StringBuilder();
+            byte[] chunk = new byte[4096]; IntPtr rd;
+            for (int i = 0; i < 32; i++) { // up to 128 KB, stop at the first unreadable page
+                if (!ReadProcessMemory(h, (IntPtr)(env.ToInt64() + i * 4096), chunk, (IntPtr)chunk.Length, out rd) || rd.ToInt64() == 0) break;
+                sb.Append(Encoding.Unicode.GetString(chunk, 0, (int)rd.ToInt64()));
+            }
+            if (sb.ToString().Contains(secret)) { Console.WriteLine("CHILD openparent SECRET READ (LEAK)"); return 0; }
+            Console.WriteLine("CHILD openparent opened+read but secret NOT found (chars=" + sb.Length + ")"); return 7;
+        } catch (Exception e) { Console.WriteLine("CHILD openparent ERR: " + e.Message); return 9; }
+        finally { CloseHandle(h); }
+    }
+
     static int Main(string[] a) {
         try {
             if (a.Length < 1) { Console.WriteLine("CHILD bad-args"); return 2; }
@@ -141,6 +189,12 @@ static class ProbeChild {
                     string v = Environment.GetEnvironmentVariable(a[1]);
                     if (v == null) { Console.WriteLine("CHILD env ABSENT"); return 4; }
                     Console.WriteLine("CHILD env PRESENT: " + v); return 0;
+                }
+                case "openparent": {
+                    // openparent <pid> <secret> -- read the target process's env for <secret>.
+                    if (a.Length < 3) { Console.WriteLine("CHILD openparent bad-args"); return 2; }
+                    uint pid; if (!uint.TryParse(a[1], out pid)) { Console.WriteLine("CHILD openparent bad-pid"); return 2; }
+                    return OpenParent(pid, a[2]);
                 }
                 default:
                     Console.WriteLine("CHILD unknown-cmd"); return 2;

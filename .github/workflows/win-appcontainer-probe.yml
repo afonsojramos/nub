@@ -35,33 +35,36 @@ jobs:
           Write-Host "IsElevated(admin): $admin"
           Write-Host "OS: $([System.Environment]::OSVersion.VersionString)"
           Write-Host "--- parent whoami /priv ---"; whoami /priv
-      - name: 'Leg A -- mechanism proof (elevated; child-token axes are elevation-independent)'
+      # ── ascendant-env read investigation: can an AppContainer child OpenProcess+read a
+      #    PARENT's environment? Leg A = elevated parent (comparison); Leg B = DE-ELEVATED
+      #    Medium-IL parent (the decisive confirm). Each carries an unconfined negative control.
+      - name: 'Leg A -- ascendant-env read, DIRECT (elevated parent)'
         id: legA
         continue-on-error: true
         shell: powershell
-        run: ./tests/win-appcontainer-probe/probe-appcontainer.ps1
-      - name: 'Leg B -- unprivileged proof (throwaway standard user via Secondary Logon)'
+        run: ./tests/win-appcontainer-probe/probe-envread.ps1
+      - name: 'Leg B -- ascendant-env read, DE-ELEVATED (Medium-IL standard-user parent)'
         id: legB
         continue-on-error: true
         shell: powershell
-        run: ./tests/win-appcontainer-probe/run-deelevated.ps1 ./tests/win-appcontainer-probe/probe-appcontainer.ps1
+        run: ./tests/win-appcontainer-probe/run-deelevated.ps1 ./tests/win-appcontainer-probe/probe-envread.ps1
       - name: Summary
         if: always()
         shell: powershell
         run: |
-          Write-Host "Leg A (mechanism, elevated):        ${{ steps.legA.outcome }}"
-          Write-Host "Leg B (unprivileged, standard user): ${{ steps.legB.outcome }}"
-          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "## nub Windows AppContainer file-access probe"
+          Write-Host "Leg A (env-read, elevated parent):     ${{ steps.legA.outcome }}"
+          Write-Host "Leg B (env-read, de-elevated parent):  ${{ steps.legB.outcome }}"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "## nub Windows ascendant-env read probe"
           Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "| Leg | Outcome |"
           Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "|---|---|"
-          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "| A - mechanism (elevated) | ${{ steps.legA.outcome }} |"
-          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "| B - unprivileged (standard user) | ${{ steps.legB.outcome }} |"
-          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "success = every axis as-expected (both catastrophic claims refuted); read the leg log for per-axis RESULT lines."
-      - name: Gate (green only if BOTH legs pass every axis)
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "| A - elevated parent | ${{ steps.legA.outcome }} |"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "| B - de-elevated parent (decisive) | ${{ steps.legB.outcome }} |"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "success = ENVREAD VERDICT: CLOSED (AC child OpenProcess DENIED, unconfined control leaked). Read the leg log for the VERDICT line."
+      - name: Gate (green only if the DE-ELEVATED leg is CLOSED)
         if: always()
         shell: powershell
         run: |
-          $a='${{ steps.legA.outcome }}'; $b='${{ steps.legB.outcome }}'
-          Write-Host "legA=$a legB=$b"
-          if($a -ne 'success' -or $b -ne 'success'){ Write-Host "GATE: not all-green -- read the per-axis RESULT/SUMMARY lines in each leg log"; exit 1 }
-          Write-Host "GATE OK: both legs passed every axis"
+          $b='${{ steps.legB.outcome }}'
+          Write-Host "legA(elevated)=${{ steps.legA.outcome }} legB(de-elevated,decisive)=$b"
+          if($b -ne 'success'){ Write-Host "GATE: de-elevated env-read leg not CLOSED -- read its VERDICT line (LEAK/PARTIAL/INCONCLUSIVE)"; exit 1 }
+          Write-Host "GATE OK: de-elevated AC child could NOT read the parent's env (CLOSED)"
