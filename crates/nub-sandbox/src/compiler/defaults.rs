@@ -265,10 +265,10 @@ fn baseline_allows(key: &str) -> bool {
     // Windows-cased `NPM_CONFIG_//…:_authToken` is caught too (env names are
     // case-insensitive there); on unix npm always emits the lowercase prefix, so a CI
     // match only ever affects `npm_config_`-shaped keys and never widens the allow.
-    if let Some(rest) = strip_prefix_ci(key, NPM_CONFIG_PREFIX) {
-        if is_npm_config_credential(rest) {
-            return false;
-        }
+    if let Some(rest) = strip_prefix_ci(key, NPM_CONFIG_PREFIX)
+        && is_npm_config_credential(rest)
+    {
+        return false;
     }
     #[cfg(windows)]
     {
@@ -354,7 +354,10 @@ mod tests {
             ("npm_config__authToken", "npm_LEAK"),
             ("npm_config__password", "hunter2"),
             ("npm_config_email", "me@example.com"),
-            ("npm_config_//registry.npmjs.org/:_authToken", "SECRET_TOKEN"),
+            (
+                "npm_config_//registry.npmjs.org/:_authToken",
+                "SECRET_TOKEN",
+            ),
             ("npm_config_//registry.npmjs.org/:_password", "SECRET_PW"),
             ("npm_config_//registry.npmjs.org/:_auth", "SECRET_BASIC"),
         ]

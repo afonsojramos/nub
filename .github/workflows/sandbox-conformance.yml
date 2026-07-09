@@ -31,7 +31,8 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: macOS Seatbelt enforcement (per-backend + proxy)
         run: cargo test -p nub-sandbox --test macos_enforcement --test macos_proxy
-      # CLI-seam matrix step added once tests/sandbox_conformance.rs lands.
+      - name: macOS CLI-seam conformance matrix
+        run: cargo test -p nub-cli --test sandbox_conformance
 
   linux:
     runs-on: ubuntu-24.04
@@ -52,7 +53,10 @@ jobs:
         env:
           NUB_SANDBOX_REQUIRE_LANDLOCK: "1"
         run: cargo test -p nub-sandbox --test linux_enforcement --test linux_proxy
-      # CLI-seam matrix step added once tests/sandbox_conformance.rs lands.
+      - name: Linux CLI-seam conformance matrix
+        env:
+          NUB_SANDBOX_REQUIRE_LANDLOCK: "1"
+        run: cargo test -p nub-cli --test sandbox_conformance
 
   windows:
     runs-on: windows-latest

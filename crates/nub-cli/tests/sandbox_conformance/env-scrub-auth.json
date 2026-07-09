@@ -1,0 +1,26 @@
+{
+  "name": "env-scrub-auth",
+  "policy": true,
+  "relaxed": { "env": true },
+  "ambient_env": {
+    "npm_config_target": "22.0.0",
+    "npm_config_arch": "arm64",
+    "npm_config__authToken": "npm_LEAKED_TOKEN",
+    "npm_config_email": "leak@example.com",
+    "npm_config_//registry.npmjs.org/:_authToken": "REGISTRY_LEAK",
+    "AWS_SECRET_ACCESS_KEY": "AKIA_LEAKED",
+    "GITHUB_TOKEN": "gh_leaked",
+    "MY_API_TOKEN": "api_leaked"
+  },
+  "cases": [
+    { "probe": "env", "target": "PATH", "expect": true },
+    { "probe": "env", "target": "npm_config_target", "expect": true },
+    { "probe": "env", "target": "npm_config_arch", "expect": true },
+    { "probe": "env", "target": "npm_config__authToken", "expect": false },
+    { "probe": "env", "target": "npm_config_email", "expect": false },
+    { "probe": "env", "target": "npm_config_//registry.npmjs.org/:_authToken", "expect": false, "platforms": ["macos", "linux"] },
+    { "probe": "env", "target": "AWS_SECRET_ACCESS_KEY", "expect": false },
+    { "probe": "env", "target": "GITHUB_TOKEN", "expect": false },
+    { "probe": "env", "target": "MY_API_TOKEN", "expect": false }
+  ]
+}

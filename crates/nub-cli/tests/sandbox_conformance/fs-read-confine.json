@@ -1,0 +1,11 @@
+{
+  "name": "fs-read-confine",
+  "policy": { "fs": ["./"] },
+  "relaxed": { "fs": true },
+  "cases": [
+    { "probe": "read", "target": "proj:pub.txt", "expect": true },
+    { "probe": "read", "target": "proj:sub/nested.txt", "expect": true },
+    { "probe": "read", "target": "out:o.txt", "expect": false },
+    { "probe": "read", "target": "home:.ssh/id_rsa", "expect": false }
+  ]
+}

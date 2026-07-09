@@ -10,6 +10,13 @@ repository.workspace = true
 name = "nub"
 path = "src/main.rs"
 
+# Test-support probe for the cross-platform sandbox conformance matrix
+# (tests/sandbox_conformance.rs). std-only; built alongside `nub` so the integration
+# test finds it next to the nub binary. Not a product surface.
+[[bin]]
+name = "nub-sandbox-probe"
+path = "src/bin/nub-sandbox-probe.rs"
+
 [features]
 # Single self-contained binary: embed the `runtime/` tree as a compressed blob and
 # JIT-extract it on first run (forwards to nub-core, where the extract module +

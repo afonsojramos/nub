@@ -1,0 +1,8 @@
+{
+  "name": "net-coarse-deny",
+  "policy": { "net": false },
+  "relaxed": { "net": true },
+  "cases": [
+    { "probe": "connect", "target": "1.1.1.1:443", "expect": false }
+  ]
+}
