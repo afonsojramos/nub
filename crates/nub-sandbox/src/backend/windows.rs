@@ -559,26 +559,38 @@ mod launch {
             //    every path, whatever the access mask.
             let mut granted: Vec<std::path::PathBuf> = Vec::new();
             for dir in &self.read_grants {
-                if set_ace(
+                // A failed grant (e.g. a >MAX_PATH path, or a dir we can't WRITE_DAC) is
+                // skipped, not fatal — the child is then denied that leaf. Log at debug so
+                // a "child can't read its own dir" report is diagnosable, not silent.
+                match set_ace(
                     dir,
                     ac_sid,
                     GENERIC_READ | GENERIC_EXECUTE,
                     GRANT_ACCESS,
                     true,
-                )
-                .is_ok()
-                {
-                    granted.push(dir.clone());
+                ) {
+                    Ok(()) => granted.push(dir.clone()),
+                    Err(e) => tracing::debug!(
+                        path = %dir.display(),
+                        error = %e,
+                        "sandbox: read-grant ACE failed — leaf unreachable to the child"
+                    ),
                 }
             }
             for dir in &self.write_grants {
-                let _ = set_ace(
+                if let Err(e) = set_ace(
                     dir,
                     ac_sid,
                     GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | DELETE,
                     GRANT_ACCESS,
                     true,
-                );
+                ) {
+                    tracing::debug!(
+                        path = %dir.display(),
+                        error = %e,
+                        "sandbox: write-grant ACE failed — leaf not writable by the child"
+                    );
+                }
                 if !granted.contains(dir) {
                     granted.push(dir.clone());
                 }

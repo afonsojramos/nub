@@ -400,6 +400,15 @@ fn fs_write_confine() {
     drive("fs-write-confine");
 }
 
+/// Windows-only: the intentional regression guard for the `\\?\` verbatim-prefix strip
+/// (`matcher/path.rs`). A `./`-relative policy compiled through the real compiler +
+/// `std::fs::canonicalize` must still grant the child its own project dir. See the
+/// fixture note.
+#[test]
+fn fs_windows_relative_canon_grant() {
+    drive("fs-windows-relative-canon");
+}
+
 #[test]
 fn env_scrub_including_npm_config_auth() {
     drive("env-scrub-auth");

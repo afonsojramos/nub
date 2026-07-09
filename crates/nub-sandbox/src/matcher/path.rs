@@ -138,13 +138,25 @@ pub fn canonicalize_including_nonexistent(path: &Path) -> PathBuf {
 /// backend then denies the project its own dir). No-op on a non-verbatim path (the
 /// prefix never appears off Windows). Bounded to normal-length paths, which is all a
 /// project/work dir is; a genuine >MAX_PATH path that needs the prefix is out of scope.
+///
+/// Only the two forms that stay ABSOLUTE after stripping are unwrapped: a drive path
+/// (`\\?\C:\…` → `C:\…`) and a UNC path (`\\?\UNC\server\share` → `\\server\share`).
+/// A DRIVELESS volume-GUID path (`\\?\Volume{…}\…`, a folder on a volume mounted with no
+/// letter) is left VERBATIM: stripping it would yield a non-absolute remainder AND expose
+/// its `{`/`}` as glob metachars — dropping the grant. Leaving it verbatim is no worse
+/// than today (that rare shape isn't a normal project dir); mangling it would be.
 fn strip_verbatim_prefix(p: PathBuf) -> PathBuf {
     let Some(s) = p.to_str() else { return p };
     if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
         return PathBuf::from(format!(r"\\{rest}"));
     }
     if let Some(rest) = s.strip_prefix(r"\\?\") {
-        return PathBuf::from(rest);
+        // Unwrap only a real drive path (`X:\…`); leave `Volume{GUID}\…` (and any other
+        // non-drive shape) verbatim rather than produce a broken relative path.
+        let b = rest.as_bytes();
+        if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
+            return PathBuf::from(rest);
+        }
     }
     p
 }
@@ -272,23 +284,33 @@ mod tests {
     #[test]
     fn verbatim_prefix_is_stripped_so_the_ir_path_has_no_bogus_glob_char() {
         // `std::fs::canonicalize` on Windows returns `\\?\C:\…`; unstripped, its `?`
-        // reads as a glob metachar and drops the literal grant. Strip drive + UNC forms;
-        // a plain path passes through untouched (incl. non-Windows paths).
-        assert_eq!(
-            strip_verbatim_prefix(PathBuf::from(r"\\?\C:\Users\me\proj")),
-            PathBuf::from(r"C:\Users\me\proj")
-        );
-        assert_eq!(
-            strip_verbatim_prefix(PathBuf::from(r"\\?\UNC\server\share\proj")),
-            PathBuf::from(r"\\server\share\proj")
-        );
-        assert_eq!(
-            strip_verbatim_prefix(PathBuf::from(r"C:\Users\me\proj")),
-            PathBuf::from(r"C:\Users\me\proj")
-        );
-        assert_eq!(
-            strip_verbatim_prefix(PathBuf::from("/private/tmp/proj")),
-            PathBuf::from("/private/tmp/proj")
-        );
+        // reads as a glob metachar and drops the literal grant. Exhaustive over every
+        // shape canonicalize can emit; strip ONLY the two that stay absolute.
+        let cases: &[(&str, &str)] = &[
+            // Drive verbatim → plain drive path.
+            (r"\\?\C:\Users\me\proj", r"C:\Users\me\proj"),
+            (r"\\?\D:\", r"D:\"),
+            // UNC verbatim → plain UNC.
+            (r"\\?\UNC\server\share\proj", r"\\server\share\proj"),
+            // Driveless volume-GUID: MUST stay verbatim (stripping → non-absolute + `{}`
+            // glob metachars → dropped grant). Left unchanged is the correct behavior.
+            (
+                r"\\?\Volume{b75e2c83-0000-0000-0000-602f00000000}\proj",
+                r"\\?\Volume{b75e2c83-0000-0000-0000-602f00000000}\proj",
+            ),
+            // A bare/short `\\?\x` that is not a drive path stays verbatim (no mangling).
+            (r"\\?\x", r"\\?\x"),
+            // Already-plain paths pass through untouched (incl. non-Windows).
+            (r"C:\Users\me\proj", r"C:\Users\me\proj"),
+            (r"\\server\share\proj", r"\\server\share\proj"),
+            ("/private/tmp/proj", "/private/tmp/proj"),
+        ];
+        for (input, want) in cases {
+            assert_eq!(
+                strip_verbatim_prefix(PathBuf::from(input)),
+                PathBuf::from(want),
+                "strip_verbatim_prefix({input:?})"
+            );
+        }
     }
 }
