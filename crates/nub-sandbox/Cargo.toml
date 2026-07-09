@@ -16,14 +16,18 @@ repository.workspace = true
 
 [dependencies]
 serde = { workspace = true }
-serde_json = { workspace = true }
+# preserve_order is LOAD-BEARING: object-form fold (fold_fs/net/env) relies on
+# SOURCE key order for last-match-wins, so `{ "~/.ssh": true, "~/**": false }`
+# must evaluate in written order (a BTreeMap sort would flip the verdict). Declared
+# locally so the guarantee is owned here, not inherited by accidental workspace
+# feature unification.
+serde_json = { workspace = true, features = ["preserve_order"] }
 tracing = { workspace = true }
-# Matcher stack: globset+ignore is ripgrep's gitignore engine (cross-platform
-# path normalization built in); regex backs the env /regex/ grammar; ipnet parses
-# net CIDRs. All four are already in the workspace lockfile (transitive) — no new
+# Matcher stack: globset is ripgrep's glob engine (cross-platform path
+# normalization + per-glob case flags); regex backs the env /regex/ grammar; ipnet
+# parses net CIDRs. All already in the workspace lockfile (transitive) — no new
 # supply-chain surface.
 globset = "0.4"
-ignore = "0.4"
 regex = "1"
 ipnet = { version = "2", features = ["serde"] }
 

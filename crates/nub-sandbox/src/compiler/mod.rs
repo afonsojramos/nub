@@ -283,14 +283,15 @@ enum StringKind {
 }
 
 /// Disambiguate a `sandbox` string: a path-like string (leading `./`/`../`/`/`/`~`,
-/// or carrying a file extension) is a file-ref; a bare identifier is a preset.
-/// Mirrors `crate::project_config`'s `classify_sandbox_string`.
+/// or carrying a file extension) is a file-ref; a bare identifier is a preset. Must
+/// stay byte-identical to nub-cli's `project_config::classify_sandbox_string` — the
+/// two classify the same surface string and a divergence would route it differently
+/// through the skeleton vs the engine.
 fn classify_string(s: &str) -> StringKind {
     let path_like = s.starts_with("./")
         || s.starts_with("../")
         || s.starts_with('/')
         || s.starts_with('~')
-        || s.starts_with('.')
         || std::path::Path::new(s).extension().is_some();
     if path_like {
         StringKind::FileRef

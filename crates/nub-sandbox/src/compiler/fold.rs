@@ -13,7 +13,7 @@ use crate::policy::{
     CanonGlob, Effect, EnvFormat, EnvPolicy, EnvRule, FsAccess, FsPolicy, FsRule, FsRuleSet,
     NetPolicy, NetRule, NetTarget,
 };
-use globset::Glob;
+use globset::{GlobBuilder, GlobMatcher};
 use serde_json::Value;
 use std::collections::BTreeSet;
 
@@ -142,14 +142,16 @@ pub fn fold_net(value: &Value, path: &str) -> Result<NetPolicy, CompileError> {
         Value::Bool(false) => {} // enforce, deny-all base, no rules
         Value::Array(items) => {
             for (i, item) in items.iter().enumerate() {
-                let s = as_str(item, &child(path, &i.to_string()))?;
-                fold_net_entry(s, &mut policy.rules)?;
+                let p = child(path, &i.to_string());
+                let s = as_str(item, &p)?;
+                fold_net_entry(s, &p, &mut policy.rules)?;
             }
         }
         Value::Object(map) => {
             for (key, val) in map {
-                let effect = net_value_effect(val, &child(path, key))?;
-                push_net_rule(key, effect, &mut policy.rules)?;
+                let p = child(path, key);
+                let effect = net_value_effect(val, &p)?;
+                push_net_rule(key, effect, &p, &mut policy.rules)?;
             }
         }
         _ => {
@@ -162,7 +164,7 @@ pub fn fold_net(value: &Value, path: &str) -> Result<NetPolicy, CompileError> {
     Ok(policy)
 }
 
-fn fold_net_entry(s: &str, out: &mut Vec<NetRule>) -> Result<(), CompileError> {
+fn fold_net_entry(s: &str, path: &str, out: &mut Vec<NetRule>) -> Result<(), CompileError> {
     if s == "..." {
         // No default trusted-host allowlist is committed in Stage 1 (the
         // build-jail baseline owns it). `"..."` in net currently splices nothing
@@ -174,7 +176,7 @@ fn fold_net_entry(s: &str, out: &mut Vec<NetRule>) -> Result<(), CompileError> {
         Some(rest) => (rest, Effect::Deny),
         None => (s, Effect::Allow),
     };
-    push_net_rule(pattern, effect, out)
+    push_net_rule(pattern, effect, path, out)
 }
 
 fn net_value_effect(val: &Value, path: &str) -> Result<Effect, CompileError> {
@@ -190,13 +192,18 @@ fn net_value_effect(val: &Value, path: &str) -> Result<Effect, CompileError> {
 
 /// Classify a net target as a CIDR (contains `/` and parses as one) or a host
 /// pattern, and push the rule.
-fn push_net_rule(target: &str, effect: Effect, out: &mut Vec<NetRule>) -> Result<(), CompileError> {
+fn push_net_rule(
+    target: &str,
+    effect: Effect,
+    path: &str,
+    out: &mut Vec<NetRule>,
+) -> Result<(), CompileError> {
     let net_target = if target.contains('/') {
         match target.parse::<ipnet::IpNet>() {
             Ok(net) => NetTarget::Cidr(net),
             Err(e) => {
                 return Err(CompileError::shape(
-                    "net",
+                    path,
                     &format!("`{target}` looks like a CIDR but did not parse: {e}"),
                 ));
             }
@@ -258,6 +265,27 @@ struct EnvEntry {
     secret: bool,
     optional: bool,
     format: Option<EnvFormat>,
+    /// How `pattern` matches an ambient key. User patterns are case-sensitive
+    /// globs; the built-in secret defaults are case-insensitive (glob or
+    /// boundary-token) so an uppercase `MY_TOKEN` cannot slip past them.
+    key_match: KeyMatch,
+}
+
+/// How an [`EnvEntry`]'s pattern is matched against an ambient env key.
+#[derive(Clone, Copy)]
+enum KeyMatch {
+    /// A user-authored glob/exact key, matched case-SENSITIVELY (POSIX env keys
+    /// are case-sensitive; an explicit rule means exactly what it says).
+    User,
+    /// A built-in secret-KEY guard (`AWS_*`, `NPM_TOKEN`), matched as a
+    /// case-INsensitive glob.
+    SecretGlob,
+    /// A built-in unambiguous secret token (`token`, `credential`), matched
+    /// case-insensitively as a SUBSTRING (via `defaults::word_in_substr`).
+    SecretSubstr,
+    /// A built-in short/ambiguous secret token (`pat`, `pwd`, `auth`), matched
+    /// case-insensitively as a whole SEGMENT (via `defaults::word_is_segment`).
+    SecretSegment,
 }
 
 enum EnvAction {
@@ -298,8 +326,15 @@ fn parse_env_array(items: &[Value], path: &str) -> Result<Vec<EnvEntry>, Compile
                 EnvAction::Allow(None)
             },
             secret: !deny, // an allow defaults sensitive; a deny mark is irrelevant
-            optional: false,
+            // The array form is a concise ALLOWLIST (pass-through-if-present),
+            // never a required-var declaration — an exact key here means "permit
+            // it", not "demand it" (required/optional is an object-form concept
+            // via the `?` suffix). So array entries are always optional; without
+            // this the canonical `["FOO", "BAR", "!*_TOKEN"]` would hard-error
+            // whenever FOO is unset. Object plain-keys stay required.
+            optional: true,
             format: None,
+            key_match: KeyMatch::User,
         });
     }
     Ok(out)
@@ -338,6 +373,7 @@ fn parse_env_object_value(
             secret: true,
             optional,
             format: None,
+            key_match: KeyMatch::User,
         }),
         Value::Bool(false) => Ok(EnvEntry {
             pattern: key,
@@ -345,6 +381,7 @@ fn parse_env_object_value(
             secret: true,
             optional,
             format: None,
+            key_match: KeyMatch::User,
         }),
         Value::String(s) => parse_env_string_value(key, optional, s, ctx, path),
         Value::Object(extras) => parse_env_extras(key, optional, extras, ctx, path),
@@ -364,6 +401,15 @@ fn parse_env_string_value(
 ) -> Result<EnvEntry, CompileError> {
     // `$(…)` resolver — trusted homes only.
     if resolve::has_substitution(s) {
+        // Reject a glob-key literal BEFORE running the command (a glob key has no
+        // single value to bind; without this the exec fires, then construct_env
+        // rejects it — a wasted, surprising side effect).
+        if is_glob(&key) {
+            return Err(CompileError::shape(
+                path,
+                "`$(…)` cannot be bound to a glob key",
+            ));
+        }
         if !ctx.trusted {
             return Err(CompileError::untrusted_substitution(path));
         }
@@ -375,6 +421,7 @@ fn parse_env_string_value(
             secret: true,
             optional,
             format: None,
+            key_match: KeyMatch::User,
         });
     }
     // Otherwise a type from the grammar.
@@ -386,6 +433,7 @@ fn parse_env_string_value(
         secret: true,
         optional,
         format,
+        key_match: KeyMatch::User,
     })
 }
 
@@ -434,6 +482,14 @@ fn parse_env_extras(
     let format = ty.as_ref().and_then(EnvType::format);
     // An explicit `value:` (optionally `$(…)`) overrides the ambient source.
     if let Some(v) = extras.get("value") {
+        // A literal value has no single key to bind to under a glob — reject
+        // before any `$(…)` runs.
+        if is_glob(&key) {
+            return Err(CompileError::shape(
+                &child(path, "value"),
+                "a literal `value` cannot be bound to a glob key",
+            ));
+        }
         let raw = as_str(v, &child(path, "value"))?;
         let resolved = if resolve::has_substitution(raw) {
             if !ctx.trusted {
@@ -454,6 +510,7 @@ fn parse_env_extras(
             secret,
             optional,
             format,
+            key_match: KeyMatch::User,
         });
     }
     Ok(EnvEntry {
@@ -462,20 +519,29 @@ fn parse_env_extras(
         secret,
         optional,
         format,
+        key_match: KeyMatch::User,
     })
 }
 
 /// The env `"..."` payload: the default secret denies (name-token + prefix
 /// matches), spliced as trailing deny entries.
 fn splice_env_defaults(out: &mut Vec<EnvEntry>) {
-    for tok in defaults::SECRET_ENV_TOKENS {
-        out.push(EnvEntry {
-            pattern: format!("*{tok}*"),
-            action: EnvAction::Deny,
-            secret: true,
-            optional: false,
-            format: None,
-        });
+    // Each secret token is its own ordered deny entry (so a later user allow can
+    // re-permit one by ordering). Two match rules per the token's ambiguity:
+    // unambiguous → substring; short/ambiguous → whole segment.
+    let secret_deny = |pattern: String, key_match: KeyMatch| EnvEntry {
+        pattern,
+        action: EnvAction::Deny,
+        secret: true,
+        optional: false,
+        format: None,
+        key_match,
+    };
+    for tok in defaults::SECRET_SUBSTR_TOKENS {
+        out.push(secret_deny(tok.to_string(), KeyMatch::SecretSubstr));
+    }
+    for tok in defaults::SECRET_SEGMENT_TOKENS {
+        out.push(secret_deny(tok.to_string(), KeyMatch::SecretSegment));
     }
     for key in defaults::SECRET_ENV_KEYS {
         let pat = if key.ends_with('_') {
@@ -483,13 +549,7 @@ fn splice_env_defaults(out: &mut Vec<EnvEntry>) {
         } else {
             key.to_string()
         };
-        out.push(EnvEntry {
-            pattern: pat,
-            action: EnvAction::Deny,
-            secret: true,
-            optional: false,
-            format: None,
-        });
+        out.push(secret_deny(pat, KeyMatch::SecretGlob));
     }
 }
 
@@ -501,11 +561,9 @@ fn construct_env(
     ctx: &CompileCtx,
     policy: &mut EnvPolicy,
 ) -> Result<(), CompileError> {
-    // Compile a matcher per entry pattern (case-SENSITIVE — env keys are).
-    let matchers: Vec<Option<globset::GlobMatcher>> = entries
-        .iter()
-        .map(|e| Glob::new(&e.pattern).ok().map(|g| g.compile_matcher()))
-        .collect();
+    // Compile a matcher per entry, honoring its `key_match`: user patterns are
+    // case-sensitive globs, the built-in secret defaults case-insensitive.
+    let matchers: Vec<KeyMatcher> = entries.iter().map(compile_key_matcher).collect();
 
     // 1. Literal-value entries: set directly + validate + schema. (Exact keys
     //    only; a glob key has no single value to bind.)
@@ -528,11 +586,7 @@ fn construct_env(
         }
         let mut verdict: Option<&EnvEntry> = None;
         for (e, m) in entries.iter().zip(&matchers) {
-            let hit = match m {
-                Some(mm) => mm.is_match(name),
-                None => &e.pattern == name,
-            };
-            if hit {
+            if m.hit(name) {
                 verdict = Some(e);
             }
         }
@@ -587,6 +641,45 @@ fn construct_env(
 
 fn is_glob(s: &str) -> bool {
     s.contains(['*', '?', '[', '{'])
+}
+
+/// A compiled env-key matcher — the runtime form of an entry's [`KeyMatch`].
+enum KeyMatcher {
+    /// A compiled glob (user case-sensitive, or a secret-KEY case-insensitive).
+    Glob(GlobMatcher),
+    /// Exact fallback when a user pattern fails to compile as a glob.
+    Exact(String),
+    /// A secret token matched as a case-insensitive substring.
+    SecretSubstr(String),
+    /// A secret token matched as a case-insensitive whole segment.
+    SecretSegment(String),
+}
+
+impl KeyMatcher {
+    fn hit(&self, name: &str) -> bool {
+        match self {
+            KeyMatcher::Glob(m) => m.is_match(name),
+            KeyMatcher::Exact(s) => s == name,
+            KeyMatcher::SecretSubstr(word) => defaults::word_in_substr(word, name),
+            KeyMatcher::SecretSegment(word) => defaults::word_is_segment(word, name),
+        }
+    }
+}
+
+/// Compile an entry's pattern into a [`KeyMatcher`] per its [`KeyMatch`] kind.
+fn compile_key_matcher(e: &EnvEntry) -> KeyMatcher {
+    match e.key_match {
+        KeyMatch::SecretSubstr => KeyMatcher::SecretSubstr(e.pattern.clone()),
+        KeyMatch::SecretSegment => KeyMatcher::SecretSegment(e.pattern.clone()),
+        KeyMatch::User | KeyMatch::SecretGlob => {
+            let case_insensitive = matches!(e.key_match, KeyMatch::SecretGlob);
+            GlobBuilder::new(&e.pattern)
+                .case_insensitive(case_insensitive)
+                .build()
+                .map(|g| KeyMatcher::Glob(g.compile_matcher()))
+                .unwrap_or_else(|_| KeyMatcher::Exact(e.pattern.clone()))
+        }
+    }
 }
 
 // ── shared helpers ────────────────────────────────────────────────────────────

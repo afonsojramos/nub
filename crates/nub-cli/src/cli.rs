@@ -1681,6 +1681,9 @@ fn value_consuming_flags(subcommand: &str) -> &'static [&'static str] {
             "--reporter",
             "--cwd",
             "--workspace-concurrency",
+            // Internal `--sandbox <FILE>` (hidden) takes a separate-token policy
+            // path, so its value must not mis-bind as the script positional.
+            "--sandbox",
         ],
         // Exec's workspace value-flags must be listed so `nubx --filter @org/api
         // tsc` binds `@org/api` to the filter, not the bin positional. (Exec's
@@ -8619,6 +8622,7 @@ mod tests {
             "--resume-from",
             "--script-shell",
             "--workspace-concurrency",
+            "--sandbox",
         ] {
             assert!(
                 flags.contains(&required),

@@ -49,22 +49,58 @@ const SECRET_READ_RELPATHS: &[&str] = &[
 /// not by `fs.read()`-ing the file, so denying these is near-zero-breakage.
 const SECRET_READ_GLOBS: &[&str] = &["**/.env", "**/.env.*", ".env", ".env.*"];
 
-/// Secret-name env markers — a key matching any (as a boundary-delimited token or
-/// obvious substring) is a default env Deny. Ported from the §8.5 env posture.
-pub const SECRET_ENV_TOKENS: &[&str] = &[
+/// Secret name-word tokens matched as a case-insensitive SUBSTRING anywhere in a
+/// key (via [`word_in_substr`]). These are long/specific enough that a substring
+/// rule has no realistic false positive, so it catches the forms an exact-segment
+/// rule misses — plurals (`SESSION_TOKENS`, `DB_PASSWORDS`, `CREDENTIALS`),
+/// undelimited/camelCase (`MYTOKEN`, `myToken`), and fused names
+/// (`GOOGLE_APPLICATION_CREDENTIALS`). Ported from the §8.5 env posture.
+pub const SECRET_SUBSTR_TOKENS: &[&str] = &[
     "token",
     "secret",
     "password",
     "passwd",
-    "auth",
     "credential",
     "apikey",
     "api_key",
-    "pat",
-    "pwd",
 ];
-/// Secret-name env prefixes/exact keys denied by default.
+
+/// Short/ambiguous secret tokens matched ONLY as a whole `_`/`-`/`.` segment (via
+/// [`word_is_segment`]). A substring rule on these would over-match wildly
+/// (`pat`→PATH, `auth`→AUTHOR, `pwd`→PWD-as-substring); segment matching still
+/// catches `MYSQL_PWD`, `X_AUTH_TOKEN`, `GITHUB_PAT` while sparing PATH/AUTHOR.
+/// Bare `PWD` (the CWD var, a whole segment) IS denied under `"..."` — a benign
+/// false positive (the working directory is re-derivable). A superstring like
+/// `AUTHORIZATION` is NOT caught (segment ≠ `auth`); `["*","..."]` is a
+/// best-effort denylist, not a guarantee — real confinement is an allowlist.
+pub const SECRET_SEGMENT_TOKENS: &[&str] = &["pat", "pwd", "auth"];
+
+/// Secret-name env prefixes/exact keys denied by default. Matched as
+/// case-insensitive globs (a trailing `_` becomes a `*` prefix); no boundary
+/// logic needed since these are already anchored names, not bare words.
 pub const SECRET_ENV_KEYS: &[&str] = &["AWS_", "NPM_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"];
+
+/// Case-insensitive substring test — the match rule for [`SECRET_SUBSTR_TOKENS`].
+pub fn word_in_substr(word: &str, key: &str) -> bool {
+    key.to_ascii_uppercase()
+        .contains(&word.to_ascii_uppercase())
+}
+
+/// Whole-segment (case-insensitive) test — the match rule for
+/// [`SECRET_SEGMENT_TOKENS`]. The key is split on `_`/`-`/`.` and the word must
+/// EQUAL one segment, so `pwd` hits `MYSQL_PWD` but `pat` misses `PATH`.
+pub fn word_is_segment(word: &str, key: &str) -> bool {
+    let w = word.to_ascii_uppercase();
+    segments(key).contains(&w)
+}
+
+/// Split a name into non-empty, upper-cased segments on `_`/`-`/`.` boundaries.
+fn segments(s: &str) -> Vec<String> {
+    s.split(['_', '-', '.'])
+        .filter(|seg| !seg.is_empty())
+        .map(str::to_ascii_uppercase)
+        .collect()
+}
 
 /// Build the default fs-read DENY entries (secret paths + `.env*` globs). These
 /// are what `"..."` splices into a read ruleset. Deny access is neutral (Read).

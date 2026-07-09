@@ -88,8 +88,26 @@ fn unknown_preset_is_a_hard_error_naming_the_set() {
 #[test]
 fn path_like_string_is_an_unresolved_file_ref() {
     let ctx = common::ctx(true, &[]);
-    let err = compile(&json!("./policy.json"), &ctx).unwrap_err();
-    assert!(matches!(err, CompileError::FileRefUnresolved { .. }));
+    // A leading `./`/`../`/`/`/`~` or an extension = file-ref.
+    for reference in [
+        "./policy.json",
+        "../p.json",
+        "/abs/p.json",
+        "~/p.json",
+        "p.json",
+    ] {
+        let err = compile(&json!(reference), &ctx).unwrap_err();
+        assert!(
+            matches!(err, CompileError::FileRefUnresolved { .. }),
+            "{reference} should be a file-ref"
+        );
+    }
+    // A bare identifier (no leading-dot, no extension) = preset — matching
+    // nub-cli's project_config classifier exactly (Phase R unified the two).
+    assert!(matches!(
+        compile(&json!("build-jail-x"), &ctx).unwrap_err(),
+        CompileError::UnknownPreset { .. }
+    ));
 }
 
 // ── unknown keys fail loud ────────────────────────────────────────────────────
@@ -143,6 +161,75 @@ fn env_spread_defaults_deny_secrets_but_ordering_can_reallow() {
 }
 
 #[test]
+fn env_secret_defaults_deny_uppercase_secrets_without_overmatching() {
+    // The security regression that motivated Phase R: the `"..."` secret guards
+    // were case-sensitive lowercase substrings, so real UPPERCASE secrets leaked.
+    // Unambiguous tokens now match case-insensitively as SUBSTRINGS (catching
+    // plurals, undelimited, and fused names); short/ambiguous tokens (pat/pwd/auth)
+    // match only as whole SEGMENTS so look-alikes (`PATH`⊃`pat`, `AUTHOR`⊃`auth`)
+    // survive.
+    let secrets = [
+        "MY_TOKEN",
+        "MY_PASSWORD",
+        "DATABASE_SECRET",
+        "MY_API_KEY",
+        "AWS_SECRET_ACCESS_KEY",
+        "my_token",                       // lowercase → case-insensitive
+        "SESSION_TOKENS",                 // plural — substring rule catches it
+        "DB_PASSWORDS",                   // plural
+        "CREDENTIALS",                    // plural, bare
+        "GOOGLE_APPLICATION_CREDENTIALS", // fused/plural
+        "MYTOKEN",                        // undelimited
+        "MYSQL_PWD",                      // short token as a whole segment
+    ];
+    let benign = ["PATH", "AUTHOR", "COMPATIBILITY", "HOME", "LANG"];
+    let mut env: Vec<(&str, &str)> = secrets.iter().map(|k| (*k, "s")).collect();
+    env.extend(benign.iter().map(|k| (*k, "ok")));
+
+    let ctx = common::ctx(true, &env);
+    let p = compile(&json!({ "env": ["*", "..."] }), &ctx).unwrap();
+    let c = &p.env.constructed;
+    for leaked in secrets {
+        assert!(
+            !c.contains_key(leaked),
+            "{leaked} must be denied by default"
+        );
+    }
+    for kept in benign {
+        assert!(
+            c.contains_key(kept),
+            "{kept} must survive — the guards must not over-match"
+        );
+    }
+}
+
+#[test]
+fn env_array_is_an_allowlist_not_required() {
+    // Array exact keys are pass-through-if-present, NEVER required — the canonical
+    // `["FOO", "BAR", "!*_TOKEN"]` must compile even when FOO/BAR are unset.
+    let absent = common::ctx(true, &[("BAR", "b")]);
+    let p = compile(&json!({ "env": ["FOO", "BAR", "!*_TOKEN"] }), &absent).unwrap();
+    assert!(!p.env.constructed.contains_key("FOO"), "absent FOO omitted");
+    assert_eq!(p.env.constructed.get("BAR").map(String::as_str), Some("b"));
+
+    // Object plain-keys, by contrast, stay REQUIRED (fail on missing).
+    let err = compile(&json!({ "env": { "FOO": true } }), &absent).unwrap_err();
+    assert!(matches!(err, CompileError::MissingRequired { .. }));
+}
+
+#[test]
+fn env_user_deny_stays_case_sensitive() {
+    // Only the BUILT-IN secret defaults are case-insensitive; a user's explicit
+    // `!vite_url` must NOT deny `VITE_URL` (POSIX env keys are case-sensitive).
+    let ctx = common::ctx(true, &[("VITE_URL", "keep")]);
+    let p = compile(&json!({ "env": ["VITE_*", "!vite_url"] }), &ctx).unwrap();
+    assert_eq!(
+        p.env.constructed.get("VITE_URL").map(String::as_str),
+        Some("keep")
+    );
+}
+
+#[test]
 fn env_object_types_validate() {
     let ctx = common::ctx(true, &[("PORT", "8080"), ("COUNT", "12")]);
     let p = compile(
@@ -164,6 +251,23 @@ fn env_object_types_validate() {
     let bad = common::ctx(true, &[("PORT", "notaport")]);
     let err = compile(&json!({ "env": { "PORT": "port" } }), &bad).unwrap_err();
     assert!(matches!(err, CompileError::Validation { .. }));
+}
+
+#[test]
+fn env_number_rejects_non_finite() {
+    // `number` means a finite numeric string — `inf`/`nan` are not values.
+    let ok = common::ctx(true, &[("RATIO", "1.5")]);
+    assert!(compile(&json!({ "env": { "RATIO": "number" } }), &ok).is_ok());
+    for bad in ["inf", "nan", "infinity"] {
+        let ctx = common::ctx(true, &[("RATIO", bad)]);
+        assert!(
+            matches!(
+                compile(&json!({ "env": { "RATIO": "number" } }), &ctx),
+                Err(CompileError::Validation { .. })
+            ),
+            "`{bad}` must be rejected as a number"
+        );
+    }
 }
 
 #[test]
@@ -262,6 +366,34 @@ fn substitution_failure_surfaces() {
     assert!(matches!(err, CompileError::Substitution { .. }));
 }
 
+#[test]
+fn glob_key_substitution_is_rejected_before_running() {
+    // A `$(…)` on a glob key has no single key to bind to → rejected at parse,
+    // BEFORE the command runs (the runner panics if reached).
+    struct PanicRunner;
+    impl nub_sandbox::CommandRunner for PanicRunner {
+        fn run(&self, _: &str) -> Result<String, String> {
+            panic!("a glob-key `$(…)` must be rejected before it executes");
+        }
+    }
+    let ctx = nub_sandbox::compiler::CompileCtx {
+        homes: common::homes(),
+        cwd: common::homes().project,
+        trusted: true,
+        ambient_env: std::collections::BTreeMap::new(),
+        runner: Box::new(PanicRunner),
+    };
+    for surface in [
+        json!({ "env": { "FOO_*": "$(echo hi)" } }),
+        json!({ "env": { "FOO_*": { "value": "$(echo hi)" } } }),
+    ] {
+        assert!(matches!(
+            compile(&surface, &ctx).unwrap_err(),
+            CompileError::Shape { .. }
+        ));
+    }
+}
+
 // ── net fold ──────────────────────────────────────────────────────────────────
 
 #[test]
@@ -278,6 +410,23 @@ fn net_array_hosts_and_cidr_classify() {
     assert!(m.admits("10.2.3.4"));
     assert!(!m.admits("evil.com"));
     assert!(!m.admits("unlisted.com"));
+}
+
+#[test]
+fn net_bad_cidr_is_a_shape_error_at_its_path() {
+    let ctx = common::ctx(true, &[]);
+    let err = compile(&json!({ "net": ["10.0.0.0/999"] }), &ctx).unwrap_err();
+    match err {
+        CompileError::Shape { path, .. } => assert_eq!(path, "net.0", "error points at the entry"),
+        other => panic!("expected Shape, got {other:?}"),
+    }
+}
+
+#[test]
+fn net_per_host_object_option_is_rejected_for_now() {
+    let ctx = common::ctx(true, &[]);
+    let err = compile(&json!({ "net": { "*.x.com": { "port": 443 } } }), &ctx).unwrap_err();
+    assert!(matches!(err, CompileError::Shape { .. }));
 }
 
 #[test]

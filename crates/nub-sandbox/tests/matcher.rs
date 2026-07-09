@@ -114,6 +114,22 @@ fn fs_rw_grant_is_writable_read_only_grant_is_not() {
     assert!(matches!(d_ro.effect, Effect::Allow) && matches!(d_ro.access, FsAccess::Read));
 }
 
+#[test]
+fn deny_is_not_dodged_by_parent_dir_traversal() {
+    use nub_sandbox::compiler::compile;
+    use serde_json::json;
+    // A `..` bounce back into a denied subtree must still hit the deny — the
+    // candidate is canonicalized (incl. non-existent tail) before matching.
+    let ctx = common::ctx(true, &[]);
+    let policy = compile(&json!({ "fs": ["...", "!~/.ssh"] }), &ctx).unwrap();
+    let m = PathMatcher::new(&policy.fs.rules);
+    let dodge = common::homes().home.join(".ssh/../.ssh/id_rsa");
+    assert!(
+        matches!(m.decide(&dodge).effect, Effect::Deny),
+        "`..` traversal must not dodge the ssh deny"
+    );
+}
+
 // ── host glob + CIDR ──────────────────────────────────────────────────────────
 
 #[test]

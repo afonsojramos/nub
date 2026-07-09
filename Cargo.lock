@@ -2759,7 +2759,6 @@ name = "nub-sandbox"
 version = "0.4.5"
 dependencies = [
  "globset",
- "ignore",
  "ipnet",
  "libc",
  "regex",

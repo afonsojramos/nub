@@ -85,10 +85,12 @@ impl EnvType {
                 .parse::<i64>()
                 .map(|_| ())
                 .map_err(|_| format!("`{value}` is not an integer")),
-            EnvType::Format(EnvFormat::Number) => value
-                .parse::<f64>()
-                .map(|_| ())
-                .map_err(|_| format!("`{value}` is not a number")),
+            EnvType::Format(EnvFormat::Number) => match value.parse::<f64>() {
+                // Reject `inf`/`nan` — a config value typed `number` means a finite
+                // numeric string, not an IEEE special.
+                Ok(n) if n.is_finite() => Ok(()),
+                _ => Err(format!("`{value}` is not a finite number")),
+            },
             EnvType::Format(EnvFormat::Port) => match value.parse::<u32>() {
                 Ok(n) if (1..=65535).contains(&n) => Ok(()),
                 _ => Err(format!("`{value}` is not a valid port (1–65535)")),

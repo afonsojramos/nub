@@ -998,6 +998,24 @@ mod tests {
         }
     }
 
+    #[test]
+    fn hostile_input_never_panics() {
+        // A malicious/broken project file must degrade to Ok/Err, never panic or
+        // stack-overflow. Deep nesting, huge arrays, duplicate keys, embedded NUL.
+        let deep = format!("{}1{}", "[".repeat(2000), "]".repeat(2000));
+        let _ = parse_project_config(&deep); // deep-nesting: no overflow
+
+        let dup = parse_project_config(r#"{ "nodeCompat": true, "nodeCompat": false }"#);
+        assert_eq!(dup.unwrap().node_compat, Some(false), "last duplicate wins");
+
+        let huge = format!(r#"{{ "preload": [{}] }}"#, "\"x\",".repeat(5000));
+        assert!(parse_project_config(&huge).is_ok(), "huge array parses");
+
+        // Embedded NUL / control chars in a string value → parses (Type-valid) or
+        // Parse-errors, never panics.
+        let _ = parse_project_config("{ \"tsconfig\": \"a\\u0000b\" }");
+    }
+
     // ── the discovery gate ──
 
     #[test]
