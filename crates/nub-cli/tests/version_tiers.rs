@@ -196,6 +196,67 @@ fn import_text_works_on_compat_tier() {
     );
 }
 
+/// Import Text on the FAST tier BELOW 26.5 (Node 24.x): sync `module.registerHooks`,
+/// but native `--experimental-import-text` does not exist yet, so nub serves text imports
+/// via its own `loadTextImport` short-circuit (the `nativeImportText=false` arm of the
+/// makeHooks load hook). Pins the 24.x fast-tier path deterministically — the host-Node
+/// `integration.rs` cases silently migrate to the native-defer path once the host reaches
+/// >= 26.5 (AGENTS.md "latest major"), leaving [22.15, 26.5) otherwise uncovered.
+#[test]
+fn import_text_works_on_fast_tier_below_26_5() {
+    let Some((stdout, stderr, code)) = run_nub_against_node((24, 4, 0), "import-text", "main.ts")
+    else {
+        eprintln!("skipping: Node 24.4.0 not installed (set TEST_NODE_BIN_24_4_0 or nvm install)");
+        return;
+    };
+    assert_eq!(
+        code, 0,
+        "fast-tier (<26.5) import-text must succeed via nub's short-circuit: stderr={stderr}"
+    );
+    assert!(
+        stdout.contains(r##"md:"# Release notes\n\n- first\n- second\n""##),
+        "fast tier <26.5: .md read as text via nub's loadTextImport: stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("yaml-is-string:true") && stdout.contains("json-is-string:true"),
+        "fast tier <26.5: the attribute wins over data-loader parsing: stdout={stdout:?}"
+    );
+}
+
+/// Import Text on the NATIVE tier (Node >= 26.5.0). There nub injects
+/// `--experimental-import-text` and its preload DEFERS `with { type: "text" }` to
+/// Node's native text translator (signaled by `__NUB_NATIVE_IMPORT_TEXT`) instead of
+/// serving it with nub's own `loadTextImport`. The user-visible result must be
+/// byte-identical to the compat/host tiers — SAME fixture, SAME assertions — proving
+/// the mechanism swap is transparent, and the experimental warning native emits must
+/// stay suppressed by nub's injected `--disable-warning=ExperimentalWarning`.
+#[test]
+fn import_text_works_via_native_on_26_5() {
+    let Some((stdout, stderr, code)) = run_nub_against_node((26, 5, 0), "import-text", "main.ts")
+    else {
+        eprintln!("skipping: Node 26.5.0 not installed (set TEST_NODE_BIN_26_5_0 or nvm install)");
+        return;
+    };
+    assert_eq!(
+        code, 0,
+        "native-tier import-text must succeed: stderr={stderr}"
+    );
+    assert!(
+        stdout.contains(r##"md:"# Release notes\n\n- first\n- second\n""##),
+        "native tier: .md read as text via Node's native translator: stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("yaml-is-string:true") && stdout.contains("json-is-string:true"),
+        "native tier: the attribute wins over data-loader parsing on the native path: stdout={stdout:?}"
+    );
+    // Native's textStrategy emits ExperimentalWarning('Text import'); nub's injected
+    // --disable-warning=ExperimentalWarning must keep it off the user's stderr.
+    assert!(
+        !stderr.contains("ExperimentalWarning"),
+        "native import-text experimental warning must stay suppressed: stderr={stderr:?}"
+    );
+}
+
 /// Node 18.18.0 is one patch below the 18.19 floor — the boundary case
 /// for the hard-error tier. Contract: stderr carries the canonical
 /// refusal text, exit is non-zero, and (implicitly) Node was never
