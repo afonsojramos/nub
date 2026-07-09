@@ -676,6 +676,28 @@ mod win {
             schema: Vec::new(),
             withheld: vec!["NUB_SBX_SECRET".to_string()],
         };
+        // env-read-ascendant is OS-CLOSED (the AppContainer denies the parent
+        // OpenProcess(PROCESS_VM_READ), run 29043151805) — apply() must NOT report it LOST
+        // for an env-withholding policy, else a frontend would think Windows is degraded when
+        // it isn't. Lock in the corrected state so it can't silently regress.
+        {
+            let spec_args: &[&str] = &["__sbxchild__", "token"];
+            let spec = CommandSpec::new(child.as_os_str()).args(spec_args.iter().copied());
+            let prepared = apply(&scrub, spec).expect("apply env-withholding scrub policy");
+            if prepared
+                .degradation
+                .lost
+                .iter()
+                .any(|s| s.as_str() == "env-read-ascendant")
+            {
+                fails += 1;
+                eprintln!(
+                    "FAIL env-read-ascendant: apply() still reports it LOST (OS-closed, must not degrade)"
+                );
+            } else {
+                println!("PASS env-read-ascendant NOT reported by apply() (OS-closed)");
+            }
+        }
         expect(
             &mut fails,
             "scrubbed child does NOT see the secret (absent)",

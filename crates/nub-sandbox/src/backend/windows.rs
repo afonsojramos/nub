@@ -35,8 +35,8 @@
 //! (run 29043151805) with the parent BOTH elevated AND de-elevated; an unconfined control
 //! recovers the secret (negative control). So no dedicated-account backend is needed for
 //! this axis. (Bound: the VM_READ-inclusive open is proven denied; a QUERY_LIMITED-only
-//! handle wasn't separately probed but cannot read the env block.) NOTE: the
-//! `env-read-ascendant` `Degradation` emitted by [`apply`] is now stale — pending removal.
+//! handle wasn't separately probed but cannot read the env block.) [`apply`] therefore
+//! emits NO `env-read-ascendant` `Degradation`.
 //!
 //! THE LAUNCH SEAM: unlike mac/linux, this backend cannot hand the caller a pre-built
 //! `std::process::Command` — the AppContainer launch needs a custom CreateProcess, a
@@ -379,17 +379,10 @@ pub(crate) fn apply(
                 .to_string()
         });
     }
-    // Env-read isolation from ascendants is REDUCED on Windows (same-user
-    // PROCESS_VM_READ) whenever the scrub actually withholds something. env-scrub of
-    // the child's own env still holds; this names the residual, per design.md §2.4.
-    if policy.env.enforce && !policy.env.withheld.is_empty() {
-        deg.lost.push("env-read-ascendant".to_string());
-        reason.get_or_insert_with(|| {
-            "same-user PROCESS_VM_READ can read the parent's env — ascendant-env \
-             isolation is reduced on Windows (dedicated-account backend is the fix)"
-                .to_string()
-        });
-    }
+    // (Ascendant-env read is OS-CLOSED — the AppContainer denies the parent
+    // OpenProcess(PROCESS_VM_READ), run 29043151805 — so NO `env-read-ascendant`
+    // Degradation is emitted. Reporting it would falsely tell a frontend Windows is
+    // degraded when it isn't. See the module doc.)
     deg.reason = reason;
 
     let launch = WindowsLaunch {
