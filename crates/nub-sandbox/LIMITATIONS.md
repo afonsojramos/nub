@@ -128,14 +128,25 @@ environ.
   it spawns the child (scrub nub's environ pre-spawn, or clean-env re-exec). Launcher
   owns the parent env. See design.md §2.4.
 
-### Windows ascendant-env via same-user `PROCESS_VM_READ`
+### Windows ascendant-env via same-user `PROCESS_VM_READ` — OS-CLOSED (not a residual)
 
-The Windows twin of the above: a same-user `OpenProcess(PROCESS_VM_READ)` on the parent
-reads nub's environ; AppContainer cannot block it. Surfaced as an `env-read-ascendant`
-`Degradation` whenever the scrub actually withholds something.
+Previously suspected as the Windows twin of the macOS ascendant-env read; **empirically
+disproven** — the AppContainer closes it. A LowBox child CANNOT
+`OpenProcess(PROCESS_VM_READ)` the parent to read nub's environ: the AppContainer access
+check requires the target process object's DACL to grant the child's package SID, a
+capability, or `ALL APPLICATION PACKAGES`, and a normal parent process grants only the user
+SID — so the open is denied (`ERROR_ACCESS_DENIED`), **independent of integrity level**.
 
-- **Where fixed:** the dedicated-account (distinct low-privilege user) backend, so the
-  child cannot open the parent — a post-v0 launcher concern.
+- **CI-proven on windows-latest (run 29043151805)** with the parent BOTH elevated AND
+  de-elevated (Medium-IL standard user): the AppContainer child's `OpenProcess(PROCESS_VM_READ
+  | PROCESS_QUERY_LIMITED_INFORMATION)` on the parent is DENIED (exit 5), while an unconfined
+  control recovers the secret (exit 0 — negative control proving the read path is live). So
+  **no dedicated-account backend is needed for this axis.**
+- **Honest bound:** the `PROCESS_VM_READ`-inclusive `OpenProcess` is proven denied; a
+  `PROCESS_QUERY_LIMITED_INFORMATION`-only handle was not separately probed, but it cannot
+  read the environment block (that requires `PROCESS_VM_READ`), so it does not reopen the axis.
+- **Code follow-up:** `backend/windows.rs` still emits an `env-read-ascendant` `Degradation`
+  when the scrub withholds something — now stale given this result, pending removal.
 
 ### macOS toolchain read-confine for a non-system interpreter
 

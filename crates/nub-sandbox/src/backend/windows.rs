@@ -27,11 +27,16 @@
 //!   - process-reap: a Job Object with `KILL_ON_JOB_CLOSE`; the whole tree dies when
 //!     the job handle closes (after the child exits, or if nub does).
 //!
-//! ENV-READ ISOLATION FROM ASCENDANTS IS REDUCED (design.md §2.4): a same-user
-//! `OpenProcess(PROCESS_VM_READ)` on the parent can read nub's environ; AppContainer
-//! cannot block it. env-scrub of the child's OWN env holds; ascendant-env isolation
-//! is v1-degraded-with-note (the dedicated-account backend is the post-v0 fix). We
-//! report it, never silently claim it closed.
+//! ASCENDANT-ENV READ IS OS-CLOSED (design.md §2.4): a LowBox child CANNOT
+//! `OpenProcess(PROCESS_VM_READ)` the parent to read nub's environ — the AppContainer
+//! access check needs the target's DACL to grant the child's package SID / a capability /
+//! `ALL APPLICATION PACKAGES`, which a normal parent process does not, so the open is
+//! DENIED (`ERROR_ACCESS_DENIED`), integrity-level-independent. CI-proven on windows-latest
+//! (run 29043151805) with the parent BOTH elevated AND de-elevated; an unconfined control
+//! recovers the secret (negative control). So no dedicated-account backend is needed for
+//! this axis. (Bound: the VM_READ-inclusive open is proven denied; a QUERY_LIMITED-only
+//! handle wasn't separately probed but cannot read the env block.) NOTE: the
+//! `env-read-ascendant` `Degradation` emitted by [`apply`] is now stale — pending removal.
 //!
 //! THE LAUNCH SEAM: unlike mac/linux, this backend cannot hand the caller a pre-built
 //! `std::process::Command` — the AppContainer launch needs a custom CreateProcess, a
