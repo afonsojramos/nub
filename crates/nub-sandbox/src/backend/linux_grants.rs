@@ -107,12 +107,16 @@ pub(crate) fn derive_read_grants(policy: &SandboxPolicy) -> DerivedGrants {
             if is_proc_or_sys(&top) {
                 continue;
             }
-            // A system top-level is granted CLEAN (allowed, and no LITERAL deny
-            // targets inside it) — the depth-independent `.env*` carve is
-            // deliberately not walked across system dirs (no user secrets there;
-            // net-deny blocks exfil regardless). A literal deny inside, or any
-            // user-data top-level, is walked with the full carve.
-            if is_system_toplevel(&top) && view.allows(&top) && !view.has_literal_deny_under(&top) {
+            // A system top-level is granted CLEAN only when the ONLY denies reaching
+            // inside it are the BUILT-IN `.env*` secret globs — those are
+            // deliberately not carved across system dirs (no user `.env` there;
+            // net-deny blocks exfil regardless). A USER-authored deny reaching inside
+            // (literal like `!/etc/x`, or depth-independent like `!**/*.pem`) forces
+            // the full carve so an explicit deny is never silently overridden.
+            if is_system_toplevel(&top)
+                && view.allows(&top)
+                && !view.has_nonbuiltin_deny_reaching(&top)
+            {
                 out.grants.push(Grant {
                     path: top,
                     kind: GrantKind::ReadSubtree,
@@ -130,22 +134,52 @@ pub(crate) fn derive_read_grants(policy: &SandboxPolicy) -> DerivedGrants {
     out
 }
 
-/// Derive the WRITE grants (read+write subtrees). The caller pre-creates a
-/// not-yet-existing write root before installing the grant.
-pub(crate) fn derive_write_grants(policy: &SandboxPolicy) -> Vec<Grant> {
+/// Derive the WRITE grants (read+write subtrees) plus a `write_partial` honesty
+/// flag. The caller pre-creates a not-yet-existing write root before installing.
+pub(crate) fn derive_write_grants(policy: &SandboxPolicy) -> (Vec<Grant>, bool) {
     if !write_confines(&policy.fs) {
-        return Vec::new();
+        return (Vec::new(), false);
     }
     let view = View::write(&policy.fs.rules);
+    let (roots, whole_fs) = view.allow_roots();
     let mut out = Vec::new();
-    for root in view.write_roots(&policy.fs.rules) {
-        walk_write(&root, &view, &mut out);
+    let mut visits = 0usize;
+    let mut partial = false;
+    if whole_fs {
+        // A whole-fs `rw` grant (`{"**":"rw"}`): seed from `/`'s top-levels, minus
+        // `/proc`,`/sys` — symmetric with the generous-read seeding.
+        for top in read_top_levels() {
+            if is_proc_or_sys(&top) {
+                continue;
+            }
+            walk_write(&top, &view, &mut out, &mut visits, &mut partial);
+        }
+    } else {
+        for root in roots {
+            walk_write(&root, &view, &mut out, &mut visits, &mut partial);
+        }
     }
     dedup(&mut out);
-    out
+    (out, partial)
 }
 
 // ── the carve walks ────────────────────────────────────────────────────────────
+
+/// Directory entries, SORTED by path, symlinks dropped — so the walk (and thus the
+/// grant set) is deterministic regardless of `read_dir` iteration order (a budget
+/// overflow must not depend on FS ordering). `Err` (unreadable/nonexistent) → empty.
+fn sorted_entries(dir: &Path) -> Vec<(std::fs::FileType, PathBuf)> {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut v: Vec<_> = rd
+        .flatten()
+        .filter_map(|e| e.file_type().ok().map(|ft| (ft, e.path())))
+        .filter(|(ft, _)| !ft.is_symlink())
+        .collect();
+    v.sort_by(|a, b| a.1.cmp(&b.1));
+    v
+}
 
 /// Recursively grant read under `dir`. A subtree whose verdict no later rule can
 /// flip is granted whole (`ReadSubtree`, walk stops). Where a later rule reaches
@@ -173,25 +207,16 @@ fn walk_read(dir: &Path, view: &View, out: &mut DerivedGrants, visits: &mut usiz
         }
         return;
     }
-    // A later rule can flip the verdict inside — carve.
+    // A later rule can flip the verdict inside — carve. Never follow symlinks: a
+    // link's target is granted (or not) on its own merits — a link to a denied
+    // secret stays denied because its resolved inode is not in the grant set.
     if weff == Effect::Allow {
         out.grants.push(Grant {
             path: dir.to_path_buf(),
             kind: GrantKind::ReadDir,
         });
     }
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        // Never follow symlinks: a link's target is granted (or not) on its own
-        // merits — a link to a denied secret stays denied because its resolved inode
-        // is not in the grant set (Landlock checks the resolved inode).
-        let Ok(ft) = entry.file_type() else { continue };
-        if ft.is_symlink() {
-            continue;
-        }
-        let child = entry.path();
+    for (ft, child) in sorted_entries(dir) {
         if ft.is_dir() {
             walk_read(&child, view, out, visits);
         } else if ft.is_file() && view.allows(&child) {
@@ -207,13 +232,27 @@ fn walk_read(dir: &Path, view: &View, out: &mut DerivedGrants, visits: &mut usiz
 /// rule reaches inside, recurse and grant each allowed child (no dir-list analog for
 /// write). Creating a NEW entry directly in a CARVED directory is not grantable
 /// without also granting the denied sibling, so that narrow corner is left denied
-/// (fail-safe) — existing allowed subtrees/files stay writable.
-fn walk_write(dir: &Path, view: &View, out: &mut Vec<Grant>) {
+/// (fail-safe) — existing allowed subtrees/files stay writable. Budget-capped like
+/// the read walk: on overflow the remainder is left ungranted and `partial` is set.
+fn walk_write(
+    dir: &Path,
+    view: &View,
+    out: &mut Vec<Grant>,
+    visits: &mut usize,
+    partial: &mut bool,
+) {
     if is_proc_or_sys(dir) {
+        return;
+    }
+    *visits += 1;
+    if *visits > MAX_VISITS || out.len() > MAX_GRANTS {
+        *partial = true;
         return;
     }
     let (widx, weff) = view.decide(dir);
     if !view.later_reaches(dir, widx, weff) {
+        // Uniform subtree (incl. a not-yet-existing write root — linux.rs pre-creates
+        // it before opening) → grant whole iff allowed.
         if weff == Effect::Allow {
             out.push(Grant {
                 path: dir.to_path_buf(),
@@ -222,25 +261,9 @@ fn walk_write(dir: &Path, view: &View, out: &mut Vec<Grant>) {
         }
         return;
     }
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        // Nonexistent/unreadable but uniform-allowed → grant whole (linux.rs
-        // pre-creates a not-yet-existing write root before opening it).
-        if weff == Effect::Allow {
-            out.push(Grant {
-                path: dir.to_path_buf(),
-                kind: GrantKind::WriteSubtree,
-            });
-        }
-        return;
-    };
-    for entry in entries.flatten() {
-        let Ok(ft) = entry.file_type() else { continue };
-        if ft.is_symlink() {
-            continue;
-        }
-        let child = entry.path();
+    for (ft, child) in sorted_entries(dir) {
         if ft.is_dir() {
-            walk_write(&child, view, out);
+            walk_write(&child, view, out, visits, partial);
         } else if ft.is_file() && view.allows(&child) {
             out.push(Grant {
                 path: child,
@@ -326,14 +349,16 @@ impl View {
         self.decide(path).1 == Effect::Allow
     }
 
-    /// Whether any LITERAL-anchored deny targets inside `dir`'s subtree. Used only by
-    /// the generous-`**` system-dir seeding, which grants system dirs clean but must
-    /// still honor a concrete deny path that lands inside one (a depth-independent
-    /// `.env*` deny is deliberately NOT counted — see the seeding comment).
-    fn has_literal_deny_under(&self, dir: &Path) -> bool {
+    /// Whether any deny that is NOT a built-in `.env*` secret glob reaches inside
+    /// `dir`. Used by the generous-`**` system-dir seeding: the built-in `.env*`
+    /// carve is skipped across system dirs, but a USER-authored deny (literal or
+    /// depth-independent) reaching inside must force the carve so it isn't silently
+    /// overridden.
+    fn has_nonbuiltin_deny_reaching(&self, dir: &Path) -> bool {
         self.entries.iter().any(|e| {
             e.effect == Effect::Deny
-                && matches!(literal_prefix(&e.glob), Prefix::Dir(p) if p.starts_with(dir) || dir.starts_with(&p))
+                && !is_builtin_env_glob(&e.glob)
+                && glob_reaches_under(&e.glob, dir)
         })
     }
 
@@ -370,22 +395,6 @@ impl View {
         roots.dedup();
         (roots, whole_fs)
     }
-
-    /// The `ReadWrite` allow roots (concrete literal prefixes) for the write walk.
-    fn write_roots(&self, set: &FsRuleSet) -> Vec<PathBuf> {
-        let mut roots = Vec::new();
-        for r in &set.entries {
-            if r.effect == Effect::Allow
-                && r.access == FsAccess::ReadWrite
-                && let Prefix::Dir(p) = literal_prefix(r.matcher.as_str())
-            {
-                roots.push(p);
-            }
-        }
-        roots.sort();
-        roots.dedup();
-        roots
-    }
 }
 
 // ── glob prefix analysis ───────────────────────────────────────────────────────
@@ -420,6 +429,17 @@ fn literal_prefix(glob: &str) -> Prefix {
     }
 }
 
+/// The built-in `.env*` deny globs the compiler splices via `"..."` (must stay in
+/// sync with `compiler::defaults::SECRET_READ_GLOBS`). These are the ONLY denies the
+/// generous-`**` system-dir seeding is allowed to skip — user secrets live in
+/// home/project (always walked), not under `/usr`,`/etc`,…; a USER-authored deny is
+/// never skipped.
+const BUILTIN_ENV_DENY_GLOBS: &[&str] = &["**/.env", "**/.env.*", ".env", ".env.*"];
+
+fn is_builtin_env_glob(glob: &str) -> bool {
+    BUILTIN_ENV_DENY_GLOBS.contains(&glob)
+}
+
 /// Whether a glob could match some path inside `dir`'s subtree. Depth-independent
 /// (rootless) and whole-fs globs can match anywhere → true; a literal-anchored glob
 /// reaches `dir` iff their subtrees overlap. Conservative (possible-match) so the
@@ -438,6 +458,19 @@ fn glob_reaches_under(glob: &str, dir: &Path) -> bool {
 /// defense-in-depth (no build needs it read). Hard filter, not policy-overridable.
 fn is_proc_or_sys(path: &Path) -> bool {
     path.starts_with("/proc") || path.starts_with("/sys")
+}
+
+/// Top-levels of `/` EXCLUDING `/proc`,`/sys` — the "relaxed fs but close /proc"
+/// grant set for an env-scrub-only policy. The env-read boundary requires `/proc`
+/// be unreadable whenever env is scrubbed (else a scrubbed child recovers the
+/// ancestor's env via `/proc/<ppid>/environ`), so even a policy that does NOT
+/// confine fs installs this ruleset: everything readable/writable except `/proc`,
+/// `/sys` — preserving "fs relaxed" while closing the ancestor-env file vector.
+pub(crate) fn relaxed_top_levels_except_proc_sys() -> Vec<PathBuf> {
+    read_top_levels()
+        .into_iter()
+        .filter(|p| !is_proc_or_sys(p))
+        .collect()
 }
 
 /// Top-level directories of `/`, for the generous `**` seeding. Empty if `/` can't
@@ -597,7 +630,8 @@ mod tests {
         let f = fixture();
         // Generous read + write only to ./writable. The generous `**` read is a
         // baseline (ordered first), so the later rw grant is uniform → whole subtree.
-        let g = derive_write_grants(&f.compile(serde_json::json!({ "fs": ["...", "./writable"] })));
+        let (g, _partial) =
+            derive_write_grants(&f.compile(serde_json::json!({ "fs": ["...", "./writable"] })));
         assert!(write_reachable(&g, &f.proj.join("writable/out.txt")));
         assert!(!write_reachable(&g, &f.proj.join("pub.txt")));
         assert!(!write_reachable(&g, &f.home.join("x")));
@@ -608,7 +642,8 @@ mod tests {
     fn nested_write_deny_is_carved_out() {
         let f = fixture();
         // Allow rw the whole project, deny ./sub — sub must be excluded from write.
-        let g = derive_write_grants(&f.compile(serde_json::json!({ "fs": ["./", "!./sub"] })));
+        let (g, _partial) =
+            derive_write_grants(&f.compile(serde_json::json!({ "fs": ["./", "!./sub"] })));
         assert!(write_reachable(&g, &f.proj.join("pub.txt")));
         assert!(
             !write_reachable(&g, &f.proj.join("sub/x")),
@@ -621,7 +656,11 @@ mod tests {
         let f = fixture();
         let d = derive_read_grants(&f.compile(serde_json::json!({ "fs": true })));
         assert!(d.grants.is_empty(), "relaxed read needs no Landlock grants");
-        assert!(derive_write_grants(&f.compile(serde_json::json!({ "fs": true }))).is_empty());
+        assert!(
+            derive_write_grants(&f.compile(serde_json::json!({ "fs": true })))
+                .0
+                .is_empty()
+        );
     }
 
     #[test]
@@ -643,6 +682,35 @@ mod tests {
             !read_reachable(&d.grants, &f.proj.join("pub.txt")),
             "a trailing !** must deny even an earlier allow"
         );
+    }
+
+    #[test]
+    fn read_grant_derivation_is_deterministic() {
+        // Sorted walk → the grant set is identical across runs (a budget overflow
+        // must not depend on read_dir iteration order).
+        let f = fixture();
+        let surface = serde_json::json!({ "fs": [f.root.to_str().unwrap(), "!**/.env"] });
+        let a = derive_read_grants(&f.compile(surface.clone())).grants;
+        let b = derive_read_grants(&f.compile(surface)).grants;
+        assert_eq!(a, b, "derivation must be deterministic");
+    }
+
+    #[test]
+    fn relaxed_top_levels_exclude_proc_and_sys() {
+        // The env-scrub-only relaxed grant set never includes /proc or /sys.
+        let tops = relaxed_top_levels_except_proc_sys();
+        assert!(
+            tops.iter()
+                .all(|p| !p.starts_with("/proc") && !p.starts_with("/sys"))
+        );
+    }
+
+    #[test]
+    fn builtin_env_glob_recognition() {
+        assert!(is_builtin_env_glob("**/.env"));
+        assert!(is_builtin_env_glob(".env.*"));
+        assert!(!is_builtin_env_glob("**/*.pem"));
+        assert!(!is_builtin_env_glob("/etc/secret"));
     }
 
     #[test]

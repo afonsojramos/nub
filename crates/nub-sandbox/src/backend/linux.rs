@@ -68,32 +68,41 @@ pub fn apply(policy: &SandboxPolicy, spec: CommandSpec) -> Result<Prepared, Degr
     let mut reason: Option<String> = None;
 
     // ── fs → Landlock grants (parent-side derivation + PathFd targets) ──────────
+    // Landlock engages for a fs-confining policy OR a pure env-scrub: the env-read
+    // boundary requires `/proc` be unreadable whenever env is scrubbed (else a
+    // scrubbed child recovers the ancestor's env via `/proc/<ppid>/environ`), and
+    // seccomp cannot close a FILE read — only Landlock (not granting `/proc`) can.
     let landlock_ok = landlock_available();
+    let want_landlock = confine_fs || policy.env.enforce;
+    let install_landlock = want_landlock && landlock_ok;
     let mut grant_specs: Vec<(PathBuf, BitFlags<AccessFs>)> = Vec::new();
-    if confine_fs {
-        if landlock_ok {
-            let read_bits = read_access_bits();
-            let write_bits = AccessFs::from_write(ABI::V2);
-            let rw_bits = read_bits | write_bits;
+    let read_bits = read_access_bits();
+    let rw_bits = read_bits | AccessFs::from_write(ABI::V2);
 
-            let derived = linux_grants::derive_read_grants(policy);
+    if want_landlock && landlock_ok {
+        if confine_fs {
             let DerivedGrants {
                 grants,
                 read_partial,
-            } = derived;
+            } = linux_grants::derive_read_grants(policy);
             for g in grants {
                 push_grant(&mut grant_specs, g, read_bits, rw_bits);
             }
             // Write grants: pre-create the target so Landlock can open it (granting
             // the nearest existing ancestor instead would over-grant), then request
-            // rw on the subtree.
-            for g in linux_grants::derive_write_grants(policy) {
+            // rw on the subtree. NOTE: pre_create makes a not-yet-existing target a
+            // DIRECTORY — a write grant to a not-yet-existing FILE should instead be
+            // expressed as its containing directory (a Landlock-vs-Seatbelt limit).
+            let (write_grants, write_partial) = linux_grants::derive_write_grants(policy);
+            for g in write_grants {
                 pre_create(&g.path);
                 grant_specs.push((g.path, rw_bits));
             }
             // Essential system read set + /dev (rw for /dev/null redirects) + the
             // program file, so a dynamically-linked child can exec, link, and
-            // redirect under read-confine.
+            // redirect under read-confine. These are granted WHOLESALE for the loader;
+            // an explicit policy deny landing INSIDE one (e.g. `!/etc/x`) is not
+            // carved out of them (documented limitation — net-deny mitigates exfil).
             for dir in ESSENTIAL_READ_DIRS {
                 add_if_exists(&mut grant_specs, Path::new(dir), read_bits);
             }
@@ -101,7 +110,6 @@ pub fn apply(policy: &SandboxPolicy, spec: CommandSpec) -> Result<Prepared, Degr
             if let Some(prog) = resolve_program(&spec.program, spec.cwd.as_deref()) {
                 add_if_exists(&mut grant_specs, &prog, AccessFs::ReadFile.into());
             }
-
             if read_partial {
                 deg.lost.push("fs-read-partial".to_string());
                 reason.get_or_insert_with(|| {
@@ -109,12 +117,36 @@ pub fn apply(policy: &SandboxPolicy, spec: CommandSpec) -> Result<Prepared, Degr
                         .to_string()
                 });
             }
+            if write_partial {
+                deg.lost.push("fs-write-partial".to_string());
+                reason.get_or_insert_with(|| {
+                    "write allow-set too large to fully enumerate under a deny — remainder denied"
+                        .to_string()
+                });
+            }
         } else {
-            // No Landlock (kernel <5.19 / disabled / LinuxKit): report fs lost, do
-            // NOT install a fs hook. seccomp + env-scrub still apply. The caller
-            // (build-jail = fail-closed-for-scripts; runtime = fail-open) decides.
+            // env-scrub only, fs relaxed: keep fs effectively relaxed (grant rw to
+            // every top-level of `/`) but CLOSE `/proc`,`/sys` so the env-read
+            // boundary holds. Consequence: a child that reads `/proc/self/*` under a
+            // pure env-scrub is denied — the same trade the fs-confine path makes.
+            for top in linux_grants::relaxed_top_levels_except_proc_sys() {
+                grant_specs.push((top, rw_bits));
+            }
+        }
+    } else if want_landlock {
+        // No Landlock (kernel <5.19 / disabled / LinuxKit): do NOT install a fs hook.
+        // seccomp (incl. ptrace-family deny) + env-scrub still apply. Report honestly
+        // so the caller (build-jail = fail-closed; runtime = fail-open) decides — a
+        // pure env-scrub additionally loses the `/proc` ancestor-env close.
+        if confine_fs {
             deg.lost.push("fs".to_string());
             reason.get_or_insert_with(|| "Landlock unavailable on this kernel".to_string());
+        } else {
+            deg.lost.push("env-read-boundary".to_string());
+            reason.get_or_insert_with(|| {
+                "Landlock unavailable — /proc ancestor-env read not blocked (env scrub still applied)"
+                    .to_string()
+            });
         }
     }
 
@@ -136,7 +168,6 @@ pub fn apply(policy: &SandboxPolicy, spec: CommandSpec) -> Result<Prepared, Degr
         lost: vec!["seccomp".to_string()],
         reason: Some(e),
     })?;
-    let install_landlock = confine_fs && landlock_ok;
 
     // SAFETY: the closure runs post-fork/pre-exec. nub may host a tokio runtime, so
     // strictly only async-signal-safe work is sound here; in practice the child is
@@ -279,9 +310,12 @@ fn landlock_available() -> bool {
 /// Build the seccomp filter. `ptrace`/`process_vm_readv`/`process_vm_writev` are
 /// denied unconditionally (the env-read second vector; an empty rule-vec matches the
 /// syscall regardless of args → EPERM). When `deny_net`, `AF_INET`/`AF_INET6` (+
-/// exotic families, keeping `AF_UNIX` for node IPC) are denied at socket creation —
-/// coarse (seccomp can't inspect a connect() sockaddr), so this denies ALL TCP
+/// exotic families, keeping `AF_UNIX` for node IPC) are denied at socket creation
+/// AND `io_uring_setup` is denied (io_uring can create a socket without `socket()`)
+/// — coarse (seccomp can't inspect a connect() sockaddr), so this denies ALL TCP
 /// egress including loopback; the loopback→proxy carve arrives with the proxy phase.
+/// seccompiler emits `SECCOMP_RET_KILL_PROCESS` on a foreign-ABI (e.g. i386) syscall,
+/// so a compat-ABI syscall can't slip past the single-arch filter.
 fn build_seccomp(deny_net: bool) -> Result<BpfProgram, String> {
     let arch = TargetArch::try_from(std::env::consts::ARCH)
         .map_err(|e| format!("unsupported arch for seccomp: {e}"))?;
@@ -329,6 +363,11 @@ fn build_seccomp(deny_net: bool) -> Result<BpfProgram, String> {
         for syscall in [libc::SYS_socket, libc::SYS_socketpair].map(i64::from) {
             rules.insert(syscall, family_rules.clone());
         }
+        // io_uring can create+connect a socket without ever calling socket()
+        // (IORING_OP_SOCKET/CONNECT), bypassing the family filter above. Deny
+        // io_uring setup outright when net is confined — no build workload needs it.
+        #[allow(clippy::useless_conversion)]
+        rules.insert(i64::from(libc::SYS_io_uring_setup), Vec::new());
     }
 
     // mismatch_action = Allow (unlisted syscalls flow); match_action = EPERM.

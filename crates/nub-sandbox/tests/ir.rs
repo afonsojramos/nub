@@ -102,18 +102,43 @@ fn apply_scrubs_env_when_enforced() {
     );
 }
 
+/// Raw Landlock ABI probe (Linux) — the degradation shape depends on whether the
+/// kernel can enforce Landlock.
+#[cfg(target_os = "linux")]
+fn landlock_available() -> bool {
+    let abi = unsafe { libc::syscall(444, std::ptr::null::<libc::c_void>(), 0usize, 1u64) };
+    abi >= 2
+}
+
 #[test]
 fn apply_degradation_reflects_backend_capability() {
     let ctx = common::ctx(true, &[]);
     let policy = compile(&json!({ "fs": ["./x"], "net": false }), &ctx).unwrap();
     let prepared = apply(&policy, CommandSpec::new("true")).unwrap();
     let d = &prepared.degradation;
-    // macOS has a real Seatbelt backend: fs + deny-all net are genuinely enforced,
-    // so nothing is degraded. Other OSes still run the env-scrub skeleton, which
-    // honestly reports fs + net as not-enforced.
+    // macOS (Seatbelt) and Linux (Landlock+seccomp) have real backends: fs +
+    // deny-all net are genuinely enforced, so nothing is degraded. A Landlock-less
+    // Linux kernel loses only fs (net is still seccomp-enforced) — never a silent
+    // full claim. Other OSes still run the env-scrub skeleton, which honestly
+    // reports fs + net as not-enforced.
     #[cfg(target_os = "macos")]
     assert!(d.is_full(), "macOS enforces fs + deny-all net");
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        if landlock_available() {
+            assert!(
+                d.is_full(),
+                "Linux enforces fs + deny-all net with Landlock"
+            );
+        } else {
+            assert!(d.lost.contains(&"fs".to_string()), "no Landlock → fs lost");
+            assert!(
+                !d.lost.contains(&"net".to_string()),
+                "net still seccomp-enforced"
+            );
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         assert!(!d.is_full(), "skeleton does not enforce fs/net");
         assert!(d.lost.contains(&"fs".to_string()));
