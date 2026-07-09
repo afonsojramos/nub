@@ -114,10 +114,10 @@ fn linux_enforceable() -> bool {
     false
 }
 
-/// Strip inherited ACEs (incl. C:\'s `ALL APPLICATION PACKAGES`) and grant ONLY the
-/// current user full control on a Windows fixture root — so a LowBox child reaches only
-/// the backend's explicit AC-SID grants (a user-SID grant does not satisfy the
-/// AppContainer access check). No-op off Windows. `icacls` is the reliable path here; the
+/// Give a Windows fixture root a PROTECTED DACL — strip inherited ACEs (incl. any inherited
+/// `ALL APPLICATION PACKAGES`) and grant ONLY the current user full control — so a LowBox
+/// child reaches only the backend's explicit AC-SID grants (a user-SID grant does not satisfy
+/// the AppContainer access check). No-op off Windows. `icacls` is the reliable path here; the
 /// alternative is a windows-sys `SetNamedSecurityInfoW` dance for a one-shot test setup.
 fn secure_windows_root(root: &Path) {
     if !cfg!(windows) {
@@ -158,36 +158,38 @@ impl Tree {
         // Fixture-root placement is per-OS:
         //   macOS   — /private/tmp, NOT $TMPDIR (= the DARWIN confstr scratch the backend
         //             always write-grants, which would make every write spuriously pass);
-        //   Windows — directly under C:\: a LowBox child only traverses C:\ by default, so
-        //             a %TEMP% tree under the user profile is unreachable (no AC-SID
-        //             traverse grant without WRITE_DAC on the profile's ancestors) — see
+        //   Windows — an ORDINARY %TEMP% tree under the user profile (the default
+        //             tempdir), deliberately NOT a special C:\ store: a LowBox token
+        //             bypasses traverse checking on a standard NTFS volume (retained
+        //             SeChangeNotifyPrivilege + the volume's FILE_DEVICE_ALLOW_APPCONTAINER_
+        //             TRAVERSAL flag), so the backend's leaf-only AC-SID grant is reachable
+        //             with NO ancestor grants and NO WRITE_DAC on the profile. This is the
+        //             real production model (CI-proven, run 29033024137) — see
         //             tests/windows_enforcement.rs;
         //   else    — the default tempdir.
         let builder = tempfile::Builder::new().prefix("nub-conf-").to_owned();
         let tmp = if cfg!(target_os = "macos") {
             builder.tempdir_in("/private/tmp")
-        } else if cfg!(windows) {
-            builder.tempdir_in("C:\\")
         } else {
             builder.tempdir()
         }
         .expect("tempdir");
         // Canonicalize off Windows (firmlink on macOS, /tmp symlinks on Linux); on Windows
         // canonicalize yields a `\\?\` path the matcher/backend don't expect — use the raw
-        // clean `C:\...` path (as windows_enforcement.rs does).
+        // %TEMP% path (policy/access/grant paths all derive from it, so they stay consistent
+        // and the ACL lands on the same object regardless of 8.3-vs-long form).
         let root = if cfg!(windows) {
             tmp.path().to_path_buf()
         } else {
             std::fs::canonicalize(tmp.path()).expect("canonicalize")
         };
-        // Windows: a dir created under C:\ INHERITS C:\'s `ALL APPLICATION PACKAGES`
-        // (AAP) read+traverse ACE, and AAP satisfies an AppContainer LowBox access check
-        // for the WHOLE subtree — so read-confine would collapse (a not-granted file
-        // stays readable) and an explicit AC-SID grant isn't the effective ACE. Strip the
-        // inherited ACEs and grant ONLY the current user (a user-SID grant does NOT
-        // satisfy the LowBox check, so the child still reaches only the backend's explicit
-        // AC-SID grants). This is the clean-DACL nub-owned store the launcher provides in
-        // production, which the Windows backend's allowlist model assumes.
+        // Windows: give the fixture root a PROTECTED DACL — strip inherited ACEs and grant
+        // ONLY the current user — so a not-granted file cannot be reached by an inherited
+        // `ALL APPLICATION PACKAGES` (AAP) ACE (AAP satisfies the LowBox check for the whole
+        // subtree, which would collapse read-confine). A user-SID grant does NOT satisfy the
+        // LowBox check, so the child still reaches only the backend's explicit AC-SID grants.
+        // %TEMP% under a user profile carries no AAP today, so this is defensive; it mirrors
+        // the clean-DACL confined root the launcher provides in production.
         secure_windows_root(&root);
         let proj = root.join("proj");
         let home = root.join("home");

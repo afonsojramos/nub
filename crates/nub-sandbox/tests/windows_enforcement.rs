@@ -13,9 +13,12 @@
 //! self-reexec avoids a separate compiled child, and args survive env-scrub (env does
 //! not), so the child learns its role even under a scrubbed environment.
 //!
-//! TRAVERSAL: a LowBox child does not bypass traverse checking, and only `C:\` is
-//! AC-traversable by default — so the whole fixture lives under a fresh `C:\nub-sbx-*`
-//! root and the backend's ancestor-traverse grants carry the child down to the leaves.
+//! TRAVERSAL: a LowBox token retains SeChangeNotifyPrivilege (Bypass Traverse Checking)
+//! and standard NTFS volumes carry FILE_DEVICE_ALLOW_APPCONTAINER_TRAVERSAL on the volume
+//! device, so intermediate-directory ACLs are NOT checked on C: — a leaf-only AC-SID grant
+//! is reachable in an ORDINARY `%TEMP%` tree with NO ancestor grants (CI-proven, run
+//! 29033024137). The fixture lives under `%TEMP%` with a PROTECTED DACL (inherited ACEs
+//! stripped) so only the backend's explicit AC-SID grants gate access.
 
 #[cfg(not(target_os = "windows"))]
 fn main() {
@@ -223,22 +226,45 @@ mod win {
         secret: PathBuf,
     }
 
+    /// Give the fixture root a PROTECTED DACL: strip inherited ACEs and grant only the
+    /// current user full control, so a not-granted file carries no AC-SID/AAP grant and the
+    /// LowBox access check denies it — the clean-DACL confined root the launcher provides in
+    /// production. `icacls` is the one-shot reliable path for test setup.
+    fn secure_root(root: &Path) {
+        let user = std::env::var("USERNAME").expect("USERNAME set on Windows");
+        let status = std::process::Command::new("icacls")
+            .arg(root)
+            .args(["/inheritance:r", "/grant:r"])
+            .arg(format!("{user}:(OI)(CI)F"))
+            .status()
+            .expect("run icacls");
+        assert!(status.success(), "icacls failed to secure the fixture root");
+    }
+
     impl Fixture {
         fn new() -> Self {
-            // A fresh C:\-rooted tree (only C:\ is AC-traversable; %TEMP% is not).
+            // An ORDINARY %TEMP% tree (NOT a special C:\ store): a LowBox token bypasses
+            // traverse checking on a standard NTFS volume, so the backend's leaf-only AC-SID
+            // grants are reachable here with no ancestor grants. `secure_root` gives it a
+            // PROTECTED DACL so a not-granted file is denied (the LowBox check finds no
+            // AC-SID/AAP grant) rather than reachable via some inherited ACE.
             let nonce = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos();
-            let root = PathBuf::from(format!("C:\\nub-sbx-{nonce:x}"));
+            let root = std::env::temp_dir().join(format!("nub-sbx-{nonce:x}"));
+            // Secure the root's DACL BEFORE creating children, so each child INHERITS the
+            // clean protected ACL (no stray AAP) rather than %TEMP%'s inherited ACEs.
+            std::fs::create_dir_all(&root).unwrap();
+            secure_root(&root);
             let bin = root.join("bin");
             let work = root.join("work");
             let vault = root.join("vault");
             std::fs::create_dir_all(&bin).unwrap();
             std::fs::create_dir_all(&work).unwrap();
             std::fs::create_dir_all(&vault).unwrap();
-            // The child is a copy of THIS binary under bin/ (so its ancestors are only
-            // the root + C:\, both reachable — not the CI checkout dir under D:\a\…).
+            // The child is a copy of THIS binary under bin/ (reachable via traverse-bypass;
+            // kept out of the CI checkout dir under D:\a\… which the LowBox token can't read).
             let child = bin.join("child.exe");
             std::fs::copy(std::env::current_exe().unwrap(), &child).unwrap();
             let allowed = work.join("allowed.txt");
