@@ -2658,8 +2658,9 @@ fn run_sandboxed(policy_file: &str, program: Option<&str>, args: &[String]) -> R
     if let Some(warning) = prepared.degradation.warning() {
         eprintln!("warning: {warning}");
     }
-    let mut command = prepared.command;
-    let status = command
+    // The uniform launch verb across backends — mac/linux spawn the configured
+    // `command`; Windows owns the AppContainer spawn+wait+teardown behind `status()`.
+    let status = prepared
         .status()
         .with_context(|| format!("spawning `{program}` under the sandbox"))?;
     Ok(status.code().unwrap_or(1))

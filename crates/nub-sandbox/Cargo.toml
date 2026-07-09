@@ -45,6 +45,24 @@ libc = { workspace = true }
 landlock = "0.4"
 seccompiler = "0.5"
 
+# windows-sys backs the Windows AppContainer backend: the LowBox launch
+# (CreateProcessW + STARTUPINFOEX + SECURITY_CAPABILITIES), per-run inheritable
+# allow-ACE grants (Get/SetNamedSecurityInfoW + SetEntriesInAclW), the
+# CreateAppContainerProfile identity, and the Job-Object KILL_ON_JOB_CLOSE reap.
+# 0.61 is already in the workspace lockfile (transitive via clap/anstyle) — no
+# new supply-chain surface. Raw FFI (no COM), gated `#[cfg(target_os = "windows")]`.
+[target.'cfg(target_os = "windows")'.dependencies.windows-sys]
+version = "0.61"
+features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_Security_Isolation",
+  "Win32_System_Threading",
+  "Win32_System_JobObjects",
+  "Win32_System_Memory",
+]
+
 [dev-dependencies]
 tempfile = "3"
 

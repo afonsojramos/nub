@@ -7,12 +7,22 @@
 //! loss in [`Degradation`] so the caller surfaces a WARNING; a hard fail-closed
 //! (a required axis unenforceable) is `Err(Degradation)`.
 //!
-//! BACKEND STATUS: macOS (Seatbelt, [`macos`]) and Linux (Landlock+seccomp,
-//! [`linux`]) are wired; Windows (AppContainer) lands later and still runs the
-//! env-scrub-only [`generic_apply`] skeleton — which constructs the child env and
-//! reports fs/net as NOT enforced. Every path preserves the API shape
+//! BACKEND STATUS: macOS (Seatbelt, [`macos`]), Linux (Landlock+seccomp,
+//! [`linux`]), and Windows (AppContainer LowBox, [`windows`]) are wired; any other
+//! OS runs the env-scrub-only [`generic_apply`] skeleton — which constructs the
+//! child env and reports fs/net as NOT enforced. Every path preserves the API shape
 //! (`apply(policy, spec) -> Result<Prepared, Degradation>`) the future embedder
 //! seam slots into.
+//!
+//! LAUNCH SEAM: a backend either configures [`Prepared::command`] for the caller to
+//! spawn (macOS wraps `sandbox-exec`; Linux installs a `pre_exec` hook; the skeleton
+//! just scrubs env) OR — Windows only — OWNS the whole spawn lifecycle, because an
+//! AppContainer launch cannot be a pre-built `std::process::Command`: it needs a
+//! custom `CreateProcessW` with `STARTUPINFOEX`/`SECURITY_CAPABILITIES`, a Job Object
+//! assigned at creation, and per-run ACL grants that must be TORN DOWN after the
+//! child exits. [`Prepared::status`] is the uniform verb: mac/linux/skeleton delegate
+//! to `command.status()`; Windows runs its launcher (setup → spawn → wait → RAII
+//! teardown) when a launch plan is attached.
 
 use crate::policy::SandboxPolicy;
 use std::process::Command;
@@ -22,6 +32,13 @@ mod macos;
 
 #[cfg(target_os = "linux")]
 mod linux;
+
+// The Windows AppContainer backend. Compiled on Windows (its real consumer) and
+// under `test` on any host — so its OS-agnostic IR→plan derivation (grant carve,
+// capability selection, dangerous-root guard) is unit-tested on the macOS dev host
+// without a Windows machine (the FFI launcher itself stays `#[cfg(windows)]`).
+#[cfg(any(target_os = "windows", test))]
+mod windows;
 
 // The OS-agnostic Landlock grant derivation. Compiled on Linux (its real consumer)
 // and under `test` on any host — so its security-critical carve logic is unit-tested
@@ -97,10 +114,35 @@ impl CommandSpec {
 }
 
 /// A launch-ready child: a configured [`Command`] plus the [`Degradation`] the
-/// backend achieved. The caller spawns `command` and surfaces `degradation`.
+/// backend achieved. The caller surfaces `degradation`, then launches with
+/// [`Prepared::status`] (NOT `command.status()` directly — Windows enforcement
+/// rides the `status` seam, not the `command` field).
 pub struct Prepared {
+    /// The configured child for the mac/linux/skeleton path. On Windows this is the
+    /// env-scrubbed plain child used ONLY when nothing needs AppContainer confinement
+    /// (`launch` is `None`); when confinement applies, `launch` owns the spawn and
+    /// this field is unused.
     pub command: Command,
     pub degradation: Degradation,
+    /// Windows AppContainer launch plan — the backend owns spawn+wait+teardown when
+    /// this is `Some`. Absent (or on other OSes) → [`Prepared::status`] spawns
+    /// `command`.
+    #[cfg(target_os = "windows")]
+    pub(crate) launch: Option<windows::WindowsLaunch>,
+}
+
+impl Prepared {
+    /// Launch the prepared child and wait for it, returning its exit status. The
+    /// UNIFORM launch verb across backends: mac/linux/skeleton spawn `command`;
+    /// Windows runs its AppContainer launcher (ACL setup → `CreateProcessW` under a
+    /// LowBox token → wait → RAII teardown) when a launch plan is attached.
+    pub fn status(mut self) -> std::io::Result<std::process::ExitStatus> {
+        #[cfg(target_os = "windows")]
+        if let Some(launch) = self.launch.take() {
+            return launch.run();
+        }
+        self.command.status()
+    }
 }
 
 /// Apply a resolved policy to a command, dispatching to the per-OS backend.
@@ -124,15 +166,19 @@ pub fn apply(policy: &SandboxPolicy, spec: CommandSpec) -> Result<Prepared, Degr
     {
         linux::apply(policy, spec)
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
+    {
+        windows::apply(policy, spec)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         generic_apply(policy, spec)
     }
 }
 
-/// Env-scrub-only skeleton for backends not yet wired (Windows). Reports fs and net
-/// as not-enforced so a caller never mistakes the skeleton for confinement.
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+/// Env-scrub-only skeleton for an OS with no wired backend. Reports fs and net as
+/// not-enforced so a caller never mistakes the skeleton for confinement.
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn generic_apply(policy: &SandboxPolicy, spec: CommandSpec) -> Result<Prepared, Degradation> {
     let mut command = Command::new(&spec.program);
     command.args(&spec.args);
@@ -172,7 +218,7 @@ fn generic_apply(policy: &SandboxPolicy, spec: CommandSpec) -> Result<Prepared, 
 
 /// Whether the fs policy actually confines anything (a non-relaxed base or any
 /// entry). A relaxed fs axis (allow-all, no rules) is not a lost enforcement.
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn fs_confines(policy: &SandboxPolicy) -> bool {
     !matches!(policy.fs.rules.default_effect, crate::policy::Effect::Allow)
         || !policy.fs.rules.entries.is_empty()
