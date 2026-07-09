@@ -285,6 +285,55 @@ fn firmlink_write_allow_is_not_inert() {
 }
 
 #[test]
+fn read_confine_does_not_leak_program_siblings() {
+    // The program auto-grant must expose the program FILE only — never its parent
+    // dir, or a project-local tool would leak its neighbouring secrets under a tight
+    // read-confine (the F3 over-grant).
+    let f = fixture();
+    let tooldir = f.proj.join("tooldir");
+    fs::create_dir_all(&tooldir).unwrap();
+    fs::write(tooldir.join("tool.sh"), "#!/bin/sh\ncat \"$1\"\n").unwrap();
+    fs::write(tooldir.join("secret.key"), "SIBLING_SECRET").unwrap();
+    // Read-confine to a DIFFERENT dir; tooldir is never granted.
+    let allowed = f.proj.join("allowed");
+    fs::create_dir_all(&allowed).unwrap();
+    let confine = serde_json::json!({ "fs": [s(&allowed)] });
+    // The interpreter runs the granted tool file, but reading its SIBLING is denied.
+    assert!(
+        !f.allowed(
+            confine,
+            "/bin/sh",
+            &[
+                &s(&tooldir.join("tool.sh")),
+                &s(&tooldir.join("secret.key"))
+            ]
+        ),
+        "program's sibling secret must not be readable"
+    );
+}
+
+#[test]
+fn confstr_scratch_writable_under_generous_write_confine() {
+    // Regression guard for C1: under a generous-read write-confine policy the Apple
+    // toolchain's confstr temp scratch must stay writable (else from-source compiles
+    // silently fail). Exercise it via a real `cc -c`, which writes xcrun_db there.
+    let f = fixture();
+    let src = f.proj.join("hello.c");
+    fs::write(&src, "int main(void){return 0;}\n").unwrap();
+    // generous read + write only to the project: cc must still reach confstr temp.
+    let wc = serde_json::json!({ "fs": ["...", "./"] });
+    let obj = f.proj.join("hello.o");
+    assert!(
+        f.allowed(wc, "/usr/bin/cc", &["-c", &s(&src), "-o", &s(&obj)]),
+        "cc compile (writes confstr xcrun_db) must succeed under write-confine"
+    );
+    assert!(
+        obj.exists(),
+        "the object file was produced inside the project"
+    );
+}
+
+#[test]
 fn deny_not_dodgeable_via_dotdot_or_symlink() {
     let f = fixture();
     let generous = serde_json::json!({ "fs": ["..."] });

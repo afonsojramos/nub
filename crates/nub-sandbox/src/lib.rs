@@ -9,10 +9,12 @@
 //!     nub-cli/aube/PM type crosses this line — the future build-jail embedder
 //!     seam wires aube's lifecycle to these two fns).
 //!
-//! STAGE 1 (this build): compiler + IR + matcher are complete and exhaustively
-//! tested; [`apply`] is the env-scrub-only skeleton (OS backends land S3–S5). The
-//! [`conformance`] harness evaluates compiler/matcher verdicts against committed
-//! fixtures — the engine-pure half of the cross-platform conformance bar.
+//! BACKEND STATUS: the compiler + IR + matcher are complete and exhaustively
+//! tested. [`apply`] enforces on macOS (Seatbelt); Linux + Windows still run the
+//! env-scrub-only skeleton (their backends land in later stages) and honestly
+//! report fs/net as not-enforced. The [`conformance`] harness evaluates
+//! compiler/matcher verdicts against committed fixtures — the engine-pure half of
+//! the cross-platform conformance bar.
 
 pub mod backend;
 pub mod compiler;

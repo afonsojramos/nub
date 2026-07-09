@@ -174,11 +174,12 @@ fn emit_fs(policy: &SandboxPolicy, spec: &CommandSpec, out: &mut String) {
         out.push_str("(allow file-read* (subpath \"/\"))\n");
         out.push_str("(allow file-map-executable (subpath \"/\"))\n");
     }
-    // Auto-grant the target binary + its dir so it can exec/map under read-confine
-    // (the system toolchain is already covered by the essential base; this covers a
-    // non-system toolchain's own bin dir — best-effort, its out-of-dir libs still
-    // need an explicit toolchain allow).
-    for term in program_read_terms(spec) {
+    // Auto-grant read/map of the target binary FILE so read-confine can exec it
+    // (system tools are already covered by the essential base). Only the file — NOT
+    // its parent dir: a directory grant would expose the program's SIBLINGS (e.g. a
+    // `.env`/key next to a project-local tool), defeating a tight read allowlist. A
+    // non-system toolchain's out-of-dir libs need an explicit toolchain allow.
+    if let Some(term) = program_read_term(spec) {
         out.push_str(&format!("(allow file-read* {term})\n"));
         out.push_str(&format!("(allow file-map-executable {term})\n"));
     }
@@ -194,20 +195,19 @@ fn emit_fs(policy: &SandboxPolicy, spec: &CommandSpec, out: &mut String) {
     }
 
     // ── writes (base denies all writes) ───────────────────────────────────────
-    // The Apple toolchain (xcrun/cc/libtool) writes its `xcrun_db` scratch to the
-    // per-user DARWIN confstr dirs — NOT redirectable via TMPDIR — so a from-source
-    // compile fails without this grant. Per-user OS scratch, granted when confining.
-    for dir in confstr_scratch_dirs() {
-        out.push_str(&format!(
-            "(allow file-write* (subpath \"{}\"))\n",
-            sbpl_escape(&dir)
-        ));
-    }
     for rule in &policy.fs.rules.entries {
-        let term = emit_term(&to_match_term(rule.matcher.as_str()));
+        let m = to_match_term(rule.matcher.as_str());
+        let term = emit_term(&m);
         match (rule.effect, rule.access) {
             (Effect::Allow, FsAccess::ReadWrite) => {
-                out.push_str(&format!("(allow file-write* {term})\n"))
+                // Refuse a write grant that resolves to a dangerous top-level root
+                // (a `..` in a surface path can collapse a grant up to `/private`
+                // etc. — an accidental filesystem-wide write hole). Fail-safe: drop
+                // the over-broad grant rather than emit it.
+                if is_dangerous_write_root(&m) {
+                    continue;
+                }
+                out.push_str(&format!("(allow file-write* {term})\n"));
             }
             // A read-only allow or a deny caps write: revoke any write a broader
             // earlier rw-allow granted at this path (last-match-wins).
@@ -216,38 +216,69 @@ fn emit_fs(policy: &SandboxPolicy, spec: &CommandSpec, out: &mut String) {
             }
         }
     }
-}
-
-/// Best-effort read/map grants for the target program so read-confine can exec it:
-/// the resolved binary file + its parent dir. Skips silently if the program can't
-/// be resolved (a bare name with no PATH hit) — the essential base still covers
-/// system tools.
-fn program_read_terms(spec: &CommandSpec) -> Vec<String> {
-    let Some(resolved) = resolve_program(&spec.program) else {
-        return Vec::new();
-    };
-    let file = normalize_slashes(&resolved.to_string_lossy());
-    let mut terms = vec![format!("(subpath \"{}\")", sbpl_escape(&file))];
-    if let Some(parent) = resolved.parent() {
-        let dir = normalize_slashes(&parent.to_string_lossy());
-        if dir != "/" && !dir.is_empty() {
-            terms.push(format!("(subpath \"{}\")", sbpl_escape(&dir)));
-        }
+    // The Apple toolchain (xcrun/cc/libtool) writes its `xcrun_db` scratch to the
+    // per-user DARWIN confstr TEMP dir — NOT redirectable via TMPDIR — so a
+    // from-source compile fails without this grant. Emitted LAST so it survives a
+    // generous-read policy's `(deny file-write* /)` cap (last-match-wins); the
+    // only thing it can override is a user write-deny targeting the OS temp, which
+    // is rare and acceptable. The persistent DARWIN CACHE dir is deliberately NOT
+    // granted — it is a cross-build poisoning surface a later unsandboxed tool
+    // consumes, and `cc`/`xcrun` need only the temp scratch.
+    for dir in confstr_scratch_dirs() {
+        out.push_str(&format!(
+            "(allow file-write* (subpath \"{}\"))\n",
+            sbpl_escape(&dir)
+        ));
     }
-    terms
 }
 
-/// Resolve a program to an absolute, canonical path: an absolute or cwd-relative
-/// path is canonicalized directly; a bare name is searched on `PATH`.
-fn resolve_program(program: &std::ffi::OsStr) -> Option<PathBuf> {
+/// Top-level roots a write grant must never cover — a `..`-collapsed surface path
+/// (`/tmp/..` → `/private`) would otherwise open filesystem-wide write. Reads are
+/// exempt (a generous `(subpath "/")` read is the legitimate default posture).
+fn is_dangerous_write_root(term: &MatchTerm) -> bool {
+    let MatchTerm::Subpath(p) = term else {
+        return false;
+    };
+    matches!(
+        p.as_str(),
+        "/" | "/private"
+            | "/System"
+            | "/Users"
+            | "/usr"
+            | "/bin"
+            | "/sbin"
+            | "/etc"
+            | "/var"
+            | "/opt"
+            | "/Library"
+            | "/Applications"
+    )
+}
+
+/// Best-effort read/map grant for the target program FILE so read-confine can exec
+/// it. `None` when the program can't be resolved (a bare name with no PATH hit) —
+/// the essential base still covers system tools.
+fn program_read_term(spec: &CommandSpec) -> Option<String> {
+    let resolved = resolve_program(&spec.program, spec.cwd.as_deref())?;
+    let file = normalize_slashes(&resolved.to_string_lossy());
+    Some(format!("(subpath \"{}\")", sbpl_escape(&file)))
+}
+
+/// Resolve a program to an absolute, canonical path. A cwd-relative program is
+/// resolved against the CHILD's cwd (`spec.cwd`, where the kernel will resolve it),
+/// falling back to the process cwd; a bare name is searched on `PATH`.
+fn resolve_program(program: &std::ffi::OsStr, child_cwd: Option<&Path>) -> Option<PathBuf> {
     let p = Path::new(program);
     if p.is_absolute() {
         return Some(canonicalize_including_nonexistent(p));
     }
     if p.components().count() > 1 {
-        // cwd-relative (`./x`, `dir/x`)
-        let abs = std::env::current_dir().ok()?.join(p);
-        return Some(canonicalize_including_nonexistent(&abs));
+        // cwd-relative (`./x`, `dir/x`) — anchor at the child's cwd, not ours.
+        let base = match child_cwd {
+            Some(c) => c.to_path_buf(),
+            None => std::env::current_dir().ok()?,
+        };
+        return Some(canonicalize_including_nonexistent(&base.join(p)));
     }
     // bare name → PATH search
     let path_var = std::env::var_os("PATH")?;
@@ -260,22 +291,18 @@ fn resolve_program(program: &std::ffi::OsStr) -> Option<PathBuf> {
     None
 }
 
-/// The per-user DARWIN confstr scratch dirs (`/private/var/folders/<uid>/{T,C}`),
-/// canonicalized (they are `/var/folders/…` firmlinks resolving under `/private`).
-/// Empty off macOS or when confstr yields nothing.
+/// The per-user DARWIN confstr TEMP scratch dir (`/private/var/folders/<uid>/T`),
+/// canonicalized (a `/var/folders/…` firmlink resolving under `/private`). Only the
+/// TEMP dir — NOT the persistent CACHE dir (`…/C`), which is a cross-build poisoning
+/// surface. Empty off macOS or when confstr yields nothing.
 fn confstr_scratch_dirs() -> Vec<String> {
     let mut out = Vec::new();
-    for name in [
-        libc::_CS_DARWIN_USER_TEMP_DIR,
-        libc::_CS_DARWIN_USER_CACHE_DIR,
-    ] {
-        if let Some(dir) = confstr_dir(name) {
-            let canon = canonicalize_including_nonexistent(&dir);
-            let s = normalize_slashes(&canon.to_string_lossy());
-            // Refuse a root/empty grant (would be a filesystem-wide write hole).
-            if !s.is_empty() && s != "/" && !out.contains(&s) {
-                out.push(s);
-            }
+    if let Some(dir) = confstr_dir(libc::_CS_DARWIN_USER_TEMP_DIR) {
+        let canon = canonicalize_including_nonexistent(&dir);
+        let s = normalize_slashes(&canon.to_string_lossy());
+        // Refuse a root/empty grant (would be a filesystem-wide write hole).
+        if !s.is_empty() && s != "/" {
+            out.push(s);
         }
     }
     out
@@ -582,17 +609,64 @@ mod tests {
     }
 
     #[test]
-    fn confstr_scratch_write_granted_when_confining() {
+    fn confstr_scratch_write_wins_over_generous_write_cap() {
+        // A generous-read policy caps writes with `(deny file-write* (subpath "/"))`
+        // (from the `**` read-only allow). The confstr temp grant MUST be emitted
+        // after it so it survives last-match-wins — otherwise the Apple toolchain's
+        // xcrun_db write is silently denied (the C1 regression).
+        let p = fs_policy(
+            Effect::Deny,
+            vec![
+                rule("**", Effect::Allow, FsAccess::Read),
+                rule("/proj", Effect::Allow, FsAccess::ReadWrite),
+            ],
+        );
+        let prof = build_profile(&p, &spec());
+        let cap = prof.find("(deny file-write* (subpath \"/\"))").unwrap();
+        let confstr = prof
+            .find("(allow file-write* (subpath \"/private/var/folders/")
+            .unwrap();
+        assert!(
+            confstr > cap,
+            "confstr grant must follow the write cap-deny"
+        );
+    }
+
+    #[test]
+    fn confstr_grants_temp_not_cache() {
+        // Only the DARWIN TEMP dir is granted; the persistent CACHE dir (…/C) is a
+        // cross-build poisoning surface and must NOT be write-granted.
         let p = fs_policy(
             Effect::Deny,
             vec![rule("/proj", Effect::Allow, FsAccess::ReadWrite)],
         );
         let prof = build_profile(&p, &spec());
-        // The DARWIN confstr temp dir is under /private/var/folders — granted write.
-        assert!(
-            prof.contains("(allow file-write* (subpath \"/private/var/folders/"),
-            "confstr scratch dir must be write-granted"
+        if let Some(cache) = confstr_dir(libc::_CS_DARWIN_USER_CACHE_DIR) {
+            let cache =
+                normalize_slashes(&canonicalize_including_nonexistent(&cache).to_string_lossy());
+            assert!(
+                !prof.contains(&format!("(allow file-write* (subpath \"{cache}\"))")),
+                "the DARWIN cache dir must not be write-granted"
+            );
+        }
+    }
+
+    #[test]
+    fn dangerous_write_roots_are_dropped() {
+        // A `..`-collapsed grant that resolves to a top-level root must not emit a
+        // write allow (filesystem-wide write hole). Read of `/` stays legal.
+        let p = fs_policy(
+            Effect::Deny,
+            vec![rule("/private", Effect::Allow, FsAccess::ReadWrite)],
         );
+        let prof = build_profile(&p, &spec());
+        assert!(!prof.contains("(allow file-write* (subpath \"/private\"))"));
+        assert!(is_dangerous_write_root(&MatchTerm::Subpath(
+            "/private".to_string()
+        )));
+        assert!(!is_dangerous_write_root(&MatchTerm::Subpath(
+            "/proj".to_string()
+        )));
     }
 
     #[test]
