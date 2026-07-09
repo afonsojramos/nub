@@ -198,7 +198,7 @@ fn import_text_works_on_compat_tier() {
 
 /// Import Text on the FAST tier BELOW 26.5 (Node 24.x): sync `module.registerHooks`,
 /// but native `--experimental-import-text` does not exist yet, so nub serves text imports
-/// via its own `loadTextImport` short-circuit (the `nativeImportText=false` arm of the
+/// via its own `loadTextImport` short-circuit (the `NATIVE_IMPORT_TEXT=false` arm of the
 /// makeHooks load hook). Pins the 24.x fast-tier path deterministically — the host-Node
 /// `integration.rs` cases silently migrate to the native-defer path once the host reaches
 /// >= 26.5 (AGENTS.md "latest major"), leaving [22.15, 26.5) otherwise uncovered.
@@ -225,7 +225,8 @@ fn import_text_works_on_fast_tier_below_26_5() {
 
 /// Import Text on the NATIVE tier (Node >= 26.5.0). There nub injects
 /// `--experimental-import-text` and its preload DEFERS `with { type: "text" }` to
-/// Node's native text translator (signaled by `__NUB_NATIVE_IMPORT_TEXT`) instead of
+/// Node's native text translator (feature-detected via the `NATIVE_IMPORT_TEXT` const
+/// in preload-common.cjs, `process.allowedNodeEnvironmentFlags`) instead of
 /// serving it with nub's own `loadTextImport`. The user-visible result must be
 /// byte-identical to the compat/host tiers — SAME fixture, SAME assertions — proving
 /// the mechanism swap is transparent, and the experimental warning native emits must
