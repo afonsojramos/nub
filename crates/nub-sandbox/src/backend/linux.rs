@@ -68,12 +68,16 @@ pub fn apply(policy: &SandboxPolicy, spec: CommandSpec) -> Result<Prepared, Degr
     let mut reason: Option<String> = None;
 
     // ── fs → Landlock grants (parent-side derivation + PathFd targets) ──────────
-    // Landlock engages for a fs-confining policy OR a pure env-scrub: the env-read
-    // boundary requires `/proc` be unreadable whenever env is scrubbed (else a
-    // scrubbed child recovers the ancestor's env via `/proc/<ppid>/environ`), and
-    // seccomp cannot close a FILE read — only Landlock (not granting `/proc`) can.
+    // Landlock engages for a fs-confining policy OR an env-scrub that actually
+    // WITHHOLDS something: the env-read boundary requires `/proc` be unreadable
+    // whenever the child is denied a var the ancestor holds (else it recovers it via
+    // `/proc/<ppid>/environ`), and seccomp cannot close a FILE read — only Landlock
+    // (not granting `/proc`) can. An `{env:true}` passthrough withholds nothing, so
+    // it needs no `/proc` close (leaving `/proc/cpuinfo` etc. readable for a config
+    // the user chose to be permissive).
     let landlock_ok = landlock_available();
-    let want_landlock = confine_fs || policy.env.enforce;
+    let scrub_withholds = policy.env.enforce && !policy.env.withheld.is_empty();
+    let want_landlock = confine_fs || scrub_withholds;
     let install_landlock = want_landlock && landlock_ok;
     let mut grant_specs: Vec<(PathBuf, BitFlags<AccessFs>)> = Vec::new();
     let read_bits = read_access_bits();

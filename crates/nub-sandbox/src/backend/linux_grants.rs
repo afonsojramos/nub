@@ -111,8 +111,8 @@ pub(crate) fn derive_read_grants(policy: &SandboxPolicy) -> DerivedGrants {
             // inside it are the BUILT-IN `.env*` secret globs — those are
             // deliberately not carved across system dirs (no user `.env` there;
             // net-deny blocks exfil regardless). A USER-authored deny reaching inside
-            // (literal like `!/etc/x`, or depth-independent like `!**/*.pem`) forces
-            // the full carve so an explicit deny is never silently overridden.
+            // (an absolute `!/etc/**`, or the whole-fs `!**`) forces the full carve so
+            // an explicit deny is never silently overridden.
             if is_system_toplevel(&top)
                 && view.allows(&top)
                 && !view.has_nonbuiltin_deny_reaching(&top)

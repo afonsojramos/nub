@@ -290,12 +290,13 @@ fn env_scrub_alone_closes_proc_even_with_fs_relaxed() {
     let f = fixture();
     // A pure env-scrub with fs RELAXED must STILL close /proc — otherwise the
     // scrubbed child recovers the ancestor's env via /proc/<ppid>/environ, defeating
-    // the scrub. `{env:false}` scrubs + (fs omitted) relaxes fs; the backend installs
-    // a relaxed-minus-/proc Landlock ruleset for the env-read boundary.
+    // the scrub. `{env:false}` with a non-empty ambient WITHHOLDS a var, so the
+    // backend installs a relaxed-minus-/proc Landlock ruleset for the env-read
+    // boundary (fs stays relaxed; only /proc,/sys are closed).
     let read_environ = "/bin/cat /proc/$PPID/environ 2>/dev/null || true";
     let (_c, out) = f.run(
         serde_json::json!({ "env": false }),
-        &[],
+        &[("AMBIENT_SECRET", "s")],
         SH,
         &["-c", read_environ],
     );
@@ -314,6 +315,28 @@ fn env_scrub_alone_closes_proc_even_with_fs_relaxed() {
     assert!(
         out2.contains("PATH="),
         "neg-control: unsandboxed reads /proc"
+    );
+}
+
+#[test]
+fn env_passthrough_does_not_close_proc() {
+    if !landlock_available() {
+        return;
+    }
+    let f = fixture();
+    // `{env:true}` is a PASSTHROUGH: nothing is withheld, so there is no ancestor
+    // secret to protect and /proc must stay open (a config the user chose to be
+    // permissive) — the `/proc` close only fires when the scrub actually withholds.
+    let read_environ = "/bin/cat /proc/$PPID/environ 2>/dev/null || true";
+    let (_c, out) = f.run(
+        serde_json::json!({ "env": true }),
+        &[("FOO", "bar")],
+        SH,
+        &["-c", read_environ],
+    );
+    assert!(
+        out.contains("PATH="),
+        "env passthrough must NOT close /proc (nothing withheld)"
     );
 }
 
