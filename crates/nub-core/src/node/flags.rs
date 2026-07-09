@@ -396,6 +396,24 @@ mod tests {
     }
 
     #[test]
+    fn import_text_injected_from_26_5_open_ended() {
+        // `--experimental-import-text` was added in Node 26.5.0 (#62300) and is not
+        // default-on through Node 27 — inject from 26.5.0 upward, never below (the
+        // flag is a "bad option" there). Also verify it snips out of an inherited
+        // NODE_OPTIONS on a child below the 26.5.0 floor.
+        let it = "--experimental-import-text";
+        assert!(!compute_inject_flags(v(26, 4, 0), &[], None, false).contains(&it));
+        assert!(compute_inject_flags(v(26, 5, 0), &[], None, false).contains(&it));
+        assert!(compute_inject_flags(v(27, 0, 0), &[], None, false).contains(&it));
+        // A user opt-out subtracts it.
+        let argv = vec!["--no-experimental-import-text".to_string()];
+        assert!(!compute_inject_flags(v(26, 5, 0), &argv, None, false).contains(&it));
+        // Inherited NODE_OPTIONS: stripped below the floor, kept at/above it.
+        assert_eq!(strip_unsupported_node_options(it, &v(26, 4, 0)), "");
+        assert_eq!(strip_unsupported_node_options(it, &v(26, 5, 0)), it);
+    }
+
+    #[test]
     fn shadow_realm_never_injected() {
         // ShadowRealm is DELIBERATELY not auto-unflagged (the harmony-flag policy):
         // `--experimental-shadow-realm` implies V8's `--harmony-shadow-realm`, which

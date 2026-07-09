@@ -263,6 +263,32 @@ pub static FEATURES: &[Feature] = &[
         ],
         evidence: "flag added 23.6.0 (23.x) / 22.20.0 (22.x backport); Stability 1.0; never default-on through Node 27",
     },
+    // ── import-text (importing source as text via import attributes) ─────────
+    // `import txt from './x.txt' with { type: 'text' }` — the module's default export
+    // is the file's string contents. Node gained this behind `--experimental-import-text`
+    // on the 26.x line at 26.5.0 (SEMVER-MINOR, #62300); the flag does not exist below
+    // 26.5.0, where injecting it is a "bad option" startup abort, and is still flag-gated
+    // (never default-on) through Node 27 nightly — so this open-ended Unflag band injects
+    // it on [26.5.0, ∞).
+    //
+    // This row is ONLY the native side. nub ALSO provides import-text on EVERY version
+    // that can parse the `with` syntax (Node 18.20+) via a loader polyfill —
+    // `loadTextImport` in runtime/transform-core.mjs, dispatched by the load hooks on
+    // `importAttributes.type === "text"`. Per the additive contract, the fast-tier hook
+    // (preload-common.cjs) feature-detects native support (`--experimental-import-text`
+    // in `process.allowedNodeEnvironmentFlags`, i.e. Node 26.5+) and STEPS ASIDE to
+    // Node's own textStrategy there — this injected flag is what makes that native path
+    // work; below 26.5 the polyfill owns it. The polyfill is a load-hook, not a
+    // typeof-global, so it does not fit the `Polyfill` mitigation shape and lives in the
+    // runtime rather than as a band here.
+    Feature {
+        name: "import-text",
+        mitigations: &[(
+            band((26, 5, 0), None),
+            Mitigation::Unflag("--experimental-import-text"),
+        )],
+        evidence: "flag added Node 26.5.0 (#62300); still flag-gated through Node 27 nightly; nub loader-polyfills below via runtime/transform-core.mjs loadTextImport",
+    },
     // ── WebSocket global ────────────────────────────────────────────────────
     // Flag-gated on [20.10.0, 22.0.0) — the global exists on 20.10+ and all of the
     // 21.x line behind `--experimental-websocket`, then becomes default-on at
@@ -780,6 +806,12 @@ mod tests {
         assert!(unflag_flags_for(&v(22, 4, 0)).contains(&"--experimental-webstorage"));
         assert!(unflag_flags_for(&v(24, 99, 0)).contains(&"--experimental-webstorage"));
         assert!(!unflag_flags_for(&v(25, 0, 0)).contains(&"--experimental-webstorage"));
+        // import-text: open-ended [26.5.0, ∞); the flag doesn't exist below 26.5.0.
+        let it = "--experimental-import-text";
+        assert!(!unflag_flags_for(&v(26, 4, 0)).contains(&it));
+        assert!(unflag_flags_for(&v(26, 5, 0)).contains(&it));
+        assert!(unflag_flags_for(&v(27, 0, 0)).contains(&it));
+        assert_eq!(unflag_floor(it), Some(v(26, 5, 0)));
     }
 
     #[test]
