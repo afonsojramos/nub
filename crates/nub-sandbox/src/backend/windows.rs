@@ -342,10 +342,13 @@ pub(crate) fn apply(
 
     // Auto-grant read on the program's own directory so the LowBox child can exec +
     // load its sibling DLLs (system DLLs live under dirs that already grant ALL
-    // APPLICATION PACKAGES, so those need no grant). Unlike macOS (file-only, to hide
-    // a project-local tool's siblings), a Windows binary commonly loads sibling DLLs,
-    // so the program dir is granted; for the build-jail the program is the toolchain,
-    // whose dir is not a secret store.
+    // APPLICATION PACKAGES, so those need no grant). Unlike macOS (file-only), a Windows
+    // binary commonly loads sibling DLLs, so the DIR is granted. KNOWN EXPOSURE: this
+    // read-grant is subtree-inheritable, so a project-local program's siblings (a `.env`
+    // next to a tool) become readable — bounded for the build-jail (the program is the
+    // toolchain, e.g. node.exe, whose dir holds no user secrets), but for a general
+    // confined run the FRONT-END should own the program grant explicitly rather than the
+    // engine auto-widening it. Documented follow-up, not silently claimed as full.
     let mut read_grants = read_grants;
     if let Some(prog) = resolve_program(&spec.program, spec.cwd.as_deref())
         && let Some(parent) = prog.parent()
@@ -662,7 +665,12 @@ mod launch {
                     std::ptr::null(),
                     std::ptr::null(),
                     // bInheritHandles TRUE ⇒ the child shares the console/stdio, so its
-                    // output reaches the user (parity with Command::status()).
+                    // output reaches the user (parity with Command::status()). KNOWN
+                    // SURFACE (hardening follow-up): this inherits EVERY inheritable
+                    // handle nub holds, not a curated stdio set — a PROC_THREAD_ATTRIBUTE_
+                    // HANDLE_LIST would confine it to the three std handles. Practically
+                    // small (Rust marks its handles non-inheritable; nub opens no
+                    // inheritable handle to a secret at spawn), but not zero.
                     1,
                     flags,
                     env_ptr as *const _,
