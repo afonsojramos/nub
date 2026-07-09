@@ -55,9 +55,19 @@ enum NetMode {
     Off,
     /// Coarse deny-all: no `AF_INET`/`AF_INET6` socket at all (nothing reachable).
     DenyAll,
-    /// Per-host via the loopback proxy on `port`: `AF_INET` sockets allowed, but
-    /// Landlock ABI-v4 `ConnectTcp` restricts `connect()` to ONLY this port, so the
-    /// child's only egress route is the proxy (which SNI/host-gates per host).
+    /// Per-host via the loopback proxy on `port`. `AF_INET` STREAM sockets are allowed
+    /// (so the child can reach the loopback proxy) but narrowed hard: seccomp denies
+    /// AF_INET datagram/raw types (no UDP → no DNS-tunnel/QUIC exfil), Landlock ABI-v4
+    /// `ConnectTcp` pins `connect()` to this port, and `BindTcp` denies explicit `bind()`
+    /// (a bind-less `listen()` autobind is a dominated residual — see [`apply_landlock`]).
+    ///
+    /// RESIDUAL (bounded, documented — Landlock cannot filter by address): `ConnectTcp`
+    /// is PORT-scoped, not IP-scoped, so a direct TCP connect to an EXTERNAL host that
+    /// happens to listen on the ephemeral proxy port is not blocked. The port is random
+    /// per run; exploiting it needs an attacker-controlled server on that exact port.
+    /// Fully closing it needs a netns/veth (rejected here) or seccomp user-notify (a
+    /// larger mechanism) — surfaced as a follow-up, not silently claimed closed. macOS
+    /// (Seatbelt address+port carve) has no equivalent gap.
     Proxy(u16),
 }
 
@@ -350,9 +360,21 @@ fn apply_landlock(
             .map_err(|e| format!("handle_access fs: {e}"))?;
     }
     if connect_tcp_port.is_some() {
+        // Handle BOTH TCP rights: ConnectTcp (allow ONLY the proxy port, below) and
+        // BindTcp with NO allowed port — denying every explicit TCP bind(), which
+        // removes the deliberate inbound-listener exfil channel. An outbound connect()'s
+        // implicit source-port autobind is NOT a bind() and stays permitted, so the
+        // proxy path is unaffected. NOTE: Landlock hooks bind + connect but NOT listen,
+        // so a bind-LESS listen() still autobinds an ephemeral port — an inbound listener
+        // on a RANDOM port remains creatable. That residual is strictly dominated by the
+        // port-scoped ConnectTcp residual (below): it needs inbound host reachability AND
+        // an out-of-band channel to signal the random port, which the child lacks.
         ruleset = ruleset
             .handle_access(AccessNet::ConnectTcp)
-            .map_err(|e| format!("handle_access net: {e}"))?;
+            .map_err(|e| format!("handle_access connect: {e}"))?;
+        ruleset = ruleset
+            .handle_access(AccessNet::BindTcp)
+            .map_err(|e| format!("handle_access bind: {e}"))?;
     }
     let mut created = ruleset
         .create()
@@ -365,6 +387,7 @@ fn apply_landlock(
             .map_err(|e| format!("add_rule {}: {e}", path.display()))?;
     }
     if let Some(port) = connect_tcp_port {
+        // ConnectTcp allowed to the proxy port only; no BindTcp rule → all binds denied.
         created = created
             .add_rule(NetPort::new(port, AccessNet::ConnectTcp))
             .map_err(|e| format!("add_rule net port {port}: {e}"))?;
@@ -464,7 +487,15 @@ fn build_seccomp(net_mode: NetMode) -> Result<BpfProgram, String> {
         if net_mode == NetMode::DenyAll {
             socket_deny.push(libc::AF_INET);
         }
-        rules.insert(i64_from(libc::SYS_socket), family_rules(&socket_deny)?);
+        let mut socket_rules = family_rules(&socket_deny)?;
+        if let NetMode::Proxy(_) = net_mode {
+            // Proxy mode keeps AF_INET, but the proxy is TCP-only — a UDP (or raw/other)
+            // AF_INET socket would dodge BOTH the seccomp family filter AND Landlock's
+            // TCP-only ConnectTcp rule, giving unrestricted datagram egress (DNS-tunnel,
+            // QUIC, arbitrary UDP C2). So AF_INET is narrowed to SOCK_STREAM only.
+            socket_rules.extend(af_inet_non_stream_rules()?);
+        }
+        rules.insert(i64_from(libc::SYS_socket), socket_rules);
 
         // socketpair() deny families — NEVER AF_UNIX (node fork IPC rides it); the
         // inet/exotic families can't make a socketpair anyway, so this is belt-and-braces.
@@ -499,6 +530,48 @@ fn family_rules(families: &[libc::c_int]) -> Result<Vec<SeccompRule>, String> {
                     .map_err(|e| format!("net cond: {e}"))?,
             ])
             .map_err(|e| format!("net rule: {e}"))?,
+        );
+    }
+    Ok(out)
+}
+
+/// Deny `socket(AF_INET, <non-stream>, …)`: one rule per non-stream type, each an AND
+/// of `arg0 == AF_INET` and `(arg1 & SOCK_TYPE_MASK) == <type>` (the low 4 bits carry
+/// the type; `SOCK_NONBLOCK`/`SOCK_CLOEXEC` flags ride the high bits and are masked
+/// off). Leaves `SOCK_STREAM` (the proxy's TCP) the only permitted AF_INET socket.
+fn af_inet_non_stream_rules() -> Result<Vec<SeccompRule>, String> {
+    // SOCK_TYPE_MASK == 0xf on Linux (the base type occupies the low nibble).
+    const SOCK_TYPE_MASK: u64 = 0xf;
+    // Every AF_INET base type except SOCK_STREAM(1): DGRAM(2), RAW(3), RDM(4),
+    // SEQPACKET(5), DCCP(6). RAW needs CAP_NET_RAW (already unavailable to an
+    // unprivileged child) but is denied for completeness; DGRAM is the live exfil hole.
+    let non_stream: [u64; 5] = [
+        libc::SOCK_DGRAM as u64,
+        libc::SOCK_RAW as u64,
+        libc::SOCK_RDM as u64,
+        libc::SOCK_SEQPACKET as u64,
+        6, // SOCK_DCCP (not always in libc)
+    ];
+    let mut out = Vec::with_capacity(non_stream.len());
+    for ty in non_stream {
+        out.push(
+            SeccompRule::new(vec![
+                SeccompCondition::new(
+                    0,
+                    SeccompCmpArgLen::Dword,
+                    SeccompCmpOp::Eq,
+                    libc::AF_INET as u64,
+                )
+                .map_err(|e| format!("inet cond: {e}"))?,
+                SeccompCondition::new(
+                    1,
+                    SeccompCmpArgLen::Dword,
+                    SeccompCmpOp::MaskedEq(SOCK_TYPE_MASK),
+                    ty,
+                )
+                .map_err(|e| format!("inet type cond: {e}"))?,
+            ])
+            .map_err(|e| format!("inet type rule: {e}"))?,
         );
     }
     Ok(out)

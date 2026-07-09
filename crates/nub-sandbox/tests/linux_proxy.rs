@@ -173,6 +173,15 @@ static int proxy_connect(const char* tgt,int tport){
 int main(int argc,char**argv){
     if(argc<2)return 1;
     if(!strcmp(argv[1],"rawconnect")){int fd=dial(argv[2],atoi(argv[3]));if(fd<0)return 1;close(fd);return 0;}
+    /* SOCK_DGRAM|SOCK_CLOEXEC (the realistic flagged form) — proves the seccomp type
+       mask ignores the high flag bits and still catches the datagram type. */
+    if(!strcmp(argv[1],"udpsocket")){int fd=socket(AF_INET,SOCK_DGRAM|SOCK_CLOEXEC,0);if(fd<0)return 1;close(fd);return 0;}
+    if(!strcmp(argv[1],"tcpbind")){
+        int fd=socket(AF_INET,SOCK_STREAM,0); if(fd<0)return 1;
+        struct sockaddr_in a; memset(&a,0,sizeof a); a.sin_family=AF_INET;
+        a.sin_port=htons(atoi(argv[2])); a.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+        if(bind(fd,(struct sockaddr*)&a,sizeof a)!=0){close(fd);return 1;} close(fd);return 0;
+    }
     if(!strcmp(argv[1],"unixconnect")){
         int fd=socket(AF_UNIX,SOCK_STREAM,0); if(fd<0)return 1; /* socket() denied */
         struct sockaddr_un a; memset(&a,0,sizeof a); a.sun_family=AF_UNIX;
@@ -244,6 +253,45 @@ fn per_host_proxy_forwards_allowed_drops_denied_blocks_direct() {
         ),
         0,
         "neg-control: unenforced net connects directly"
+    );
+}
+
+#[test]
+fn udp_and_inbound_bind_denied_in_proxy_mode() {
+    // Proxy mode keeps AF_INET STREAM (for the proxy) but must close the channels that
+    // would dodge the TCP-only proxy gate: a UDP socket (DNS-tunnel/QUIC exfil) and an
+    // explicit TCP bind() (the deliberate inbound-listener exfil channel). A bind-less
+    // listen() autobind is a documented dominated residual, not asserted here.
+    if !landlock_net() {
+        return;
+    }
+    let f = fixture();
+    let Some(probe) = compile_probe(&f.proj) else {
+        return;
+    };
+    let probe = probe.to_str().unwrap();
+    // socket(AF_INET, SOCK_DGRAM) denied by seccomp under Proxy mode.
+    assert_eq!(
+        f.run(net_policy(), probe, &["udpsocket"]),
+        1,
+        "UDP socket must be denied in proxy mode (no datagram exfil)"
+    );
+    // explicit bind() to a TCP port denied by Landlock BindTcp under Proxy mode.
+    assert_eq!(
+        f.run(net_policy(), probe, &["tcpbind", "0"]),
+        1,
+        "explicit TCP bind() must be denied in proxy mode"
+    );
+    // Negative controls: net relaxed → both succeed.
+    assert_eq!(
+        f.run(json!({ "fs": true }), probe, &["udpsocket"]),
+        0,
+        "neg-control: unenforced net creates a UDP socket"
+    );
+    assert_eq!(
+        f.run(json!({ "fs": true }), probe, &["tcpbind", "0"]),
+        0,
+        "neg-control: unenforced net binds a TCP port"
     );
 }
 
