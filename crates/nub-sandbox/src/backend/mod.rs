@@ -7,17 +7,27 @@
 //! loss in [`Degradation`] so the caller surfaces a WARNING; a hard fail-closed
 //! (a required axis unenforceable) is `Err(Degradation)`.
 //!
-//! BACKEND STATUS: macOS (Seatbelt) is wired ([`macos`]); Linux (Landlock+seccomp)
-//! and Windows (AppContainer) land in later stages and still run the env-scrub-only
-//! [`generic_apply`] skeleton — which constructs the child env and reports fs/net as
-//! NOT enforced. Every path preserves the API shape (`apply(policy, spec) ->
-//! Result<Prepared, Degradation>`) the future embedder seam slots into.
+//! BACKEND STATUS: macOS (Seatbelt, [`macos`]) and Linux (Landlock+seccomp,
+//! [`linux`]) are wired; Windows (AppContainer) lands later and still runs the
+//! env-scrub-only [`generic_apply`] skeleton — which constructs the child env and
+//! reports fs/net as NOT enforced. Every path preserves the API shape
+//! (`apply(policy, spec) -> Result<Prepared, Degradation>`) the future embedder
+//! seam slots into.
 
 use crate::policy::SandboxPolicy;
 use std::process::Command;
 
 #[cfg(target_os = "macos")]
 mod macos;
+
+#[cfg(target_os = "linux")]
+mod linux;
+
+// The OS-agnostic Landlock grant derivation. Compiled on Linux (its real consumer)
+// and under `test` on any host — so its security-critical carve logic is unit-tested
+// on the macOS dev host over tempfile trees, without a kernel.
+#[cfg(any(target_os = "linux", test))]
+mod linux_grants;
 
 /// Which confinement axes a backend managed to enforce, and which degraded. A
 /// non-empty `lost` becomes a user-facing WARNING. Ported contract.
@@ -104,15 +114,19 @@ pub fn apply(policy: &SandboxPolicy, spec: CommandSpec) -> Result<Prepared, Degr
     {
         macos::apply(policy, spec)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::apply(policy, spec)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         generic_apply(policy, spec)
     }
 }
 
-/// Env-scrub-only skeleton for backends not yet wired (Linux/Windows). Reports fs
-/// and net as not-enforced so a caller never mistakes the skeleton for confinement.
-#[cfg(not(target_os = "macos"))]
+/// Env-scrub-only skeleton for backends not yet wired (Windows). Reports fs and net
+/// as not-enforced so a caller never mistakes the skeleton for confinement.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn generic_apply(policy: &SandboxPolicy, spec: CommandSpec) -> Result<Prepared, Degradation> {
     let mut command = Command::new(&spec.program);
     command.args(&spec.args);
@@ -152,7 +166,7 @@ fn generic_apply(policy: &SandboxPolicy, spec: CommandSpec) -> Result<Prepared, 
 
 /// Whether the fs policy actually confines anything (a non-relaxed base or any
 /// entry). A relaxed fs axis (allow-all, no rules) is not a lost enforcement.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn fs_confines(policy: &SandboxPolicy) -> bool {
     !matches!(policy.fs.rules.default_effect, crate::policy::Effect::Allow)
         || !policy.fs.rules.entries.is_empty()

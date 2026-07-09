@@ -2760,8 +2760,10 @@ version = "0.4.5"
 dependencies = [
  "globset",
  "ipnet",
+ "landlock",
  "libc",
  "regex",
+ "seccompiler",
  "serde",
  "serde_json",
  "tempfile",

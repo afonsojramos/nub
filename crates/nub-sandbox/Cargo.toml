@@ -31,10 +31,19 @@ globset = "0.4"
 regex = "1"
 ipnet = { version = "2", features = ["serde"] }
 
-# libc: macOS needs it now (confstr scratch-dir lookup in the Seatbelt backend);
-# Linux uses it when its backend lands (S4).
+# libc: macOS needs it (confstr scratch-dir lookup in the Seatbelt backend); Linux
+# uses it in the Landlock/seccomp backend (prctl + the raw landlock ABI probe).
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 libc = { workspace = true }
+
+# Landlock (fs read/write-confine) + seccompiler (net + ptrace-family syscall
+# deny) back the Linux backend. Both are already in the workspace lockfile
+# (transitive via vendor/aube) — no new supply-chain surface. Linux-only: the
+# backend is `#[cfg(target_os = "linux")]`, so the OS-agnostic grant DERIVATION
+# (linux_grants.rs, host-tested) references neither.
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4"
+seccompiler = "0.5"
 
 [dev-dependencies]
 tempfile = "3"
