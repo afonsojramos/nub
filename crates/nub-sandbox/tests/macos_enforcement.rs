@@ -288,27 +288,25 @@ fn firmlink_write_allow_is_not_inert() {
 fn read_confine_does_not_leak_program_siblings() {
     // The program auto-grant must expose the program FILE only — never its parent
     // dir, or a project-local tool would leak its neighbouring secrets under a tight
-    // read-confine (the F3 over-grant).
+    // read-confine (the F3 over-grant). The tool itself is the PROGRAM (the case the
+    // grant governs — a system interpreter would be covered by the essential base
+    // and never exercise this).
+    use std::os::unix::fs::PermissionsExt;
     let f = fixture();
     let tooldir = f.proj.join("tooldir");
     fs::create_dir_all(&tooldir).unwrap();
-    fs::write(tooldir.join("tool.sh"), "#!/bin/sh\ncat \"$1\"\n").unwrap();
+    let tool = tooldir.join("tool.sh");
+    fs::write(&tool, "#!/bin/sh\ncat \"$1\"\n").unwrap();
+    fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
     fs::write(tooldir.join("secret.key"), "SIBLING_SECRET").unwrap();
-    // Read-confine to a DIFFERENT dir; tooldir is never granted.
+    // Read-confine to a DIFFERENT dir; tooldir is granted ONLY via the program's
+    // own-file auto-grant, so the tool execs but its sibling stays denied.
     let allowed = f.proj.join("allowed");
     fs::create_dir_all(&allowed).unwrap();
     let confine = serde_json::json!({ "fs": [s(&allowed)] });
-    // The interpreter runs the granted tool file, but reading its SIBLING is denied.
     assert!(
-        !f.allowed(
-            confine,
-            "/bin/sh",
-            &[
-                &s(&tooldir.join("tool.sh")),
-                &s(&tooldir.join("secret.key"))
-            ]
-        ),
-        "program's sibling secret must not be readable"
+        !f.allowed(confine, &s(&tool), &[&s(&tooldir.join("secret.key"))]),
+        "the program's sibling secret must not be readable via a parent-dir grant"
     );
 }
 

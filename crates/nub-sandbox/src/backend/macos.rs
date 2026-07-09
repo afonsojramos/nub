@@ -235,6 +235,12 @@ fn emit_fs(policy: &SandboxPolicy, spec: &CommandSpec, out: &mut String) {
 /// Top-level roots a write grant must never cover — a `..`-collapsed surface path
 /// (`/tmp/..` → `/private`) would otherwise open filesystem-wide write. Reads are
 /// exempt (a generous `(subpath "/")` read is the legitimate default posture).
+///
+/// The matcher reaching here is already firmlink-CANONICALIZED, so the entries must
+/// be the canonical forms the guard actually sees: `/var`/`/etc`/`/tmp` resolve to
+/// `/private/var`/`/private/etc`/`/private/tmp`. The firmlink spellings are kept
+/// too (harmless, self-documenting); `/private/tmp` is deliberately absent — it is
+/// the legitimate temp firmlink target, not a broad system root.
 fn is_dangerous_write_root(term: &MatchTerm) -> bool {
     let MatchTerm::Subpath(p) = term else {
         return false;
@@ -242,6 +248,8 @@ fn is_dangerous_write_root(term: &MatchTerm) -> bool {
     matches!(
         p.as_str(),
         "/" | "/private"
+            | "/private/var"
+            | "/private/etc"
             | "/System"
             | "/Users"
             | "/usr"
@@ -252,6 +260,9 @@ fn is_dangerous_write_root(term: &MatchTerm) -> bool {
             | "/opt"
             | "/Library"
             | "/Applications"
+            | "/Volumes"
+            | "/Network"
+            | "/cores"
     )
 }
 
@@ -664,8 +675,26 @@ mod tests {
         assert!(is_dangerous_write_root(&MatchTerm::Subpath(
             "/private".to_string()
         )));
+        // The canonical forms of firmlink roots (`/var`→`/private/var`) — what the
+        // guard actually sees after the matcher's canonicalization — must be caught.
+        assert!(is_dangerous_write_root(&MatchTerm::Subpath(
+            "/private/var".to_string()
+        )));
+        assert!(is_dangerous_write_root(&MatchTerm::Subpath(
+            "/private/etc".to_string()
+        )));
+        assert!(is_dangerous_write_root(&MatchTerm::Subpath(
+            "/Volumes".to_string()
+        )));
+        // A real project dir under a guarded root is NOT over-blocked (exact match).
         assert!(!is_dangerous_write_root(&MatchTerm::Subpath(
             "/proj".to_string()
+        )));
+        assert!(!is_dangerous_write_root(&MatchTerm::Subpath(
+            "/Users/me/proj".to_string()
+        )));
+        assert!(!is_dangerous_write_root(&MatchTerm::Subpath(
+            "/private/tmp/scratch".to_string()
         )));
     }
 
