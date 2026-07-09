@@ -215,6 +215,24 @@ const BASELINE_ENV_EXACT: &[&str] = &[
 ];
 const BASELINE_ENV_PREFIXES: &[&str] = &["LC_", "npm_config_"];
 
+/// The `npm_config_` prefix carries BOTH build hints (kept) and registry
+/// CREDENTIALS (must never reach sandboxed code). See [`is_npm_config_credential`].
+const NPM_CONFIG_PREFIX: &str = "npm_config_";
+
+/// Whether an `npm_config_*` key (given the part AFTER the `npm_config_` prefix) is
+/// a registry CREDENTIAL rather than a build hint. Grounds .fray/sandbox.md thread
+/// #6: registry auth never rides the lifecycle env — env-scrub's whole point for the
+/// credential class. Covers the bare legacy keys (`_auth`, `_authToken`, `_password`,
+/// `email`) AND the registry-scoped `//host/:_auth…`/`:_password`/`:email` forms,
+/// both matched case-insensitively as a substring so bare and scoped shapes fall to
+/// one rule. `_auth` subsumes the `_authToken` form (it is a substring of it). The
+/// kept build hints (`npm_config_target`/`arch`/`runtime`/`nodedir`/`python`/…)
+/// contain none of these markers, so nothing legitimate is caught.
+fn is_npm_config_credential(remainder: &str) -> bool {
+    let r = remainder.to_ascii_lowercase();
+    r.contains("_auth") || r.contains("_password") || r.contains("email")
+}
+
 /// Build the curated-baseline child env from the ambient env (the `sandbox: true`
 /// / build-jail env posture). Only the non-secret operational allowlist passes.
 pub fn curated_baseline_env(
@@ -227,12 +245,31 @@ pub fn curated_baseline_env(
         .collect()
 }
 
+/// Case-insensitive prefix strip: returns the remainder after `prefix` if `key`
+/// starts with it (ignoring ASCII case), else `None`. Used to gate the credential
+/// carve-out uniformly across platforms.
+fn strip_prefix_ci<'a>(key: &'a str, prefix: &str) -> Option<&'a str> {
+    key.get(..prefix.len())
+        .filter(|head| head.eq_ignore_ascii_case(prefix))
+        .map(|_| &key[prefix.len()..])
+}
+
 /// Whether a key is in the curated baseline. Case-SENSITIVE on unix (POSIX env
 /// keys are); case-INSENSITIVE on Windows, where env names are case-insensitive by
 /// OS contract and a process may report `SYSTEMROOT` or `SystemRoot` — an
 /// exact-case miss would drop a container-essential var and re-open the
 /// `ERROR_ENVVAR_NOT_FOUND` spawn failure the baseline exists to prevent.
 fn baseline_allows(key: &str) -> bool {
+    // Registry credential keys ride the build-hint `npm_config_*` prefix; scrub them
+    // before the prefix pass would admit them. Case-insensitive prefix match so a
+    // Windows-cased `NPM_CONFIG_//…:_authToken` is caught too (env names are
+    // case-insensitive there); on unix npm always emits the lowercase prefix, so a CI
+    // match only ever affects `npm_config_`-shaped keys and never widens the allow.
+    if let Some(rest) = strip_prefix_ci(key, NPM_CONFIG_PREFIX) {
+        if is_npm_config_credential(rest) {
+            return false;
+        }
+    }
     #[cfg(windows)]
     {
         BASELINE_ENV_EXACT
@@ -301,6 +338,49 @@ mod tests {
             !out.contains_key("AWS_SECRET_ACCESS_KEY"),
             "aws secret not in baseline"
         );
+    }
+
+    #[test]
+    fn npm_config_build_hints_pass_but_credentials_scrubbed() {
+        // The `npm_config_*` family passes build hints through, but registry auth
+        // rides the same prefix and must be scrubbed — thread #6. Both the bare
+        // legacy keys and the registry-scoped `//host/:_auth…` forms are excluded.
+        let ambient: BTreeMap<String, String> = [
+            ("npm_config_target", "22.0.0"),
+            ("npm_config_arch", "arm64"),
+            ("npm_config_runtime", "node"),
+            ("npm_config_registry", "https://registry.npmjs.org/"),
+            ("npm_config__auth", "aGVsbG86d29ybGQ="),
+            ("npm_config__authToken", "npm_LEAK"),
+            ("npm_config__password", "hunter2"),
+            ("npm_config_email", "me@example.com"),
+            ("npm_config_//registry.npmjs.org/:_authToken", "SECRET_TOKEN"),
+            ("npm_config_//registry.npmjs.org/:_password", "SECRET_PW"),
+            ("npm_config_//registry.npmjs.org/:_auth", "SECRET_BASIC"),
+        ]
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        let out = curated_baseline_env(&ambient);
+        for k in [
+            "npm_config_target",
+            "npm_config_arch",
+            "npm_config_runtime",
+            "npm_config_registry",
+        ] {
+            assert!(out.contains_key(k), "build hint {k} must pass");
+        }
+        for k in [
+            "npm_config__auth",
+            "npm_config__authToken",
+            "npm_config__password",
+            "npm_config_email",
+            "npm_config_//registry.npmjs.org/:_authToken",
+            "npm_config_//registry.npmjs.org/:_password",
+            "npm_config_//registry.npmjs.org/:_auth",
+        ] {
+            assert!(!out.contains_key(k), "credential {k} must be scrubbed");
+        }
     }
 
     #[test]
