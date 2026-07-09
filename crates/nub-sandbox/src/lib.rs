@@ -10,11 +10,15 @@
 //!     seam wires aube's lifecycle to these two fns).
 //!
 //! BACKEND STATUS: the compiler + IR + matcher are complete and exhaustively
-//! tested. [`apply`] enforces on macOS (Seatbelt); Linux + Windows still run the
-//! env-scrub-only skeleton (their backends land in later stages) and honestly
-//! report fs/net as not-enforced. The [`conformance`] harness evaluates
-//! compiler/matcher verdicts against committed fixtures — the engine-pure half of
-//! the cross-platform conformance bar.
+//! tested. [`apply`] enforces fs/net/env on macOS (Seatbelt), real-kernel Linux
+//! (Landlock + seccomp), and Windows (AppContainer), each proven by per-axis
+//! enforcement tests with negative controls; per-host egress rides the localhost
+//! proxy. The [`conformance`] harness evaluates compiler/matcher verdicts against
+//! committed fixtures — the engine-pure half of the cross-platform bar.
+//!
+//! What the engine does NOT close (bounded residuals + the launcher-handoff
+//! contract) is recorded honestly in `LIMITATIONS.md` alongside the runtime
+//! [`Degradation`] signals; read it before relying on any single-axis guarantee.
 
 pub mod backend;
 pub mod compiler;

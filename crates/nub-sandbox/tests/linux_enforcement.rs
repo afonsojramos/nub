@@ -184,6 +184,59 @@ fn generous_read_denies_dotenv() {
     );
 }
 
+// ── new secret deny-set additions (A2): each denied under a generous read ──────
+
+#[test]
+fn new_secret_paths_denied_under_generous_read() {
+    if !landlock_available() {
+        return;
+    }
+    let f = fixture();
+    // Home-anchored secret files/dirs (the deny-set additions), anchored to the
+    // fixture home so the walk carves fixture paths, never the real `~`.
+    std::fs::write(f.home.join(".pgpass"), "PGPASS").unwrap();
+    std::fs::write(f.home.join(".pypirc"), "PYPIRC").unwrap();
+    std::fs::create_dir_all(f.home.join(".gnupg")).unwrap();
+    std::fs::write(f.home.join(".gnupg/secring.gpg"), "GPGKEY").unwrap();
+    std::fs::create_dir_all(f.home.join(".config/git")).unwrap();
+    std::fs::write(f.home.join(".config/git/credentials"), "GITCREDS").unwrap();
+    // Project-local: a `.env` DIRECTORY subtree (not just a leaf) + direnv `.envrc`.
+    std::fs::create_dir_all(f.proj.join("nested/.env")).unwrap();
+    std::fs::write(f.proj.join("nested/.env/prod"), "ENVDIRSECRET").unwrap();
+    std::fs::write(f.proj.join(".envrc"), "export SECRET=x").unwrap();
+
+    let generous = serde_json::json!({ "fs": ["..."] });
+    for (path, label) in [
+        (f.home.join(".pgpass"), ".pgpass"),
+        (f.home.join(".pypirc"), ".pypirc"),
+        (f.home.join(".gnupg/secring.gpg"), ".gnupg subtree"),
+        (
+            f.home.join(".config/git/credentials"),
+            "git credential store",
+        ),
+        (f.proj.join("nested/.env/prod"), ".env directory subtree"),
+        (f.proj.join(".envrc"), ".envrc"),
+    ] {
+        assert!(
+            !f.ok(generous.clone(), CAT, &[&s(&path)]),
+            "{label} must be denied under generous read"
+        );
+    }
+    // negative controls — relaxed fs reads each fine, so the deny (not a missing
+    // file) is the cause above. Cover a home file + both new glob mechanisms.
+    for path in [
+        f.home.join(".pgpass"),
+        f.proj.join("nested/.env/prod"),
+        f.proj.join(".envrc"),
+    ] {
+        assert!(
+            f.ok(serde_json::json!({ "fs": true }), CAT, &[&s(&path)]),
+            "neg-control: relaxed fs reads {}",
+            s(&path)
+        );
+    }
+}
+
 // ── fs write-confine ────────────────────────────────────────────────────────────
 
 #[test]

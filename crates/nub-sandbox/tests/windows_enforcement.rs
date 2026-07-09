@@ -72,6 +72,7 @@ mod win {
                 Err(_) => 4,
             },
             Some("token") => token_check(),
+            Some("checkhandle") => check_handle(&a[1]),
             Some("spawnchild") => spawn_grandchild(&a[1]),
             Some("sleep") => {
                 std::thread::sleep(Duration::from_secs(90));
@@ -79,6 +80,21 @@ mod win {
             }
             _ => 2,
         }
+    }
+
+    /// Whether the numeric handle value passed by the parent is a live handle in THIS
+    /// process — i.e. was inherited. `GetHandleInformation` succeeds only on a handle
+    /// present in the caller's table. Exit 0 = inherited (handle valid here), 7 = not.
+    fn check_handle(hex: &str) -> i32 {
+        use windows_sys::Win32::Foundation::{GetHandleInformation, HANDLE};
+        let Ok(val) = usize::from_str_radix(hex.trim_start_matches("0x"), 16) else {
+            return 9;
+        };
+        let h = val as HANDLE;
+        let mut flags = 0u32;
+        // SAFETY: query-only; an un-inherited value simply fails the call (no deref).
+        let ok = unsafe { GetHandleInformation(h, &mut flags) };
+        if ok != 0 { 0 } else { 7 }
     }
 
     fn connect(host: &str, port: u16) -> i32 {
@@ -365,6 +381,97 @@ mod win {
         }
     }
 
+    // ── handle-inheritance + env-baseline helpers ──────────────────────────────────
+
+    /// Create an unnamed, inheritable, initially-signaled event so the parent holds a
+    /// handle that WOULD inherit under a bInheritHandles=TRUE spawn absent a handle-list.
+    fn create_inheritable_event() -> windows_sys::Win32::Foundation::HANDLE {
+        use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+        use windows_sys::Win32::System::Threading::CreateEventW;
+        let mut sa: SECURITY_ATTRIBUTES = unsafe { std::mem::zeroed() };
+        sa.nLength = std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32;
+        sa.bInheritHandle = 1;
+        // SAFETY: unnamed manual-reset event with an inheritable SA; NULL name.
+        unsafe { CreateEventW(&sa, 1, 1, std::ptr::null()) }
+    }
+
+    /// The NC for the handle-list scoping: a raw CreateProcessW with bInheritHandles=TRUE
+    /// and NO attribute list — the pre-hardening "inherit ALL inheritable handles"
+    /// behavior. Proves the test event IS genuinely inheritable (the child sees it), so
+    /// the sandbox leg's non-inheritance is the HANDLE_LIST, not a dead handle. Args are
+    /// space-free here, so a naive quoted command line suffices.
+    fn spawn_inherit_all(program: &Path, args: &[&str]) -> i32 {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            CreateProcessW, GetExitCodeProcess, INFINITE, PROCESS_INFORMATION, STARTUPINFOW,
+            WaitForSingleObject,
+        };
+        let mut cl: Vec<u16> = Vec::new();
+        cl.push(u16::from(b'"'));
+        cl.extend(program.as_os_str().encode_wide());
+        cl.push(u16::from(b'"'));
+        for a in args {
+            cl.push(u16::from(b' '));
+            cl.extend(a.encode_utf16());
+        }
+        cl.push(0);
+        let mut si: STARTUPINFOW = unsafe { std::mem::zeroed() };
+        si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+        let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: inherit-all spawn (bInheritHandles TRUE, no attr list); cl outlives it.
+        let ok = unsafe {
+            CreateProcessW(
+                std::ptr::null(),
+                cl.as_mut_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                1,
+                0,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::from_mut(&mut si).cast(),
+                &mut pi,
+            )
+        };
+        if ok == 0 {
+            return -101;
+        }
+        // SAFETY: wait for exit, read the code, close both handles.
+        unsafe {
+            WaitForSingleObject(pi.hProcess, INFINITE);
+            let mut code = 0u32;
+            GetExitCodeProcess(pi.hProcess, &mut code);
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+            code as i32
+        }
+    }
+
+    /// Compile a REAL `sandbox: true` policy over the CI runner's actual ambient env, so
+    /// the env axis is the compiler's own curated baseline (with the Windows-essential
+    /// vars) — not the hand-rolled `base_env` list. This is the A1 fix under test.
+    fn compile_sandbox_true(f: &Fixture) -> SandboxPolicy {
+        let ambient: BTreeMap<String, String> = std::env::vars().collect();
+        let home = std::env::var("USERPROFILE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| f.root.clone());
+        let homes = nub_sandbox::Homes {
+            home: home.clone(),
+            tmp: std::env::temp_dir(),
+            cache: home.join("AppData").join("Local"),
+            project: f.work.clone(),
+        };
+        let ctx = nub_sandbox::CompileCtx {
+            homes,
+            cwd: f.work.clone(),
+            trusted: true,
+            ambient_env: ambient,
+            runner: Box::new(nub_sandbox::compiler::ShellRunner),
+        };
+        nub_sandbox::compile(&serde_json::Value::Bool(true), &ctx).expect("sandbox:true compiles")
+    }
+
     // ── the cases ─────────────────────────────────────────────────────────────────
 
     pub fn run_enforcement() -> Result<(), u32> {
@@ -558,6 +665,76 @@ mod win {
             ),
             0,
         );
+
+        // ── env baseline (A1): the compiler's `sandbox: true` curated baseline must
+        //    carry the Windows-essential vars so CreateProcessW succeeds (no
+        //    ERROR_ENVVAR_NOT_FOUND) and a normal exe runs. Compiled over the runner's
+        //    REAL ambient env — replaces the hand-rolled base_env workaround. ─────────
+        // SAFETY: single-threaded test main; seed an ambient secret the scrub must drop.
+        unsafe { std::env::set_var("NUB_SBX_A1_SECRET", "sk-leak") };
+        let true_policy = compile_sandbox_true(&f);
+        expect(
+            &mut fails,
+            "sandbox:true child STARTS under compiler baseline (CreateProcessW ok)",
+            code(&true_policy, &child, &["__sbxchild__", "token"]),
+            0,
+        );
+        expect(
+            &mut fails,
+            "sandbox:true baseline carries SystemRoot (essential var present)",
+            code(
+                &true_policy,
+                &child,
+                &["__sbxchild__", "getenv", "SystemRoot"],
+            ),
+            0,
+        );
+        expect(
+            &mut fails,
+            "sandbox:true baseline carries USERPROFILE (essential var present)",
+            code(
+                &true_policy,
+                &child,
+                &["__sbxchild__", "getenv", "USERPROFILE"],
+            ),
+            0,
+        );
+        expect(
+            &mut fails,
+            "sandbox:true scrubs the ambient secret",
+            code(
+                &true_policy,
+                &child,
+                &["__sbxchild__", "getenv", "NUB_SBX_A1_SECRET"],
+            ),
+            4,
+        );
+
+        // ── inherited-handle scoping (B1): the sandboxed child inherits ONLY its stdio
+        //    (PROC_THREAD_ATTRIBUTE_HANDLE_LIST), NOT an arbitrary inheritable handle nub
+        //    holds. NC: a raw inherit-ALL spawn DOES pass the same handle, proving it's
+        //    genuinely inheritable — so the sandbox leg's non-inheritance is the scoping. ─
+        let event = create_inheritable_event();
+        if event.is_null() {
+            fails += 1;
+            eprintln!("FAIL handle-scoping setup: CreateEventW failed");
+        } else {
+            let harg = format!("0x{:x}", event as usize);
+            expect(
+                &mut fails,
+                "sandboxed child does NOT inherit nub's extra handle (scoped to stdio)",
+                code(&confine, &child, &["__sbxchild__", "checkhandle", &harg]),
+                7,
+            );
+            expect(
+                &mut fails,
+                "NC inherit-all spawn DOES pass the handle (proves it's inheritable)",
+                spawn_inherit_all(&child, &["__sbxchild__", "checkhandle", &harg]),
+                0,
+            );
+            // SAFETY: close the test event.
+            unsafe { windows_sys::Win32::Foundation::CloseHandle(event) };
+        }
 
         // ── process-reap (Job Object KILL_ON_JOB_CLOSE) ──────────────────────────
         job_reap(&mut fails, &f);

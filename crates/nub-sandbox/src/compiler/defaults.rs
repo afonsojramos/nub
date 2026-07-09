@@ -16,15 +16,19 @@ use crate::policy::{CanonGlob, Effect, FsAccess, FsRule};
 const SECRET_READ_RELPATHS: &[&str] = &[
     // classic credentials
     ".ssh",
+    ".gnupg",
     ".aws",
     ".netrc",
     ".git-credentials",
+    ".config/git/credentials",
     ".docker/config.json",
     ".kube",
     ".config/gcloud",
     ".config/gh",
     ".config/hub",
     ".npmrc",
+    ".pgpass",
+    ".pypirc",
     // crypto wallets / keystores
     ".config/solana",
     ".config/sui",
@@ -45,9 +49,25 @@ const SECRET_READ_RELPATHS: &[&str] = &[
     ".config/microsoft-edge",
 ];
 
-/// `.env*` deny globs — legit code reads secrets via the injected process env,
-/// not by `fs.read()`-ing the file, so denying these is near-zero-breakage.
-const SECRET_READ_GLOBS: &[&str] = &["**/.env", "**/.env.*", ".env", ".env.*"];
+/// `.env*` / `.envrc` deny globs — legit code reads secrets via the injected
+/// process env, not by `fs.read()`-ing the file, so denying these is
+/// near-zero-breakage. `.env` is denied both as a leaf (`**/.env`) AND as a
+/// SUBTREE (`**/.env/**`) so a `.env/` directory holding per-target secret files
+/// is covered, not just a single-file `.env`. `.envrc` is direnv's secret-bearing
+/// shell config, project-local at any depth like `.env`.
+///
+/// MUST STAY IN SYNC with `linux_grants::BUILTIN_ENV_DENY_GLOBS` (the generous-`**`
+/// system-dir seeding skips exactly these depth-independent builtin denies).
+const SECRET_READ_GLOBS: &[&str] = &[
+    "**/.env",
+    "**/.env.*",
+    "**/.env/**",
+    ".env",
+    ".env.*",
+    ".env/**",
+    "**/.envrc",
+    ".envrc",
+];
 
 /// Secret name-word tokens matched as a case-insensitive SUBSTRING anywhere in a
 /// key (via [`word_in_substr`]). These are long/specific enough that a substring
@@ -156,6 +176,14 @@ fn deny(glob: String) -> FsRule {
 /// build-hint `npm_config_*` subset. Ambient secrets never ride this list. The
 /// exact baseline is the deferred build-jail thread's product surface; this is a
 /// usable, safe default for the frontend-less engine.
+///
+/// The Windows container-essential block (`SystemRoot` … `PROCESSOR_ARCHITECTURE`)
+/// is load-bearing: `CreateProcessW` with a constructed environment block that
+/// omits `SystemRoot` fails `ERROR_ENVVAR_NOT_FOUND` (the loader resolves system
+/// DLLs relative to it), and a normal Windows exe (node.exe) needs the
+/// `USERPROFILE`/`APPDATA`/`LOCALAPPDATA` family to resolve its home/temp/config.
+/// These names never appear on unix (the filter is over the ambient env, so the
+/// baseline stays OS-appropriate without a `cfg`).
 const BASELINE_ENV_EXACT: &[&str] = &[
     "PATH",
     "HOME",
@@ -170,11 +198,17 @@ const BASELINE_ENV_EXACT: &[&str] = &[
     "TMPDIR",
     "TEMP",
     "TMP",
+    // Windows container-essential (see the doc note above).
     "SystemRoot",
     "SystemDrive",
     "windir",
     "ComSpec",
     "PATHEXT",
+    "USERPROFILE",
+    "LOCALAPPDATA",
+    "APPDATA",
+    "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE",
 ];
 const BASELINE_ENV_PREFIXES: &[&str] = &["LC_", "npm_config_"];
 
@@ -185,10 +219,104 @@ pub fn curated_baseline_env(
 ) -> std::collections::BTreeMap<String, String> {
     ambient
         .iter()
-        .filter(|(k, _)| {
-            BASELINE_ENV_EXACT.contains(&k.as_str())
-                || BASELINE_ENV_PREFIXES.iter().any(|p| k.starts_with(p))
-        })
+        .filter(|(k, _)| baseline_allows(k))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect()
+}
+
+/// Whether a key is in the curated baseline. Case-SENSITIVE on unix (POSIX env
+/// keys are); case-INSENSITIVE on Windows, where env names are case-insensitive by
+/// OS contract and a process may report `SYSTEMROOT` or `SystemRoot` — an
+/// exact-case miss would drop a container-essential var and re-open the
+/// `ERROR_ENVVAR_NOT_FOUND` spawn failure the baseline exists to prevent.
+fn baseline_allows(key: &str) -> bool {
+    #[cfg(windows)]
+    {
+        BASELINE_ENV_EXACT
+            .iter()
+            .any(|e| e.eq_ignore_ascii_case(key))
+            || BASELINE_ENV_PREFIXES.iter().any(|p| {
+                key.get(..p.len())
+                    .is_some_and(|s| s.eq_ignore_ascii_case(p))
+            })
+    }
+    #[cfg(not(windows))]
+    {
+        BASELINE_ENV_EXACT.contains(&key)
+            || BASELINE_ENV_PREFIXES.iter().any(|p| key.starts_with(p))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    fn homes() -> Homes {
+        Homes {
+            home: PathBuf::from("/testhome"),
+            tmp: PathBuf::from("/testtmp"),
+            cache: PathBuf::from("/testhome/.cache"),
+            project: PathBuf::from("/proj"),
+        }
+    }
+
+    #[test]
+    fn baseline_keeps_windows_essentials_drops_secrets() {
+        let ambient: BTreeMap<String, String> = [
+            ("PATH", "/bin"),
+            ("USERPROFILE", "C:/Users/me"),
+            ("LOCALAPPDATA", "C:/Users/me/AppData/Local"),
+            ("APPDATA", "C:/Users/me/AppData/Roaming"),
+            ("NUMBER_OF_PROCESSORS", "8"),
+            ("PROCESSOR_ARCHITECTURE", "AMD64"),
+            ("SystemRoot", "C:/Windows"),
+            ("MY_SECRET_TOKEN", "leak"),
+            ("AWS_SECRET_ACCESS_KEY", "leak"),
+        ]
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        let out = curated_baseline_env(&ambient);
+        for k in [
+            "PATH",
+            "USERPROFILE",
+            "LOCALAPPDATA",
+            "APPDATA",
+            "NUMBER_OF_PROCESSORS",
+            "PROCESSOR_ARCHITECTURE",
+            "SystemRoot",
+        ] {
+            assert!(out.contains_key(k), "baseline must keep {k}");
+        }
+        assert!(
+            !out.contains_key("MY_SECRET_TOKEN"),
+            "secret not in baseline"
+        );
+        assert!(
+            !out.contains_key("AWS_SECRET_ACCESS_KEY"),
+            "aws secret not in baseline"
+        );
+    }
+
+    #[test]
+    fn secret_denies_include_the_new_additions() {
+        let globs: Vec<String> = secret_read_denies(&homes())
+            .into_iter()
+            .map(|r| r.matcher.as_str().to_string())
+            .collect();
+        // Depth-independent `.env`/`.envrc` globs are verbatim (never anchored).
+        for g in ["**/.env", "**/.env/**", "**/.envrc"] {
+            assert!(globs.contains(&g.to_string()), "missing verbatim deny {g}");
+        }
+        // Home-anchored secret files/dirs appear as subtree denies (substring match
+        // tolerates OS firmlink canonicalization of the fake home prefix).
+        for frag in [".gnupg", ".pgpass", ".pypirc", ".config/git/credentials"] {
+            assert!(
+                globs.iter().any(|g| g.contains(frag)),
+                "missing home secret deny containing {frag}"
+            );
+        }
+    }
 }

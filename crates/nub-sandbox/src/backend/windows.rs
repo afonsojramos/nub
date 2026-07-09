@@ -508,12 +508,16 @@ mod launch {
     use super::WindowsLaunch;
     use std::io;
     use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::AsRawHandle;
     use std::os::windows::process::ExitStatusExt;
     use std::path::Path;
     use std::process::ExitStatus;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Mutex, MutexGuard};
-    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LocalFree, WAIT_OBJECT_0};
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, LocalFree,
+        SetHandleInformation, WAIT_OBJECT_0,
+    };
     use windows_sys::Win32::Security::Authorization::{
         ConvertStringSidToSidW, EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW,
         NO_MULTIPLE_TRUSTEE, REVOKE_ACCESS, SE_FILE_OBJECT, SetEntriesInAclW,
@@ -534,9 +538,9 @@ mod launch {
     use windows_sys::Win32::System::Threading::{
         CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
         DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, INFINITE,
-        InitializeProcThreadAttributeList, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
-        PROCESS_INFORMATION, ResumeThread, STARTUPINFOEXW, UpdateProcThreadAttribute,
-        WaitForSingleObject,
+        InitializeProcThreadAttributeList, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+        PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, PROCESS_INFORMATION, ResumeThread,
+        STARTUPINFOEXW, UpdateProcThreadAttribute, WaitForSingleObject,
     };
 
     // Generic access rights (avoid a Storage_FileSystem feature dep for FILE_GENERIC_*).
@@ -660,13 +664,25 @@ mod launch {
             let job = create_kill_on_close_job()?;
             let _job = HandleGuard(job);
 
-            // 5. Proc-thread attribute list carrying SECURITY_CAPABILITIES.
-            let mut attr = ProcThreadAttrList::new(1)?;
+            // 5. Proc-thread attribute list: SECURITY_CAPABILITIES, plus a HANDLE_LIST
+            //    scoping inheritance to EXACTLY the std handles (see `bInheritHandles`
+            //    below). The list must be alive across CreateProcessW (it stores the
+            //    pointer); `inherit_handles` outlives the call.
+            let inherit_handles = inheritable_std_handles();
+            let n_attrs = 1 + u32::from(!inherit_handles.is_empty());
+            let mut attr = ProcThreadAttrList::new(n_attrs)?;
             attr.update(
                 PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES as usize,
                 std::ptr::from_mut(&mut sec_caps).cast(),
                 std::mem::size_of::<SECURITY_CAPABILITIES>(),
             )?;
+            if !inherit_handles.is_empty() {
+                attr.update(
+                    PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
+                    inherit_handles.as_ptr().cast_mut().cast(),
+                    std::mem::size_of::<HANDLE>() * inherit_handles.len(),
+                )?;
+            }
 
             // 6. Build the command line + env block + cwd (kept alive across the call).
             let mut cmdline = build_command_line(&self.program, &self.args);
@@ -696,14 +712,12 @@ mod launch {
                     cmdline.as_mut_ptr(),
                     std::ptr::null(),
                     std::ptr::null(),
-                    // bInheritHandles TRUE ⇒ the child shares the console/stdio, so its
-                    // output reaches the user (parity with Command::status()). KNOWN
-                    // SURFACE (hardening follow-up): this inherits EVERY inheritable
-                    // handle nub holds, not a curated stdio set — a PROC_THREAD_ATTRIBUTE_
-                    // HANDLE_LIST would confine it to the three std handles. Practically
-                    // small (Rust marks its handles non-inheritable; nub opens no
-                    // inheritable handle to a secret at spawn), but not zero.
-                    1,
+                    // bInheritHandles must be TRUE for the PROC_THREAD_ATTRIBUTE_HANDLE_LIST
+                    // above to take effect — and WITH that list, the child inherits ONLY the
+                    // std handles in it (its output still reaches the user), not every
+                    // inheritable handle nub holds. If there was no valid std handle to pass,
+                    // the list is absent and we set FALSE (inherit nothing) — fail-safe.
+                    i32::from(!inherit_handles.is_empty()),
                     flags,
                     env_ptr as *const _,
                     cwd_ptr,
@@ -863,6 +877,32 @@ mod launch {
         fn drop(&mut self) {
             unsafe { DeleteProcThreadAttributeList(self.buf.as_mut_ptr().cast()) };
         }
+    }
+
+    /// The std handles (stdin/stdout/stderr) to hand the child, deduplicated. Each is
+    /// marked inheritable — every member of a PROC_THREAD_ATTRIBUTE_HANDLE_LIST must be,
+    /// or CreateProcessW fails. An invalid/NULL std handle (a parent with no console) is
+    /// skipped; an empty result ⇒ the caller inherits nothing (bInheritHandles FALSE).
+    /// Marking the parent's own std handles inheritable is what `std`'s own inherited-stdio
+    /// spawn does; it does not widen anything the child can reach beyond its stdio.
+    fn inheritable_std_handles() -> Vec<HANDLE> {
+        let raws = [
+            std::io::stdin().as_raw_handle(),
+            std::io::stdout().as_raw_handle(),
+            std::io::stderr().as_raw_handle(),
+        ];
+        let mut out: Vec<HANDLE> = Vec::new();
+        for r in raws {
+            let h: HANDLE = r.cast();
+            if h.is_null() || h == INVALID_HANDLE_VALUE {
+                continue;
+            }
+            unsafe { SetHandleInformation(h, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) };
+            if !out.contains(&h) {
+                out.push(h);
+            }
+        }
+        out
     }
 
     fn unique_profile_name() -> String {

@@ -434,7 +434,16 @@ fn literal_prefix(glob: &str) -> Prefix {
 /// generous-`**` system-dir seeding is allowed to skip — user secrets live in
 /// home/project (always walked), not under `/usr`,`/etc`,…; a USER-authored deny is
 /// never skipped.
-const BUILTIN_ENV_DENY_GLOBS: &[&str] = &["**/.env", "**/.env.*", ".env", ".env.*"];
+const BUILTIN_ENV_DENY_GLOBS: &[&str] = &[
+    "**/.env",
+    "**/.env.*",
+    "**/.env/**",
+    ".env",
+    ".env.*",
+    ".env/**",
+    "**/.envrc",
+    ".envrc",
+];
 
 fn is_builtin_env_glob(glob: &str) -> bool {
     BUILTIN_ENV_DENY_GLOBS.contains(&glob)
@@ -709,6 +718,11 @@ mod tests {
     fn builtin_env_glob_recognition() {
         assert!(is_builtin_env_glob("**/.env"));
         assert!(is_builtin_env_glob(".env.*"));
+        // The subtree + direnv additions must be recognized too, or the
+        // generous-`**` seeding would treat them as user denies and over-carve
+        // every system dir (a perf regression on the generous-read path).
+        assert!(is_builtin_env_glob("**/.env/**"));
+        assert!(is_builtin_env_glob("**/.envrc"));
         assert!(!is_builtin_env_glob("**/*.pem"));
         assert!(!is_builtin_env_glob("/etc/secret"));
     }
