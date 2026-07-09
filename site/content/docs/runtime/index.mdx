@@ -101,6 +101,7 @@ The **minimum version** column is the lowest Node where the API works under Nub.
 | [`EventSource`](https://developer.mozilla.org/en-US/docs/Web/API/EventSource) | Node 20.18 | unflagged below the native line, native above |
 | [`node:sqlite`](https://nodejs.org/api/sqlite.html) | Node 22.5 | unflagged below Node 22.13, native above |
 | [`addon imports`](https://nodejs.org/api/esm.html#node-addons) | Node 22.20 | unflagged, never native |
+| [`text imports`](https://nodejs.org/api/esm.html#import-attributes) | Node 18.20 | polyfilled below Node 26.5, native above |
 
 A dash means the API works across the full supported range, 18.19 and up. The floored rows have a real cutoff, because the underlying Node mechanism doesn't exist below it:
 
@@ -108,6 +109,7 @@ A dash means the API works across the full supported range, 18.19 and up. The fl
 - The `EventSource` global needs Node 20.18, the patch where Node added the flag on the 20 LTS line.
 - The `node:sqlite` module needs Node 22.5, where Node first shipped it.
 - Importing a native `.node` addon from an ES module needs Node 22.20 (or 23.6 on the 23 line), where Node added the flag Nub injects. It is never native — Node keeps the import behind the flag — so Nub injects it on every version that has it.
+- Importing a file as text — `import readme from "./README.md" with { type: "text" }` — needs Node 18.20, the first version whose parser accepts the `with` import-attribute syntax. Nub polyfills the feature below Node 26.5, then steps aside to Node's native text imports on 26.5 and up (where it injects the `--experimental-import-text` flag).
 
 ## Node version resolution
 
