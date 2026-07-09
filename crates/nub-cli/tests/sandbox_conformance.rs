@@ -220,6 +220,13 @@ fn run_case(
         .env("USERPROFILE", &tree.home)
         .env("XDG_CACHE_HOME", tree.home.join(".cache"));
     for (k, v) in ambient {
+        // The registry-scoped `npm_config_//host/:_auth…` key holds a `/`, which the
+        // Windows environment block does not represent; its assertion case is already
+        // platform-gated to unix, so skip injecting it on Windows rather than risk
+        // disturbing the child env block.
+        if cfg!(windows) && k.contains('/') {
+            continue;
+        }
         let v = v.replace("$HOME", &tree.home.to_string_lossy());
         cmd.env(k, v);
     }
