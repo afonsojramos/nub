@@ -103,12 +103,20 @@ fn apply_scrubs_env_when_enforced() {
 }
 
 #[test]
-fn apply_reports_unenforced_fs_and_net_in_degradation() {
+fn apply_degradation_reflects_backend_capability() {
     let ctx = common::ctx(true, &[]);
     let policy = compile(&json!({ "fs": ["./x"], "net": false }), &ctx).unwrap();
     let prepared = apply(&policy, CommandSpec::new("true")).unwrap();
     let d = &prepared.degradation;
-    assert!(!d.is_full(), "fs+net not enforced by the Stage-1 skeleton");
-    assert!(d.lost.contains(&"fs".to_string()));
-    assert!(d.lost.contains(&"net".to_string()));
+    // macOS has a real Seatbelt backend: fs + deny-all net are genuinely enforced,
+    // so nothing is degraded. Other OSes still run the env-scrub skeleton, which
+    // honestly reports fs + net as not-enforced.
+    #[cfg(target_os = "macos")]
+    assert!(d.is_full(), "macOS enforces fs + deny-all net");
+    #[cfg(not(target_os = "macos"))]
+    {
+        assert!(!d.is_full(), "skeleton does not enforce fs/net");
+        assert!(d.lost.contains(&"fs".to_string()));
+        assert!(d.lost.contains(&"net".to_string()));
+    }
 }

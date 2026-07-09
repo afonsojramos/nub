@@ -1,0 +1,16 @@
+nub-sandbox
+
+The macOS Seatbelt essential base profile
+(src/backend/macos_seatbelt_base.sbpl) and the glob→Seatbelt-regex translation
+(glob_to_seatbelt_regex in src/backend/macos.rs) are adapted from OpenAI Codex
+(https://github.com/openai/codex), licensed under the Apache License 2.0:
+
+    Copyright OpenAI
+    Licensed under the Apache License, Version 2.0.
+
+Codex's Seatbelt base policy is itself derived from the Chromium project's macOS
+sandbox policy (https://source.chromium.org/chromium/chromium/src), licensed
+under the BSD 3-Clause License:
+
+    Copyright The Chromium Authors
+    Licensed under the BSD 3-Clause License.

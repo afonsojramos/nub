@@ -31,9 +31,9 @@ globset = "0.4"
 regex = "1"
 ipnet = { version = "2", features = ["serde"] }
 
-[target.'cfg(target_os = "linux")'.dependencies]
-# Backend deps declared now so later stages (S4) slot in without a Cargo churn;
-# unused until the Linux backend lands.
+# libc: macOS needs it now (confstr scratch-dir lookup in the Seatbelt backend);
+# Linux uses it when its backend lands (S4).
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 libc = { workspace = true }
 
 [dev-dependencies]

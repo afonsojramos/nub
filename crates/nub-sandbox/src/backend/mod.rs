@@ -7,15 +7,17 @@
 //! loss in [`Degradation`] so the caller surfaces a WARNING; a hard fail-closed
 //! (a required axis unenforceable) is `Err(Degradation)`.
 //!
-//! STAGE 1 STATUS: no OS backend is wired yet (Landlock/Seatbelt/AppContainer
-//! land in S3–S5). [`apply`] here is the env-scrub-only skeleton: it constructs
-//! the child env from the policy and reports fs/net as NOT enforced. This keeps
-//! the API shape (`apply(policy, spec) -> Result<Prepared, Degradation>`) the
-//! backends and the future embedder seam slot into, without pretending to confine
-//! fs/net before the primitives exist.
+//! BACKEND STATUS: macOS (Seatbelt) is wired ([`macos`]); Linux (Landlock+seccomp)
+//! and Windows (AppContainer) land in later stages and still run the env-scrub-only
+//! [`generic_apply`] skeleton — which constructs the child env and reports fs/net as
+//! NOT enforced. Every path preserves the API shape (`apply(policy, spec) ->
+//! Result<Prepared, Degradation>`) the future embedder seam slots into.
 
 use crate::policy::SandboxPolicy;
 use std::process::Command;
+
+#[cfg(target_os = "macos")]
+mod macos;
 
 /// Which confinement axes a backend managed to enforce, and which degraded. A
 /// non-empty `lost` becomes a user-facing WARNING. Ported contract.
@@ -91,12 +93,27 @@ pub struct Prepared {
     pub degradation: Degradation,
 }
 
-/// Apply a resolved policy to a command. STAGE-1 SKELETON: env-scrub only.
+/// Apply a resolved policy to a command, dispatching to the per-OS backend.
 ///
-/// The env axis is enforced by CONSTRUCTION (not an OS primitive): when the
+/// The env axis is always enforced by CONSTRUCTION (not an OS primitive): when the
 /// policy enforces env, the child env is cleared and set to exactly the policy's
-/// constructed map. fs/net are reported as not-enforced until their backends land.
+/// constructed map. fs/net enforcement is the backend's job; on an OS whose backend
+/// has not landed, [`generic_apply`] reports them as not-enforced (never silent).
 pub fn apply(policy: &SandboxPolicy, spec: CommandSpec) -> Result<Prepared, Degradation> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::apply(policy, spec)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        generic_apply(policy, spec)
+    }
+}
+
+/// Env-scrub-only skeleton for backends not yet wired (Linux/Windows). Reports fs
+/// and net as not-enforced so a caller never mistakes the skeleton for confinement.
+#[cfg(not(target_os = "macos"))]
+fn generic_apply(policy: &SandboxPolicy, spec: CommandSpec) -> Result<Prepared, Degradation> {
     let mut command = Command::new(&spec.program);
     command.args(&spec.args);
     if let Some(cwd) = &spec.cwd {
@@ -135,6 +152,7 @@ pub fn apply(policy: &SandboxPolicy, spec: CommandSpec) -> Result<Prepared, Degr
 
 /// Whether the fs policy actually confines anything (a non-relaxed base or any
 /// entry). A relaxed fs axis (allow-all, no rules) is not a lost enforcement.
+#[cfg(not(target_os = "macos"))]
 fn fs_confines(policy: &SandboxPolicy) -> bool {
     !matches!(policy.fs.rules.default_effect, crate::policy::Effect::Allow)
         || !policy.fs.rules.entries.is_empty()
