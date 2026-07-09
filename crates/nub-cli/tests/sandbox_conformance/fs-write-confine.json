@@ -1,6 +1,6 @@
 {
   "name": "fs-write-confine",
-  "policy": { "fs": ["...", "./writable"] },
+  "policy": { "fs": ["./writable"] },
   "relaxed": { "fs": true },
   "cases": [
     { "probe": "write", "target": "proj:writable/ok.txt", "expect": true },

@@ -114,6 +114,29 @@ fn linux_enforceable() -> bool {
     false
 }
 
+/// Strip inherited ACEs (incl. C:\'s `ALL APPLICATION PACKAGES`) and grant ONLY the
+/// current user full control on a Windows fixture root — so a LowBox child reaches only
+/// the backend's explicit AC-SID grants (a user-SID grant does not satisfy the
+/// AppContainer access check). No-op off Windows. `icacls` is the reliable path here; the
+/// alternative is a windows-sys `SetNamedSecurityInfoW` dance for a one-shot test setup.
+fn secure_windows_root(root: &Path) {
+    if !cfg!(windows) {
+        return;
+    }
+    let user = std::env::var("USERNAME").expect("USERNAME set on Windows");
+    let out = Command::new("icacls")
+        .arg(root)
+        .args(["/inheritance:r", "/grant:r"])
+        .arg(format!("{user}:(OI)(CI)F"))
+        .output()
+        .expect("run icacls");
+    assert!(
+        out.status.success(),
+        "icacls failed to secure the fixture root:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 // ── the hermetic fixture tree ─────────────────────────────────────────────────────
 
 /// A throwaway project + fake home + outside dir. `resolve` turns a `proj:`/`home:`/
@@ -157,6 +180,15 @@ impl Tree {
         } else {
             std::fs::canonicalize(tmp.path()).expect("canonicalize")
         };
+        // Windows: a dir created under C:\ INHERITS C:\'s `ALL APPLICATION PACKAGES`
+        // (AAP) read+traverse ACE, and AAP satisfies an AppContainer LowBox access check
+        // for the WHOLE subtree — so read-confine would collapse (a not-granted file
+        // stays readable) and an explicit AC-SID grant isn't the effective ACE. Strip the
+        // inherited ACEs and grant ONLY the current user (a user-SID grant does NOT
+        // satisfy the LowBox check, so the child still reaches only the backend's explicit
+        // AC-SID grants). This is the clean-DACL nub-owned store the launcher provides in
+        // production, which the Windows backend's allowlist model assumes.
+        secure_windows_root(&root);
         let proj = root.join("proj");
         let home = root.join("home");
         let outside = root.join("outside");
@@ -165,10 +197,17 @@ impl Tree {
         }
         // On Windows the sandboxed child must ALSO be C:\-traversable — the sibling probe
         // under the CI checkout is unreachable from a LowBox token — so copy it into the
-        // C:\-rooted tree. Elsewhere the sibling is reachable (the program auto-grant + the
-        // system libs it links), so use it in place.
+        // C:\-rooted tree, in a DEDICATED `bin/` subdir. The Windows backend auto-grants
+        // the program's PARENT DIR an inheritable read subtree (so a native exe can load
+        // sibling DLLs); placing the probe at the tree root would auto-grant read to the
+        // WHOLE tree and collapse read-confine — `bin/` holds only the probe, so the
+        // auto-grant exposes nothing (mirrors windows_enforcement.rs's `bin/child.exe`).
+        // Elsewhere the sibling probe is reachable (the program auto-grant + its system
+        // libs), so use it in place.
         let probe = if cfg!(windows) {
-            let dest = root.join(format!("probe{}", std::env::consts::EXE_SUFFIX));
+            let bin = root.join("bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            let dest = bin.join(format!("probe{}", std::env::consts::EXE_SUFFIX));
             std::fs::copy(probe_bin(), &dest).expect("copy probe into the C:\\ tree");
             dest
         } else {
