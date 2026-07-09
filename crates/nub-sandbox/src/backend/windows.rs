@@ -311,6 +311,7 @@ fn is_drive_root(p: &Path) -> bool {
 pub(crate) fn apply(
     policy: &SandboxPolicy,
     spec: super::CommandSpec,
+    proxy_port: Option<u16>,
 ) -> Result<super::Prepared, super::Degradation> {
     use super::{Degradation, Prepared};
 
@@ -331,9 +332,13 @@ pub(crate) fn apply(
                 command.env(k, v);
             }
         }
+        if let Some(port) = proxy_port {
+            super::set_proxy_env(&mut command, port);
+        }
         return Ok(Prepared {
             command,
             degradation: Degradation::full(),
+            proxy: None,
             launch: None,
         });
     }
@@ -389,11 +394,18 @@ pub(crate) fn apply(
                 .to_string()
         });
     }
-    // Coarse net: an enforced net with any Allow rule needs the proxy (S6) for per-host.
+    // Coarse net: an enforced net with any Allow rule needs the loopback proxy for
+    // per-host. On Windows the proxy runs in the parent, but an AppContainer child
+    // cannot reach a loopback service without a registered loopback exemption
+    // (`NetworkIsolationSetAppContainerConfig`) — NOT wired in this phase — so per-host
+    // is honestly degraded and the coarse egress-deny (no `internetClient`) holds. The
+    // branch-scoped windows-latest CI probe investigates the exemption's feasibility.
     if policy.net.enforce && policy.net.rules.iter().any(|r| r.effect == Effect::Allow) {
         deg.lost.push("net-per-host".to_string());
         reason.get_or_insert_with(|| {
-            "egress proxy not wired — per-host allows denied (coarse network deny)".to_string()
+            "per-host egress needs an AppContainer loopback exemption to reach the proxy \
+             (not wired) — per-host allows denied (coarse network deny)"
+                .to_string()
         });
     }
     // Env-read isolation from ascendants is REDUCED on Windows (same-user
@@ -415,9 +427,28 @@ pub(crate) fn apply(
         cwd: spec.cwd,
         read_grants,
         write_grants,
-        env: policy.env.enforce.then(|| policy.env.constructed.clone()),
+        // When env is enforced, fold the cooperative proxy hint into the constructed
+        // map (over an enforced env-scrub). If env is NOT enforced, the child inherits
+        // the ambient env and we do not synthesize a block just for the proxy vars —
+        // per-host is degraded on Windows anyway, so the hint would be inert.
+        env: policy.env.enforce.then(|| {
+            let mut m = policy.env.constructed.clone();
+            if let Some(port) = proxy_port {
+                let url = format!("http://127.0.0.1:{port}");
+                for k in [
+                    "HTTP_PROXY",
+                    "HTTPS_PROXY",
+                    "http_proxy",
+                    "https_proxy",
+                    "ALL_PROXY",
+                ] {
+                    m.insert(k.to_string(), url.clone());
+                }
+            }
+            m
+        }),
         // Grant internetClient only when net is unconfined; an enforced net is coarse
-        // deny (no capability), per-host handled by the proxy later.
+        // deny (no capability). Per-host would need the loopback exemption (above).
         allow_internet: !policy.net.enforce,
     };
 
@@ -426,6 +457,7 @@ pub(crate) fn apply(
     Ok(Prepared {
         command: std::process::Command::new(&launch.program),
         degradation: deg,
+        proxy: None,
         launch: Some(launch),
     })
 }

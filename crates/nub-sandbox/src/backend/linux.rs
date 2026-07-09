@@ -27,8 +27,8 @@ use crate::backend::linux_grants::{self, DerivedGrants, Grant, GrantKind, fs_con
 use crate::backend::{CommandSpec, Degradation, Prepared};
 use crate::policy::{Effect, SandboxPolicy};
 use landlock::{
-    ABI, AccessFs, BitFlags, CompatLevel, Compatible, PathBeneath, PathFd, Ruleset, RulesetAttr,
-    RulesetCreatedAttr, RulesetStatus,
+    ABI, AccessFs, AccessNet, BitFlags, CompatLevel, Compatible, NetPort, PathBeneath, PathFd,
+    Ruleset, RulesetAttr, RulesetCreatedAttr, RulesetStatus,
 };
 use seccompiler::{
     BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompFilter,
@@ -47,12 +47,34 @@ const ESSENTIAL_READ_DIRS: &[&str] = &[
     "/usr", "/bin", "/sbin", "/lib", "/lib64", "/lib32", "/libx32", "/etc", "/opt",
 ];
 
+/// The net enforcement mode chosen for this run (resolved from the policy + whether an
+/// egress proxy is running + kernel capability).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NetMode {
+    /// Net unconfined — no socket restriction.
+    Off,
+    /// Coarse deny-all: no `AF_INET`/`AF_INET6` socket at all (nothing reachable).
+    DenyAll,
+    /// Per-host via the loopback proxy on `port`: `AF_INET` sockets allowed, but
+    /// Landlock ABI-v4 `ConnectTcp` restricts `connect()` to ONLY this port, so the
+    /// child's only egress route is the proxy (which SNI/host-gates per host).
+    Proxy(u16),
+}
+
 /// Apply a resolved policy on Linux. Env-scrub is construction (parent-side); fs is
-/// Landlock, net + ptrace are seccomp, both installed in a `pre_exec` hook. The
-/// [`Degradation`] is computed parent-side (capability probe + carve honesty); a
-/// hard child-side enforcement failure fails the SPAWN (never runs unconfined).
-pub fn apply(policy: &SandboxPolicy, spec: CommandSpec) -> Result<Prepared, Degradation> {
+/// Landlock, net + ptrace are seccomp (+ Landlock-v4 TCP for the per-host proxy), all
+/// installed in a `pre_exec` hook. The [`Degradation`] is computed parent-side
+/// (capability probe + carve honesty); a hard child-side enforcement failure fails the
+/// SPAWN (never runs unconfined).
+pub fn apply(
+    policy: &SandboxPolicy,
+    spec: CommandSpec,
+    proxy_port: Option<u16>,
+) -> Result<Prepared, Degradation> {
     let mut command = base_command(&spec, policy);
+    if let Some(port) = proxy_port {
+        super::set_proxy_env(&mut command, port);
+    }
 
     let confine_fs = fs_confines(&policy.fs);
     let sandboxing = confine_fs || policy.net.enforce || policy.env.enforce;
@@ -61,11 +83,16 @@ pub fn apply(policy: &SandboxPolicy, spec: CommandSpec) -> Result<Prepared, Degr
         return Ok(Prepared {
             command,
             degradation: Degradation::full(),
+            proxy: None,
         });
     }
 
     let mut deg = Degradation::full();
     let mut reason: Option<String> = None;
+
+    // Resolve the net mode up front — it drives BOTH the seccomp filter and whether
+    // Landlock must handle the TCP-connect access type.
+    let net_mode = decide_net_mode(policy, proxy_port, &mut deg, &mut reason);
 
     // ── fs → Landlock grants (parent-side derivation + PathFd targets) ──────────
     // Landlock engages for a fs-confining policy OR an env-scrub that actually
@@ -77,13 +104,21 @@ pub fn apply(policy: &SandboxPolicy, spec: CommandSpec) -> Result<Prepared, Degr
     // the user chose to be permissive).
     let landlock_ok = landlock_available();
     let scrub_withholds = policy.env.enforce && !policy.env.withheld.is_empty();
-    let want_landlock = confine_fs || scrub_withholds;
-    let install_landlock = want_landlock && landlock_ok;
+    // fs Landlock is needed to confine reads/writes OR to close `/proc` for the
+    // env-read boundary; net Landlock (ABI v4 ConnectTcp) is needed to pin egress to
+    // the proxy port. They compose in ONE ruleset (handle_access ORs fs + net).
+    let fs_handling = confine_fs || scrub_withholds;
+    let connect_tcp_port = match net_mode {
+        NetMode::Proxy(port) => Some(port),
+        _ => None,
+    };
+    let net_handling = connect_tcp_port.is_some();
+    let install_landlock = (fs_handling || net_handling) && landlock_ok;
     let mut grant_specs: Vec<(PathBuf, BitFlags<AccessFs>)> = Vec::new();
     let read_bits = read_access_bits();
     let rw_bits = read_bits | AccessFs::from_write(ABI::V2);
 
-    if want_landlock && landlock_ok {
+    if fs_handling && landlock_ok {
         if confine_fs {
             let DerivedGrants {
                 grants,
@@ -137,7 +172,7 @@ pub fn apply(policy: &SandboxPolicy, spec: CommandSpec) -> Result<Prepared, Degr
                 grant_specs.push((top, rw_bits));
             }
         }
-    } else if want_landlock {
+    } else if fs_handling {
         // No Landlock (kernel <5.19 / disabled / LinuxKit): do NOT install a fs hook.
         // seccomp (incl. ptrace-family deny) + env-scrub still apply. Report honestly
         // so the caller (build-jail = fail-closed; runtime = fail-open) decides — a
@@ -154,21 +189,14 @@ pub fn apply(policy: &SandboxPolicy, spec: CommandSpec) -> Result<Prepared, Degr
         }
     }
 
-    // ── net → per-host degradation (seccomp is coarse; proxy not wired) ─────────
-    if policy.net.enforce && policy.net.rules.iter().any(|r| r.effect == Effect::Allow) {
-        deg.lost.push("net-per-host".to_string());
-        reason.get_or_insert_with(|| {
-            "egress proxy not wired — per-host allows denied (coarse network deny)".to_string()
-        });
-    }
-
     deg.reason = reason;
 
     // ── the child-side hook: NNP → Landlock → seccomp ───────────────────────────
     // Precompute the seccomp BPF parent-side (pure byte assembly, no syscalls) so
-    // the post-fork child only calls apply_filter. ptrace-family deny is
-    // unconditional when sandboxing; net-family deny is added iff net enforces.
-    let seccomp = build_seccomp(policy.net.enforce).map_err(|e| Degradation {
+    // the post-fork child only calls apply_filter. ptrace-family deny is unconditional
+    // when sandboxing; the net socket-family deny follows `net_mode` (Proxy keeps
+    // AF_INET so the child can reach the proxy, Landlock pins its connect port).
+    let seccomp = build_seccomp(net_mode).map_err(|e| Degradation {
         lost: vec!["seccomp".to_string()],
         reason: Some(e),
     })?;
@@ -187,7 +215,8 @@ pub fn apply(policy: &SandboxPolicy, spec: CommandSpec) -> Result<Prepared, Degr
                 return Err(std::io::Error::last_os_error());
             }
             if install_landlock {
-                apply_landlock(&grant_specs).map_err(std::io::Error::other)?;
+                apply_landlock(fs_handling, &grant_specs, connect_tcp_port)
+                    .map_err(std::io::Error::other)?;
             }
             seccompiler::apply_filter(&seccomp).map_err(std::io::Error::other)?;
             Ok(())
@@ -197,7 +226,45 @@ pub fn apply(policy: &SandboxPolicy, spec: CommandSpec) -> Result<Prepared, Degr
     Ok(Prepared {
         command,
         degradation: deg,
+        proxy: None,
     })
+}
+
+/// Resolve the net enforcement mode. Per-host requires BOTH a running proxy AND
+/// Landlock ABI v4 (to pin the child's `connect()` to the proxy port); absent either,
+/// we FALL BACK to coarse deny-all (fail-SAFE — denies more, not less) and report
+/// `net-per-host` so the caller knows the per-host allows were not honored.
+fn decide_net_mode(
+    policy: &SandboxPolicy,
+    proxy_port: Option<u16>,
+    deg: &mut Degradation,
+    reason: &mut Option<String>,
+) -> NetMode {
+    if !policy.net.enforce {
+        return NetMode::Off;
+    }
+    let has_allow = policy.net.rules.iter().any(|r| r.effect == Effect::Allow);
+    if !has_allow {
+        // Pure deny-all — coarse, no proxy needed.
+        return NetMode::DenyAll;
+    }
+    match proxy_port {
+        Some(port) if landlock_net_available() => NetMode::Proxy(port),
+        other => {
+            deg.lost.push("net-per-host".to_string());
+            reason.get_or_insert_with(|| {
+                if other.is_none() {
+                    "egress proxy unavailable — per-host allows denied (coarse network deny)"
+                        .to_string()
+                } else {
+                    "Landlock TCP rules (ABI v4) unavailable — cannot pin egress to the proxy; \
+                     per-host allows denied (coarse network deny)"
+                        .to_string()
+                }
+            });
+            NetMode::DenyAll
+        }
+    }
 }
 
 /// The unwrapped command with env-scrub by construction (identical contract to the
@@ -261,27 +328,48 @@ fn pre_create(path: &Path) {
     }
 }
 
-/// Build the Landlock ruleset from pre-derived `(path, bits)` specs and enforce it
-/// on the current (post-fork) task. `BestEffort` degrades gracefully on older ABIs;
-/// a `NotEnforced` result is a hard error (the parent PROMISED fs enforcement in the
-/// degradation report, so failing the spawn is safer than running unconfined).
-fn apply_landlock(specs: &[(PathBuf, BitFlags<AccessFs>)]) -> Result<(), String> {
-    let read = AccessFs::from_read(ABI::V2) & !BitFlags::from(AccessFs::Execute);
-    let handled = read | AccessFs::from_write(ABI::V2);
-    let mut ruleset = Ruleset::default()
-        .set_compatibility(CompatLevel::BestEffort)
-        .handle_access(handled)
-        .map_err(|e| format!("handle_access: {e}"))?
+/// Build the Landlock ruleset and enforce it on the current (post-fork) task.
+/// `handle_fs` engages fs read/write confinement over `specs`; `connect_tcp_port`
+/// engages ABI-v4 `ConnectTcp` pinning to that single port (the per-host proxy). The
+/// two access types compose in one ruleset (handle_access ORs them). `BestEffort`
+/// degrades gracefully on older ABIs; a `NotEnforced` result is a hard error (the
+/// parent PROMISED enforcement in the degradation report, so failing the spawn is
+/// safer than running unconfined). Net is only requested when the parent already
+/// confirmed ABI v4 ([`decide_net_mode`]), so its rule cannot silently vanish.
+fn apply_landlock(
+    handle_fs: bool,
+    specs: &[(PathBuf, BitFlags<AccessFs>)],
+    connect_tcp_port: Option<u16>,
+) -> Result<(), String> {
+    let mut ruleset = Ruleset::default().set_compatibility(CompatLevel::BestEffort);
+    if handle_fs {
+        let read = AccessFs::from_read(ABI::V2) & !BitFlags::from(AccessFs::Execute);
+        let handled = read | AccessFs::from_write(ABI::V2);
+        ruleset = ruleset
+            .handle_access(handled)
+            .map_err(|e| format!("handle_access fs: {e}"))?;
+    }
+    if connect_tcp_port.is_some() {
+        ruleset = ruleset
+            .handle_access(AccessNet::ConnectTcp)
+            .map_err(|e| format!("handle_access net: {e}"))?;
+    }
+    let mut created = ruleset
         .create()
         .map_err(|e| format!("create ruleset: {e}"))?;
     for (path, bits) in specs {
         // A path that vanished between derivation and here is skipped, not fatal.
         let Ok(fd) = PathFd::new(path) else { continue };
-        ruleset = ruleset
+        created = created
             .add_rule(PathBeneath::new(fd, *bits))
             .map_err(|e| format!("add_rule {}: {e}", path.display()))?;
     }
-    let status = ruleset
+    if let Some(port) = connect_tcp_port {
+        created = created
+            .add_rule(NetPort::new(port, AccessNet::ConnectTcp))
+            .map_err(|e| format!("add_rule net port {port}: {e}"))?;
+    }
+    let status = created
         .restrict_self()
         .map_err(|e| format!("restrict_self: {e}"))?;
     if status.ruleset == RulesetStatus::NotEnforced {
@@ -290,37 +378,55 @@ fn apply_landlock(specs: &[(PathBuf, BitFlags<AccessFs>)]) -> Result<(), String>
     Ok(())
 }
 
-/// Probe the kernel's supported Landlock ABI via the raw
-/// `landlock_create_ruleset(NULL, 0, VERSION)` query — allocation-free and
-/// fork-free (safe under a tokio runtime), and immune to `Ruleset::create`'s
-/// degrade-to-dummy false positive. `>= v2` means our v2 policy can FullyEnforce; a
-/// no-Landlock kernel returns `-EOPNOTSUPP`/`-ENOSYS`.
-fn landlock_available() -> bool {
+/// The kernel's supported Landlock ABI version via the raw
+/// `landlock_create_ruleset(NULL, 0, VERSION)` query — allocation-free and fork-free
+/// (safe under a tokio runtime), and immune to `Ruleset::create`'s degrade-to-dummy
+/// false positive. A no-Landlock kernel returns `-EOPNOTSUPP`/`-ENOSYS` (< 1).
+fn landlock_abi() -> i64 {
     const SYS_LANDLOCK_CREATE_RULESET: libc::c_long = 444;
     const LANDLOCK_CREATE_RULESET_VERSION: libc::c_ulong = 1;
     // SAFETY: the documented ABI-query form — NULL attr, size 0, VERSION flag —
     // allocates nothing and only reads the supported version number.
-    let abi = unsafe {
+    unsafe {
         libc::syscall(
             SYS_LANDLOCK_CREATE_RULESET,
             std::ptr::null::<libc::c_void>(),
             0usize,
             LANDLOCK_CREATE_RULESET_VERSION,
         )
-    };
-    abi >= ABI::V2 as i64
+    }
 }
 
-/// Build the seccomp filter. `ptrace`/`process_vm_readv`/`process_vm_writev` are
-/// denied unconditionally (the env-read second vector; an empty rule-vec matches the
-/// syscall regardless of args → EPERM). When `deny_net`, `AF_INET`/`AF_INET6` (+
-/// exotic families, keeping `AF_UNIX` for node IPC) are denied at socket creation
-/// AND `io_uring_setup` is denied (io_uring can create a socket without `socket()`)
-/// — coarse (seccomp can't inspect a connect() sockaddr), so this denies ALL TCP
-/// egress including loopback; the loopback→proxy carve arrives with the proxy phase.
+/// `>= v2` means our fs read/write policy can enforce.
+fn landlock_available() -> bool {
+    landlock_abi() >= ABI::V2 as i64
+}
+
+/// `>= v4` means TCP `connect`/`bind` port rules are available — the prerequisite for
+/// forcing the child's egress through the loopback proxy (else per-host degrades).
+fn landlock_net_available() -> bool {
+    landlock_abi() >= ABI::V4 as i64
+}
+
+/// Build the seccomp filter for `net_mode`. `ptrace`/`process_vm_readv`/
+/// `process_vm_writev` are denied unconditionally (the env-read second vector; an
+/// empty rule-vec matches the syscall regardless of args → EPERM).
+///
+/// Net socket-family deny (when net is enforced):
+///   - `AF_UNIX` is denied at `socket()` — closing the local-IPC EGRESS channel
+///     (`/var/run/docker.sock` = root-equivalent, abstract-namespace sockets). Node's
+///     fork IPC is UNAFFECTED: it uses `socketpair()` (an unnamed connected pair that
+///     can't reach a filesystem/abstract socket), which is NOT in the socket() list.
+///   - `AF_INET6` + the exotic families are always denied at `socket()`.
+///   - `AF_INET`: denied in `DenyAll` (coarse — no egress at all); ALLOWED in `Proxy`
+///     mode so the child can reach the loopback proxy, with a Landlock-v4 `ConnectTcp`
+///     rule pinning its `connect()` to the proxy port (installed separately).
+///   - `io_uring_setup` is denied whenever net is confined (io_uring can create+connect
+///     a socket without `socket()`/`connect()`, dodging both this filter and Landlock).
+///
 /// seccompiler emits `SECCOMP_RET_KILL_PROCESS` on a foreign-ABI (e.g. i386) syscall,
 /// so a compat-ABI syscall can't slip past the single-arch filter.
-fn build_seccomp(deny_net: bool) -> Result<BpfProgram, String> {
+fn build_seccomp(net_mode: NetMode) -> Result<BpfProgram, String> {
     let arch = TargetArch::try_from(std::env::consts::ARCH)
         .map_err(|e| format!("unsupported arch for seccomp: {e}"))?;
     let mut rules: BTreeMap<i64, Vec<SeccompRule>> = BTreeMap::new();
@@ -337,10 +443,8 @@ fn build_seccomp(deny_net: bool) -> Result<BpfProgram, String> {
         rules.insert(syscall, Vec::new());
     }
 
-    if deny_net {
-        let denied = [
-            libc::AF_INET,
-            libc::AF_INET6,
+    if net_mode != NetMode::Off {
+        const EXOTIC: [libc::c_int; 11] = [
             libc::AF_NETLINK,
             libc::AF_PACKET,
             libc::AF_VSOCK,
@@ -353,25 +457,23 @@ fn build_seccomp(deny_net: bool) -> Result<BpfProgram, String> {
             libc::AF_IB,
             libc::AF_NFC,
         ];
-        let mut family_rules = Vec::with_capacity(denied.len());
-        for f in denied {
-            family_rules.push(
-                SeccompRule::new(vec![
-                    SeccompCondition::new(0, SeccompCmpArgLen::Dword, SeccompCmpOp::Eq, f as u64)
-                        .map_err(|e| format!("net cond: {e}"))?,
-                ])
-                .map_err(|e| format!("net rule: {e}"))?,
-            );
+        // socket() deny families. AF_UNIX + AF_INET6 + exotics always; AF_INET only in
+        // coarse deny-all (Proxy keeps it so the child can reach the loopback proxy).
+        let mut socket_deny = vec![libc::AF_UNIX, libc::AF_INET6];
+        socket_deny.extend_from_slice(&EXOTIC);
+        if net_mode == NetMode::DenyAll {
+            socket_deny.push(libc::AF_INET);
         }
-        #[allow(clippy::useless_conversion)]
-        for syscall in [libc::SYS_socket, libc::SYS_socketpair].map(i64::from) {
-            rules.insert(syscall, family_rules.clone());
-        }
-        // io_uring can create+connect a socket without ever calling socket()
-        // (IORING_OP_SOCKET/CONNECT), bypassing the family filter above. Deny
-        // io_uring setup outright when net is confined — no build workload needs it.
-        #[allow(clippy::useless_conversion)]
-        rules.insert(i64::from(libc::SYS_io_uring_setup), Vec::new());
+        rules.insert(i64_from(libc::SYS_socket), family_rules(&socket_deny)?);
+
+        // socketpair() deny families — NEVER AF_UNIX (node fork IPC rides it); the
+        // inet/exotic families can't make a socketpair anyway, so this is belt-and-braces.
+        let mut sp_deny = vec![libc::AF_INET, libc::AF_INET6];
+        sp_deny.extend_from_slice(&EXOTIC);
+        rules.insert(i64_from(libc::SYS_socketpair), family_rules(&sp_deny)?);
+
+        // io_uring bypasses socket()/connect() entirely — deny its setup when confined.
+        rules.insert(i64_from(libc::SYS_io_uring_setup), Vec::new());
     }
 
     // mismatch_action = Allow (unlisted syscalls flow); match_action = EPERM.
@@ -384,6 +486,29 @@ fn build_seccomp(deny_net: bool) -> Result<BpfProgram, String> {
     .map_err(|e| format!("seccomp build: {e}"))?
     .try_into()
     .map_err(|e| format!("seccomp compile: {e}"))
+}
+
+/// One seccomp rule per family, matching `socket(domain == family)` (arg0). An empty
+/// return list would match ALL calls, so a caller must never pass an empty slice here.
+fn family_rules(families: &[libc::c_int]) -> Result<Vec<SeccompRule>, String> {
+    let mut out = Vec::with_capacity(families.len());
+    for &f in families {
+        out.push(
+            SeccompRule::new(vec![
+                SeccompCondition::new(0, SeccompCmpArgLen::Dword, SeccompCmpOp::Eq, f as u64)
+                    .map_err(|e| format!("net cond: {e}"))?,
+            ])
+            .map_err(|e| format!("net rule: {e}"))?,
+        );
+    }
+    Ok(out)
+}
+
+/// Widen a syscall number to the `i64` map key across arches (`c_long` is i32 on
+/// 32-bit, i64 on 64-bit) without a clippy `useless_conversion` on 64-bit.
+#[allow(clippy::useless_conversion)]
+fn i64_from(n: libc::c_long) -> i64 {
+    i64::from(n)
 }
 
 /// Resolve a program to an absolute path (best-effort). Absolute → itself; a
@@ -423,9 +548,17 @@ mod tests {
     }
 
     #[test]
-    fn seccomp_builds_for_this_arch() {
-        // The filter assembles (BPF byte-gen, no syscalls) with and without net.
-        assert!(build_seccomp(true).is_ok());
-        assert!(build_seccomp(false).is_ok());
+    fn seccomp_builds_for_each_net_mode() {
+        // The filter assembles (BPF byte-gen, no syscalls) for every net mode.
+        assert!(build_seccomp(NetMode::Off).is_ok());
+        assert!(build_seccomp(NetMode::DenyAll).is_ok());
+        assert!(build_seccomp(NetMode::Proxy(8080)).is_ok());
+    }
+
+    #[test]
+    fn family_rules_never_empty() {
+        // An empty family list would match ALL socket() calls (empty rule-vec) — guard
+        // against a future edit passing an empty slice.
+        assert!(!family_rules(&[libc::AF_UNIX]).unwrap().is_empty());
     }
 }

@@ -24,8 +24,10 @@
 //! to `command.status()`; Windows runs its launcher (setup → spawn → wait → RAII
 //! teardown) when a launch plan is attached.
 
-use crate::policy::SandboxPolicy;
+use crate::policy::{Effect, SandboxPolicy};
+use crate::proxy::{EgressProxy, StaticDecider};
 use std::process::Command;
+use std::sync::Arc;
 
 #[cfg(target_os = "macos")]
 mod macos;
@@ -124,6 +126,12 @@ pub struct Prepared {
     /// this field is unused.
     pub command: Command,
     pub degradation: Degradation,
+    /// The running egress proxy (design.md §2.5), when the policy enforces per-host
+    /// net. It runs in the nub PARENT and MUST outlive the child, so it is owned here:
+    /// [`Prepared::status`] holds it for the child's whole run, and dropping this
+    /// value stops the listener. `None` when net is unconfined or coarse-deny (no
+    /// proxy needed). Set by [`apply`], not the per-OS backends.
+    pub(crate) proxy: Option<EgressProxy>,
     /// Windows AppContainer launch plan — the backend owns spawn+wait+teardown when
     /// this is `Some`. Absent (or on other OSes) → [`Prepared::status`] spawns
     /// `command`.
@@ -136,12 +144,46 @@ impl Prepared {
     /// UNIFORM launch verb across backends: mac/linux/skeleton spawn `command`;
     /// Windows runs its AppContainer launcher (ACL setup → `CreateProcessW` under a
     /// LowBox token → wait → RAII teardown) when a launch plan is attached.
+    ///
+    /// The egress proxy (`self.proxy`) is held for the child's whole run and dropped
+    /// (listener shut down) only after the child exits — `self` owns it until this
+    /// method returns.
     pub fn status(mut self) -> std::io::Result<std::process::ExitStatus> {
         #[cfg(target_os = "windows")]
         if let Some(launch) = self.launch.take() {
             return launch.run();
         }
         self.command.status()
+    }
+}
+
+/// Whether the policy needs the per-host egress proxy: net enforced AND at least one
+/// Allow rule (a pure deny-all is coarse — no proxy, nothing is reachable). A proxy
+/// that fails to start degrades to coarse-deny (fail-SAFE: denies more, not less), so
+/// this returns `None` on a start failure and the backend reports `net-per-host`.
+fn start_proxy_if_needed(policy: &SandboxPolicy) -> Option<EgressProxy> {
+    if policy.net.enforce && policy.net.rules.iter().any(|r| r.effect == Effect::Allow) {
+        let decider = Arc::new(StaticDecider::new(policy.net.clone()));
+        EgressProxy::start(decider).ok()
+    } else {
+        None
+    }
+}
+
+/// The cooperative proxy-env hint set on the child so ordinary HTTP(S) clients route
+/// through the loopback proxy. NOT the boundary (a malicious client ignores it — the
+/// OS deny-layer forces the traffic through); numeric host so the child needs no name
+/// resolution. Both upper/lower case (tools split on which they read).
+fn set_proxy_env(command: &mut Command, port: u16) {
+    let url = format!("http://127.0.0.1:{port}");
+    for key in [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "ALL_PROXY",
+    ] {
+        command.env(key, &url);
     }
 }
 
@@ -158,28 +200,34 @@ impl Prepared {
 /// backend has not landed, [`generic_apply`] reports them as not-enforced (never
 /// silent).
 pub fn apply(policy: &SandboxPolicy, spec: CommandSpec) -> Result<Prepared, Degradation> {
+    // Start the per-host egress proxy FIRST (if the policy needs it), so its bound port
+    // is threaded into the backend deny-layer (which permits egress ONLY to the proxy
+    // endpoint) before the child is prepared. The proxy is then stashed on `Prepared`
+    // so it outlives the child (design.md §2.5).
+    let proxy = start_proxy_if_needed(policy);
+    let proxy_port = proxy.as_ref().map(EgressProxy::port);
+
     #[cfg(target_os = "macos")]
-    {
-        macos::apply(policy, spec)
-    }
+    let mut prepared = macos::apply(policy, spec, proxy_port)?;
     #[cfg(target_os = "linux")]
-    {
-        linux::apply(policy, spec)
-    }
+    let mut prepared = linux::apply(policy, spec, proxy_port)?;
     #[cfg(target_os = "windows")]
-    {
-        windows::apply(policy, spec)
-    }
+    let mut prepared = windows::apply(policy, spec, proxy_port)?;
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    {
-        generic_apply(policy, spec)
-    }
+    let mut prepared = generic_apply(policy, spec, proxy_port)?;
+
+    prepared.proxy = proxy;
+    Ok(prepared)
 }
 
 /// Env-scrub-only skeleton for an OS with no wired backend. Reports fs and net as
 /// not-enforced so a caller never mistakes the skeleton for confinement.
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-fn generic_apply(policy: &SandboxPolicy, spec: CommandSpec) -> Result<Prepared, Degradation> {
+fn generic_apply(
+    policy: &SandboxPolicy,
+    spec: CommandSpec,
+    proxy_port: Option<u16>,
+) -> Result<Prepared, Degradation> {
     let mut command = Command::new(&spec.program);
     command.args(&spec.args);
     if let Some(cwd) = &spec.cwd {
@@ -193,8 +241,13 @@ fn generic_apply(policy: &SandboxPolicy, spec: CommandSpec) -> Result<Prepared, 
             command.env(k, v);
         }
     }
+    if let Some(port) = proxy_port {
+        set_proxy_env(&mut command, port);
+    }
 
-    // fs/net: honestly report what the skeleton does not yet enforce.
+    // fs/net: honestly report what the skeleton does not yet enforce. The skeleton has
+    // NO OS deny-layer, so even with the proxy running it cannot FORCE the child
+    // through it — net is reported unenforced regardless.
     let mut lost = Vec::new();
     if fs_confines(policy) {
         lost.push("fs".to_string());
@@ -213,6 +266,7 @@ fn generic_apply(policy: &SandboxPolicy, spec: CommandSpec) -> Result<Prepared, 
     Ok(Prepared {
         command,
         degradation,
+        proxy: None,
     })
 }
 

@@ -16,8 +16,9 @@
 //!   - writes: deny-default (the base denies all writes); a ReadWrite allow emits
 //!     `(allow file-write*)`, a Read allow or a Deny emits `(deny file-write*)` so
 //!     a narrower read-only/deny caps a broader earlier write grant.
-//!   - net:    not-enforced → `(allow network*)`; enforced → the base deny stands
-//!     (coarse deny). Per-host is the egress proxy's job (S6) via [`PROXY_PORT`].
+//!   - net:    not-enforced → `(allow network*)`; enforced WITH a proxy → egress
+//!     permitted ONLY to the proxy's loopback port (per-host enforced through it);
+//!     enforced WITHOUT a proxy → the base deny stands (coarse deny, loopback closed).
 //!   - env:    construction, not an SBPL primitive — the child env IS the policy's
 //!     constructed map (handled here when wrapping, mirrored from the skeleton).
 //!
@@ -37,11 +38,6 @@ use std::process::Command;
 /// The bootstrap essential block (`(deny default)` + process/mach/sysctl/iokit +
 /// framework map + system read surface). See the .sbpl header for provenance.
 const MACOS_SEATBELT_BASE: &str = include_str!("macos_seatbelt_base.sbpl");
-
-/// Loopback egress-proxy port. `None` until the proxy lands (S6); PER-HOST external
-/// egress then has no enforcement point, so an enforced net with allow-rules is
-/// reported degraded (coarse deny). Loopback itself is always carved out (below).
-const PROXY_PORT: Option<u16> = None;
 
 /// Mach/socket services real networking needs beyond raw `connect` — DNS resolution
 /// (mDNSResponder / SystemConfiguration), TLS trust (trustd / ocspd / SecurityServer),
@@ -68,16 +64,21 @@ const NETWORK_SERVICES: &str = "\
 /// Apply a resolved policy to a command on macOS. When the policy confines neither
 /// fs nor net, no SBPL wrap is emitted (env-scrub alone is construction, needs no
 /// kernel primitive); otherwise the child is re-homed under `sandbox-exec`.
-pub fn apply(policy: &SandboxPolicy, spec: CommandSpec) -> Result<Prepared, Degradation> {
+pub fn apply(
+    policy: &SandboxPolicy,
+    spec: CommandSpec,
+    proxy_port: Option<u16>,
+) -> Result<Prepared, Degradation> {
     if !needs_sandbox(policy) {
         // No fs/net confinement — just the env-scrub (or nothing).
         return Ok(Prepared {
             command: base_command(&spec, policy),
             degradation: Degradation::full(),
+            proxy: None,
         });
     }
 
-    let profile = build_profile(policy, &spec);
+    let profile = build_profile(policy, &spec, proxy_port);
     let mut wrapped = Command::new("sandbox-exec");
     wrapped.arg("-p").arg(&profile).arg("--");
     wrapped.arg(&spec.program).args(&spec.args);
@@ -94,10 +95,16 @@ pub fn apply(policy: &SandboxPolicy, spec: CommandSpec) -> Result<Prepared, Degr
             wrapped.env(k, v);
         }
     }
+    // Point the child at the loopback proxy (cooperative hint; the Seatbelt carve is
+    // the real boundary). Set AFTER env_clear so it survives an enforced env scrub.
+    if let Some(port) = proxy_port {
+        super::set_proxy_env(&mut wrapped, port);
+    }
 
     Ok(Prepared {
         command: wrapped,
-        degradation: degradation(policy),
+        degradation: degradation(policy, proxy_port),
+        proxy: None,
     })
 }
 
@@ -131,32 +138,44 @@ fn fs_confines(policy: &SandboxPolicy) -> bool {
 }
 
 /// Build the full SBPL profile text for `policy`.
-fn build_profile(policy: &SandboxPolicy, spec: &CommandSpec) -> String {
+fn build_profile(policy: &SandboxPolicy, spec: &CommandSpec, proxy_port: Option<u16>) -> String {
     let mut out = String::with_capacity(MACOS_SEATBELT_BASE.len() + 2048);
     out.push_str(MACOS_SEATBELT_BASE);
     out.push('\n');
 
-    emit_net(policy, &mut out);
+    emit_net(policy, proxy_port, &mut out);
     emit_fs(policy, spec, &mut out);
 
     out
 }
 
-/// Net axis. Not-enforced → allow all egress + the DNS/TLS service block (we only
-/// wrapped for fs). Enforced → the base `(deny default)` denies external egress;
-/// loopback is carved out unconditionally (local IPC + the future egress proxy live
-/// there), while per-host EXTERNAL allows await the proxy (S6) — see [`degradation`].
-fn emit_net(policy: &SandboxPolicy, out: &mut String) {
+/// Net axis. Three cases:
+///   - not enforced → allow all egress + the DNS/TLS service block.
+///   - enforced WITH a proxy → permit egress ONLY to the proxy's loopback port, so
+///     the child must route per-host through it. This deliberately does NOT carve all
+///     of loopback: arbitrary local services (a sibling listener, a docker daemon on
+///     127.0.0.1) and AF_UNIX sockets (`docker.sock`) stay DENIED by the base — the
+///     local-exfil holes the old `localhost:*` carve left open are closed here.
+///   - enforced WITHOUT a proxy (coarse deny-all) → NO carve at all; the base
+///     `(deny default)` denies every egress including loopback (nothing reachable).
+///
+/// Seatbelt requires `localhost`/`*` as the host in a `remote ip` literal (a numeric
+/// `127.0.0.1` literal is a PARSE ERROR that fails the whole profile load); `localhost`
+/// covers loopback on both 127.0.0.1 and ::1, and the explicit `:<port>` pins the one
+/// proxy port.
+fn emit_net(policy: &SandboxPolicy, proxy_port: Option<u16>, out: &mut String) {
     if !policy.net.enforce {
         out.push_str("(allow network*)\n");
         out.push_str(NETWORK_SERVICES);
         return;
     }
-    // Loopback egress only. Seatbelt requires `*`/`localhost` as the host in a
-    // `remote ip` literal — a `127.0.0.1` literal is a PARSE ERROR that fails the
-    // whole profile load. `localhost` covers loopback on both 127.0.0.1 and ::1;
-    // `:*` admits any port, so the egress proxy (whatever port it binds) is reachable.
-    out.push_str("(allow network* (remote ip \"localhost:*\"))\n");
+    if let Some(port) = proxy_port {
+        out.push_str(&format!(
+            "(allow network* (remote ip \"localhost:{port}\"))\n"
+        ));
+    }
+    // else: coarse deny-all — emit nothing (the base (deny default) closes all egress,
+    // loopback and AF_UNIX included).
 }
 
 /// Filesystem axis: reads then writes, each reproducing the IR's last-match-wins
@@ -479,17 +498,19 @@ fn sbpl_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-/// Full-enforcement unless net enforces per-host allows the coarse deny can't honor
-/// (no proxy yet) — then report `net-per-host` degraded (fail-safe, not silent).
-fn degradation(policy: &SandboxPolicy) -> Degradation {
+/// Full-enforcement unless net enforces per-host allows but the proxy could NOT be
+/// started (`proxy_port == None`): then the profile coarse-denies and we report
+/// `net-per-host` degraded (fail-safe, not silent). With a proxy the per-host allows
+/// ARE enforced (via SNI/target gating), so enforcement is full.
+fn degradation(policy: &SandboxPolicy, proxy_port: Option<u16>) -> Degradation {
     let mut deg = Degradation::full();
     if policy.net.enforce
-        && PROXY_PORT.is_none()
+        && proxy_port.is_none()
         && policy.net.rules.iter().any(|r| r.effect == Effect::Allow)
     {
         deg.lost.push("net-per-host".to_string());
         deg.reason = Some(
-            "egress proxy not wired — per-host allows denied (coarse network deny)".to_string(),
+            "egress proxy unavailable — per-host allows denied (coarse network deny)".to_string(),
         );
     }
     deg
@@ -575,7 +596,7 @@ mod tests {
                 rule("**/.env", Effect::Deny, FsAccess::Read),
             ],
         );
-        let prof = build_profile(&p, &spec());
+        let prof = build_profile(&p, &spec(), None);
         assert!(prof.contains("(allow file-read* (subpath \"/\"))"));
         // The `.env` deny is emitted AFTER the generous allow (last-match-wins).
         let allow_at = prof.find("(allow file-read* (subpath \"/\"))").unwrap();
@@ -596,7 +617,7 @@ mod tests {
             Effect::Deny,
             vec![rule("/proj", Effect::Allow, FsAccess::ReadWrite)],
         );
-        let prof = build_profile(&p, &spec());
+        let prof = build_profile(&p, &spec(), None);
         assert!(!prof.contains("(allow file-read* (subpath \"/\"))\n"));
         assert!(prof.contains("(allow file-read* (subpath \"/proj\"))"));
     }
@@ -613,7 +634,7 @@ mod tests {
                 rule("/proj/secret", Effect::Deny, FsAccess::Read),
             ],
         );
-        let prof = build_profile(&p, &spec());
+        let prof = build_profile(&p, &spec(), None);
         assert!(prof.contains("(allow file-write* (subpath \"/proj\"))"));
         assert!(prof.contains("(deny file-write* (subpath \"/proj/ro\"))"));
         assert!(prof.contains("(deny file-write* (subpath \"/proj/secret\"))"));
@@ -632,7 +653,7 @@ mod tests {
                 rule("/proj", Effect::Allow, FsAccess::ReadWrite),
             ],
         );
-        let prof = build_profile(&p, &spec());
+        let prof = build_profile(&p, &spec(), None);
         let cap = prof.find("(deny file-write* (subpath \"/\"))").unwrap();
         let confstr = prof
             .find("(allow file-write* (subpath \"/private/var/folders/")
@@ -651,7 +672,7 @@ mod tests {
             Effect::Deny,
             vec![rule("/proj", Effect::Allow, FsAccess::ReadWrite)],
         );
-        let prof = build_profile(&p, &spec());
+        let prof = build_profile(&p, &spec(), None);
         if let Some(cache) = confstr_dir(libc::_CS_DARWIN_USER_CACHE_DIR) {
             let cache =
                 normalize_slashes(&canonicalize_including_nonexistent(&cache).to_string_lossy());
@@ -670,7 +691,7 @@ mod tests {
             Effect::Deny,
             vec![rule("/private", Effect::Allow, FsAccess::ReadWrite)],
         );
-        let prof = build_profile(&p, &spec());
+        let prof = build_profile(&p, &spec(), None);
         assert!(!prof.contains("(allow file-write* (subpath \"/private\"))"));
         assert!(is_dangerous_write_root(&MatchTerm::Subpath(
             "/private".to_string()
@@ -707,22 +728,45 @@ mod tests {
             rules: vec![],
             default_effect: Effect::Deny,
         };
-        let prof = build_profile(&p, &spec());
+        let prof = build_profile(&p, &spec(), None);
         assert!(prof.contains("(allow file*)"));
     }
 
     #[test]
-    fn net_enforced_carves_loopback_only() {
+    fn net_enforced_with_proxy_carves_only_the_proxy_port() {
+        // A proxy on port 54321: egress permitted to EXACTLY localhost:54321, nothing
+        // else — no blanket allow, and critically NOT all-loopback (`localhost:*`), so
+        // a sibling listener / docker-on-loopback stays denied (local-exfil closed).
         let mut p = fs_policy(Effect::Allow, vec![]);
         p.net = NetPolicy {
             enforce: true,
             rules: vec![],
             default_effect: Effect::Deny,
         };
-        let prof = build_profile(&p, &spec());
-        assert!(prof.contains("(allow network* (remote ip \"localhost:*\"))"));
-        // No blanket network allow when enforcing.
-        assert!(!prof.contains("(allow network*)\n"));
+        let prof = build_profile(&p, &spec(), Some(54321));
+        assert!(prof.contains("(allow network* (remote ip \"localhost:54321\"))"));
+        assert!(
+            !prof.contains("localhost:*"),
+            "must not carve all of loopback"
+        );
+        assert!(!prof.contains("(allow network*)\n"), "no blanket egress");
+    }
+
+    #[test]
+    fn net_enforced_coarse_deny_carves_nothing() {
+        // Coarse deny-all (net enforce, no proxy): NO network allow at all — the base
+        // (deny default) closes every egress incl. loopback + AF_UNIX.
+        let mut p = fs_policy(Effect::Allow, vec![]);
+        p.net = NetPolicy {
+            enforce: true,
+            rules: vec![],
+            default_effect: Effect::Deny,
+        };
+        let prof = build_profile(&p, &spec(), None);
+        assert!(
+            !prof.contains("(allow network*"),
+            "coarse deny emits no egress carve"
+        );
     }
 
     #[test]
@@ -732,13 +776,13 @@ mod tests {
             Effect::Deny,
             vec![rule("/proj", Effect::Allow, FsAccess::ReadWrite)],
         );
-        let prof = build_profile(&p, &spec());
+        let prof = build_profile(&p, &spec(), None);
         assert!(prof.contains("(allow network*)\n"));
         assert!(prof.contains("com.apple.trustd"));
     }
 
     #[test]
-    fn degradation_reports_lost_per_host_without_proxy() {
+    fn degradation_reports_lost_per_host_only_without_proxy() {
         let mut p = fs_policy(Effect::Allow, vec![]);
         p.net = NetPolicy {
             enforce: true,
@@ -748,11 +792,14 @@ mod tests {
             }],
             default_effect: Effect::Deny,
         };
-        let deg = degradation(&p);
+        // No proxy available → per-host can't be enforced → degraded.
+        let deg = degradation(&p, None);
         assert_eq!(deg.lost, vec!["net-per-host".to_string()]);
+        // WITH a proxy the per-host allows ARE enforced (SNI/target gating) → full.
+        assert!(degradation(&p, Some(9999)).is_full());
         // A pure deny-all net (no allow rules) is fully enforced, not degraded.
         p.net.rules.clear();
-        assert!(degradation(&p).is_full());
+        assert!(degradation(&p, None).is_full());
     }
 
     #[test]
