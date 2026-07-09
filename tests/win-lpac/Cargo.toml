@@ -1,0 +1,32 @@
+# Throwaway windows-latest probe (branch probe/win-lpac). Standalone crate — detached
+# from nub's workspace via the empty [workspace] table so it never has to be a member.
+# Answers ONE question empirically: does LPAC (Less Privileged AppContainer) close the
+# Windows "deny-inside-a-broad-allow" / AAP-inheritance trap that the standard
+# AppContainer backend currently honest-degrades? Investigation-scope; nothing here
+# lands in the shipping engine.
+[package]
+name = "win-lpac-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "win-lpac-probe"
+path = "src/main.rs"
+
+# Detach from the parent nub workspace.
+[workspace]
+
+[target.'cfg(target_os = "windows")'.dependencies.windows-sys]
+version = "0.61"
+features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_Security_Isolation",
+  "Win32_System_Threading",
+]
+
+[profile.release]
+# crt-static is set via RUSTFLAGS in the workflow so the probe child is self-contained
+# under the LowBox/LPAC token (no vcruntime DLL dependency to satisfy).

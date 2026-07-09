@@ -1,0 +1,32 @@
+# Throwaway windows-latest probe (branch probe/win-lpac ONLY). Answers: does LPAC close
+# the Windows deny-inside-a-broad-allow / AAP-inheritance trap, and is LPAC viable?
+# Prints a CASE matrix; not a pass/fail gate. Delete the branch to retire it.
+name: win-lpac-probe
+on:
+  workflow_dispatch:
+  push:
+    branches: [probe/win-lpac]
+    paths:
+      - "tests/win-lpac/**"
+      - ".github/workflows/win-lpac-probe.yml"
+jobs:
+  probe:
+    runs-on: windows-latest
+    env:
+      # crt-static: the probe child self-reexecs under the LowBox/LPAC token and must be
+      # self-contained (no vcruntime DLL dependency to satisfy under the restricted token).
+      RUSTFLAGS: "-C target-feature=+crt-static"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Environment baseline
+        shell: powershell
+        run: |
+          $id=[System.Security.Principal.WindowsIdentity]::GetCurrent()
+          $admin=(New-Object System.Security.Principal.WindowsPrincipal($id)).IsInRole([System.Security.Principal.WindowsBuiltinRole]::Administrator)
+          Write-Host "User: $($id.Name)  IsElevated: $admin  OS: $([System.Environment]::OSVersion.VersionString)"
+          Write-Host "node: $((Get-Command node -ErrorAction SilentlyContinue).Source)"
+      - name: Build + run the LPAC probe matrix
+        shell: bash
+        working-directory: tests/win-lpac
+        run: cargo run --release
