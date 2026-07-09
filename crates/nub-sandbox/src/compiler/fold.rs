@@ -51,6 +51,14 @@ pub fn fold_fs(value: &Value, ctx: &CompileCtx, path: &str) -> Result<FsPolicy, 
             ));
         }
     }
+    // Default-deny `.git/hooks/` when (and only when) the policy grants write: a
+    // planted hook executes on the next git op (see defaults::git_hooks_write_denies).
+    // Appended LAST so last-match-wins overrides the grant; gated on a write grant so
+    // a read-only/relaxed axis is untouched (no widening, escape hatches stay open).
+    if defaults::grants_write(&set.entries) {
+        set.entries
+            .extend(defaults::git_hooks_write_denies(&ctx.homes));
+    }
     Ok(FsPolicy {
         rules: set,
         tmp: Default::default(),

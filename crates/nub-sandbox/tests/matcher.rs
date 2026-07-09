@@ -219,3 +219,68 @@ fn generous_read_still_denies_dotenv_and_ssh() {
         "ssh denied"
     );
 }
+
+// ── default `.git/hooks/` write-deny (planted-hook code-exec vector) ───────────
+
+#[test]
+fn write_grant_denies_git_hooks_but_not_normal_or_git_metadata_writes() {
+    use nub_sandbox::compiler::compile;
+    use serde_json::json;
+    let ctx = common::ctx(true, &[]);
+    let proj = common::homes().project;
+
+    // A write grant over the whole project tree ("..." read defaults + "./" rw).
+    let policy = compile(&json!({ "fs": ["...", "./"] }), &ctx).unwrap();
+    let m = PathMatcher::new(&policy.fs.rules);
+    let writable = |p: &std::path::Path| {
+        let d = m.decide(p);
+        matches!(d.effect, Effect::Allow) && matches!(d.access, FsAccess::ReadWrite)
+    };
+
+    // The vector: planting a hook is DENIED even though the tree is writable.
+    assert!(
+        !writable(&proj.join(".git/hooks/pre-commit")),
+        "planting a git hook must be write-denied"
+    );
+    assert!(
+        !writable(&proj.join(".git/hooks/evil")),
+        "any file under .git/hooks/ write-denied"
+    );
+    // Normal source and git's OWN commit/add/checkout writes still pass — those hit
+    // objects/refs/index/HEAD, never hooks.
+    assert!(
+        writable(&proj.join("src/x.ts")),
+        "normal source write allowed"
+    );
+    assert!(
+        writable(&proj.join(".git/refs/heads/main")),
+        "git ref write allowed"
+    );
+    assert!(
+        writable(&proj.join(".git/index")),
+        "git index write allowed"
+    );
+    assert!(
+        writable(&proj.join(".git/objects/ab/cdef")),
+        "git object write allowed"
+    );
+}
+
+#[test]
+fn read_only_default_leaves_git_hooks_readable_and_unwritable() {
+    // The deny is gated on a write grant: `sandbox: true` (generous read, no write)
+    // must NOT inject it — `.git/hooks/` stays readable (so a repo's own hooks still
+    // run) and is unwritable purely because nothing granted write.
+    use nub_sandbox::compiler::compile;
+    use serde_json::json;
+    let ctx = common::ctx(true, &[]);
+    let proj = common::homes().project;
+    let policy = compile(&json!(true), &ctx).unwrap();
+    let m = PathMatcher::new(&policy.fs.rules);
+    let d = m.decide(&proj.join(".git/hooks/pre-commit"));
+    assert!(matches!(d.effect, Effect::Allow), ".git/hooks readable");
+    assert!(
+        !matches!(d.access, FsAccess::ReadWrite),
+        "no write under read-only default"
+    );
+}

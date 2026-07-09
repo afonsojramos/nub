@@ -144,6 +144,36 @@ pub fn secret_read_denies(homes: &Homes) -> Vec<FsRule> {
     out
 }
 
+/// The default `.git/hooks/` write-deny — the project's `.git/hooks` dir + contents,
+/// as ordinary last-match-wins Deny entries (same `deny()` builder + subtree shape as
+/// the secret denies). The fold appends these AFTER a write grant so they override it.
+///
+/// WHY: a sandboxed child with a write grant over the project could plant
+/// `.git/hooks/{pre-commit,post-checkout,…}`, which git EXECUTES on the next
+/// commit/checkout → a code-exec sandbox escape (Codex + Anthropic's SRT guard this;
+/// nub now too). Transparent to normal git — commit/add/checkout write
+/// `.git/{objects,refs,index,HEAD}`, never `.git/hooks/`.
+///
+/// Anchored at the project root (absolute) rather than a depth-independent
+/// `**/.git/hooks`: the latter is a `Prefix::Relative` glob the linux write-grant
+/// walk treats as reaching under EVERY dir, forcing it to carve — and thus drop
+/// new-file writes on — every write subtree. An absolute anchor confines the carve to
+/// the tree that actually holds `.git/hooks`.
+pub fn git_hooks_write_denies(homes: &Homes) -> Vec<FsRule> {
+    let expanded = expand_symbolic("./.git/hooks", homes);
+    subtree_globs(&expanded).into_iter().map(deny).collect()
+}
+
+/// Whether an fs ruleset grants WRITE anywhere (an Allow carrying ReadWrite). The
+/// `.git/hooks/` deny is injected only when it does: a read-only or fully-denied
+/// policy has no write vector to close, and a relaxed/escape-hatch axis (no Allow
+/// entries) must stay open — so the deny never tightens or widens those.
+pub fn grants_write(entries: &[FsRule]) -> bool {
+    entries
+        .iter()
+        .any(|r| r.effect == Effect::Allow && r.access == FsAccess::ReadWrite)
+}
+
 /// The generous read base entry: allow everything, then the secret denies (added
 /// by the caller after this) tighten it. Emitted for the wrapper `true` /
 /// spread-of-defaults read posture.
@@ -390,6 +420,37 @@ mod tests {
         ] {
             assert!(!out.contains_key(k), "credential {k} must be scrubbed");
         }
+    }
+
+    #[test]
+    fn git_hooks_denies_cover_dir_and_contents_and_gate_on_write() {
+        let globs: Vec<String> = git_hooks_write_denies(&homes())
+            .into_iter()
+            .map(|r| r.matcher.as_str().to_string())
+            .collect();
+        // Anchored at the project root — the dir itself AND its contents.
+        assert!(globs.contains(&"/proj/.git/hooks".to_string()), "hooks dir");
+        assert!(
+            globs.contains(&"/proj/.git/hooks/**".to_string()),
+            "hooks contents"
+        );
+        // The gate: only an Allow+ReadWrite entry counts as a write grant.
+        let rw = FsRule {
+            matcher: CanonGlob("**".into()),
+            effect: Effect::Allow,
+            access: FsAccess::ReadWrite,
+        };
+        let ro = FsRule {
+            matcher: CanonGlob("**".into()),
+            effect: Effect::Allow,
+            access: FsAccess::Read,
+        };
+        assert!(
+            grants_write(std::slice::from_ref(&rw)),
+            "rw is a write grant"
+        );
+        assert!(!grants_write(&[ro]), "read-only is not a write grant");
+        assert!(!grants_write(&[]), "empty (relaxed/denied) is not a grant");
     }
 
     #[test]
