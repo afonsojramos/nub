@@ -489,6 +489,13 @@ pub enum Command {
         #[arg(long = "no-check", visible_alias = "no-install")]
         no_check: bool,
 
+        /// INTERNAL, UNDOCUMENTED: run the target under the OS-enforced sandbox
+        /// engine using an explicit surface policy file. The frontend-less test
+        /// entry for `nub-sandbox` (Stage 1: compile→apply). Does NOT read the
+        /// project nub.jsonc; takes an explicit `<file.json>`. Not a user surface.
+        #[arg(long = "sandbox", value_name = "FILE", hide = true)]
+        sandbox: Option<String>,
+
         /// Remaining arguments forwarded to the script.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -1894,9 +1901,17 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             script_shell,
             aggregate_output,
             resume_from,
+            sandbox,
             mut args,
         }) => {
             args.extend(suffix);
+            // INTERNAL test entry: `nub run --sandbox <file.json> <cmd> [args]`
+            // compiles an explicit surface policy and launches <cmd> under the
+            // sandbox engine. Bypasses the whole script-run/workspace path (this
+            // is a frontend-less engine seam, not a package.json script lookup).
+            if let Some(policy_file) = sandbox {
+                return run_sandboxed(&policy_file, script.as_deref(), &args);
+            }
             if no_check {
                 crate::verify_deps::disable();
             }
@@ -2595,6 +2610,81 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
     let result = nub_core::node::spawn::spawn_node(&config)?;
     // PATH shim cleanup is handled once at the top level (see `run`).
     Ok(nub_core::node::spawn::exit_code(&result))
+}
+
+/// INTERNAL, UNDOCUMENTED test entry for the `nub-sandbox` engine (design.md
+/// §2.6). Loads a SURFACE `sandbox` block from an explicit file (NOT the project
+/// nub.jsonc), compiles it to a resolved policy, and launches `<program> [args]`
+/// under it via the engine's `apply`. Stage 1: env-scrub only (OS backends land
+/// later); a non-full [`Degradation`] is surfaced to stderr, never silent.
+///
+/// The file may be either a bare surface block (`{ "fs": … }`) or a document with
+/// a top-level `"sandbox"` key. Trusted (an explicit user-supplied policy file),
+/// so `$(…)` substitution is permitted.
+fn run_sandboxed(policy_file: &str, program: Option<&str>, args: &[String]) -> Result<i32> {
+    use jsonc_parser::ParseOptions;
+
+    // clap's `trailing_var_arg` on `args` captures the whole command when no
+    // package.json script name precedes it, so the program may arrive as the
+    // `script` positional OR as the first trailing arg. Accept either.
+    let (program, prog_args): (&str, &[String]) = match program {
+        Some(p) => (p, args),
+        None => match args.split_first() {
+            Some((first, rest)) => (first.as_str(), rest),
+            None => bail!(
+                "nub run --sandbox: provide a command to run, e.g. `--sandbox policy.json <cmd> [args]`"
+            ),
+        },
+    };
+    let text = std::fs::read_to_string(policy_file)
+        .with_context(|| format!("reading sandbox policy file {policy_file}"))?;
+    let value = jsonc_parser::parse_to_serde_value(&text, &ParseOptions::default())
+        .map_err(|e| anyhow::anyhow!("parsing sandbox policy {policy_file}: {e}"))?
+        .unwrap_or(serde_json::Value::Null);
+    // Accept either a bare surface block or a `{ "sandbox": … }` wrapper.
+    let block = value.get("sandbox").cloned().unwrap_or(value);
+
+    let cwd = std::env::current_dir().context("resolving cwd")?;
+    let ctx = nub_sandbox::CompileCtx::new(sandbox_homes(&cwd), cwd.clone(), true, ambient_env());
+    let policy = nub_sandbox::compile(&block, &ctx)
+        .map_err(|e| anyhow::anyhow!("sandbox policy did not compile: {e}"))?;
+
+    let spec = nub_sandbox::CommandSpec::new(program).args(prog_args.iter().map(String::as_str));
+    let prepared = nub_sandbox::apply(&policy, spec)
+        .map_err(|d| anyhow::anyhow!("sandbox could not be applied (fail-closed): {d:?}"))?;
+    if let Some(warning) = prepared.degradation.warning() {
+        eprintln!("warning: {warning}");
+    }
+    let mut command = prepared.command;
+    let status = command
+        .status()
+        .with_context(|| format!("spawning `{program}` under the sandbox"))?;
+    Ok(status.code().unwrap_or(1))
+}
+
+/// The per-OS home anchors the sandbox compiler expands symbolic roots against.
+/// Best-effort from the environment (the frontend-less engine takes them as
+/// host-provided data).
+fn sandbox_homes(cwd: &std::path::Path) -> nub_sandbox::Homes {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| cwd.to_path_buf());
+    let cache = std::env::var_os("XDG_CACHE_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| home.join(".cache"));
+    nub_sandbox::Homes {
+        home,
+        tmp: std::env::temp_dir(),
+        cache,
+        project: cwd.to_path_buf(),
+    }
+}
+
+/// Snapshot the ambient env for the sandbox compiler (Boundary B: the engine
+/// receives parsed data, it does not read the process env itself).
+fn ambient_env() -> std::collections::BTreeMap<String, String> {
+    std::env::vars().collect()
 }
 
 fn run_script(

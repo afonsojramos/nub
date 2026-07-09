@@ -2686,6 +2686,7 @@ dependencies = [
  "nub-core",
  "nub-phantom-core",
  "nub-phantom-scan",
+ "nub-sandbox",
  "num_cpus",
  "rayon",
  "rustc-hash",
@@ -2751,6 +2752,21 @@ dependencies = [
  "nub-phantom-core",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "nub-sandbox"
+version = "0.4.5"
+dependencies = [
+ "globset",
+ "ignore",
+ "ipnet",
+ "libc",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
 ]
 
 [[package]]

@@ -20,6 +20,12 @@ embed-runtime = ["nub-core/embed-runtime"]
 
 [dependencies]
 nub-core = { path = "../nub-core" }
+# The OS-enforced sandbox ENGINE (PM-pure). nub-cli is the CONSUMER seam: it does
+# file discovery/parse + the ambient-env snapshot and calls nub-sandbox's
+# compile()/apply() over parsed data. The dependency is one-directional — the
+# engine never depends back on nub-cli (Boundary B). Reached only by the
+# undocumented `nub run --sandbox <file.json>` test entry in Stage 1.
+nub-sandbox = { path = "../nub-sandbox" }
 # Shared phantom-classification primitives (specifier extraction + guard modeling
 # + builtin/name classification) for the pre-run phantom scan (src/phantom_scan.rs).
 # Depends on the LEAN oxc parser subset, not the full `oxc` umbrella — see the
