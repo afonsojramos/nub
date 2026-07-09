@@ -200,9 +200,12 @@ fn new_secret_paths_denied_under_generous_read() {
     std::fs::write(f.home.join(".gnupg/secring.gpg"), "GPGKEY").unwrap();
     std::fs::create_dir_all(f.home.join(".config/git")).unwrap();
     std::fs::write(f.home.join(".config/git/credentials"), "GITCREDS").unwrap();
-    // Project-local: a `.env` DIRECTORY subtree (not just a leaf) + direnv `.envrc`.
+    // Project-local: `.env` + `.env.local` DIRECTORY subtrees (not just leaves) + direnv
+    // `.envrc`.
     std::fs::create_dir_all(f.proj.join("nested/.env")).unwrap();
     std::fs::write(f.proj.join("nested/.env/prod"), "ENVDIRSECRET").unwrap();
+    std::fs::create_dir_all(f.proj.join("nested/.env.local")).unwrap();
+    std::fs::write(f.proj.join("nested/.env.local/prod"), "ENVLOCALDIRSECRET").unwrap();
     std::fs::write(f.proj.join(".envrc"), "export SECRET=x").unwrap();
 
     let generous = serde_json::json!({ "fs": ["..."] });
@@ -215,6 +218,10 @@ fn new_secret_paths_denied_under_generous_read() {
             "git credential store",
         ),
         (f.proj.join("nested/.env/prod"), ".env directory subtree"),
+        (
+            f.proj.join("nested/.env.local/prod"),
+            ".env.local directory subtree",
+        ),
         (f.proj.join(".envrc"), ".envrc"),
     ] {
         assert!(

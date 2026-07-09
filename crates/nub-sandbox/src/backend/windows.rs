@@ -897,8 +897,12 @@ mod launch {
             if h.is_null() || h == INVALID_HANDLE_VALUE {
                 continue;
             }
-            unsafe { SetHandleInformation(h, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) };
-            if !out.contains(&h) {
+            // Only keep a handle we could actually mark inheritable — a non-inheritable
+            // member would make CreateProcessW fail the whole spawn, so omit it (the child
+            // loses that one stream) rather than take the process down.
+            let marked =
+                unsafe { SetHandleInformation(h, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) };
+            if marked != 0 && !out.contains(&h) {
                 out.push(h);
             }
         }

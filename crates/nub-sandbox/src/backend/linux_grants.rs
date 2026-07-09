@@ -438,9 +438,11 @@ const BUILTIN_ENV_DENY_GLOBS: &[&str] = &[
     "**/.env",
     "**/.env.*",
     "**/.env/**",
+    "**/.env.*/**",
     ".env",
     ".env.*",
     ".env/**",
+    ".env.*/**",
     "**/.envrc",
     ".envrc",
 ];

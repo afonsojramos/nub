@@ -51,10 +51,11 @@ const SECRET_READ_RELPATHS: &[&str] = &[
 
 /// `.env*` / `.envrc` deny globs — legit code reads secrets via the injected
 /// process env, not by `fs.read()`-ing the file, so denying these is
-/// near-zero-breakage. `.env` is denied both as a leaf (`**/.env`) AND as a
-/// SUBTREE (`**/.env/**`) so a `.env/` directory holding per-target secret files
-/// is covered, not just a single-file `.env`. `.envrc` is direnv's secret-bearing
-/// shell config, project-local at any depth like `.env`.
+/// near-zero-breakage. Both `.env` and `.env.<x>` are denied as a leaf (`**/.env`,
+/// `**/.env.*`) AND as a SUBTREE (`**/.env/**`, `**/.env.*/**`) so a `.env/` or
+/// `.env.local/` DIRECTORY holding per-target secret files is covered, not just the
+/// single-file form. `.envrc` is direnv's secret-bearing shell config, project-local
+/// at any depth like `.env`.
 ///
 /// MUST STAY IN SYNC with `linux_grants::BUILTIN_ENV_DENY_GLOBS` (the generous-`**`
 /// system-dir seeding skips exactly these depth-independent builtin denies).
@@ -62,9 +63,11 @@ const SECRET_READ_GLOBS: &[&str] = &[
     "**/.env",
     "**/.env.*",
     "**/.env/**",
+    "**/.env.*/**",
     ".env",
     ".env.*",
     ".env/**",
+    ".env.*/**",
     "**/.envrc",
     ".envrc",
 ];
@@ -307,7 +310,7 @@ mod tests {
             .map(|r| r.matcher.as_str().to_string())
             .collect();
         // Depth-independent `.env`/`.envrc` globs are verbatim (never anchored).
-        for g in ["**/.env", "**/.env/**", "**/.envrc"] {
+        for g in ["**/.env", "**/.env/**", "**/.env.*/**", "**/.envrc"] {
             assert!(globs.contains(&g.to_string()), "missing verbatim deny {g}");
         }
         // Home-anchored secret files/dirs appear as subtree denies (substring match

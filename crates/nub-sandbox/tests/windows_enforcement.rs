@@ -82,19 +82,32 @@ mod win {
         }
     }
 
-    /// Whether the numeric handle value passed by the parent is a live handle in THIS
-    /// process — i.e. was inherited. `GetHandleInformation` succeeds only on a handle
-    /// present in the caller's table. Exit 0 = inherited (handle valid here), 7 = not.
+    /// Whether the numeric handle value passed by the parent names OUR event in THIS
+    /// process — i.e. was inherited. Two checks so a recycled handle-value COLLISION
+    /// (Windows reuses small handle values, and the fresh child allocates its own) can't
+    /// masquerade as inheritance: the value must be a live handle here
+    /// (`GetHandleInformation`) AND `WaitForSingleObject(_, 0)` must return signaled —
+    /// the parent creates the event manual-reset + signaled, so only our event (or a
+    /// vanishingly-rare signaled-waitable collision) passes both. Exit 0 = inherited,
+    /// 7 = not.
     fn check_handle(hex: &str) -> i32 {
-        use windows_sys::Win32::Foundation::{GetHandleInformation, HANDLE};
+        use windows_sys::Win32::Foundation::{GetHandleInformation, HANDLE, WAIT_OBJECT_0};
+        use windows_sys::Win32::System::Threading::WaitForSingleObject;
         let Ok(val) = usize::from_str_radix(hex.trim_start_matches("0x"), 16) else {
             return 9;
         };
         let h = val as HANDLE;
         let mut flags = 0u32;
         // SAFETY: query-only; an un-inherited value simply fails the call (no deref).
-        let ok = unsafe { GetHandleInformation(h, &mut flags) };
-        if ok != 0 { 0 } else { 7 }
+        if unsafe { GetHandleInformation(h, &mut flags) } == 0 {
+            return 7;
+        }
+        // SAFETY: non-blocking wait; on an invalid/non-waitable value it fails, not blocks.
+        if unsafe { WaitForSingleObject(h, 0) } == WAIT_OBJECT_0 {
+            0
+        } else {
+            7
+        }
     }
 
     fn connect(host: &str, port: u16) -> i32 {
