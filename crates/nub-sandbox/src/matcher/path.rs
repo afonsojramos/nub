@@ -101,7 +101,7 @@ pub fn normalize_slashes(s: &str) -> String {
 pub fn canonicalize_including_nonexistent(path: &Path) -> PathBuf {
     // Fast path: the whole thing exists.
     if let Ok(real) = std::fs::canonicalize(path) {
-        return real;
+        return strip_verbatim_prefix(real);
     }
     // Find the longest existing ancestor (ancestors() yields longest → shortest).
     let Some(base) = path
@@ -113,7 +113,9 @@ pub fn canonicalize_including_nonexistent(path: &Path) -> PathBuf {
     };
     // Canonicalize the existing prefix (resolves symlinks / firmlinks / 8.3
     // names), then re-apply the non-existent tail with lexical `..`/`.` collapse.
-    let mut out = std::fs::canonicalize(base).unwrap_or_else(|_| base.to_path_buf());
+    let mut out = std::fs::canonicalize(base)
+        .map(strip_verbatim_prefix)
+        .unwrap_or_else(|_| base.to_path_buf());
     if let Ok(tail) = path.strip_prefix(base) {
         for comp in tail.components() {
             match comp {
@@ -126,6 +128,25 @@ pub fn canonicalize_including_nonexistent(path: &Path) -> PathBuf {
         }
     }
     out
+}
+
+/// Strip a Windows `\\?\` / `\\?\UNC\` verbatim (extended-length) prefix that
+/// `std::fs::canonicalize` prepends. An IR path MUST be a plain path: the verbatim
+/// prefix is not merely cosmetic — after `normalize_slashes` its `?` reads as a glob
+/// metacharacter, so `has_glob_meta`/`literal_subtree` mis-classify a fully-literal
+/// grant as an unenforceable embedded-glob and DROP it (the Windows AppContainer
+/// backend then denies the project its own dir). No-op on a non-verbatim path (the
+/// prefix never appears off Windows). Bounded to normal-length paths, which is all a
+/// project/work dir is; a genuine >MAX_PATH path that needs the prefix is out of scope.
+fn strip_verbatim_prefix(p: PathBuf) -> PathBuf {
+    let Some(s) = p.to_str() else { return p };
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        return PathBuf::from(rest);
+    }
+    p
 }
 
 /// Canonicalize the LITERAL directory prefix of an (already symbol-expanded,
@@ -242,4 +263,32 @@ pub fn compile_glob(pattern: &str) -> Result<GlobMatcher, globset::Error> {
         .case_insensitive(CASE_INSENSITIVE)
         .build()?;
     Ok(glob.compile_matcher())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verbatim_prefix_is_stripped_so_the_ir_path_has_no_bogus_glob_char() {
+        // `std::fs::canonicalize` on Windows returns `\\?\C:\…`; unstripped, its `?`
+        // reads as a glob metachar and drops the literal grant. Strip drive + UNC forms;
+        // a plain path passes through untouched (incl. non-Windows paths).
+        assert_eq!(
+            strip_verbatim_prefix(PathBuf::from(r"\\?\C:\Users\me\proj")),
+            PathBuf::from(r"C:\Users\me\proj")
+        );
+        assert_eq!(
+            strip_verbatim_prefix(PathBuf::from(r"\\?\UNC\server\share\proj")),
+            PathBuf::from(r"\\server\share\proj")
+        );
+        assert_eq!(
+            strip_verbatim_prefix(PathBuf::from(r"C:\Users\me\proj")),
+            PathBuf::from(r"C:\Users\me\proj")
+        );
+        assert_eq!(
+            strip_verbatim_prefix(PathBuf::from("/private/tmp/proj")),
+            PathBuf::from("/private/tmp/proj")
+        );
+    }
 }
