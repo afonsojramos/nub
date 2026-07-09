@@ -279,22 +279,45 @@ mod win {
 
     /// A minimal env map the AppContainer child needs to start + the caller's marker.
     fn base_env(extra: &[(&str, &str)]) -> BTreeMap<String, String> {
+        // An AppContainer's CreateProcessW resolves its per-container storage from the
+        // passed environment, so a TOO-minimal block fails with ERROR_ENVVAR_NOT_FOUND
+        // (203): the scrubbed child needs the Windows-essential baseline (SystemRoot +
+        // the USERPROFILE/LOCALAPPDATA family, …), not just PATH. (Real finding — the
+        // compiler's env-scrub baseline must carry these on Windows; see the fray
+        // thread.) The secret under test is deliberately absent — that is the scrub.
         let mut m = BTreeMap::new();
         for k in [
             "SystemRoot",
-            "windir",
             "SystemDrive",
+            "windir",
             "ComSpec",
             "PATHEXT",
+            "Path",
             "TEMP",
             "TMP",
+            "USERPROFILE",
+            "HOMEDRIVE",
+            "HOMEPATH",
+            "APPDATA",
+            "LOCALAPPDATA",
+            "ProgramData",
+            "ALLUSERSPROFILE",
+            "ProgramFiles",
+            "ProgramFiles(x86)",
+            "ProgramW6432",
+            "CommonProgramFiles",
+            "PUBLIC",
+            "USERNAME",
+            "USERDOMAIN",
+            "COMPUTERNAME",
+            "NUMBER_OF_PROCESSORS",
+            "PROCESSOR_ARCHITECTURE",
+            "OS",
+            "DriverData",
         ] {
             if let Ok(v) = std::env::var(k) {
                 m.insert(k.to_string(), v);
             }
-        }
-        if let Ok(v) = std::env::var("Path") {
-            m.insert("Path".to_string(), v);
         }
         for (k, v) in extra {
             m.insert(k.to_string(), v.to_string());
