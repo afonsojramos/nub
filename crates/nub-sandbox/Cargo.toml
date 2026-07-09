@@ -75,10 +75,12 @@ features = [
   "Win32_Security",
   "Win32_System_Threading",
   # windows_adversarial.rs probes: ReadProcessMemory + VirtualQueryEx (foreign-env
-  # scrape), ReadFile/CreateFileW (raw-handle + inheritable-file-handle probes).
+  # scrape), CreateFileW (inheritable-file-handle probe), ConvertSidToStringSidW
+  # (SID-string token dump for the capability/package-SID checks).
   "Win32_System_Diagnostics_Debug",
   "Win32_System_Memory",
   "Win32_Storage_FileSystem",
+  "Win32_Security_Authorization",
 ]
 
 # The Windows enforcement probe self-reexecs as the AppContainer child, so it owns

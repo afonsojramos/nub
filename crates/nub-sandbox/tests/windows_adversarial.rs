@@ -89,8 +89,10 @@ mod win {
                 std::thread::sleep(Duration::from_secs(70));
                 0
             }
+            // TCP egress (positive control).  0 = connect OK  5 = WSAEACCES  6 = timeout  9 = other
+            Some("connect") => tcp_connect(&a[1], a[2].parse().unwrap_or(0)),
             // UDP egress to an external host under no-internetClient.
-            //   5 = blocked (WSAEACCES)   0 = send/connect OK (LEAK)   6 = timeout   9 = other
+            //   0 = DNS reply received (egress reached)  8 = dropped  5 = WSAEACCES  6 = timeout
             Some("udpx") => udp_egress(&a[1], a[2].parse().unwrap_or(0)),
             // Open a well-known local named pipe.
             //   0 = OPENED (IPC reach)   5 = access-denied   2 = not-found/busy   9 = other
@@ -302,91 +304,57 @@ mod win {
         }
     }
 
-    /// Count capability SIDs (S-1-15-3-*) in the token's groups; exit = count (capped 90).
-    fn count_capabilities() -> i32 {
-        use windows_sys::Win32::Foundation::CloseHandle;
-        use windows_sys::Win32::Security::{
-            GetSidIdentifierAuthority, GetSidSubAuthority, GetTokenInformation, SID_AND_ATTRIBUTES,
-            TOKEN_GROUPS, TOKEN_QUERY, TokenGroups,
-        };
-        use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-
-        // SAFETY: token-group enumeration; buffer sized by the first call.
+    /// Convert a PSID to its "S-1-…" string (or a diagnostic on failure). Caller owns nothing.
+    fn sid_to_string(sid: *mut std::ffi::c_void) -> String {
+        use windows_sys::Win32::Foundation::LocalFree;
+        use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+        if sid.is_null() {
+            return "<null>".into();
+        }
+        let mut out: *mut u16 = std::ptr::null_mut();
+        // SAFETY: ConvertSidToStringSidW allocates `out`; freed with LocalFree.
         unsafe {
-            let mut tok = std::ptr::null_mut();
-            if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut tok) == 0 {
-                return 90;
+            if ConvertSidToStringSidW(sid, &mut out) == 0 || out.is_null() {
+                return format!(
+                    "<convfail {}>",
+                    std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+                );
             }
-            let mut len = 0u32;
-            GetTokenInformation(tok, TokenGroups, std::ptr::null_mut(), 0, &mut len);
-            if len == 0 {
-                CloseHandle(tok);
-                return 90;
+            let mut len = 0usize;
+            while *out.add(len) != 0 {
+                len += 1;
             }
-            let mut buf = vec![0u8; len as usize];
-            if GetTokenInformation(tok, TokenGroups, buf.as_mut_ptr().cast(), len, &mut len) == 0 {
-                CloseHandle(tok);
-                return 90;
-            }
-            CloseHandle(tok);
-            let tg = &*(buf.as_ptr() as *const TOKEN_GROUPS);
-            let count = tg.GroupCount as usize;
-            let arr = std::slice::from_raw_parts(
-                std::ptr::addr_of!(tg.Groups) as *const SID_AND_ATTRIBUTES,
-                count,
-            );
-            let mut caps = 0i32;
-            for g in arr {
-                let sid = g.Sid;
-                if sid.is_null() {
-                    continue;
-                }
-                // Capability SID: identifier authority 15 (SECURITY_APP_PACKAGE_AUTHORITY)
-                // AND first subauthority == 3 (SECURITY_CAPABILITY_BASE_RID).
-                let ia = GetSidIdentifierAuthority(sid);
-                if ia.is_null() {
-                    continue;
-                }
-                let auth5 = (*ia).Value[5];
-                let sub0 = *GetSidSubAuthority(sid, 0);
-                if auth5 == 15 && sub0 == 3 {
-                    let sub1 = *GetSidSubAuthority(sid, 1);
-                    println!("CHILD capability SID S-1-15-3-{sub1}");
-                    caps += 1;
-                }
-            }
-            caps.min(90)
+            let s = String::from_utf16_lossy(std::slice::from_raw_parts(out, len));
+            LocalFree(out.cast());
+            s
         }
     }
 
-    /// Report package-SID membership. Returns 30 if ALL APPLICATION PACKAGES (S-1-15-2-1) is
-    /// present (a STANDARD AppContainer — can reach any object whose ACL grants AAP), 0 if it
-    /// is absent (e.g. an LPAC that carries only ALL RESTRICTED APPLICATION PACKAGES,
-    /// S-1-15-2-2). Prints every S-1-15-2-* package SID's second subauthority.
-    fn report_package_sids() -> i32 {
+    /// Parse a TOKEN_GROUPS-shaped info class (TokenGroups OR TokenCapabilities — both return
+    /// this shape) into its member SID strings.
+    fn token_sid_strings(info_class: i32) -> Vec<String> {
         use windows_sys::Win32::Foundation::CloseHandle;
         use windows_sys::Win32::Security::{
-            GetSidIdentifierAuthority, GetSidSubAuthority, GetSidSubAuthorityCount,
-            GetTokenInformation, SID_AND_ATTRIBUTES, TOKEN_GROUPS, TOKEN_QUERY, TokenGroups,
+            GetTokenInformation, SID_AND_ATTRIBUTES, TOKEN_GROUPS, TOKEN_QUERY,
         };
         use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-
-        // SAFETY: token-group enumeration; buffer sized by the first call.
+        let mut out = Vec::new();
+        // SAFETY: token-info enumeration; buffer sized by the first call.
         unsafe {
             let mut tok = std::ptr::null_mut();
             if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut tok) == 0 {
-                return 9;
+                return out;
             }
             let mut len = 0u32;
-            GetTokenInformation(tok, TokenGroups, std::ptr::null_mut(), 0, &mut len);
+            GetTokenInformation(tok, info_class, std::ptr::null_mut(), 0, &mut len);
             if len == 0 {
                 CloseHandle(tok);
-                return 9;
+                return out;
             }
             let mut buf = vec![0u8; len as usize];
-            if GetTokenInformation(tok, TokenGroups, buf.as_mut_ptr().cast(), len, &mut len) == 0 {
+            if GetTokenInformation(tok, info_class, buf.as_mut_ptr().cast(), len, &mut len) == 0 {
                 CloseHandle(tok);
-                return 9;
+                return out;
             }
             CloseHandle(tok);
             let tg = &*(buf.as_ptr() as *const TOKEN_GROUPS);
@@ -395,34 +363,38 @@ mod win {
                 std::ptr::addr_of!(tg.Groups) as *const SID_AND_ATTRIBUTES,
                 count,
             );
-            let mut has_aap = false;
             for g in arr {
-                let sid = g.Sid;
-                if sid.is_null() {
-                    continue;
-                }
-                let ia = GetSidIdentifierAuthority(sid);
-                if ia.is_null() || (*ia).Value[5] != 15 {
-                    continue;
-                }
-                let sub0 = *GetSidSubAuthority(sid, 0);
-                if sub0 != 2 {
-                    continue; // 2 = package SID family; 3 = capabilities (handled by `caps`)
-                }
-                let subcount = *GetSidSubAuthorityCount(sid);
-                let sub1 = if subcount >= 2 { *GetSidSubAuthority(sid, 1) } else { u32::MAX };
-                let label = match sub1 {
-                    1 => " (ALL APPLICATION PACKAGES)",
-                    2 => " (ALL RESTRICTED APPLICATION PACKAGES)",
-                    _ => " (specific package SID)",
-                };
-                println!("CHILD package SID S-1-15-2-{sub1}{label}");
-                if sub1 == 1 {
-                    has_aap = true;
-                }
+                out.push(sid_to_string(g.Sid));
             }
-            if has_aap { 30 } else { 0 }
         }
+        out
+    }
+
+    /// Enumerate the token's CAPABILITY SIDs. Capabilities live in `TokenCapabilities`, NOT
+    /// `TokenGroups` (the earlier group-scan bug). Prints each; exit = count (capped 90).
+    fn count_capabilities() -> i32 {
+        use windows_sys::Win32::Security::TokenCapabilities;
+        let caps = token_sid_strings(TokenCapabilities);
+        for s in &caps {
+            println!("CHILD capability SID {s}");
+        }
+        (caps.len() as i32).min(90)
+    }
+
+    /// Report package-SID membership from the token GROUPS, printed as SID STRINGS (not a
+    /// hand-rolled authority filter — that scan found nothing, an impossible result that
+    /// revealed the bug). Returns 30 if ALL APPLICATION PACKAGES (S-1-15-2-1) is present (a
+    /// STANDARD AppContainer — reaches any AAP-granted object), 0 otherwise (LPAC-class).
+    fn report_package_sids() -> i32 {
+        use windows_sys::Win32::Security::TokenGroups;
+        let groups = token_sid_strings(TokenGroups);
+        // Print ALL group SIDs (unfiltered) so the log carries ground truth — the earlier
+        // authority-filtered scan printed nothing, which was the tell it was buggy.
+        for s in &groups {
+            println!("CHILD group SID {s}");
+        }
+        let has_aap = groups.iter().any(|s| s == "S-1-15-2-1");
+        if has_aap { 30 } else { 0 }
     }
 
     /// Attempt to spawn a sleeper OUTSIDE the Job via CREATE_BREAKAWAY_FROM_JOB. On success,
@@ -487,21 +459,64 @@ mod win {
         21
     }
 
-    /// UDP datagram egress to an external host under no-internetClient. Connected UDP so the
-    /// WFP connect-authorization fires; a blocked send/connect surfaces WSAEACCES (10013).
+    /// TCP connect to an external host (the coarse-egress positive control). 0 = connect OK,
+    /// 5 = WSAEACCES (the AppContainer egress block), 6 = timeout, 9 = other.
+    fn tcp_connect(host: &str, port: u16) -> i32 {
+        use std::net::{TcpStream, ToSocketAddrs};
+        let Ok(mut addrs) = (host, port).to_socket_addrs() else {
+            return 9;
+        };
+        let Some(addr) = addrs.next() else { return 9 };
+        match TcpStream::connect_timeout(&addr, Duration::from_secs(8)) {
+            Ok(_) => {
+                println!("CHILD connect OK to {host}:{port} (egress NOT blocked)");
+                0
+            }
+            Err(e) if e.raw_os_error() == Some(10013) => {
+                println!("CHILD connect WSAEACCES (blocked)");
+                5
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => 6,
+            Err(_) => 9,
+        }
+    }
+
+    /// UDP egress to a real DNS resolver under no-internetClient, sending an actual DNS query
+    /// and AWAITING a reply — send-success alone is fire-and-forget (WFP can drop the datagram
+    /// silently), so only a RECEIVED reply proves genuine egress.
+    ///   0 = DNS reply received (egress REACHED — real hole)
+    ///   8 = send ok but NO reply (datagram dropped — blocked)
+    ///   5 = WSAEACCES at connect/send (blocked)   9 = other
     fn udp_egress(ip: &str, port: u16) -> i32 {
         use std::net::UdpSocket;
         let Ok(sock) = UdpSocket::bind("0.0.0.0:0") else {
             return 9;
         };
+        let _ = sock.set_read_timeout(Some(Duration::from_secs(4)));
         let addr = format!("{ip}:{port}");
         if let Err(e) = sock.connect(&addr) {
             return classify_wsa(e);
         }
-        match sock.send(b"nub-adv-probe") {
+        // Minimal DNS A-record query for "example.com" (id 0x1234, RD set).
+        #[rustfmt::skip]
+        let query: [u8; 29] = [
+            0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 3, b'c', b'o', b'm', 0,
+            0x00, 0x01, 0x00, 0x01,
+        ];
+        match sock.send(&query) {
             Ok(_) => {
-                println!("CHILD udpx send OK to {addr} (egress NOT blocked)");
-                0
+                let mut buf = [0u8; 512];
+                match sock.recv(&mut buf) {
+                    Ok(n) if n > 0 => {
+                        println!("CHILD udpx got {n}-byte DNS reply from {addr} — egress REACHED");
+                        0
+                    }
+                    _ => {
+                        println!("CHILD udpx send ok but NO reply (datagram dropped — no egress)");
+                        8
+                    }
+                }
             }
             Err(e) => classify_wsa(e),
         }
@@ -865,6 +880,32 @@ mod win {
                 }
             ),
         );
+        // NEGATIVE CONTROL (load-bearing): an UNCONFINED (non-AppContainer) reader must recover
+        // the needle from the SAME target, proving the read vector works absent confinement —
+        // otherwise a "denied" above is a probe artifact, not the AppContainer. The plain child
+        // scans the HARNESS pid's memory (not its own), so its inherited env is irrelevant.
+        let nc_code = std::process::Command::new(&child)
+            .args([
+                "__sbxadv__",
+                "readenv",
+                &std::process::id().to_string(),
+                &parent_needle,
+            ])
+            .status()
+            .ok()
+            .and_then(|s| s.code())
+            .unwrap_or(-1);
+        r.note(
+            "vm-read-NC-unconfined-reader",
+            &format!(
+                "plain reader exit {nc_code} ({})",
+                match nc_code {
+                    0 | 2 => "read vector WORKS unconfined ⇒ the AppContainer denial above is REAL confinement",
+                    5 => "probe cannot read even UNCONFINED ⇒ VM-read verdicts INCONCLUSIVE (probe artifact)",
+                    _ => "inconclusive",
+                }
+            ),
+        );
 
         // ── 2. PROCESS_VM_READ: a SIBLING AppContainer child's env ──────────────────
         // A sibling LowBox child (its OWN unique AC SID) holds a secret in its constructed
@@ -1017,23 +1058,35 @@ mod win {
             ),
         );
 
-        // ── 7. Coarse egress completeness — UDP external ────────────────────────────
-        // NOTE (not an auto-FAIL): a WSAEACCES(5) on the connected-UDP connect is a clean
-        // "blocked"; a send-success(0) is AMBIGUOUS (fire-and-forget can queue locally even
-        // if WFP drops the datagram), so it is surfaced for review rather than auto-flagged.
+        // ── 7. Coarse egress completeness ───────────────────────────────────────────
+        // Positive control first: TCP egress under net-deny must be blocked in THIS binary,
+        // so a UDP difference (if any) is meaningful and not "egress works here anyway."
+        let (_d, code_tcp) = run(
+            &net_deny,
+            &child,
+            &["__sbxadv__", "connect", "1.1.1.1", "443"],
+        );
+        r.note(
+            "coarse-egress-tcp-control",
+            &format!("child exit {code_tcp} (expect 5 WSAEACCES / 6 timeout = blocked; 0 = TCP egress reach)"),
+        );
+        // UDP as a real DNS round-trip: only a RECEIVED reply (exit 0) proves egress, so exit 0
+        // is a genuine hole; 8/5/6 = blocked (dropped / WSAEACCES / timeout).
         let (_d, code_udp) = run(
             &net_deny,
             &child,
             &["__sbxadv__", "udpx", "1.1.1.1", "53"],
         );
-        r.note(
-            "coarse-egress-udp",
+        r.blocked_if(
+            "coarse-egress-udp (UDP DNS round-trip blocked under no-internetClient)",
+            code_udp == 0,
             &format!(
                 "child exit {code_udp} ({})",
                 match code_udp {
-                    5 => "WSAEACCES — UDP egress BLOCKED (good)",
-                    6 => "timeout",
-                    0 => "connect+send OK — REVIEW (possible UDP egress reach)",
+                    0 => "DNS REPLY RECEIVED — real UDP egress (HOLE)",
+                    8 => "send ok, no reply — datagram dropped (blocked)",
+                    5 => "WSAEACCES — blocked",
+                    6 => "timeout — blocked",
                     _ => "other/err",
                 }
             ),
