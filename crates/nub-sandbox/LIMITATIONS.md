@@ -27,16 +27,33 @@ address filter**, so a direct TCP `connect()` to an *external* host that happens
 listen on the (random, per-run) ephemeral proxy port is not blocked — a bounded bypass
 of the per-host gate.
 
-- **Why bounded:** the attacker needs a server reachable on that exact random port, and
-  malicious in-sandbox code — which does know the port — has no out-of-band channel to
-  convey it to an outside collaborator under net-deny. UDP/DNS and inbound `bind()` are
-  separately denied (seccomp `AF_INET`+`SOCK_STREAM`-only via per-type `MaskedEq`), so
-  this is the one remaining TCP edge. macOS (address+port carve) and Windows have no
+- **Why bounded — but real for a determined attacker:** the exploit is not "guess the
+  one random port"; a determined attacker points in-sandbox code at a C2 server that
+  **listens across the whole ephemeral port range**, so whichever port the run drew is
+  covered. That still requires the C2 to be inbound-reachable from the sandbox AND to run
+  a broad listener — materially harder than the now-closed UDP/DNS hole, but not merely
+  theoretical. UDP/DNS and inbound `bind()` are separately denied (seccomp
+  `AF_INET`+`SOCK_STREAM`-only via per-type `MaskedEq`), so this port-scoped TCP connect
+  is the one remaining egress edge. macOS (address+port carve) and Windows have no
   equivalent gap.
 - **Where fixed:** seccomp `user_notify` (inspect the `connect()` sockaddr in a
   supervisor) or a netns/veth pair (rejected — needs userns, unavailable on the stock
-  targets). A larger mechanism; a build-jail-thread call. Documented in
-  `backend/linux.rs` (`NetMode`), honestly not-claimed-closed.
+  targets). Either is the only full close; a larger mechanism, a build-jail-thread call.
+  Documented in `backend/linux.rs` (`NetMode`), honestly not-claimed-closed.
+
+### Linux bind-less `listen()` autobind (P3, strictly dominated)
+
+Landlock hooks `bind()` and `connect()` but has **no `socket_listen` hook**, so a
+`listen()` issued WITHOUT an explicit `bind()` still autobinds a random ephemeral port —
+an inbound listener remains creatable on an unpredictable port. Explicit `bind()`
+(including `bind(port = 0)`) IS denied and VM-proven; only the bind-less path is open.
+
+- **Why it adds nothing:** strictly weaker than the `ConnectTcp` residual above — the
+  port is unpredictable, the listener needs inbound reachability, and the child has no
+  outbound channel to signal the drawn port under net-deny. It confers no capability the
+  port-scoped connect edge doesn't already bound; noted only so it is not later mistaken
+  for full inbound closure. Same full-close as above (seccomp `user_notify` / netns).
+  Documented in `backend/linux.rs` (`apply_landlock`).
 
 ### Windows per-host egress is not wired (coarse deny holds)
 
