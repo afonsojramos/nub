@@ -475,6 +475,47 @@ mod win {
             0,
         );
 
+        // ── loopback egress denied (local-exfil closed; per-host needs an exemption) ─
+        // A LOOPBACK service (docker.sock-class local exfil, or a would-be egress
+        // proxy) is unreachable from inside the AppContainer by default: Windows blocks
+        // AppContainer loopback absent a registered exemption (`NetworkIsolation…`). This
+        // is the narrowed-endpoint property on Windows — local-IPC exfil is closed — AND
+        // it is precisely WHY per-host via the loopback proxy is honestly DEGRADED here
+        // (the confined child cannot reach the proxy without the exemption, not wired in
+        // this phase). We prove the block empirically; the NC is a fully-relaxed (NON-
+        // AppContainer) spawn that reaches the same loopback service.
+        let loopback = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let lport = loopback.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for c in loopback.incoming() {
+                drop(c);
+            }
+        });
+        expect_in(
+            &mut fails,
+            "AppContainer child DENIED loopback (local-exfil closed)",
+            code(
+                &net_deny,
+                &child,
+                &["__sbxchild__", "connect", "127.0.0.1", &lport.to_string()],
+            ),
+            &[5, 6, 9],
+        );
+        let relaxed = SandboxPolicy {
+            fs: relaxed_fs(),
+            ..Default::default()
+        };
+        expect(
+            &mut fails,
+            "NC fully-relaxed (no AppContainer) reaches the loopback service",
+            code(
+                &relaxed,
+                &child,
+                &["__sbxchild__", "connect", "127.0.0.1", &lport.to_string()],
+            ),
+            0,
+        );
+
         // ── env-scrub ────────────────────────────────────────────────────────────
         // SAFETY: single-threaded test main; set the ambient secret the child would
         // inherit absent enforcement.
