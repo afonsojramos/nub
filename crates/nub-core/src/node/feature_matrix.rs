@@ -263,6 +263,38 @@ pub static FEATURES: &[Feature] = &[
         ],
         evidence: "flag added 23.6.0 (23.x) / 22.20.0 (22.x backport); Stability 1.0; never default-on through Node 27",
     },
+    // ── Module syntax detection (ambiguous ESM `.js` "just works") ───────────
+    // `--experimental-detect-module` makes Node parse an ambiguous file — a `.js`
+    // (or extensionless) file with no `package.json` `"type"` field — and run it as
+    // ESM when ES-module syntax is detected, else CommonJS. WITHOUT it an ambiguous
+    // ESM `.js` aborts ("To load an ES module, set type: module"); nub injecting it
+    // closes that gap so the file runs like it would on a newer Node (the core
+    // "future Node on old Node" mission). Flag introduced on the 21.x line at 21.1.0
+    // (#50096) and backported to the 20.x line at 20.10.0; the 18.x and 19.x lines
+    // NEVER received it (injecting there is a "bad option" abort), and 21.0.0
+    // predates the 21.1.0 landing — the same one-version hole as eventsource's 21.x.
+    // Unflagged (default-on, flag → no-op) at 20.19.0 on the 20.x line and 22.7.0 on
+    // the 22.x line (both #53619); the 21.x line reached EOL before 22.7.0, so it
+    // stays flag-gated its whole length. Inject only where the flag both EXISTS and
+    // is still REQUIRED, tight-banded like sqlite/wasm (the flag survives as an
+    // accepted no-op past the cutover, so over-injection would be harmless — verified
+    // rc 0 on 20.19/22.11+/24/26 — but the bands are kept tight so nub never
+    // open-ended-injects a flag a future Node could remove):
+    //   [20.10.0, 20.19.0) ∪ [21.1.0, 22.7.0).
+    Feature {
+        name: "detect-module",
+        mitigations: &[
+            (
+                band((20, 10, 0), Some((20, 19, 0))),
+                Mitigation::Unflag("--experimental-detect-module"),
+            ),
+            (
+                band((21, 1, 0), Some((22, 7, 0))),
+                Mitigation::Unflag("--experimental-detect-module"),
+            ),
+        ],
+        evidence: "flag added 21.1.0 (#50096) / 20.10.0 (20.x backport); never on 18.x/19.x or 21.0.x; default-on 20.19.0 & 22.7.0 (#53619)",
+    },
     // ── import-text (importing source as text via import attributes) ─────────
     // `import txt from './x.txt' with { type: 'text' }` — the module's default export
     // is the file's string contents. Node gained this behind `--experimental-import-text`
@@ -798,6 +830,22 @@ mod tests {
         assert!(!unflag_flags_for(&v(23, 5, 0)).contains(&addon));
         assert!(unflag_flags_for(&v(23, 6, 0)).contains(&addon));
         assert!(unflag_flags_for(&v(26, 2, 0)).contains(&addon));
+        // detect-module: [20.10, 20.19) ∪ [21.1, 22.7). Never on 18.x/19.x/21.0.x
+        // (flag absent → "bad option" crash); off in the default-on ranges.
+        let dm = "--experimental-detect-module";
+        assert!(!unflag_flags_for(&v(18, 19, 0)).contains(&dm)); // never on 18.x
+        assert!(!unflag_flags_for(&v(19, 3, 0)).contains(&dm)); // never on 19.x
+        assert!(!unflag_flags_for(&v(20, 9, 0)).contains(&dm)); // below the 20.10 floor
+        assert!(unflag_flags_for(&v(20, 10, 0)).contains(&dm)); // 20.x floor
+        assert!(unflag_flags_for(&v(20, 18, 0)).contains(&dm));
+        assert!(!unflag_flags_for(&v(20, 19, 0)).contains(&dm)); // default-on (20.x)
+        assert!(!unflag_flags_for(&v(21, 0, 0)).contains(&dm)); // the 21.0.x hole (flag absent → crash)
+        assert!(unflag_flags_for(&v(21, 1, 0)).contains(&dm)); // 21.x floor
+        assert!(unflag_flags_for(&v(22, 0, 0)).contains(&dm));
+        assert!(unflag_flags_for(&v(22, 6, 0)).contains(&dm));
+        assert!(!unflag_flags_for(&v(22, 7, 0)).contains(&dm)); // default-on (22.x)
+        assert!(!unflag_flags_for(&v(24, 0, 0)).contains(&dm)); // default-on everywhere after
+        assert!(!unflag_flags_for(&v(26, 5, 0)).contains(&dm));
         // websocket: [20.10, 22.0).
         assert!(!unflag_flags_for(&v(20, 9, 0)).contains(&"--experimental-websocket"));
         assert!(unflag_flags_for(&v(20, 10, 0)).contains(&"--experimental-websocket"));

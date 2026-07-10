@@ -414,6 +414,34 @@ mod tests {
     }
 
     #[test]
+    fn detect_module_injected_only_in_the_two_flagged_bands() {
+        // Module syntax detection: flag added 21.1.0 (#50096) / 20.10.0 (20.x
+        // backport), default-on at 20.19.0 & 22.7.0 (#53619). Never on 18.x/19.x,
+        // and 21.0.x predates the 21.1.0 landing — injecting where the flag is
+        // absent is a "bad option" crash. Inject on [20.10, 20.19) ∪ [21.1, 22.7).
+        let dm = "--experimental-detect-module";
+        assert!(!compute_inject_flags(v(18, 19, 0), &[], None, false).contains(&dm)); // never 18.x
+        assert!(!compute_inject_flags(v(20, 9, 0), &[], None, false).contains(&dm)); // below floor
+        assert!(compute_inject_flags(v(20, 10, 0), &[], None, false).contains(&dm)); // 20.x floor
+        assert!(compute_inject_flags(v(20, 18, 0), &[], None, false).contains(&dm));
+        assert!(!compute_inject_flags(v(20, 19, 0), &[], None, false).contains(&dm)); // default-on (20.x)
+        assert!(
+            !compute_inject_flags(v(21, 0, 0), &[], None, false).contains(&dm),
+            "must NOT inject --experimental-detect-module on 21.0 (flag landed at 21.1.0 → crash)"
+        );
+        assert!(compute_inject_flags(v(21, 1, 0), &[], None, false).contains(&dm)); // 21.x floor
+        assert!(compute_inject_flags(v(22, 6, 0), &[], None, false).contains(&dm));
+        assert!(!compute_inject_flags(v(22, 7, 0), &[], None, false).contains(&dm)); // default-on (22.x)
+        assert!(!compute_inject_flags(v(26, 5, 0), &[], None, false).contains(&dm));
+        // A user opt-out subtracts it.
+        let argv = vec!["--no-experimental-detect-module".to_string()];
+        assert!(!compute_inject_flags(v(20, 10, 0), &argv, None, false).contains(&dm));
+        // Inherited NODE_OPTIONS: stripped below the 20.10 existence floor, kept above.
+        assert_eq!(strip_unsupported_node_options(dm, &v(20, 9, 0)), "");
+        assert_eq!(strip_unsupported_node_options(dm, &v(20, 10, 0)), dm);
+    }
+
+    #[test]
     fn shadow_realm_never_injected() {
         // ShadowRealm is DELIBERATELY not auto-unflagged (the harmony-flag policy):
         // `--experimental-shadow-realm` implies V8's `--harmony-shadow-realm`, which
