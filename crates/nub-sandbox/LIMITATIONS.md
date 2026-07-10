@@ -194,27 +194,50 @@ front-end posture, not an engine mechanism.
 
 Each is documented in code at the site noted; none is silently mis-reported.
 
-- **Linux `/etc` granted wholesale (no deny-inside carve).** Build toolchains read
-  `/etc` (resolv.conf, CA bundles), so the generous-read path grants it whole rather
-  than per-file. A secret placed *under* `/etc` would be readable. Bounded: user secrets
-  do not live in `/etc`, and a USER-authored deny reaching `/etc` still forces a carve.
-  Fix: selective `/etc` carve. (`backend/linux_grants.rs`.)
-- **Linux write-target widening for a not-yet-existing file.** Landlock cannot grant
-  write to a file that does not yet exist, so a write grant for a not-yet-created FILE
-  widens to its parent DIR. Bounded over-grant within an already-granted write subtree.
-  Fix: none clean at the Landlock layer. (`backend/linux.rs` pre-create.)
-- **Linux hardlink-to-secret.** A pre-existing same-uid hardlink to a secret, reached
-  via a carve `ReadFile`, bypasses a path-based deny (Landlock keys on the inode reached,
-  and the alt path was never denied). Bounded: requires a hardlink created *outside* the
-  sandbox beforehand. Fix: none clean at the Landlock layer.
+- **Linux `/etc` granted wholesale for the loader — a user deny now carves it (FIXED).**
+  Build toolchains read `/etc` (resolv.conf, CA bundles), so the essential-read set grants
+  `/etc` (and `/usr`,`/lib`,…) whole for the dynamic loader. Previously an explicit
+  `!/etc/secret` was NOT honored — the wholesale essential-base grant overrode the carve,
+  so a secret under `/etc` stayed readable despite the deny (VM-verified: `!/etc/**`,
+  `!/etc/secret`, `!/etc/*`, `!/etc` all failed to deny). Now the essential-base grant
+  CARVES an essential dir when a user deny reaches inside it (an implicit-allow walk
+  excluding the denied path), so the deny is honored while the loader's own files stay
+  readable — VM-verified surgical (wholesale vs carved `/etc` differ in exactly the denied
+  file; `ld.so.cache`, `ca-certificates.crt`, dynamic linking all unaffected). Residual:
+  with NO user deny, `/etc` is still granted whole (a secret under it is readable — user
+  secrets do not live in `/etc`, and net-deny blocks exfil). (`backend/linux.rs` +
+  `backend/linux_grants.rs` `essential_dir_needs_carve`/`derive_essential_dir_carve`.)
+- **Linux write-target for a not-yet-existing file becomes a DIRECTORY (not a parent
+  widen).** Landlock cannot grant write to a file that does not yet exist, so the backend
+  pre-creates the target and grants that subtree. VM-verified: `pre_create` uses
+  `create_dir_all`, so the requested leaf is created as a DIRECTORY and its subtree is
+  write-granted — the containing PARENT dir is NOT widened (a sibling in the parent stays
+  denied). Consequences: (a) a tool expecting to write a FILE at that path finds a
+  directory; (b) the over-grant is the target-as-dir subtree, bounded within the named
+  path. Fix: none clean at the Landlock layer. (`backend/linux.rs` `pre_create`.)
+- **Linux hardlink-to-secret (VM-verified).** A pre-existing same-uid hardlink to a
+  secret, at a name the deny never targets, is granted `ReadFile`, which grants read on
+  the SHARED inode — so the path-denied secret is reachable through the alias (and, since
+  the grant is inode-keyed, the denied path itself then leaks too). VM-verified: with the
+  alias present the secret leaks; without it the path-deny holds. Bounded: requires a
+  hardlink created *outside* the sandbox beforehand. Fix: none clean at the Landlock layer
+  (the inode was legitimately named twice). Regression test:
+  `hardlink_to_denied_secret_leaks_via_alias`.
 - **Linux derive→open TOCTOU.** Grant derivation canonicalizes paths on the host, then
   the kernel enforces at `open()` later; a path swapped in between could shift a target.
-  Bounded: a same-uid local race within the confined tree.
+  Bounded: a same-uid local race within the confined tree. (Inherent to a canonicalize-
+  then-enforce split; not deterministically reproducible.)
 - **Linux bind-mounted procfs at a non-standard path.** The `/proc` filter (the
-  ascendant-env boundary) matches the standard mount; a procfs bind-mounted at a
-  non-standard path is not matched, re-exposing `/proc/<pid>/environ`. Bounded: requires
-  the ability to bind-mount procfs (prior privilege/setup) before entering the sandbox.
-  Fix: a mount namespace, or broader procfs detection.
+  ascendant-env boundary) is path-literal (`starts_with("/proc")`), so a procfs
+  bind-mounted at a non-standard path is not filtered and IS grantable when a covering fs
+  grant reaches it — VM-verified: under `{fs:["/tmp"]}` a `/proc` bind-mounted at
+  `/tmp/altproc` was readable (`/tmp/altproc/version` leaked). The environ-secret read
+  itself (`/proc/<pid>/environ`) is additionally gated by `ptrace_may_access`, which held
+  in every VM topology tried (ancestor non-dumpable / sibling non-attachable under
+  `ptrace_scope>=1`), so the specific ascendant-env leak was not reproduced — but the
+  filter bypass is real. Bounded: requires the ability to bind-mount procfs (prior
+  privilege/setup) before entering the sandbox. Fix: a mount namespace, or resolve the
+  mount type rather than the path prefix.
 - **Windows program grant is file-only (neighbor-read leak CLOSED).** The engine grants
   read+execute on the program FILE ITSELF, not its parent dir (traverse-bypass makes the
   leaf-object ACL sufficient to exec), so a `.env` next to a binary is no longer swept
