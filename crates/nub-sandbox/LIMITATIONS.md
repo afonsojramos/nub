@@ -264,3 +264,48 @@ Each is documented in code at the site noted; none is silently mis-reported.
   loads SIBLING DLLs from its own dir needs the front-end to supply that toolchain dir in
   the read allow-set — the engine no longer auto-widens. A self-contained build-jail
   toolchain (`node.exe`) needs nothing more. (`backend/windows.rs` `apply`.)
+
+## Linux syscall-boundary hardening (defense-in-depth, seccomp/`/dev`)
+
+Three former residuals now closed at the syscall boundary so FS/env confinement no longer
+leans on a host-policy chain. All VM-verified (kernel 6.17, Ubuntu 24.04) with differential
+probes carrying positive + negative controls; each has a committed regression test.
+
+- **Linux userns + mount family — the FS-escape now denied in seccomp (O1, CLOSED).** An
+  unprivileged user namespace (`unshare`/`clone(CLONE_NEWUSER)`) plus a bind-mount under a
+  granted dir is the strongest FS-confinement escape. It was previously blocked only by a
+  CHAIN — Landlock never grants `/proc` (so a `uid_map` write fails), the kernel refuses a
+  mount from an unmapped userns, and host AppArmor — none of which the engine owns. The
+  seccomp filter now denies `unshare`, `mount`, `umount2`, `pivot_root`, `move_mount`,
+  `fsopen`, `fsmount`, `fsconfig`, `open_tree` wholesale, and `clone` when its flags register
+  carries `CLONE_NEWUSER`/`CLONE_NEWNS`. `clone3` hides its flags behind a pointer (seccomp
+  cannot inspect them), so a companion filter returns `ENOSYS` for `clone3` — glibc then
+  falls back to the flag-filtered `clone` (the same technique Docker's default profile uses),
+  closing the `clone3(CLONE_NEWUSER)` path without breaking threading. VM-verified: `unshare`
+  and `clone(CLONE_NEWUSER)` return EPERM and `clone3` ENOSYS under sandbox, while the same
+  unprivileged forms succeed unsandboxed; normal `sh`/`python3`/PTY children (which fork via
+  the register `clone`) are unaffected. Residual: a procfs *bind-mounted before* entering the
+  sandbox is still not created via these syscalls (that residual is the "bind-mounted procfs
+  at a non-standard path" item above); O1 removes the in-sandbox mount-creation route to it.
+  (`backend/linux.rs` `build_seccomp`/`clone_userns_newns_rules`/`build_clone3_enosys`;
+  `seccomp_denies_userns_and_mount_family`.)
+- **Linux pidfd fd-theft — `pidfd_getfd` now denied (O2, CLOSED).** `pidfd_getfd` steals an
+  open fd out of another process (needs `PTRACE_MODE_ATTACH`; no legitimate confined use) and
+  was not in the denylist. It is now denied in seccomp. `pidfd_open` stays ALLOWED — it has
+  legitimate self-child uses (`pidfd_send_signal`/`waitid`) and cannot itself steal an fd.
+  VM-verified: under sandbox `pidfd_open` still returns a valid fd while `pidfd_getfd` is
+  EPERM; both go through unsandboxed. (`backend/linux.rs` `build_seccomp`;
+  `seccomp_denies_pidfd_getfd_keeps_pidfd_open`.)
+- **Linux `/dev` narrowed to a least-privilege allowlist (O3, CLOSED).** A read-confined
+  child was granted wholesale `/dev` rw. It is now granted per-node:
+  `null`/`zero`/`full`/`random`/`urandom`/`tty` (standard sink/source/entropy/tty) plus
+  `ptmx` + the `pts` subtree (PTYs). Everything else under `/dev` — and listing `/dev`
+  itself — is denied and fails CLOSED (EACCES, visible), not leaked. Landlock does no
+  directory-traverse check, so a leaf grant suffices to open the node by path without
+  granting the `/dev` directory. VM-verified: `/dev/null` + `/dev/urandom` and a full PTY
+  (ptmx → pts slave) work under read-confine, `python3` still spawns, and a non-allowlisted
+  node (`/dev/shm` write) is denied while relaxed-fs admits it. Residual: the env-scrub-only
+  relaxed path (fs deliberately relaxed) still grants `/dev` among the top-levels — narrowing
+  it there would contradict "fs relaxed"; the allowlist governs the read-confine path where
+  `/dev` is explicitly granted. (`backend/linux.rs` `DEV_ALLOWLIST`;
+  `dev_allowlist_permits_pty_and_nodes_denies_rest`.)

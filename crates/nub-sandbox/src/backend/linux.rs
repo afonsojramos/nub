@@ -48,6 +48,30 @@ const ESSENTIAL_READ_DIRS: &[&str] = &[
     "/usr", "/bin", "/sbin", "/lib", "/lib64", "/lib32", "/libx32", "/etc", "/opt",
 ];
 
+/// Least-privilege `/dev` allowlist (O3) — the device nodes a normal child actually
+/// opens, replacing the former wholesale `/dev` rw grant. Each node is granted rw
+/// individually; everything else under `/dev` (and `/dev` listing itself) is denied,
+/// failing CLOSED (EACCES, visible) rather than leaking. Why each is present:
+///   - `null`/`zero`/`full` — the standard sink/source char devices (redirects,
+///     `/dev/null` discards, `/dev/zero` fills).
+///   - `random`/`urandom` — entropy; libc/openssl/node CSPRNG seeding reads them.
+///   - `tty` — the process's controlling terminal (interactive I/O, isatty probes).
+///   - `ptmx` + `pts` — the PTY master clone device and the devpts slave directory:
+///     a PTY-spawning child (shells under a pseudo-terminal, `node-pty`, `script`)
+///     opens `/dev/ptmx` then its allocated `/dev/pts/N`, so the `pts` subtree is
+///     granted rw. Absent nodes are skipped by `add_if_exists`, so a host without
+///     devpts simply grants fewer nodes.
+const DEV_ALLOWLIST: &[&str] = &[
+    "/dev/null",
+    "/dev/zero",
+    "/dev/full",
+    "/dev/random",
+    "/dev/urandom",
+    "/dev/tty",
+    "/dev/ptmx",
+    "/dev/pts",
+];
+
 /// The net enforcement mode chosen for this run (resolved from the policy + whether an
 /// egress proxy is running + kernel capability).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -177,7 +201,13 @@ pub fn apply(
                     add_if_exists(&mut grant_specs, p, read_bits);
                 }
             }
-            add_if_exists(&mut grant_specs, Path::new("/dev"), rw_bits);
+            // /dev is granted per-node, NOT wholesale (O3): the least-privilege set a
+            // normal child needs (see [`DEV_ALLOWLIST`]). Landlock does no
+            // directory-traverse check, so a leaf grant suffices to open the node by
+            // path without granting the /dev directory itself.
+            for node in DEV_ALLOWLIST {
+                add_if_exists(&mut grant_specs, Path::new(node), rw_bits);
+            }
             if let Some(prog) = resolve_program(&spec.program, spec.cwd.as_deref()) {
                 add_if_exists(&mut grant_specs, &prog, AccessFs::ReadFile.into());
             }
@@ -232,6 +262,13 @@ pub fn apply(
         lost: vec!["seccomp".to_string()],
         reason: Some(e),
     })?;
+    // Companion filter that forces glibc off the unfilterable `clone3` onto the
+    // flag-filtered `clone` (O1 — see [`build_clone3_enosys`]). Installed alongside
+    // the main filter; the kernel takes the most-restrictive verdict per syscall.
+    let clone3_enosys = build_clone3_enosys().map_err(|e| Degradation {
+        lost: vec!["seccomp".to_string()],
+        reason: Some(e),
+    })?;
 
     // ── connect-notify supervisor (Proxy mode only) ─────────────────────────────
     // Close the port-scoped ConnectTcp residual: the child's pre_exec installs a 2nd
@@ -273,6 +310,9 @@ pub fn apply(
                     .map_err(std::io::Error::other)?;
             }
             seccompiler::apply_filter(&seccomp).map_err(std::io::Error::other)?;
+            if let Some(prog) = &clone3_enosys {
+                seccompiler::apply_filter(prog).map_err(std::io::Error::other)?;
+            }
             // Install the connect→USER_NOTIF filter LAST and hand its listener fd to the
             // parent. After the EPERM filter (which allows seccomp/sendmsg/close), so the
             // handoff syscalls flow; connect gets USER_NOTIF (lower RET value than the
@@ -506,17 +546,48 @@ fn build_seccomp(net_mode: NetMode) -> Result<BpfProgram, String> {
         .map_err(|e| format!("unsupported arch for seccomp: {e}"))?;
     let mut rules: BTreeMap<i64, Vec<SeccompRule>> = BTreeMap::new();
 
-    // Unconditional ptrace-family deny (empty rule-vec → always matches).
+    // Unconditional deny set (empty rule-vec → always matches → EPERM). Three
+    // defense-in-depth families, all closed at the syscall boundary whenever ANY
+    // axis is sandboxed:
+    //   - ptrace family (the env-read second vector — scraping an ancestor's memory).
+    //   - userns + mount family (O1): an unprivileged user namespace + bind-mount
+    //     under a granted dir is the strongest FS-confinement escape. Today it's
+    //     blocked only by a CHAIN (Landlock never grants /proc → uid_map write fails,
+    //     the kernel refuses a mount from an unmapped userns, host AppArmor). Denying
+    //     the namespace/mount syscalls here makes FS confinement self-sufficient. The
+    //     register-flag `clone` (below) + the `clone3` ENOSYS filter close the two
+    //     clone forms; `unshare` and the mount/new-mount-API calls are denied whole.
+    //     Normal children (node/sh/python) call none of these.
+    //   - pidfd_getfd (O2): the fd-theft primitive — steal a parent's open fd via a
+    //     pidfd (needs PTRACE_MODE_ATTACH; zero legit confined use). `pidfd_open`
+    //     stays ALLOWED (legit self-child signaling: pidfd_send_signal/waitid).
     #[allow(clippy::useless_conversion)]
     for syscall in [
         libc::SYS_ptrace,
         libc::SYS_process_vm_readv,
         libc::SYS_process_vm_writev,
+        libc::SYS_unshare,
+        libc::SYS_mount,
+        libc::SYS_umount2,
+        libc::SYS_pivot_root,
+        libc::SYS_move_mount,
+        libc::SYS_fsopen,
+        libc::SYS_fsmount,
+        libc::SYS_fsconfig,
+        libc::SYS_open_tree,
+        libc::SYS_pidfd_getfd,
     ]
     .map(i64::from)
     {
         rules.insert(syscall, Vec::new());
     }
+
+    // clone(CLONE_NEWUSER|CLONE_NEWNS): filter the flags REGISTER (arg0). A plain
+    // fork/thread-creating clone sets neither bit, so it still flows; only a
+    // namespace-creating clone is denied. The `clone3` form carries its flags behind
+    // a POINTER (unfilterable by seccomp) and is handled by a separate ENOSYS filter
+    // (see [`build_clone3_enosys`]) that forces glibc's fallback onto this `clone`.
+    rules.insert(i64_from(libc::SYS_clone), clone_userns_newns_rules()?);
 
     if net_mode != NetMode::Off {
         const EXOTIC: [libc::c_int; 11] = [
@@ -590,6 +661,53 @@ fn build_seccomp(net_mode: NetMode) -> Result<BpfProgram, String> {
     .map_err(|e| format!("seccomp build: {e}"))?
     .try_into()
     .map_err(|e| format!("seccomp compile: {e}"))
+}
+
+/// Deny a namespace-creating `clone`: one rule per unprivileged-escape flag bit,
+/// matching `(flags & bit) == bit` on the flags register (arg0). `CLONE_NEWUSER`
+/// (0x1000_0000) is the unprivileged-userns primitive that unlocks the mount escape;
+/// `CLONE_NEWNS` (0x0002_0000) is the mount-namespace bit. A normal fork/thread clone
+/// sets neither, so this never touches legitimate process/thread creation.
+fn clone_userns_newns_rules() -> Result<Vec<SeccompRule>, String> {
+    const CLONE_NEWNS: u64 = 0x0002_0000;
+    const CLONE_NEWUSER: u64 = 0x1000_0000;
+    let mut out = Vec::with_capacity(2);
+    for bit in [CLONE_NEWUSER, CLONE_NEWNS] {
+        out.push(
+            SeccompRule::new(vec![
+                SeccompCondition::new(0, SeccompCmpArgLen::Dword, SeccompCmpOp::MaskedEq(bit), bit)
+                    .map_err(|e| format!("clone flag cond: {e}"))?,
+            ])
+            .map_err(|e| format!("clone flag rule: {e}"))?,
+        );
+    }
+    Ok(out)
+}
+
+/// A SEPARATE seccomp filter that returns `ENOSYS` for `clone3` (whenever the main
+/// filter is installed). `clone3` carries its flags behind a POINTER, so seccomp
+/// cannot inspect `CLONE_NEWUSER`/`CLONE_NEWNS` the way the register-based `clone`
+/// filter does. Returning `ENOSYS` (not `EPERM`) makes glibc believe the kernel lacks
+/// `clone3` and fall back to the register-based `clone` — which the main filter DOES
+/// flag-filter — so a `clone3(CLONE_NEWUSER)` escape is closed without breaking
+/// threading (the fallback `clone` for a normal thread carries no namespace bit).
+/// This is the same technique Docker's default seccomp profile uses. `None` when the
+/// arch/libc exposes no `clone3` number (nothing to force-fall-back).
+fn build_clone3_enosys() -> Result<Option<BpfProgram>, String> {
+    let arch = TargetArch::try_from(std::env::consts::ARCH)
+        .map_err(|e| format!("unsupported arch for seccomp: {e}"))?;
+    let mut rules: BTreeMap<i64, Vec<SeccompRule>> = BTreeMap::new();
+    rules.insert(i64_from(libc::SYS_clone3), Vec::new());
+    let prog = SeccompFilter::new(
+        rules,
+        SeccompAction::Allow,
+        SeccompAction::Errno(libc::ENOSYS as u32),
+        arch,
+    )
+    .map_err(|e| format!("clone3 seccomp build: {e}"))?
+    .try_into()
+    .map_err(|e| format!("clone3 seccomp compile: {e}"))?;
+    Ok(Some(prog))
 }
 
 /// Deny `socket(AF_INET, _, proto)` for any `proto` other than default (0) or
