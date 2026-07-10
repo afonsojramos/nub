@@ -28,11 +28,6 @@ const EMPTY_FS_ENTRY_MSG: &str = "an empty fs entry is not allowed (it would gra
 /// it has no defined meaning, so it is rejected rather than silently treated as a
 /// literal path/host named `...` (fail loud, parity with env-object + the array).
 const OBJECT_SENTINEL_MSG: &str = "`\"...\"` inheritance is only valid in fs/net array form (e.g. [\"...\", …]), not as an object key";
-/// A `$(` opener with no balanced close: nub does no shell substitution outside a
-/// complete `$(…)`, so an unterminated one is named rather than passed through as a
-/// literal or mislabeled "unknown env type" (D18).
-const UNTERMINATED_SUBST_MSG: &str =
-    "unterminated `$(…)` command substitution — expected a closing `)`";
 
 // ── fs ───────────────────────────────────────────────────────────────────────
 
@@ -561,14 +556,21 @@ fn parse_env_string_value(
             builtin: false,
         });
     }
-    // An unterminated `$(` reached here (no balanced close → not a substitution).
-    // Name it as a substitution error instead of falling through to a confusing
-    // "unknown env type `$(…`". Skip regex/union forms, which may hold a literal `$(`.
-    if resolve::has_open_substitution(s) && !s.starts_with('/') && !s.contains('\'') {
-        return Err(CompileError::substitution(path, UNTERMINATED_SUBST_MSG));
-    }
-    // Otherwise a type from the grammar.
-    let ty = parse_env_type(s).map_err(|e| CompileError::shape(path, &e))?;
+    // Otherwise a type from the grammar. A string that fails to parse as a type yet
+    // carries a `$(` opener is an unterminated substitution (never a valid type) — a
+    // valid `/regex/` or `'union'` parses cleanly first, so this never mis-flags one,
+    // and an unterminated `$(op read 'x'` / `/$(x` gets the substitution-shaped error
+    // rather than a confusing "unknown env type" (D18).
+    let ty = match parse_env_type(s) {
+        Ok(ty) => ty,
+        Err(e) => {
+            return Err(if resolve::has_open_substitution(s) {
+                CompileError::substitution(path, resolve::UNTERMINATED_SUBST_MSG)
+            } else {
+                CompileError::shape(path, &e)
+            });
+        }
+    };
     let format = ty.format();
     Ok(EnvEntry {
         pattern: key,
@@ -644,7 +646,7 @@ fn parse_env_extras(
             // (silently shipping shell-looking text is the footgun); name it.
             return Err(CompileError::substitution(
                 &child(path, "value"),
-                UNTERMINATED_SUBST_MSG,
+                resolve::UNTERMINATED_SUBST_MSG,
             ));
         } else {
             raw.to_string()

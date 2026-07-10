@@ -596,6 +596,11 @@ fn unterminated_substitution_is_named_not_unknown_type() {
     for surface in [
         json!({ "env": { "X": "$(op read" } }),
         json!({ "env": { "X": { "value": "postgres://$(op read@h" } } }),
+        // The command text carries a single quote — must NOT fall through to a
+        // union-parse / "unknown env type" error (the coarse-guard gap).
+        json!({ "env": { "X": "$(op read 'op://vault/db/pw'" } }),
+        // A leading `/` must NOT be mistaken for a regex and skip the check.
+        json!({ "env": { "X": "/$(cmd" } }),
     ] {
         match compile(&surface, &ctx).unwrap_err() {
             CompileError::Substitution { message, .. } => {
@@ -604,7 +609,26 @@ fn unterminated_substitution_is_named_not_unknown_type() {
                     "{message}"
                 );
             }
-            other => panic!("expected a substitution-shaped error, got {other:?}"),
+            other => panic!("expected a substitution-shaped error for {surface}, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn mixed_balanced_then_unterminated_substitution_errors() {
+    // D18: a value with a balanced span THEN an unterminated `$(` must not ship the
+    // unterminated tail as a silent literal. The balanced span DOES run (so a real
+    // runner, not a panic-runner), then the residual opener is rejected.
+    let ctx = common::ctx(true, &[]);
+    for surface in [
+        json!({ "env": { "X": "$(echo hi) $(oops" } }),
+        json!({ "env": { "X": { "value": "$(echo hi)$(oops" } } }),
+    ] {
+        match compile(&surface, &ctx).unwrap_err() {
+            CompileError::Substitution { message, .. } => {
+                assert!(message.contains("closing"), "{message}");
+            }
+            other => panic!("expected a substitution-shaped error for {surface}, got {other:?}"),
         }
     }
 }
