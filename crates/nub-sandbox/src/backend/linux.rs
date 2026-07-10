@@ -84,10 +84,15 @@ pub fn apply(
     policy: &SandboxPolicy,
     spec: CommandSpec,
     proxy_port: Option<u16>,
+    ca_bundle: Option<&std::path::Path>,
 ) -> Result<Prepared, Degradation> {
     let mut command = base_command(&spec, policy);
     if let Some(port) = proxy_port {
         super::set_proxy_env(&mut command, port);
+    }
+    // CA trust for the child (the Landlock read grant is added to the fs ruleset below).
+    if let Some(bundle) = ca_bundle {
+        super::set_ca_env(&mut command, bundle);
     }
 
     let confine_fs = fs_confines(&policy.fs);
@@ -180,6 +185,11 @@ pub fn apply(
             add_if_exists(&mut grant_specs, Path::new("/dev"), rw_bits);
             if let Some(prog) = resolve_program(&spec.program, spec.cwd.as_deref()) {
                 add_if_exists(&mut grant_specs, &prog, AccessFs::ReadFile.into());
+            }
+            // The child must READ the CA bundle to trust the minted leaves — grant it
+            // explicitly so a confining fs policy can't hide nub's own trust infra.
+            if let Some(bundle) = ca_bundle {
+                add_if_exists(&mut grant_specs, bundle, AccessFs::ReadFile.into());
             }
             if read_partial {
                 deg.lost.push("fs-read-partial".to_string());

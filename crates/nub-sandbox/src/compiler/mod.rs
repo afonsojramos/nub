@@ -21,7 +21,7 @@ pub mod scope;
 pub use resolve::{CommandRunner, ShellRunner};
 
 use crate::matcher::path::Homes;
-use crate::policy::{Effect, EnvPolicy, FsPolicy, NetPolicy, SandboxPolicy};
+use crate::policy::{Effect, EnvPolicy, FsPolicy, Inspection, NetPolicy, ProxyMode, SandboxPolicy};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
@@ -238,7 +238,7 @@ fn compile_object(
     let obj = surface
         .as_object()
         .ok_or_else(|| CompileError::shape("", "expected a { fs, net, env } object"))?;
-    fold::reject_unknown_keys(obj, &["fs", "net", "env", "..."], "")?;
+    fold::reject_unknown_keys(obj, &["fs", "net", "env", "proxy", "..."], "")?;
     let inherit_base = object_spread(obj.get("..."))?;
 
     // Clobber detection runs per ARRAY axis (a total shadow between two entries of
@@ -259,11 +259,15 @@ fn compile_object(
         None if inherit_base => inherit_fs(parent, ctx),
         None => floor_fs(),
     };
-    let net = match obj.get("net") {
-        Some(v) => fold::fold_net(v, "net", parent.map(|p| &p.net))?,
+    let mut net = match obj.get("net") {
+        Some(v) => fold::fold_net(v, ctx, "net", parent.map(|p| &p.net))?,
         None if inherit_base => inherit_net(parent),
         None => floor_net(),
     };
+    // The `proxy` knob is authored at the wrapper level (sibling of net) but governs the
+    // net axis — fold it on, then DERIVE the enforcement tier from the broker set + mode.
+    net.mode = parse_proxy_mode(obj.get("proxy"))?;
+    finalize_net_inspection(&mut net, "net")?;
     let env = match obj.get("env") {
         Some(v) => fold::fold_env(v, ctx, "env", parent.map(|p| &p.env))?,
         None if inherit_base => inherit_env(parent, ctx),
@@ -275,6 +279,52 @@ fn compile_object(
         env,
         pid: Default::default(),
     })
+}
+
+/// Parse the wrapper-level `proxy` knob into a [`ProxyMode`]. Absent = `Auto` (the
+/// default — derive the tier from the rules; most policies never write `proxy`).
+fn parse_proxy_mode(v: Option<&Value>) -> Result<ProxyMode, CompileError> {
+    match v {
+        None => Ok(ProxyMode::Auto),
+        Some(Value::String(s)) => match s.as_str() {
+            "auto" => Ok(ProxyMode::Auto),
+            "passthrough" => Ok(ProxyMode::Passthrough),
+            "terminate" => Ok(ProxyMode::Terminate),
+            other => Err(CompileError::shape(
+                "proxy",
+                &format!(
+                    "`proxy` must be \"auto\", \"passthrough\", or \"terminate\" (got `{other}`)"
+                ),
+            )),
+        },
+        Some(_) => Err(CompileError::shape(
+            "proxy",
+            "`proxy` must be a string: \"auto\", \"passthrough\", or \"terminate\"",
+        )),
+    }
+}
+
+/// Derive the net enforcement tier from the broker set + the `proxy` mode, and enforce
+/// the mode↔rule contradiction. A broker (or an explicit `proxy: "terminate"`) engages
+/// [`Inspection::TlsInspect`]; `proxy: "passthrough"` FORBIDS termination, so a broker
+/// under it is a COMPILE ERROR — never a silent rule drop (proposal §4).
+fn finalize_net_inspection(net: &mut NetPolicy, path: &str) -> Result<(), CompileError> {
+    let needs_tls = !net.brokers.is_empty();
+    net.inspection = match net.mode {
+        ProxyMode::Passthrough => {
+            if needs_tls {
+                return Err(CompileError::shape(
+                    path,
+                    "a credential-inject rule requires TLS termination, but `proxy` is \"passthrough\" — remove the inject rule or set `proxy` to \"auto\"/\"terminate\"",
+                ));
+            }
+            Inspection::Connection
+        }
+        ProxyMode::Terminate => Inspection::TlsInspect,
+        ProxyMode::Auto if needs_tls => Inspection::TlsInspect,
+        ProxyMode::Auto => Inspection::Connection,
+    };
+    Ok(())
 }
 
 /// Parse a top-level object `"..."` key. `true` = inherit the enclosing base for
@@ -324,8 +374,8 @@ fn floor_fs() -> FsPolicy {
 fn floor_net() -> NetPolicy {
     NetPolicy {
         enforce: true,
-        rules: Vec::new(),
         default_effect: Effect::Deny,
+        ..Default::default()
     }
 }
 fn floor_env(ctx: &CompileCtx) -> EnvPolicy {
@@ -409,8 +459,8 @@ fn secure_default_net() -> NetPolicy {
     // baseline owns the trusted-host allows).
     NetPolicy {
         enforce: true,
-        rules: Vec::new(),
         default_effect: Effect::Deny,
+        ..Default::default()
     }
 }
 

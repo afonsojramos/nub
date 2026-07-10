@@ -21,7 +21,9 @@
 //! [`apply`](crate::apply) stashes the [`EgressProxy`] in [`Prepared`](crate::Prepared)
 //! so it lives for the child's whole run and shuts down when that value drops.
 
+mod ca;
 mod handshake;
+pub mod mitm;
 mod sni;
 
 use crate::matcher::HostMatcher;
@@ -101,32 +103,50 @@ pub struct EgressProxy {
     port: u16,
     shutdown: Arc<AtomicBool>,
     accept_thread: Option<JoinHandle<()>>,
+    /// The MITM engine, when the policy engages TLS termination (credential brokering /
+    /// `proxy: "terminate"`). `None` for a host-only (connection-tier) policy — in which
+    /// case NO CA exists and NO TLS code runs (the default is "MITM never instantiated").
+    /// Held here so the ephemeral CA + its child bundle live for the child's whole run.
+    mitm: Option<Arc<mitm::MitmEngine>>,
 }
 
 impl EgressProxy {
-    /// Bind a loopback listener and start the accept loop. `decider` gates every
-    /// tunnel. Returns once the port is bound (so a caller can wire the port into the
-    /// backend deny-layer before spawning the child).
-    pub fn start(decider: Arc<dyn GrantDecider>) -> io::Result<EgressProxy> {
+    /// Bind a loopback listener and start the accept loop. `decider` gates every tunnel;
+    /// `mitm` (when present) terminates the hosts whose rules demand inspection. Returns
+    /// once the port is bound (so a caller can wire the port into the backend deny-layer
+    /// before spawning the child).
+    pub fn start(
+        decider: Arc<dyn GrantDecider>,
+        mitm: Option<Arc<mitm::MitmEngine>>,
+    ) -> io::Result<EgressProxy> {
         // Loopback only — the sandboxed child reaches us via 127.0.0.1; nothing off-box
         // should ever see this listener.
         let listener = TcpListener::bind((IpAddr::from([127, 0, 0, 1]), 0))?;
         let port = listener.local_addr()?.port();
         let shutdown = Arc::new(AtomicBool::new(false));
         let sh = shutdown.clone();
+        let engine = mitm.clone();
         let accept_thread = std::thread::Builder::new()
             .name("nub-egress-proxy".into())
-            .spawn(move || accept_loop(listener, sh, decider))?;
+            .spawn(move || accept_loop(listener, sh, decider, engine))?;
         Ok(EgressProxy {
             port,
             shutdown,
             accept_thread: Some(accept_thread),
+            mitm,
         })
     }
 
     /// The loopback port the child must be pointed at (env hint + OS carve-out).
     pub fn port(&self) -> u16 {
         self.port
+    }
+
+    /// The child-scoped CA-bundle path, when TLS termination is engaged — the value the
+    /// CA-env vars point the child at so it trusts the minted leaves. `None` for a
+    /// connection-tier policy (no CA exists).
+    pub fn ca_bundle_path(&self) -> Option<&std::path::Path> {
+        self.mitm.as_ref().map(|m| m.bundle_path())
     }
 }
 
@@ -145,26 +165,37 @@ impl Drop for EgressProxy {
 
 /// Accept loop: one detached handler thread per connection. Any handler error just
 /// closes that connection — a single malformed client never takes down the proxy.
-fn accept_loop(listener: TcpListener, shutdown: Arc<AtomicBool>, decider: Arc<dyn GrantDecider>) {
+fn accept_loop(
+    listener: TcpListener,
+    shutdown: Arc<AtomicBool>,
+    decider: Arc<dyn GrantDecider>,
+    mitm: Option<Arc<mitm::MitmEngine>>,
+) {
     for conn in listener.incoming() {
         if shutdown.load(Ordering::SeqCst) {
             break;
         }
         let Ok(stream) = conn else { continue };
         let d = decider.clone();
+        let m = mitm.clone();
         // Best-effort spawn; if the OS refuses a thread we simply drop the connection
         // (fail-closed — no unproxied path opens).
         let _ = std::thread::Builder::new()
             .name("nub-egress-tunnel".into())
             .spawn(move || {
-                let _ = handle_conn(stream, d);
+                let _ = handle_conn(stream, d, m);
             });
     }
 }
 
 /// Handle one client tunnel: parse the request, gate the target host, ACK, gate the
-/// SNI, then connect upstream and blind-forward. Returns `Ok(())` on any clean refusal.
-fn handle_conn(mut stream: TcpStream, decider: Arc<dyn GrantDecider>) -> io::Result<()> {
+/// SNI, then EITHER blind-splice (connection tier) OR terminate + inject (MITM tier).
+/// Returns `Ok(())` on any clean refusal.
+fn handle_conn(
+    mut stream: TcpStream,
+    decider: Arc<dyn GrantDecider>,
+    mitm: Option<Arc<mitm::MitmEngine>>,
+) -> io::Result<()> {
     stream.set_read_timeout(Some(CLIENT_HELLO_TIMEOUT))?;
     let req = read_request(&mut stream)?;
 
@@ -176,12 +207,30 @@ fn handle_conn(mut stream: TcpStream, decider: Arc<dyn GrantDecider>) -> io::Res
     reply_success(&mut stream, req.proto)?;
 
     // Gate 2 — the TLS SNI, read no-MITM from the client's first bytes.
-    let (prelude, allowed) = read_and_check_sni(&mut stream, decider.as_ref())?;
+    let (prelude, allowed, sni_host) = read_and_check_sni(&mut stream, decider.as_ref())?;
     if !allowed {
         return Ok(()); // drop — the client sees a reset tunnel
     }
 
-    // Connect upstream ONLY after both gates pass, replay the buffered prelude, splice.
+    // The host the leaf is minted for + the broker is matched on: the SNI the client
+    // asked for (so its TLS hostname check passes), else the CONNECT/SOCKS authority.
+    let terminate_host = sni_host.or_else(|| match &req.host {
+        Host::Name(n) => Some(n.clone()),
+        Host::Ip(_) => None, // an IP-literal target carries no name to mint a leaf for
+    });
+
+    // MITM tier: terminate + inject ONLY the hosts whose rules demand it; everything else
+    // (and every host under a connection-tier policy) stays a blind splice. Any error on
+    // the terminate path is a fail-closed drop — never a splice fallback that would send
+    // the request un-injected or expose the secret.
+    if let (Some(engine), Some(host)) = (mitm.as_ref(), terminate_host.as_deref())
+        && engine.should_terminate(host)
+    {
+        let _ = mitm::terminate(engine, stream, prelude, host, req.port);
+        return Ok(());
+    }
+
+    // Connection tier — connect upstream, replay the buffered prelude, blind-splice.
     let upstream = connect_upstream(&req.host, req.port)?;
     stream.set_read_timeout(None)?;
     upstream.set_read_timeout(None)?;
@@ -194,7 +243,7 @@ fn handle_conn(mut stream: TcpStream, decider: Arc<dyn GrantDecider>) -> io::Res
 }
 
 /// Read the client's first bytes and decide the SNI gate. Returns the buffered prelude
-/// (to replay upstream) and whether the tunnel is allowed.
+/// (to replay), whether the tunnel is allowed, and the SNI hostname when one was present.
 ///
 /// The rule closes the SNI-evasion vectors: a complete ClientHello's SNI is checked;
 /// a ClientHello with no SNI, or a non-TLS stream, admits (the target host already
@@ -205,7 +254,7 @@ fn handle_conn(mut stream: TcpStream, decider: Arc<dyn GrantDecider>) -> io::Res
 fn read_and_check_sni(
     stream: &mut TcpStream,
     decider: &dyn GrantDecider,
-) -> io::Result<(Vec<u8>, bool)> {
+) -> io::Result<(Vec<u8>, bool, Option<String>)> {
     let mut buf = Vec::new();
     let mut tmp = [0u8; 4096];
     loop {
@@ -215,16 +264,16 @@ fn read_and_check_sni(
                 buf.extend_from_slice(&tmp[..n]);
                 match sni::scan_client_hello(&buf) {
                     SniScan::Sni(host) => {
-                        let ok = decider.decide(&Host::Name(host)) == Decision::Allow;
-                        return Ok((buf, ok));
+                        let ok = decider.decide(&Host::Name(host.clone())) == Decision::Allow;
+                        return Ok((buf, ok, Some(host)));
                     }
                     // Admitted target + no SNI to cross-route on → allow.
-                    SniScan::NoSni | SniScan::NotTls => return Ok((buf, true)),
+                    SniScan::NoSni | SniScan::NotTls => return Ok((buf, true, None)),
                     // TLS-shaped but broken → fail closed.
-                    SniScan::Malformed => return Ok((buf, false)),
+                    SniScan::Malformed => return Ok((buf, false, None)),
                     SniScan::Incomplete => {
                         if buf.len() > MAX_PRELUDE {
-                            return Ok((buf, false)); // dribbling past the cap → fail closed
+                            return Ok((buf, false, None)); // dribbling past the cap → fail closed
                         }
                         // else read more
                     }
@@ -239,16 +288,16 @@ fn read_and_check_sni(
 
 /// Decide on whatever prelude arrived when the read ends (EOF or timeout). A complete
 /// hello is honored; an incomplete/empty TLS stream (the stall) fails closed.
-fn finalize_scan(buf: &[u8], decider: &dyn GrantDecider) -> (Vec<u8>, bool) {
+fn finalize_scan(buf: &[u8], decider: &dyn GrantDecider) -> (Vec<u8>, bool, Option<String>) {
     match sni::scan_client_hello(buf) {
         SniScan::Sni(host) => {
             let ok = decider.decide(&Host::Name(host.clone())) == Decision::Allow;
-            (buf.to_vec(), ok)
+            (buf.to_vec(), ok, Some(host))
         }
-        SniScan::NoSni | SniScan::NotTls => (buf.to_vec(), true),
+        SniScan::NoSni | SniScan::NotTls => (buf.to_vec(), true, None),
         // Incomplete (incl. an empty buffer — client ACK'd then sent nothing) or
         // Malformed → the SNI could not be verified → deny.
-        SniScan::Incomplete | SniScan::Malformed => (buf.to_vec(), false),
+        SniScan::Incomplete | SniScan::Malformed => (buf.to_vec(), false, None),
     }
 }
 
@@ -346,6 +395,7 @@ mod tests {
             enforce: true,
             rules,
             default_effect,
+            ..Default::default()
         }
     }
     fn host(pat: &str, effect: Effect) -> NetRule {

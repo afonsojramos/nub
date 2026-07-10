@@ -24,7 +24,8 @@
 //! to `command.status()`; Windows runs its launcher (setup → spawn → wait → RAII
 //! teardown) when a launch plan is attached.
 
-use crate::policy::{Effect, SandboxPolicy};
+use crate::policy::{Effect, Inspection, ProxyMode, SandboxPolicy};
+use crate::proxy::mitm::MitmEngine;
 use crate::proxy::{EgressProxy, StaticDecider};
 use std::process::Command;
 use std::sync::Arc;
@@ -180,12 +181,70 @@ impl Prepared {
 /// that fails to start degrades to coarse-deny (fail-SAFE: denies more, not less), so
 /// this returns `None` on a start failure and the backend reports `net-per-host`.
 fn start_proxy_if_needed(policy: &SandboxPolicy) -> Option<EgressProxy> {
-    if policy.net.enforce && policy.net.rules.iter().any(|r| r.effect == Effect::Allow) {
-        let decider = Arc::new(StaticDecider::new(policy.net.clone()));
-        EgressProxy::start(decider).ok()
-    } else {
-        None
+    if !(policy.net.enforce && policy.net.rules.iter().any(|r| r.effect == Effect::Allow)) {
+        return None;
     }
+    let decider = Arc::new(StaticDecider::new(policy.net.clone()));
+    let mitm = match policy.net.inspection {
+        Inspection::TlsInspect => {
+            let terminate_all = matches!(policy.net.mode, ProxyMode::Terminate);
+            match MitmEngine::new(policy.net.brokers.clone(), terminate_all) {
+                Ok(engine) => Some(engine),
+                // FAIL-CLOSED: the tier required TLS termination but the CA/TLS stack
+                // could not be built. Do NOT downgrade to a blind splice — that would
+                // forward brokered requests UN-injected. Return None so the whole net
+                // coarse-denies (fail-safe over-confine); the backend reports net lost.
+                Err(_) => return None,
+            }
+        }
+        Inspection::Connection => None,
+    };
+    EgressProxy::start(decider, mitm).ok()
+}
+
+/// The CA-trust env keys pointed at the child CA bundle (ephemeral CA + real roots).
+/// A union of the common tool conventions — `NODE_EXTRA_CA_CERTS` is ADDITIVE (Node
+/// keeps its built-in roots); the rest REPLACE the store, which is exactly why the bundle
+/// carries the real roots alongside the CA. Brand-clean: every key is a tool's own
+/// documented convention, none nub's. Set AFTER `env_clear` so it survives the scrub.
+fn set_ca_env(command: &mut Command, bundle: &std::path::Path) {
+    let path = bundle.as_os_str();
+    for key in [
+        "NODE_EXTRA_CA_CERTS", // Node (additive)
+        "SSL_CERT_FILE",       // OpenSSL / curl / most
+        "REQUESTS_CA_BUNDLE",  // python-requests
+        "CURL_CA_BUNDLE",      // curl
+        "GIT_SSL_CAINFO",      // git
+        "PIP_CERT",            // pip
+        "NPM_CONFIG_CAFILE",   // npm
+        "npm_config_cafile",   // npm (lowercase form)
+        "CARGO_HTTP_CAINFO",   // cargo
+        "AWS_CA_BUNDLE",       // aws-cli
+        "DENO_CERT",           // deno
+    ] {
+        command.env(key, path);
+    }
+}
+
+/// One-line stderr notice when TLS termination engages — the honesty bar (§5, option 2):
+/// nub never silently decrypts, even when the user's own config demanded it.
+fn emit_mitm_notice(policy: &SandboxPolicy) {
+    let scope = if policy.net.brokers.is_empty() {
+        "all allowed hosts (proxy: \"terminate\")".to_string()
+    } else {
+        policy
+            .net
+            .brokers
+            .iter()
+            .map(|b| b.host.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    eprintln!(
+        "sandbox: TLS termination engaged for {scope} — request inspection runs in-proxy \
+         (ephemeral per-run CA, child-scoped via NODE_EXTRA_CA_CERTS-class env, never added \
+         to the OS trust store)"
+    );
 }
 
 /// The cooperative proxy-env hint set on the child so ordinary HTTP(S) clients route
@@ -225,15 +284,22 @@ pub fn apply(policy: &SandboxPolicy, spec: CommandSpec) -> Result<Prepared, Degr
     // so it outlives the child (design.md §2.5).
     let proxy = start_proxy_if_needed(policy);
     let proxy_port = proxy.as_ref().map(EgressProxy::port);
+    // The child CA-bundle path, when TLS termination engaged. Threaded into each backend
+    // so the child both TRUSTS the minted leaves (CA-env) and can READ the bundle even
+    // under a confining fs policy (an explicit read grant — nub infra, not user config).
+    let ca_bundle = proxy.as_ref().and_then(|p| p.ca_bundle_path());
+    if ca_bundle.is_some() {
+        emit_mitm_notice(policy);
+    }
 
     #[cfg(target_os = "macos")]
-    let mut prepared = macos::apply(policy, spec, proxy_port)?;
+    let mut prepared = macos::apply(policy, spec, proxy_port, ca_bundle)?;
     #[cfg(target_os = "linux")]
-    let mut prepared = linux::apply(policy, spec, proxy_port)?;
+    let mut prepared = linux::apply(policy, spec, proxy_port, ca_bundle)?;
     #[cfg(target_os = "windows")]
-    let mut prepared = windows::apply(policy, spec, proxy_port)?;
+    let mut prepared = windows::apply(policy, spec, proxy_port, ca_bundle)?;
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    let mut prepared = generic_apply(policy, spec, proxy_port)?;
+    let mut prepared = generic_apply(policy, spec, proxy_port, ca_bundle)?;
 
     prepared.proxy = proxy;
     Ok(prepared)
@@ -246,6 +312,7 @@ fn generic_apply(
     policy: &SandboxPolicy,
     spec: CommandSpec,
     proxy_port: Option<u16>,
+    ca_bundle: Option<&std::path::Path>,
 ) -> Result<Prepared, Degradation> {
     let mut command = Command::new(&spec.program);
     command.args(&spec.args);
@@ -262,6 +329,9 @@ fn generic_apply(
     }
     if let Some(port) = proxy_port {
         set_proxy_env(&mut command, port);
+    }
+    if let Some(bundle) = ca_bundle {
+        set_ca_env(&mut command, bundle);
     }
 
     // fs/net: honestly report what the skeleton does not yet enforce. The skeleton has

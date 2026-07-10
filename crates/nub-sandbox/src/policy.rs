@@ -135,6 +135,23 @@ pub struct NetPolicy {
     pub enforce: bool,
     pub rules: Vec<NetRule>,
     pub default_effect: Effect,
+    /// The `proxy` wrapper knob (default [`ProxyMode::Auto`]). Governs whether the
+    /// egress proxy may TERMINATE TLS to enforce a capability that can't be checked
+    /// from outside the stream. Authored at the wrapper level (sibling of net); the
+    /// compiler folds it onto the net axis it governs.
+    #[serde(default)]
+    pub mode: ProxyMode,
+    /// The tier the compiler DERIVED (default [`Inspection::Connection`]). A pure
+    /// function of `brokers` + `mode`; materialized in the IR so a `--sandbox` dump
+    /// states the posture explicitly (proposal §4). Never a user input.
+    #[serde(default)]
+    pub inspection: Inspection,
+    /// Per-host credential brokers (proposal §5 — cut-1 marquee). Non-empty ⇒ the tier
+    /// is [`Inspection::TlsInspect`] and the proxy terminates each brokered host to
+    /// inject the credential. The resolved secret lives here IN-MEMORY ONLY (see
+    /// [`HeaderInject::value`]) — never the child env, never a serialized dump.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub brokers: Vec<CredentialBroker>,
 }
 
 impl Default for NetPolicy {
@@ -145,8 +162,43 @@ impl Default for NetPolicy {
             enforce: false,
             rules: Vec::new(),
             default_effect: Effect::Deny,
+            mode: ProxyMode::Auto,
+            inspection: Inspection::Connection,
+            brokers: Vec::new(),
         }
     }
+}
+
+/// The `proxy` wrapper knob — whether the egress proxy may terminate TLS (the MITM
+/// tier). The default reading of the maintainer's ask: derive the tier from the rules,
+/// never a user-set boolean.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProxyMode {
+    /// Derive the tier from the rules: terminate only hosts whose own rules require it
+    /// (a credential-inject rule); tunnel everything else blind. The default.
+    #[default]
+    Auto,
+    /// Forbid termination. A rule that REQUIRES it is a COMPILE ERROR (never a silent
+    /// drop) — the explicit "block MITM" posture; net stays connection-level only.
+    Passthrough,
+    /// Force termination of all allowed TLS even under host-only rules (the
+    /// domain-fronting-closure hardening posture).
+    Terminate,
+}
+
+/// The enforcement tier the compiler derived for the net axis. Recorded in the IR for
+/// dump/fixture visibility; recomputed by the compiler, never authored.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Inspection {
+    /// Today's SNI-peek proxy: no TLS code on the path, no CA in existence.
+    #[default]
+    Connection,
+    /// The MITM tier: a per-run ephemeral CA terminates the hosts that need it,
+    /// everything else stays a blind splice.
+    #[serde(rename = "tls-inspect")]
+    TlsInspect,
 }
 
 /// One net rule: a host pattern or a CIDR, plus its effect.
@@ -154,6 +206,59 @@ impl Default for NetPolicy {
 pub struct NetRule {
     pub target: NetTarget,
     pub effect: Effect,
+}
+
+/// A per-host credential broker (proposal §5, cut-1 marquee): on egress to `host` the
+/// terminating proxy STRIPS then re-injects each header, so the sandboxed child
+/// authenticates to an allowlisted upstream WITHOUT ever holding the secret. A broker
+/// forces [`Inspection::TlsInspect`] for its host. HTTPS-only by construction — the
+/// proxy refuses to inject over an unterminated/plaintext channel (never expose a
+/// secret on an unverified wire).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CredentialBroker {
+    /// The host pattern the broker governs — same glob grammar as a net [`NetTarget::Host`].
+    pub host: String,
+    pub injects: Vec<HeaderInject>,
+}
+
+/// One header the broker sets on egress. Strip-then-set: the child's own value for
+/// `header` (if any) is removed FIRST, so a child-supplied — possibly leaked-real —
+/// credential can never survive alongside the injected one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HeaderInject {
+    /// The HTTP header name to set (e.g. `Authorization`).
+    pub header: String,
+    /// The resolved header value. `#[serde(skip)]` keeps the secret out of EVERY
+    /// serialized IR (a `--sandbox` dump, a conformance fixture) and the redacting
+    /// [`Secret`] `Debug` keeps it out of logs/panics. The IR is compiler-built and
+    /// consumed directly by `apply()` — never deserialized-then-applied — so skipping
+    /// it loses nothing at runtime.
+    #[serde(skip)]
+    pub value: Secret,
+}
+
+/// A resolved secret held in nub's PARENT process only. Serialization drops it (the
+/// containing field is `#[serde(skip)]`) and `Debug` redacts it, so a policy dump, a
+/// trace line, or a panic can never spill the credential.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct Secret(pub String);
+
+impl Secret {
+    /// Borrow the raw value. The ONE call site that needs it is the proxy's egress
+    /// header injection; grep for `.expose()` to audit every reader.
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.0.is_empty() {
+            f.write_str("Secret(\"\")")
+        } else {
+            f.write_str("Secret(\"<redacted>\")")
+        }
+    }
 }
 
 /// A net rule targets either a host pattern (glob or literal) or a CIDR block.

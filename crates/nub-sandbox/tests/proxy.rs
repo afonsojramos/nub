@@ -162,6 +162,7 @@ fn net(rules: Vec<NetRule>) -> NetPolicy {
         enforce: true,
         rules,
         default_effect: Effect::Deny,
+        ..Default::default()
     }
 }
 fn allow_host(pat: &str) -> NetRule {
@@ -178,7 +179,7 @@ fn allow_cidr(cidr: &str) -> NetRule {
 }
 
 fn start(policy: NetPolicy) -> EgressProxy {
-    EgressProxy::start(Arc::new(StaticDecider::new(policy))).unwrap()
+    EgressProxy::start(Arc::new(StaticDecider::new(policy)), None).unwrap()
 }
 
 // ── tests ────────────────────────────────────────────────────────────────────────
@@ -333,7 +334,7 @@ fn decider_seam_is_consulted_for_target_and_sni() {
     }
     let upstream = echo_server();
     let rec = Arc::new(Recorder::default());
-    let proxy = EgressProxy::start(rec.clone()).unwrap();
+    let proxy = EgressProxy::start(rec.clone(), None).unwrap();
     let mut t = http_connect(proxy.port(), &format!("127.0.0.1:{}", upstream.port())).unwrap();
     assert!(tunnel_forwards(&mut t, "keep.allowed.example"));
     let seen = rec.seen.lock().unwrap().clone();

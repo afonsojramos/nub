@@ -73,6 +73,7 @@ pub fn apply(
     policy: &SandboxPolicy,
     spec: CommandSpec,
     proxy_port: Option<u16>,
+    ca_bundle: Option<&std::path::Path>,
 ) -> Result<Prepared, Degradation> {
     if !needs_wrap(policy) {
         // Nothing to confine and no withheld secret to protect: the env-scrub is pure
@@ -87,7 +88,7 @@ pub fn apply(
         });
     }
 
-    let profile = build_profile(policy, &spec, proxy_port);
+    let profile = build_profile(policy, &spec, proxy_port, ca_bundle);
     let mut wrapped = Command::new("sandbox-exec");
     wrapped.arg("-p").arg(&profile).arg("--");
     wrapped.arg(&spec.program).args(&spec.args);
@@ -108,6 +109,11 @@ pub fn apply(
     // the real boundary). Set AFTER env_clear so it survives an enforced env scrub.
     if let Some(port) = proxy_port {
         super::set_proxy_env(&mut wrapped, port);
+    }
+    // CA trust for the child (the leaf-verifying bundle). The read grant lives in the
+    // SBPL profile (see build_profile); this is the env half so tools find the bundle.
+    if let Some(bundle) = ca_bundle {
+        super::set_ca_env(&mut wrapped, bundle);
     }
 
     Ok(Prepared {
@@ -167,7 +173,12 @@ fn fs_confines(policy: &SandboxPolicy) -> bool {
 }
 
 /// Build the full SBPL profile text for `policy`.
-fn build_profile(policy: &SandboxPolicy, spec: &CommandSpec, proxy_port: Option<u16>) -> String {
+fn build_profile(
+    policy: &SandboxPolicy,
+    spec: &CommandSpec,
+    proxy_port: Option<u16>,
+    ca_bundle: Option<&std::path::Path>,
+) -> String {
     let mut out = String::with_capacity(MACOS_SEATBELT_BASE.len() + 2048);
     out.push_str(MACOS_SEATBELT_BASE);
     out.push('\n');
@@ -175,6 +186,14 @@ fn build_profile(policy: &SandboxPolicy, spec: &CommandSpec, proxy_port: Option<
     emit_env_read_closure(&mut out);
     emit_net(policy, proxy_port, &mut out);
     emit_fs(policy, spec, &mut out);
+    // The child must READ the CA bundle to trust the minted leaves — grant it explicitly,
+    // AFTER emit_fs so it survives even a deny-all fs floor (nub infra, not user config).
+    if let Some(bundle) = ca_bundle {
+        out.push_str(&format!(
+            "(allow file-read* (literal \"{}\"))\n",
+            sbpl_escape(&bundle.to_string_lossy())
+        ));
+    }
 
     out
 }
@@ -999,7 +1018,7 @@ mod tests {
                 rule("**/.env", Effect::Deny, FsAccess::Read),
             ],
         );
-        let prof = build_profile(&p, &spec(), None);
+        let prof = build_profile(&p, &spec(), None, None);
         assert!(prof.contains("(allow file-read* (subpath \"/\"))"));
         // The `.env` deny is emitted AFTER the generous allow (last-match-wins).
         let allow_at = prof.find("(allow file-read* (subpath \"/\"))").unwrap();
@@ -1020,7 +1039,7 @@ mod tests {
             Effect::Deny,
             vec![rule("/proj", Effect::Allow, FsAccess::ReadWrite)],
         );
-        let prof = build_profile(&p, &spec(), None);
+        let prof = build_profile(&p, &spec(), None, None);
         assert!(!prof.contains("(allow file-read* (subpath \"/\"))\n"));
         assert!(prof.contains("(allow file-read* (subpath \"/proj\"))"));
     }
@@ -1037,7 +1056,7 @@ mod tests {
                 rule("/proj/secret", Effect::Deny, FsAccess::Read),
             ],
         );
-        let prof = build_profile(&p, &spec(), None);
+        let prof = build_profile(&p, &spec(), None, None);
         assert!(prof.contains("(allow file-write* (subpath \"/proj\"))"));
         assert!(prof.contains("(deny file-write* (subpath \"/proj/ro\"))"));
         assert!(prof.contains("(deny file-write* (subpath \"/proj/secret\"))"));
@@ -1056,7 +1075,7 @@ mod tests {
                 rule("/proj", Effect::Allow, FsAccess::ReadWrite),
             ],
         );
-        let prof = build_profile(&p, &spec(), None);
+        let prof = build_profile(&p, &spec(), None, None);
         let cap = prof.find("(deny file-write* (subpath \"/\"))").unwrap();
         let confstr = prof
             .find("(allow file-write* (subpath \"/private/var/folders/")
@@ -1080,7 +1099,7 @@ mod tests {
                 rule("**/.env", Effect::Deny, FsAccess::Read),
             ],
         );
-        let prof = build_profile(&p, &spec(), None);
+        let prof = build_profile(&p, &spec(), None, None);
         let confstr = prof
             .find("(allow file-write* (subpath \"/private/var/folders/")
             .expect("confstr temp grant present");
@@ -1109,7 +1128,7 @@ mod tests {
                 rule("/proj", Effect::Allow, FsAccess::ReadWrite),
             ],
         );
-        let prof = build_profile(&p, &spec(), None);
+        let prof = build_profile(&p, &spec(), None, None);
         assert!(!prof.contains("(deny file-write-unlink (subpath \"/\"))"));
         assert!(!prof.contains("(deny file-write-create (subpath \"/\"))"));
         // And the confstr grant is still the last word on the temp dir.
@@ -1129,7 +1148,7 @@ mod tests {
                 rule("/root/proj/.env", Effect::Deny, FsAccess::Read),
             ],
         );
-        let prof = build_profile(&p, &spec(), None);
+        let prof = build_profile(&p, &spec(), None, None);
         assert!(prof.contains("(deny file-write-unlink (literal \"/root/proj\"))"));
         assert!(prof.contains("(deny file-write-create (literal \"/root/proj\"))"));
         assert!(prof.contains("(deny file-write-unlink (literal \"/root\"))"));
@@ -1150,7 +1169,7 @@ mod tests {
                 rule("**/.env", Effect::Deny, FsAccess::Read),
             ],
         );
-        let prof = build_profile(&p, &spec(), None);
+        let prof = build_profile(&p, &spec(), None, None);
         assert!(!prof.contains("(deny file-write-unlink (literal \"/root\"))"));
     }
 
@@ -1168,7 +1187,7 @@ mod tests {
                 rule("/root/secrets/*.key", Effect::Deny, FsAccess::Read),
             ],
         );
-        let prof = build_profile(&p, &spec(), None);
+        let prof = build_profile(&p, &spec(), None, None);
         assert!(prof.contains("(deny file-write-unlink (literal \"/root/secrets\"))"));
         assert!(prof.contains("(deny file-write-create (literal \"/root/secrets\"))"));
         assert!(prof.contains("(deny file-write-unlink (literal \"/root\"))"));
@@ -1206,7 +1225,7 @@ mod tests {
                 rule("**/secrets/**", Effect::Deny, FsAccess::Read),
             ],
         );
-        let prof = build_profile(&p, &spec(), None);
+        let prof = build_profile(&p, &spec(), None, None);
         assert!(!prof.contains("(deny file-write-unlink (literal \"/root\"))"));
     }
 
@@ -1221,7 +1240,7 @@ mod tests {
                 rule("/root/proj/.env", Effect::Deny, FsAccess::Read),
             ],
         );
-        let prof = build_profile(&p, &spec(), None);
+        let prof = build_profile(&p, &spec(), None, None);
         assert!(!prof.contains("(deny file-write-unlink (literal \"/root/proj\"))"));
         assert!(!prof.contains("(deny file-write-unlink (literal \"/root\"))"));
     }
@@ -1234,7 +1253,7 @@ mod tests {
             Effect::Deny,
             vec![rule("/proj", Effect::Allow, FsAccess::ReadWrite)],
         );
-        let prof = build_profile(&p, &spec(), None);
+        let prof = build_profile(&p, &spec(), None, None);
         if let Some(cache) = confstr_dir(libc::_CS_DARWIN_USER_CACHE_DIR) {
             let cache =
                 normalize_slashes(&canonicalize_including_nonexistent(&cache).to_string_lossy());
@@ -1253,7 +1272,7 @@ mod tests {
             Effect::Deny,
             vec![rule("/private", Effect::Allow, FsAccess::ReadWrite)],
         );
-        let prof = build_profile(&p, &spec(), None);
+        let prof = build_profile(&p, &spec(), None, None);
         assert!(!prof.contains("(allow file-write* (subpath \"/private\"))"));
         assert!(is_dangerous_write_root(&MatchTerm::Subpath(
             "/private".to_string()
@@ -1289,8 +1308,9 @@ mod tests {
             enforce: true,
             rules: vec![],
             default_effect: Effect::Deny,
+            ..Default::default()
         };
-        let prof = build_profile(&p, &spec(), None);
+        let prof = build_profile(&p, &spec(), None, None);
         assert!(prof.contains("(allow file*)"));
     }
 
@@ -1304,8 +1324,9 @@ mod tests {
             enforce: true,
             rules: vec![],
             default_effect: Effect::Deny,
+            ..Default::default()
         };
-        let prof = build_profile(&p, &spec(), Some(54321));
+        let prof = build_profile(&p, &spec(), Some(54321), None);
         assert!(prof.contains("(allow network* (remote ip \"localhost:54321\"))"));
         assert!(
             !prof.contains("localhost:*"),
@@ -1323,8 +1344,9 @@ mod tests {
             enforce: true,
             rules: vec![],
             default_effect: Effect::Deny,
+            ..Default::default()
         };
-        let prof = build_profile(&p, &spec(), None);
+        let prof = build_profile(&p, &spec(), None, None);
         assert!(
             !prof.contains("(allow network*"),
             "coarse deny emits no egress carve"
@@ -1338,7 +1360,7 @@ mod tests {
             Effect::Deny,
             vec![rule("/proj", Effect::Allow, FsAccess::ReadWrite)],
         );
-        let prof = build_profile(&p, &spec(), None);
+        let prof = build_profile(&p, &spec(), None, None);
         assert!(prof.contains("(allow network*)\n"));
         assert!(prof.contains("com.apple.trustd"));
     }
@@ -1353,6 +1375,7 @@ mod tests {
                 effect: Effect::Allow,
             }],
             default_effect: Effect::Deny,
+            ..Default::default()
         };
         // No proxy available → per-host can't be enforced → degraded.
         let deg = degradation(&p, None);
@@ -1400,7 +1423,7 @@ mod tests {
             Effect::Deny,
             vec![rule("/proj", Effect::Allow, FsAccess::ReadWrite)],
         );
-        let prof = build_profile(&p, &spec(), None);
+        let prof = build_profile(&p, &spec(), None, None);
         assert!(prof.contains("(deny process-info*)\n"));
         assert!(prof.contains("(allow process-info* (target self))"));
         assert!(
