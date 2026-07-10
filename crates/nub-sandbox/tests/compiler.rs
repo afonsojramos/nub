@@ -726,6 +726,10 @@ fn net_mid_host_glob_is_a_shape_error_at_its_path() {
         (json!({ "net": ["api.*.com"] }), "net.0"),
         (json!({ "net": ["ok.example", "foo*bar.com"] }), "net.1"),
         (json!({ "net": { "api.*.com": true } }), "net.api.*.com"),
+        // Degenerate empty-apex wildcard: must fail loud, NOT strip down to a
+        // bare `*` allow-all (fail-open in a security primitive).
+        (json!({ "net": ["*."] }), "net.0"),
+        (json!({ "net": ["*.."] }), "net.0"),
     ] {
         match compile(&cfg, &ctx).unwrap_err() {
             CompileError::Shape { path, message } => {

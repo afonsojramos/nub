@@ -82,7 +82,10 @@ pub fn host_pattern_is_valid(pattern: &str) -> bool {
         return true;
     }
     if let Some(rest) = pattern.strip_prefix("*.") {
-        return !rest.contains('*');
+        // The wildcard label must be followed by a real suffix: non-empty, not
+        // itself dot-led (`*.`/`*..` are a degenerate empty apex that would strip
+        // down to a bare `*` allow-all — a fail-OPEN), and no further wildcard.
+        return !rest.is_empty() && !rest.starts_with('.') && !rest.contains('*');
     }
     !pattern.contains('*')
 }

@@ -283,20 +283,21 @@ fn push_net_rule(
             }
         }
     } else {
-        // D12: normalize a single FQDN trailing dot away before the IR stores it,
-        // so `example.com.` and `example.com` are the same rule.
-        let host = crate::matcher::host::strip_trailing_dot(target);
-        // D11: only `*` and a leading `*.suffix` wildcard are honored by the
-        // matcher; a mid-host glob would silently match nothing, so reject it.
-        if !crate::matcher::host::host_pattern_is_valid(host) {
+        // D11: validate the SURFACE form before the trailing-dot strip — only a
+        // bare `*` or a leading `*.suffix` wildcard is honored by the matcher; a
+        // mid-host glob would silently match nothing. Validating pre-strip also
+        // keeps a degenerate `*.`/`*..` from collapsing to a bare `*` allow-all.
+        if !crate::matcher::host::host_pattern_is_valid(target) {
             return Err(CompileError::shape(
                 path,
                 &format!(
-                    "`{host}` is not a valid host pattern — a `*` is only allowed as a bare `*` or a leading `*.` subdomain wildcard (e.g. `*.example.com`), not mid-host"
+                    "`{target}` is not a valid host pattern — a `*` is only allowed as a bare `*` or a leading `*.` subdomain wildcard (e.g. `*.example.com`), not mid-host"
                 ),
             ));
         }
-        NetTarget::Host(host.to_string())
+        // D12: normalize a single FQDN trailing dot away so `example.com.` and
+        // `example.com` are the same rule in the IR.
+        NetTarget::Host(crate::matcher::host::strip_trailing_dot(target).to_string())
     };
     out.push(NetRule {
         target: net_target,

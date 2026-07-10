@@ -189,6 +189,10 @@ fn host_pattern_grammar_accepts_only_bare_and_leading_wildcard() {
     assert!(!host_pattern_is_valid("*.foo*bar.com"));
     assert!(!host_pattern_is_valid("**.com"));
     assert!(!host_pattern_is_valid("example.*"));
+    // Degenerate empty-apex wildcards: rejected so they can't strip down to a
+    // bare `*` allow-all (fail loud, never fail open).
+    assert!(!host_pattern_is_valid("*."));
+    assert!(!host_pattern_is_valid("*.."));
 }
 
 #[test]
