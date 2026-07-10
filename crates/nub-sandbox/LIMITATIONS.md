@@ -238,6 +238,22 @@ Each is documented in code at the site noted; none is silently mis-reported.
   filter bypass is real. Bounded: requires the ability to bind-mount procfs (prior
   privilege/setup) before entering the sandbox. Fix: a mount namespace, or resolve the
   mount type rather than the path prefix.
+- **macOS move/rename secret-relocation — literal AND regex directory-pinning denies CLOSED.**
+  A write-deny keyed to a secret's path is defeatable by renaming a container dir out from
+  under the deny. Both deny shapes now pin the container: a literal `(subpath)` deny pins its
+  ancestor-dir chain, and a regex directory-pinning deny (`!secrets/*.key` → `/proj/secrets/*.key`)
+  pins its literal directory prefix (`/proj/secrets`) and up to the write-grant root, so
+  `mv secrets secretz` can no longer relocate the matched leaves. VM/host-verified: the
+  ancestor rename is blocked while a legit write under the pinned dir still succeeds
+  (`tests/macos_moveblock.rs`, `emit_move_block` in `backend/macos.rs`). **Residual (bounded):**
+  the pin covers a secret whose container is the deny's literal directory prefix or a FULL glob
+  component below it (`packages/*/.env`). Two shapes stay open: a floating-name deny with no
+  fixed prefix (`!**/secrets/**` — the `secrets` component floats to any depth), and a PARTIAL
+  glob in a non-leaf component (`!sec*/x.key` — the relocation-sensitive `secrets/` dir is
+  matched by `sec*`, not literal, so it sits below the pinned prefix and renaming it to a
+  non-`sec*` name escapes; a literal `}`/`]` in a dir name hits the same corner). Both need a
+  user-authored glob-directory deny AND a writable container; the file-level deny still blocks
+  renaming the matched leaves themselves.
 - **Windows program grant is file-only (neighbor-read leak CLOSED).** The engine grants
   read+execute on the program FILE ITSELF, not its parent dir (traverse-bypass makes the
   leaf-object ACL sufficient to exec), so a `.env` next to a binary is no longer swept

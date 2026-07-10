@@ -332,28 +332,65 @@ fn emit_move_block(policy: &SandboxPolicy, out: &mut String) {
         }
     }
 
-    // Fix 2 — ancestor move-block for ANCHORED (literal) denies. Block unlink/create on
-    // every directory from the secret's parent up to (and including) the outermost write-
-    // grant root enclosing it, so renaming a container dir can't relocate the secret past
-    // its anchored deny. Basename-glob denies (`**/.env` → a regex) have no literal
-    // ancestor and are already immune (the basename survives any rename), so they are
-    // skipped. The `(literal P)` denies are EXACT-path — they block renaming dir `P`
-    // itself, never a create/write INSIDE it, so a legit `echo > proj/other.txt` still
-    // works.
+    // Fix 2 — ancestor move-block for DIRECTORY-PINNING denies. For each deny, pin
+    // unlink/create on the directory chain from the secret's innermost writable container
+    // up to (and including) the enclosing write-grant root, so renaming a container can't
+    // relocate the secret past its path-keyed deny. The chain start differs by deny shape,
+    // because Fix 1's re-asserted deny covers a different innermost path in each:
+    //   • LITERAL `(subpath)` deny (`/proj/.env`, `/proj/secrets` subtree) — Fix 1's subpath
+    //     deny already matches its own root path, so renaming the secret / subtree-root
+    //     itself is blocked; only the ANCESTORS need pinning. Probe = the secret path; the
+    //     walk pins parent(secret) upward.
+    //   • REGEX directory-pinning deny (`!secrets/*.key` → `/proj/secrets/*.key`) — Fix 1's
+    //     regex deny matches only the glob LEAF files, NOT their literal container dir
+    //     `/proj/secrets`, so `mv secrets secretz` relocates the leaves past the deny. Pin
+    //     the deny's literal directory PREFIX itself and up. Probe = `<prefix>/*`, so the
+    //     walk pins `<prefix>` (not just its parent) upward.
+    // A deny with no absolute literal directory prefix (`**/secrets/**` — the matched dir
+    // name floats, no fixed anchor), or one whose relocation-sensitive container is itself a
+    // PARTIAL non-leaf glob (`sec*/x.key`), yields nothing (or too shallow) to pin — a bounded
+    // residual documented in LIMITATIONS.md. The `(literal P)` denies are EXACT-path — they block
+    // renaming dir `P` itself, never a create/write INSIDE it, so `echo > proj/other.txt`
+    // and writes under `/proj/secrets/` still work.
     let grant_roots = write_grant_roots(policy);
     for rule in &policy.fs.rules.entries {
         if rule.effect != Effect::Deny {
             continue;
         }
-        let MatchTerm::Subpath(denied) = to_match_term(rule.matcher.as_str()) else {
-            continue;
+        let probe = match to_match_term(rule.matcher.as_str()) {
+            MatchTerm::Subpath(denied) => denied,
+            MatchTerm::Regex(_) => {
+                let Some(prefix) = regex_literal_dir_prefix(rule.matcher.as_str()) else {
+                    continue;
+                };
+                format!("{prefix}/*")
+            }
         };
-        for anc in move_block_ancestors(&denied, &grant_roots) {
+        for anc in move_block_ancestors(&probe, &grant_roots) {
             let lit = format!("(literal \"{}\")", sbpl_escape(&anc));
             out.push_str(&format!("(deny file-write-unlink {lit})\n"));
             out.push_str(&format!("(deny file-write-create {lit})\n"));
         }
     }
+}
+
+/// The literal directory PREFIX of a glob deny — the leading run of glob-free path
+/// components (`/proj/secrets/*.key` → `/proj/secrets`; `/proj/packages/*/.env` →
+/// `/proj/packages`). Pinning it + its ancestors blocks relocating a secret whose
+/// container is this literal prefix OR a FULL glob component below it (`packages/*/.env`:
+/// renaming the `*`-matched intermediate keeps it matched; renaming `packages` is pinned).
+/// `None` when there is no absolute multi-component prefix to anchor (a first-segment or
+/// leading-`**` glob). The meta set matches `to_match_term`'s Regex classifier.
+///
+/// RESIDUAL (see LIMITATIONS.md): a PARTIAL glob in a NON-LEAF component (`sec*/x.key`)
+/// leaves its relocation-sensitive container (`/proj/secrets`, matched by `sec*`) BELOW this
+/// literal prefix and thus unpinned — renaming it to a name outside the pattern escapes. A
+/// literal `}`/`]` in a dir name hits the same residual (regex-classified, truncates here).
+fn regex_literal_dir_prefix(glob: &str) -> Option<String> {
+    let meta = glob.find(['*', '?', '[', ']', '{', '}'])?;
+    let slash = glob[..meta].rfind('/')?;
+    let prefix = &glob[..slash];
+    (prefix.len() > 1 && prefix.starts_with('/')).then(|| prefix.to_string())
 }
 
 /// The write-granted subpath roots: every rw Allow that survives the dangerous-root
@@ -917,6 +954,62 @@ mod tests {
                 rule("**", Effect::Allow, FsAccess::Read),
                 rule("/root", Effect::Allow, FsAccess::ReadWrite),
                 rule("**/.env", Effect::Deny, FsAccess::Read),
+            ],
+        );
+        let prof = build_profile(&p, &spec(), None);
+        assert!(!prof.contains("(deny file-write-unlink (literal \"/root\"))"));
+    }
+
+    #[test]
+    fn move_block_pins_regex_dir_prefix_ancestors() {
+        // A user directory-pinning glob deny (`!secrets/*.key` → `/root/secrets/*.key`) is a
+        // regex, so Fix 1 blocks the leaf `*.key` files but NOT their container `/root/secrets`
+        // — `mv secrets secretz` would relocate them past the deny. Fix 2 pins the literal
+        // prefix dir `/root/secrets` AND its ancestors up to the rw-grant root.
+        let p = fs_policy(
+            Effect::Deny,
+            vec![
+                rule("**", Effect::Allow, FsAccess::Read),
+                rule("/root", Effect::Allow, FsAccess::ReadWrite),
+                rule("/root/secrets/*.key", Effect::Deny, FsAccess::Read),
+            ],
+        );
+        let prof = build_profile(&p, &spec(), None);
+        assert!(prof.contains("(deny file-write-unlink (literal \"/root/secrets\"))"));
+        assert!(prof.contains("(deny file-write-create (literal \"/root/secrets\"))"));
+        assert!(prof.contains("(deny file-write-unlink (literal \"/root\"))"));
+        // EXACT-path, never a subpath — a legit write UNDER secrets/ stays permitted.
+        assert!(!prof.contains("(literal \"/root/secrets/"));
+        // The grant root is the stopping point — nothing above it.
+        assert!(!prof.contains("(deny file-write-unlink (literal \"/\"))"));
+    }
+
+    #[test]
+    fn regex_literal_dir_prefix_extracts_leading_literal_run() {
+        // The leading glob-free component run, dropping the glob leaf/segment.
+        assert_eq!(
+            regex_literal_dir_prefix("/root/secrets/*.key").as_deref(),
+            Some("/root/secrets")
+        );
+        assert_eq!(
+            regex_literal_dir_prefix("/root/packages/*/.env").as_deref(),
+            Some("/root/packages")
+        );
+        // No fixed anchor: a leading `**` (basename/floating glob) or a first-segment glob.
+        assert_eq!(regex_literal_dir_prefix("**/.env"), None);
+        assert_eq!(regex_literal_dir_prefix("/*.key"), None);
+    }
+
+    #[test]
+    fn move_block_no_regex_pin_without_literal_prefix() {
+        // A floating-name deny (`**/secrets/**`) has no absolute literal prefix to anchor, so
+        // Fix 2 emits no `(literal …)` ancestor denies for it — the documented residual.
+        let p = fs_policy(
+            Effect::Deny,
+            vec![
+                rule("**", Effect::Allow, FsAccess::Read),
+                rule("/root", Effect::Allow, FsAccess::ReadWrite),
+                rule("**/secrets/**", Effect::Deny, FsAccess::Read),
             ],
         );
         let prof = build_profile(&p, &spec(), None);

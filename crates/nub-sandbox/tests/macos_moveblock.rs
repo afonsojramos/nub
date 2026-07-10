@@ -202,3 +202,57 @@ fn anchored_deny_secret_cannot_be_relocated_by_ancestor_rename() {
         "a legit write inside the rw-granted dir must still succeed (got {write_ok:?})"
     );
 }
+
+#[test]
+fn regex_dir_pinning_deny_secret_cannot_be_relocated_by_ancestor_rename() {
+    // HOLE #2, regex twin: a user directory-pinning glob deny `<root>/secrets/*.key` (from
+    // `!secrets/*.key`) is a REGEX, so the re-asserted deny blocks the leaf `*.key` files but
+    // not their literal container `<root>/secrets` — `mv secrets secretz` relocates the whole
+    // dir out from under the pattern. The literal-prefix move-block must pin `<root>/secrets`
+    // so the container rename is blocked; a legit write inside secrets/ must still succeed.
+    let root = TempDir::new_in("/private/tmp").expect("tmp outside $TMPDIR");
+    let root_c = std::fs::canonicalize(root.path()).expect("canon root");
+    std::fs::create_dir(root_c.join("secrets")).expect("mkdir secrets");
+    std::fs::write(root_c.join("secrets/topsecret.key"), MARKER).expect("plant secret");
+
+    let root_s = root_c.to_string_lossy().to_string();
+    let policy = fs_policy(vec![
+        rule("**", Effect::Allow, FsAccess::Read),
+        rule(&root_s, Effect::Allow, FsAccess::ReadWrite),
+        rule(
+            &format!("{root_s}/secrets/*.key"),
+            Effect::Deny,
+            FsAccess::Read,
+        ),
+    ]);
+
+    let relocate =
+        "/bin/mv secrets secretz 2>/dev/null; /bin/cat secretz/topsecret.key 2>/dev/null";
+
+    // NEGATIVE CONTROL: unconfined, the container rename relocates and leaks the leaf.
+    let control = run_unconfined(&root_c, relocate);
+    let _ = std::fs::rename(root_c.join("secretz"), root_c.join("secrets"));
+    assert!(
+        control.contains(MARKER),
+        "neg-control: unconfined `mv secrets secretz; cat secretz/*.key` must leak (got {control:?})"
+    );
+
+    // CONFINED: the container rename is blocked → no relocation, no leak.
+    let confined = run_confined(&policy, &root_c, relocate);
+    assert!(
+        !confined.contains(MARKER),
+        "confined: an ancestor-dir rename must NOT relocate the regex-pinned secret (got {confined:?})"
+    );
+
+    // NON-REGRESSION: a legit write INSIDE secrets/ still works (the pin is exact-path on the
+    // dir, never a subpath, so it blocks renaming secrets/ but not writing under it).
+    let write_ok = run_confined(
+        &policy,
+        &root_c,
+        "echo OKINSIDE > secrets/note.txt; /bin/cat secrets/note.txt",
+    );
+    assert!(
+        write_ok.contains("OKINSIDE"),
+        "a legit write inside the pinned dir must still succeed (got {write_ok:?})"
+    );
+}
