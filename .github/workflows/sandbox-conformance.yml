@@ -29,8 +29,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - name: macOS Seatbelt enforcement (per-backend + proxy)
-        run: cargo test -p nub-sandbox --test macos_enforcement --test macos_proxy
+      - name: macOS Seatbelt enforcement (per-backend + proxy + env-read/move-block closures)
+        run: cargo test -p nub-sandbox --test macos_enforcement --test macos_proxy --test macos_envread --test macos_moveblock
       - name: macOS CLI-seam conformance matrix
         run: cargo test -p nub-cli --test sandbox_conformance
 
@@ -75,9 +75,9 @@ jobs:
           $id=[System.Security.Principal.WindowsIdentity]::GetCurrent()
           $admin=(New-Object System.Security.Principal.WindowsPrincipal($id)).IsInRole([System.Security.Principal.WindowsBuiltinRole]::Administrator)
           Write-Host "User: $($id.Name)  IsElevated: $admin  OS: $([System.Environment]::OSVersion.VersionString)"
-      - name: Windows AppContainer enforcement
+      - name: Windows AppContainer enforcement (+ ascendant-env / residuals closures)
         shell: bash
-        run: cargo test -p nub-sandbox --test windows_enforcement
+        run: cargo test -p nub-sandbox --test windows_enforcement --test windows_ascendant_env --test windows_residuals
       - name: Windows CLI-seam conformance matrix
         shell: bash
         run: cargo test -p nub-cli --test sandbox_conformance
