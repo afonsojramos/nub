@@ -288,32 +288,37 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
         .await?;
         if ran > 0 {
             tracing::debug!("allowBuilds: ran {ran} dep lifecycle script(s)");
-            // A build script can replace a bin target — a JS launcher
-            // becomes a native binary (esbuild, #394). The link phase
-            // shimmed those bins before the scripts ran, so any such
-            // shim now wraps a native binary in `node <target>` and
-            // fails. Regenerate every `.bin/` shim against the post-build
-            // targets: `create_bin_shim` re-classifies each and emits a
-            // direct-exec symlink/wrapper for the ones that turned native.
-            super::bin_linking::link_all_bins(super::bin_linking::LinkAllBinsInput {
-                settings_ctx,
-                node_linker,
-                cwd,
-                modules_dir_name,
-                aube_dir,
-                graph_for_link,
-                virtual_store_dir_max_length,
-                placements: placements_ref,
-                manifest,
-                manifests,
-                ws_dirs,
-                has_workspace,
-                virtual_store_only,
-                ignore_scripts,
-                has_any_allow_rule: build_policy.has_any_allow_rule(),
-                floor_may_allow_any: default_trust_floor.may_allow_any(),
-            })?;
         }
+        // Regenerate every `.bin/` shim against the post-build targets. A
+        // build can replace a bin — a JS launcher becomes a native binary
+        // (esbuild, #394) — and the link phase shimmed it as `node
+        // <target>` before this phase ran, so the shim now wraps a native
+        // binary and fails. `create_bin_shim` re-classifies each target
+        // and emits a direct-exec symlink/wrapper for the ones that turned
+        // native. Runs whenever the dep-lifecycle phase does — NOT gated on
+        // `ran`: a `sideEffectsCache` restore (default on) recreates the
+        // package dir with the already-native bin and returns a zero script
+        // count, yet still needs the shim regenerated. Idempotent
+        // (create_bin_shim removes+rewrites), so re-linking unchanged bins
+        // is a no-op.
+        super::bin_linking::link_all_bins(super::bin_linking::LinkAllBinsInput {
+            settings_ctx,
+            node_linker,
+            cwd,
+            modules_dir_name,
+            aube_dir,
+            graph_for_link,
+            virtual_store_dir_max_length,
+            placements: placements_ref,
+            manifest,
+            manifests,
+            ws_dirs,
+            has_workspace,
+            virtual_store_only,
+            ignore_scripts,
+            has_any_allow_rule: build_policy.has_any_allow_rule(),
+            floor_may_allow_any: default_trust_floor.may_allow_any(),
+        })?;
         phase_timings.record("dep_lifecycle", phase_start.elapsed());
     }
 
