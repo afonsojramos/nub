@@ -471,17 +471,52 @@ fn probe_bin(dir: &Path) -> Option<PathBuf> {
     ok.then_some(bin)
 }
 
-/// Probe: `probe <socket|vmread|ptrace>` exits 42 when the syscall was DENIED
-/// (EPERM), 0 when it went through. vmread/ptrace target SELF so the verdict is the
-/// seccomp filter's, not the host's yama policy.
+/// Probe: `probe <cmd>` exits 42 when the syscall was DENIED, 0 when it went through
+/// (43 = an over-deny the test flags). vmread/ptrace/pidfd target SELF so the verdict
+/// is the seccomp filter's, not the host's yama policy. Commands:
+///   socket/vmread/ptrace — the net + env-read-vector denies (existing).
+///   unshare  — `unshare(CLONE_FILES)`: an UNPRIVILEGED, host-policy-independent
+///              unshare that succeeds everywhere → proves the wholesale O1 `unshare`
+///              deny (which blocks every flag, incl. CLONE_NEWUSER, by syscall number).
+///   clone3   — `clone3(flags=0)`: a plain unprivileged fork → 42 iff the ENOSYS
+///              companion filter fired (glibc-fallback), proving clone3 (every flag,
+///              incl. CLONE_NEWUSER) is force-failed at the syscall boundary.
+///   clonens  — raw `clone(CLONE_NEWUSER|SIGCHLD)`: the register-flag escape → 42 iff
+///              the flag-filter denied it (unsandboxed it creates a userns child).
+///   pidfd    — `pidfd_open(self)` then `pidfd_getfd`: 42 iff getfd is denied while
+///              pidfd_open stays allowed (O2); 43 iff pidfd_open was wrongly denied.
+///   pty      — open /dev/ptmx, grantpt/unlockpt, open the /dev/pts slave: 0 iff the
+///              O3 allowlist admits a full PTY (nonzero = which step the narrowing broke).
 const PROBE_C: &str = r#"
 #define _GNU_SOURCE
 #include <errno.h>
 #include <string.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <fcntl.h>
+#include <sched.h>
+#include <signal.h>
 #include <sys/socket.h>
 #include <sys/ptrace.h>
 #include <sys/uio.h>
+#include <sys/syscall.h>
+#include <sys/wait.h>
 #include <unistd.h>
+#ifndef SYS_pidfd_open
+#define SYS_pidfd_open 434
+#endif
+#ifndef SYS_pidfd_getfd
+#define SYS_pidfd_getfd 438
+#endif
+#ifndef SYS_clone3
+#define SYS_clone3 435
+#endif
+#define P_CLONE_NEWNS   0x00020000
+#define P_CLONE_NEWUSER 0x10000000
+#define P_CLONE_FILES   0x00000400
+struct clone_args_probe {
+    uint64_t flags, pidfd, child_tid, parent_tid, exit_signal, stack, stack_size, tls;
+};
 int main(int argc, char** argv) {
     if (argc < 2) return 2;
     if (!strcmp(argv[1], "socket")) {
@@ -499,6 +534,45 @@ int main(int argc, char** argv) {
     if (!strcmp(argv[1], "ptrace")) {
         long r = ptrace(PTRACE_TRACEME, 0, 0, 0);
         if (r == -1 && errno == EPERM) return 42;
+        return 0;
+    }
+    if (!strcmp(argv[1], "unshare")) {
+        int r = unshare(P_CLONE_FILES);
+        if (r < 0 && errno == EPERM) return 42;
+        return 0;
+    }
+    if (!strcmp(argv[1], "clone3")) {
+        struct clone_args_probe a; memset(&a, 0, sizeof a);
+        a.exit_signal = SIGCHLD;
+        long r = syscall(SYS_clone3, &a, sizeof a);
+        if (r == 0) _exit(0);                       /* child */
+        if (r < 0 && (errno == ENOSYS || errno == EPERM)) return 42;
+        if (r > 0) { int st; waitpid((pid_t)r, &st, 0); }
+        return 0;
+    }
+    if (!strcmp(argv[1], "clonens")) {
+        long r = syscall(SYS_clone, (long)(P_CLONE_NEWUSER | SIGCHLD), 0L, 0L, 0L, 0L);
+        if (r == 0) _exit(0);                       /* child (unsandboxed: in a userns) */
+        if (r < 0 && errno == EPERM) return 42;
+        if (r > 0) { int st; waitpid((pid_t)r, &st, 0); }
+        return 0;
+    }
+    if (!strcmp(argv[1], "pidfd")) {
+        long pfd = syscall(SYS_pidfd_open, getpid(), 0);
+        if (pfd < 0) return 43;                     /* pidfd_open must stay allowed */
+        long stolen = syscall(SYS_pidfd_getfd, (int)pfd, 0, 0);
+        if (stolen < 0 && errno == EPERM) return 42;
+        return 0;
+    }
+    if (!strcmp(argv[1], "pty")) {
+        int m = posix_openpt(O_RDWR | O_NOCTTY);
+        if (m < 0) return 10;                        /* /dev/ptmx open blocked */
+        if (grantpt(m) != 0) return 11;
+        if (unlockpt(m) != 0) return 12;
+        char* sn = ptsname(m);
+        if (!sn) return 13;
+        int sfd = open(sn, O_RDWR | O_NOCTTY);
+        if (sfd < 0) return 14;                      /* /dev/pts slave open blocked */
         return 0;
     }
     return 2;
@@ -555,6 +629,207 @@ fn seccomp_denies_net_ptrace_and_vmread() {
         f.run(relaxed, &[], &probe, &["vmread"]).0,
         0,
         "neg: vmread allowed unsandboxed"
+    );
+}
+
+// ── O1: userns + mount-family seccomp deny (FS-escape closed at the boundary) ────
+
+#[test]
+fn seccomp_denies_userns_and_mount_family() {
+    if skip_without_landlock() {
+        return;
+    }
+    let f = fixture();
+    let Some(probe) = probe_bin(&f.proj) else {
+        return; // no cc — skip the syscall probes
+    };
+    let probe = s(&probe);
+    // Sandboxing active via net-enforce; fs relaxed so the probe execs from anywhere
+    // (an unlisted fs axis would floor to deny-all and stop the exec).
+    let sb = serde_json::json!({ "net": false, "fs": true });
+
+    // `unshare` is denied wholesale — proven with CLONE_FILES (unprivileged, succeeds
+    // on every host), so the deny is by syscall NUMBER and covers CLONE_NEWUSER too.
+    assert_eq!(
+        f.run(sb.clone(), &[], &probe, &["unshare"]).0,
+        42,
+        "unshare denied (blocks the userns-creating form by syscall number)"
+    );
+    // `clone3` is force-failed to ENOSYS (the glibc-fallback companion filter) — a
+    // plain fork via clone3 is blocked, so every clone3 flag set (incl. CLONE_NEWUSER)
+    // cannot create a namespace; glibc falls back to the flag-filtered `clone`.
+    assert_eq!(
+        f.run(sb.clone(), &[], &probe, &["clone3"]).0,
+        42,
+        "clone3 forced to ENOSYS (userns via clone3 closed; glibc falls back to clone)"
+    );
+    // The register-flag escape: `clone(CLONE_NEWUSER)` denied by the flag-filter.
+    // Deterministic under sandbox regardless of host unprivileged-userns policy (the
+    // seccomp EPERM precedes the kernel's userns check).
+    assert_eq!(
+        f.run(sb, &[], &probe, &["clonens"]).0,
+        42,
+        "clone(CLONE_NEWUSER) denied by the flag-filter"
+    );
+
+    // Negative controls — unsandboxed, the two unprivileged host-independent forms go
+    // through, proving the blocks above are ours (not a missing-capability artifact).
+    // (`clonens` is intentionally not controlled here: its unsandboxed success needs
+    // host unprivileged-userns; `unshare`/`clone3` carry the negative side robustly.)
+    let relaxed = serde_json::json!(false);
+    assert_eq!(
+        f.run(relaxed.clone(), &[], &probe, &["unshare"]).0,
+        0,
+        "neg: unshare(CLONE_FILES) allowed unsandboxed"
+    );
+    assert_eq!(
+        f.run(relaxed, &[], &probe, &["clone3"]).0,
+        0,
+        "neg: clone3 fork allowed unsandboxed"
+    );
+}
+
+// ── O2: pidfd fd-theft closed (getfd denied; pidfd_open preserved) ───────────────
+
+#[test]
+fn seccomp_denies_pidfd_getfd_keeps_pidfd_open() {
+    if skip_without_landlock() {
+        return;
+    }
+    let f = fixture();
+    let Some(probe) = probe_bin(&f.proj) else {
+        return;
+    };
+    let probe = s(&probe);
+    // Under sandbox: pidfd_open must still succeed (probe returns 43 if wrongly
+    // denied), and pidfd_getfd — the fd-theft primitive — must be EPERM (42).
+    assert_eq!(
+        f.run(
+            serde_json::json!({ "net": false, "fs": true }),
+            &[],
+            &probe,
+            &["pidfd"]
+        )
+        .0,
+        42,
+        "pidfd_getfd denied while pidfd_open stays allowed"
+    );
+    // Negative control — unsandboxed, the fd theft goes through.
+    assert_eq!(
+        f.run(serde_json::json!(false), &[], &probe, &["pidfd"]).0,
+        0,
+        "neg: pidfd_getfd allowed unsandboxed"
+    );
+}
+
+// ── O3: /dev narrowed to an allowlist (least-privilege, PTY still works) ──────────
+
+#[test]
+fn dev_allowlist_permits_pty_and_nodes_denies_rest() {
+    if skip_without_landlock() {
+        return;
+    }
+    let f = fixture();
+    // Read-confine engages the O3 /dev narrowing (wholesale `/dev` rw → per-node).
+    let confine = serde_json::json!({ "fs": ["./"] });
+
+    // Allowlisted nodes are usable: write /dev/null + read /dev/urandom.
+    assert!(
+        f.ok(
+            confine.clone(),
+            SH,
+            &[
+                "-c",
+                "printf x > /dev/null && head -c 4 /dev/urandom > /dev/null"
+            ]
+        ),
+        "allowlisted /dev/null + /dev/urandom usable under read-confine"
+    );
+    // A non-allowlisted node fails CLOSED: /dev/shm (world-writable tmpfs) write denied.
+    assert!(
+        !f.ok(
+            confine.clone(),
+            SH,
+            &["-c", "printf x > /dev/shm/nub_dev_probe"]
+        ),
+        "non-allowlisted /dev/shm write denied under read-confine"
+    );
+    // A PTY-spawning program works: /dev/ptmx + the /dev/pts slave are allowlisted.
+    if let Some(probe) = probe_bin(&f.proj) {
+        assert_eq!(
+            f.run(confine.clone(), &[], &s(&probe), &["pty"]).0,
+            0,
+            "PTY (ptmx + pts slave) opens under the /dev allowlist"
+        );
+    }
+    // A dynamically-linked interpreter still spawns under the narrowed /dev.
+    if Path::new("/usr/bin/python3").exists() {
+        let (_c, out) = f.run(
+            confine.clone(),
+            &[],
+            "/usr/bin/python3",
+            &["-c", "print('ok')"],
+        );
+        assert!(
+            out.contains("ok"),
+            "python3 (dynamic interpreter) runs under the narrowed /dev"
+        );
+    }
+    // Negative control — with fs relaxed, the non-allowlisted /dev/shm write succeeds,
+    // proving the deny above is the narrowing (not a missing tmpfs).
+    assert!(
+        f.ok(
+            serde_json::json!({ "fs": true }),
+            SH,
+            &["-c", "printf x > /dev/shm/nub_dev_probe2"]
+        ),
+        "neg-control: relaxed fs writes /dev/shm"
+    );
+}
+
+// ── node runs cleanly under the full hardening (the ship-blocker check) ──────────
+
+/// A real Node binary if one is installed (CI runners + the dev VM have one). The
+/// hardening MUST NOT break Node — it is the runtime nub augments.
+fn node_bin() -> Option<String> {
+    for p in ["/usr/local/bin/node", "/usr/bin/node"] {
+        if Path::new(p).exists() {
+            return Some(p.to_string());
+        }
+    }
+    None
+}
+
+#[test]
+fn node_threads_and_crypto_under_full_hardening() {
+    if skip_without_landlock() {
+        return;
+    }
+    let Some(node) = node_bin() else {
+        return; // no Node on this host — skip (VM/CI runners have one)
+    };
+    let f = fixture();
+    // Read-confine engages the whole stack at once: O1 seccomp (userns/mount deny +
+    // clone3→ENOSYS) + O2 (pidfd_getfd deny) + O3 (/dev allowlist); the unlisted net
+    // axis floors to deny-all, so seccomp is installed. This is the strictest posture.
+    // The Worker spawns a libuv/V8 thread — glibc issues clone3 for pthread_create, so
+    // this exercises the ENOSYS→clone fallback; crypto.randomBytes exercises the /dev
+    // entropy allowlist FROM the worker thread.
+    let script = "const {Worker}=require('worker_threads');\
+        const w=new Worker(\"const{parentPort}=require('worker_threads');\
+        parentPort.postMessage(require('crypto').randomBytes(4).toString('hex'))\",{eval:true});\
+        w.on('message',m=>{console.log('NODEOK'+m);w.terminate();});\
+        w.on('error',e=>{console.log('NODEERR'+e);});";
+    let (code, out) = f.run(
+        serde_json::json!({ "fs": ["./"] }),
+        &[],
+        &node,
+        &["-e", script],
+    );
+    assert!(
+        out.contains("NODEOK"),
+        "node must start, spawn a Worker thread (clone3→ENOSYS→clone fallback), and use \
+         crypto under the full O1/O2/O3 hardening (exit {code}, out {out:?})"
     );
 }
 
