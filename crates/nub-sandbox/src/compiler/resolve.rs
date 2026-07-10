@@ -11,6 +11,21 @@ pub fn has_substitution(value: &str) -> bool {
     find_next(value, 0).is_some()
 }
 
+/// Does the value contain a `$(` opener at all (balanced or not)? Paired with
+/// [`has_substitution`] to detect an UNTERMINATED substitution: opener present but
+/// no balanced close (`has_substitution` false). nub does no shell substitution
+/// outside a complete `$(…)`, so such a value is named as a substitution error
+/// rather than passed through literally (a footgun) or mislabeled "unknown env type".
+pub fn has_open_substitution(value: &str) -> bool {
+    value.contains("$(")
+}
+
+/// A `$(` opener with no balanced close: nub does no shell substitution outside a
+/// complete `$(…)`, so an unterminated one is named rather than passed through as a
+/// literal or mislabeled "unknown env type" (D18). Shared by every reject site.
+pub(crate) const UNTERMINATED_SUBST_MSG: &str =
+    "unterminated `$(…)` command substitution — expected a closing `)`";
+
 /// Locate the next `$(` … `)` span (with paren nesting) starting at `from`.
 /// Returns `(open_idx, close_idx_exclusive, inner)`.
 fn find_next(value: &str, from: usize) -> Option<(usize, usize, String)> {
@@ -91,6 +106,13 @@ pub fn resolve_with(value: &str, runner: &dyn CommandRunner) -> Result<String, S
         let stdout = runner.run(inner.trim())?;
         out.push_str(stdout.trim_end_matches('\n').trim_end_matches('\r'));
         cursor = close;
+    }
+    // A `$(` left in the trailing literal is an unterminated opener AFTER a balanced
+    // span (e.g. `$(echo hi) $(oops`). `find_next` skips it (never balances), so it
+    // would otherwise ship silently as literal text — reject instead (D18). Only the
+    // tail can hold one: any earlier `$(` would make the FIRST find_next unbalance.
+    if has_open_substitution(&value[cursor..]) {
+        return Err(UNTERMINATED_SUBST_MSG.to_string());
     }
     out.push_str(&value[cursor..]);
     Ok(out)
