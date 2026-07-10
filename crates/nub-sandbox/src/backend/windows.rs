@@ -388,6 +388,13 @@ pub(crate) fn apply(
     // branch-scoped windows-latest CI probe investigates the exemption's feasibility.
     if policy.net.enforce && policy.net.rules.iter().any(|r| r.effect == Effect::Allow) {
         deg.lost.push("net-per-host".to_string());
+        // A credential-inject rule is a per-REQUEST capability layered atop per-host: it
+        // degrades identically here (the loopback exemption that per-host needs gates the
+        // MITM proxy the same way), so report it explicitly rather than silently — the
+        // broker is fail-safe DENIED, never forwarded un-inspected (proposal §6).
+        if !policy.net.brokers.is_empty() {
+            deg.lost.push("net-per-request".to_string());
+        }
         reason.get_or_insert_with(|| {
             "per-host egress needs an AppContainer loopback exemption to reach the proxy \
              (not wired) — per-host allows denied (coarse network deny)"

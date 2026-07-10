@@ -242,6 +242,17 @@ pub(super) mod http1 {
             }
             buf.extend_from_slice(&tmp[..n]);
         };
+        // STRICT CRLF FRAMING (request-smuggling guard). Without this a child could embed
+        // a bare `\n` inside a header value; the split-on-`\r\n` parse would fold the
+        // remainder INTO that value, and on re-serialization the bare LF re-materializes
+        // as a separate header upstream — smuggling a header (e.g. its own `Authorization`)
+        // past strip-then-set and desyncing the request. Reject any bare CR or LF in the
+        // head; every CR must be followed by LF and every LF preceded by CR.
+        if has_bare_crlf(&buf[..head_end]) {
+            return Err(io::Error::other(
+                "request head contains a bare CR or LF (framing guard)",
+            ));
+        }
         let head =
             std::str::from_utf8(&buf[..head_end]).map_err(|_| io::Error::other("non-UTF8 head"))?;
         let mut lines = head.split("\r\n");
@@ -381,6 +392,26 @@ pub(super) mod http1 {
         buf.windows(4).position(|w| w == b"\r\n\r\n")
     }
 
+    /// True if `head` contains a bare CR (not followed by LF) or a bare LF (not part of a
+    /// preceding CRLF) — the request-smuggling framing violation. `\r\n` pairs are
+    /// consumed as a unit; anything else that is a CR/LF is bare.
+    fn has_bare_crlf(head: &[u8]) -> bool {
+        let mut i = 0;
+        while i < head.len() {
+            match head[i] {
+                b'\r' => {
+                    if head.get(i + 1) != Some(&b'\n') {
+                        return true; // bare CR
+                    }
+                    i += 2;
+                }
+                b'\n' => return true, // an LF reached outside a CRLF pair → bare LF
+                _ => i += 1,
+            }
+        }
+        false
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -420,6 +451,21 @@ pub(super) mod http1 {
         fn chunked_request_body_is_refused() {
             let raw = "POST /x HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
             assert!(read_request(&mut Cursor::new(raw.as_bytes())).is_err());
+        }
+
+        #[test]
+        fn bare_lf_header_smuggling_is_refused() {
+            // A child embeds a bare LF in a header value to smuggle its own Authorization
+            // past strip-then-set. The framing guard must reject the whole request.
+            let raw =
+                "GET / HTTP/1.1\r\nHost: h\r\nX-Foo: a\nAuthorization: child-smuggled\r\n\r\n";
+            assert!(read_request(&mut Cursor::new(raw.as_bytes())).is_err());
+            // A bare CR is likewise rejected.
+            let raw_cr = "GET / HTTP/1.1\r\nHost: h\rX-Evil: 1\r\n\r\n";
+            assert!(read_request(&mut Cursor::new(raw_cr.as_bytes())).is_err());
+            // A well-formed request with only CRLF pairs is accepted.
+            let ok = "GET / HTTP/1.1\r\nHost: h\r\nX-Foo: a\r\n\r\n";
+            assert!(read_request(&mut Cursor::new(ok.as_bytes())).is_ok());
         }
     }
 }

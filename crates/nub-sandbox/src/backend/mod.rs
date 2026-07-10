@@ -288,9 +288,6 @@ pub fn apply(policy: &SandboxPolicy, spec: CommandSpec) -> Result<Prepared, Degr
     // so the child both TRUSTS the minted leaves (CA-env) and can READ the bundle even
     // under a confining fs policy (an explicit read grant — nub infra, not user config).
     let ca_bundle = proxy.as_ref().and_then(|p| p.ca_bundle_path());
-    if ca_bundle.is_some() {
-        emit_mitm_notice(policy);
-    }
 
     #[cfg(target_os = "macos")]
     let mut prepared = macos::apply(policy, spec, proxy_port, ca_bundle)?;
@@ -300,6 +297,20 @@ pub fn apply(policy: &SandboxPolicy, spec: CommandSpec) -> Result<Prepared, Degr
     let mut prepared = windows::apply(policy, spec, proxy_port, ca_bundle)?;
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     let mut prepared = generic_apply(policy, spec, proxy_port, ca_bundle)?;
+
+    // One-line stderr notice when TLS termination ACTUALLY engages — never silent, but
+    // never MISLEADING either: suppress it where the backend degraded net (e.g. Windows,
+    // whose AppContainer child can't reach the loopback proxy, so termination never
+    // happens and the request is fail-safe denied — announcing it would be a false claim).
+    if ca_bundle.is_some()
+        && !prepared
+            .degradation
+            .lost
+            .iter()
+            .any(|l| l.starts_with("net-per"))
+    {
+        emit_mitm_notice(policy);
+    }
 
     prepared.proxy = proxy;
     Ok(prepared)
