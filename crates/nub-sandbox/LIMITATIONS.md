@@ -145,8 +145,13 @@ SID — so the open is denied (`ERROR_ACCESS_DENIED`), **independent of integrit
 - **Honest bound:** the `PROCESS_VM_READ`-inclusive `OpenProcess` is proven denied; a
   `PROCESS_QUERY_LIMITED_INFORMATION`-only handle was not separately probed, but it cannot
   read the environment block (that requires `PROCESS_VM_READ`), so it does not reopen the axis.
-- **Code follow-up:** `backend/windows.rs` still emits an `env-read-ascendant` `Degradation`
-  when the scrub withholds something — now stale given this result, pending removal.
+- **VM-reconfirmed (burn box, standard `nub` user, 2026-07):** an AppContainer child's
+  `OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION)` AND `(… | QUERY_LIMITED)` on
+  its same-user parent are BOTH denied `ERROR_ACCESS_DENIED` — independent of the CI run
+  (`tests/windows_ascendant_env.rs`, which mounts the full PEB-walk attack, not just the
+  reporting check).
+- **Code state:** `backend/windows.rs` `apply` emits NO `env-read-ascendant` `Degradation`
+  (the enforcement suite locks that in) — the axis is closed by the OS, not merely reported.
 
 ### macOS toolchain read-confine for a non-system interpreter
 
@@ -160,15 +165,21 @@ paths, it does not probe the host).
   the allow-set. A system interpreter is covered by the essential base and never hits
   this.
 
-### Windows confined work dirs must live under a nub-owned store
+### Windows confined work dirs need a CLEAN-DACL root (not a nub-owned store; not ancestor traverse grants)
 
-A LowBox child does not bypass traverse checking, so every ancestor of a granted leaf
-needs an AC-SID traverse grant. Granting traverse on a shared ancestor like
-`C:\Users\<user>` needs `WRITE_DAC` on it, which non-elevated nub lacks.
+Superseded — a LowBox token retains SeChangeNotifyPrivilege (Bypass Traverse Checking) and
+standard NTFS volumes carry `FILE_DEVICE_ALLOW_APPCONTAINER_TRAVERSAL`, so intermediate-dir
+ACLs are NOT access-checked: a leaf-only AC-SID grant is reachable under an ORDINARY
+`%TEMP%`/profile tree with no ancestor traverse grants and no `C:\`-owned store (VM-verified
+under `%TEMP%`, `tests/windows_enforcement.rs` + `windows_residuals.rs`). nub never needs
+`WRITE_DAC` on a shared ancestor.
 
-- **Where fixed:** confined work dirs must live under a **nub-owned** store root (whose
-  DACL nub controls), so the launcher never needs `WRITE_DAC` on a user/system ancestor.
-  A launcher work-dir-layout contract.
+- **Real launcher contract:** the confined root must carry a CLEAN DACL — no inherited
+  `ALL APPLICATION PACKAGES` allow-ACE. Where a work dir inherits an AAP grant (some
+  `%TEMP%`/profile trees), an ungranted secret UNDER it is readable regardless of the
+  allow-set (the AAP grant satisfies the LowBox check before default-deny). Demonstrated by
+  the `windows_residuals.rs` RT-B probe; the fixtures strip inherited ACEs
+  (`icacls /inheritance:r`) to model the clean root the launcher provides.
 
 ### Untrusted-tier tighten-only layering
 
@@ -204,9 +215,13 @@ Each is documented in code at the site noted; none is silently mis-reported.
   non-standard path is not matched, re-exposing `/proc/<pid>/environ`. Bounded: requires
   the ability to bind-mount procfs (prior privilege/setup) before entering the sandbox.
   Fix: a mount namespace, or broader procfs detection.
-- **Windows program-dir subtree read grant.** The program's parent DIR is auto-granted
-  inheritable read so the LowBox child can load sibling DLLs; a project-local tool's
-  neighboring files (a `.env` next to a binary) become readable. Bounded for the
-  build-jail (the program is the toolchain — e.g. `node.exe` — whose dir holds no user
-  secrets). Fix: the front-end owns the program grant explicitly rather than the engine
-  auto-widening it. (`backend/windows.rs` `apply`.)
+- **Windows program grant is file-only (neighbor-read leak CLOSED).** The engine grants
+  read+execute on the program FILE ITSELF, not its parent dir (traverse-bypass makes the
+  leaf-object ACL sufficient to exec), so a `.env` next to a binary is no longer swept
+  into the allow-set. Mirrors the macOS file-only program grant. VM-verified: the neighbor
+  `.env` is DENIED while the child still execs and reads its granted dirs
+  (`tests/windows_residuals.rs` R1, `tests/windows_enforcement.rs`). Residual launcher
+  contract (identical to the macOS "toolchain read-confine" item above): a program that
+  loads SIBLING DLLs from its own dir needs the front-end to supply that toolchain dir in
+  the read allow-set — the engine no longer auto-widens. A self-contained build-jail
+  toolchain (`node.exe`) needs nothing more. (`backend/windows.rs` `apply`.)
