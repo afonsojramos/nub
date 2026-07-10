@@ -203,7 +203,11 @@ pub(crate) fn compile_scope(
         Value::String(s) => match classify_string(s) {
             StringKind::Preset => {
                 let expanded = preset::resolve(s)?;
-                compile_object(&expanded, parent, ctx, warnings)
+                let mut policy = compile_object(&expanded, parent, ctx, warnings)?;
+                // A preset's broad grants (build-jail's `"./"`) re-open the built-in
+                // secret floor under last-match-wins; re-assert it post-fold.
+                preset::reassert_secret_floor(s, &mut policy, ctx);
+                Ok(policy)
             }
             StringKind::FileRef => Err(CompileError::FileRefUnresolved {
                 path: String::new(),

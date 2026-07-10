@@ -219,20 +219,56 @@ const BASELINE_ENV_PREFIXES: &[&str] = &["LC_", "npm_config_"];
 /// CREDENTIALS (must never reach sandboxed code). See [`is_npm_config_credential`].
 const NPM_CONFIG_PREFIX: &str = "npm_config_";
 
-/// Whether an `npm_config_*` key (given the part AFTER the `npm_config_` prefix) is
-/// a registry CREDENTIAL rather than a build hint. Grounds .fray/sandbox.md thread
-/// #6: registry auth never rides the lifecycle env — env-scrub's whole point for the
-/// credential class. Covers the bare legacy keys (`_auth`, `_authToken`, `_password`,
-/// `email`) AND the registry-scoped `//host/:_auth…`/`:_password`/`:email` forms.
-/// `_auth`/`_password` carry a leading underscore, so as substrings they can't hit a
-/// build hint (`_author`/`always-auth` are not build hints, and no hint embeds
-/// `_auth`/`_password`). `email` has no such anchor, so it is matched ONLY as the
-/// whole key or a registry-scoped `:email` suffix — otherwise it would wrongly scrub
-/// a hint like `npm_config_nodemailer_binary_host_mirror`. Kept build hints
+/// Unambiguous credential words in an `npm_config_*` key — long/specific enough that
+/// a case-insensitive SUBSTRING hit has no realistic collision with a node-gyp /
+/// node-pre-gyp build hint (none of which embed these). Mirrors the env-name
+/// [`SECRET_SUBSTR_TOKENS`] discipline, scoped to the registry-credential family.
+const NPM_CRED_SUBSTR_TOKENS: &[&str] = &[
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "credential",
+    "apikey",
+];
+
+/// Short/ambiguous credential words matched ONLY as a whole `_`/`-`/`.` segment, so
+/// `npm_config_key` (npm's inline registry client SSL key) and `npm_config_api_key`
+/// scrub while a package binary-host hint whose name merely contains the letters
+/// (`npm_config_keytar_binary_host_mirror`, `..._monkey_...`) is spared. `auth` is
+/// deliberately NOT here — it stays the anchored `_auth` test below so `always-auth` /
+/// `_author` are not swept.
+const NPM_CRED_SEGMENT_TOKENS: &[&str] = &["key"];
+
+/// Whether an `npm_config_*` key (given the part AFTER the `npm_config_` prefix) is a
+/// registry CREDENTIAL rather than a build hint — such keys must never reach sandboxed
+/// lifecycle code (.fray/sandbox.md thread #6: registry auth never rides the lifecycle
+/// env). Three tiers, all case-insensitive + delimiter-aware. First, the anchored legacy
+/// markers: `_auth*` (the leading `_` spares `always-auth` / `_author`) and `email` as the
+/// whole key or a registry-scoped `:email` suffix (an unanchored `email` would wrongly
+/// scrub `npm_config_nodemailer_binary_host_mirror`). Then the unambiguous credential
+/// words ([`NPM_CRED_SUBSTR_TOKENS`]) anywhere in the key — catching `password` /
+/// `_authToken` / scoped `//host/:_password` and the undelimited `foo_token` / `my_secret`
+/// forms an exact-segment rule would miss. Finally the short `key` family as a whole
+/// segment ([`NPM_CRED_SEGMENT_TOKENS`]). Kept build hints
 /// (`target`/`arch`/`runtime`/`nodedir`/`python`/`*_binary_host_mirror`/…) match none.
+/// Best-effort per §8: the rare native package literally named after a credential word
+/// loses its binary-host MIRROR hint (falling back to the default host), acceptable next
+/// to leaking a token.
 fn is_npm_config_credential(remainder: &str) -> bool {
     let r = remainder.to_ascii_lowercase();
-    r.contains("_auth") || r.contains("_password") || r == "email" || r.ends_with(":email")
+    if r.contains("_auth") || r == "email" || r.ends_with(":email") {
+        return true;
+    }
+    if NPM_CRED_SUBSTR_TOKENS
+        .iter()
+        .any(|w| word_in_substr(w, remainder))
+    {
+        return true;
+    }
+    NPM_CRED_SEGMENT_TOKENS
+        .iter()
+        .any(|w| word_is_segment(w, remainder))
 }
 
 /// Build the curated-baseline child env from the ambient env (the `sandbox: true`
@@ -352,39 +388,29 @@ mod tests {
         // The `npm_config_*` family passes build hints through, but registry auth
         // rides the same prefix and must be scrubbed — thread #6. Both the bare
         // legacy keys and the registry-scoped `//host/:_auth…` forms are excluded.
-        let ambient: BTreeMap<String, String> = [
-            ("npm_config_target", "22.0.0"),
-            ("npm_config_arch", "arm64"),
-            ("npm_config_runtime", "node"),
-            ("npm_config_registry", "https://registry.npmjs.org/"),
-            // A build hint whose package name embeds "email" — must NOT be scrubbed by
-            // the anchored `email` marker (regression guard for the unanchored form).
-            ("npm_config_nodemailer_binary_host_mirror", "https://x/"),
-            ("npm_config__auth", "aGVsbG86d29ybGQ="),
-            ("npm_config__authToken", "npm_LEAK"),
-            ("npm_config__password", "hunter2"),
-            ("npm_config_email", "me@example.com"),
-            (
-                "npm_config_//registry.npmjs.org/:_authToken",
-                "SECRET_TOKEN",
-            ),
-            ("npm_config_//registry.npmjs.org/:_password", "SECRET_PW"),
-            ("npm_config_//registry.npmjs.org/:_auth", "SECRET_BASIC"),
-        ]
-        .iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect();
-        let out = curated_baseline_env(&ambient);
-        for k in [
+        // Build hints (kept) — incl. two regression guards for false positives: a
+        // package whose name embeds "email" (`nodemailer`) must survive the anchored
+        // `email` marker, and a package whose name embeds "key" (`keytar`) must survive
+        // the whole-SEGMENT `key` rule. `always-auth` is `-auth`, not `_auth` — kept.
+        let hints = [
             "npm_config_target",
             "npm_config_arch",
+            "npm_config_target_arch",
             "npm_config_runtime",
+            "npm_config_nodedir",
+            "npm_config_python",
+            "npm_config_build_from_source",
             "npm_config_registry",
+            "npm_config_sharp_binary_host",
             "npm_config_nodemailer_binary_host_mirror",
-        ] {
-            assert!(out.contains_key(k), "build hint {k} must pass");
-        }
-        for k in [
+            "npm_config_keytar_binary_host_mirror",
+            "npm_config_always-auth",
+        ];
+        // Credentials (scrubbed) — the anchored legacy markers, the broadened
+        // credential-word set (token/secret/password/passwd/credential/apikey), and
+        // the short `key` family as a delimited segment. Covers undelimited, hyphen,
+        // and dot forms an exact-segment rule would miss.
+        let creds = [
             "npm_config__auth",
             "npm_config__authToken",
             "npm_config__password",
@@ -392,7 +418,29 @@ mod tests {
             "npm_config_//registry.npmjs.org/:_authToken",
             "npm_config_//registry.npmjs.org/:_password",
             "npm_config_//registry.npmjs.org/:_auth",
-        ] {
+            "npm_config_password",
+            "npm_config_passwd",
+            "npm_config_foo_token",
+            "npm_config_authtoken",
+            "npm_config_my_secret",
+            "npm_config_credential",
+            "npm_config_apikey",
+            "npm_config_api_key",
+            "npm_config_signing_key",
+            "npm_config_key",
+            "npm_config_my-token",
+            "npm_config_x.secret.y",
+        ];
+        let ambient: BTreeMap<String, String> = hints
+            .iter()
+            .chain(creds.iter())
+            .map(|k| (k.to_string(), "v".to_string()))
+            .collect();
+        let out = curated_baseline_env(&ambient);
+        for k in hints {
+            assert!(out.contains_key(k), "build hint {k} must pass");
+        }
+        for k in creds {
             assert!(!out.contains_key(k), "credential {k} must be scrubbed");
         }
     }
