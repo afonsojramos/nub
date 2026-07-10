@@ -256,3 +256,109 @@ fn regex_dir_pinning_deny_secret_cannot_be_relocated_by_ancestor_rename() {
         "a legit write inside the pinned dir must still succeed (got {write_ok:?})"
     );
 }
+
+// ── documented OPEN residuals (LIMITATIONS.md) ──────────────────────────────────
+// The two closed shapes above (literal `(subpath)` deny + regex-dir-prefix deny) ARE
+// move-blocked and are the positive controls. The two tests below BOUND the residual:
+// a deny whose relocation-sensitive container has NO absolute literal directory prefix
+// to anchor stays relocatable by an ancestor rename. Each asserts the precise bound —
+// the leaf read-deny still holds (only the container rename escapes) — and pairs an
+// UNCONFINED control proving the relocation is a real leak. These pass by REPRODUCING
+// the residual; when a future change closes it, the `confined … must still leak`
+// assertion flips and this test must be updated to a `must NOT leak` (like the two
+// above), turning the residual's closure into a visible, deliberate edit.
+
+#[test]
+fn floating_name_subtree_deny_stays_relocatable_residual() {
+    // `!**/secrets/**` → a subtree deny whose matched dir name FLOATS (no fixed absolute
+    // anchor). `regex_literal_dir_prefix` finds no literal prefix, so no ancestor is
+    // pinned. The leaf read-deny holds, but `mv secrets elsewhere` moves the tree to a
+    // path the pattern no longer matches → readable at the new path.
+    let root = TempDir::new_in("/private/tmp").expect("tmp outside $TMPDIR");
+    let root_c = std::fs::canonicalize(root.path()).expect("canon root");
+    std::fs::create_dir(root_c.join("secrets")).expect("mkdir secrets");
+    std::fs::write(root_c.join("secrets/x.key"), MARKER).expect("plant secret");
+
+    let root_s = root_c.to_string_lossy().to_string();
+    let policy = fs_policy(vec![
+        rule("**", Effect::Allow, FsAccess::Read),
+        rule(&root_s, Effect::Allow, FsAccess::ReadWrite),
+        rule("**/secrets/**", Effect::Deny, FsAccess::Read),
+    ]);
+
+    // BOUND: the direct read at the original path IS denied (the rule's primary read-deny
+    // holds — proving the sandbox applies, so the relocation leak is a genuine residual,
+    // not a non-enforcing sandbox).
+    let direct = run_confined(&policy, &root_c, "/bin/cat secrets/x.key 2>/dev/null");
+    assert!(
+        !direct.contains(MARKER),
+        "confined: the leaf read-deny must hold at the original path (got {direct:?})"
+    );
+
+    let relocate = "/bin/mv secrets elsewhere 2>/dev/null; /bin/cat elsewhere/x.key 2>/dev/null";
+    let control = run_unconfined(&root_c, relocate);
+    let _ = std::fs::rename(root_c.join("elsewhere"), root_c.join("secrets"));
+    assert!(
+        control.contains(MARKER),
+        "neg-control: unconfined `mv secrets elsewhere; cat` must leak (got {control:?})"
+    );
+
+    // RESIDUAL: no literal anchor → the container rename is NOT blocked → the secret is
+    // readable at the relocated path. (If this stops leaking, the residual closed —
+    // update to `must NOT leak`.)
+    let confined = run_confined(&policy, &root_c, relocate);
+    assert!(
+        confined.contains(MARKER),
+        "residual: a floating-name subtree deny stays relocatable — expected the leak to \
+         reproduce (got {confined:?}); if it no longer leaks the residual closed"
+    );
+}
+
+#[test]
+fn partial_component_glob_deny_stays_relocatable_residual() {
+    // `!sec*/x.key` → a PARTIAL glob in a non-leaf component. The literal directory
+    // prefix is only `<root>` (the pin stops above `<root>/secrets`), so the container
+    // `<root>/secrets` — matched by the partial `sec*` — is below the anchor and unpinned.
+    // `mv secrets elsewhere` renames it to a name outside `sec*` → the deny no longer
+    // matches → readable.
+    let root = TempDir::new_in("/private/tmp").expect("tmp outside $TMPDIR");
+    let root_c = std::fs::canonicalize(root.path()).expect("canon root");
+    std::fs::create_dir(root_c.join("secrets")).expect("mkdir secrets");
+    std::fs::write(root_c.join("secrets/x.key"), MARKER).expect("plant secret");
+
+    let root_s = root_c.to_string_lossy().to_string();
+    let policy = fs_policy(vec![
+        rule("**", Effect::Allow, FsAccess::Read),
+        rule(&root_s, Effect::Allow, FsAccess::ReadWrite),
+        rule(
+            &format!("{root_s}/sec*/x.key"),
+            Effect::Deny,
+            FsAccess::Read,
+        ),
+    ]);
+
+    // BOUND: the direct read at the original path IS denied (the rule's primary read-deny
+    // holds — proving the sandbox applies, so the relocation leak is a genuine residual).
+    let direct = run_confined(&policy, &root_c, "/bin/cat secrets/x.key 2>/dev/null");
+    assert!(
+        !direct.contains(MARKER),
+        "confined: the leaf read-deny must hold at the original path (got {direct:?})"
+    );
+
+    let relocate = "/bin/mv secrets elsewhere 2>/dev/null; /bin/cat elsewhere/x.key 2>/dev/null";
+    let control = run_unconfined(&root_c, relocate);
+    let _ = std::fs::rename(root_c.join("elsewhere"), root_c.join("secrets"));
+    assert!(
+        control.contains(MARKER),
+        "neg-control: unconfined `mv secrets elsewhere; cat` must leak (got {control:?})"
+    );
+
+    // RESIDUAL: the `sec*`-matched container is below the literal anchor → unpinned →
+    // relocatable. (If this stops leaking, the residual closed — update to `must NOT leak`.)
+    let confined = run_confined(&policy, &root_c, relocate);
+    assert!(
+        confined.contains(MARKER),
+        "residual: a partial-component glob deny stays relocatable — expected the leak to \
+         reproduce (got {confined:?}); if it no longer leaks the residual closed"
+    );
+}

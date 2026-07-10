@@ -1317,4 +1317,77 @@ mod tests {
             vec![rule("C:/x", Effect::Deny, FsAccess::Read)]
         )));
     }
+
+    // `apply` is `#[cfg(windows)]`, so this test compiles + runs only on the Windows VM/CI.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn net_enforced_with_allow_rule_degrades_per_host() {
+        use crate::policy::{NetPolicy, NetRule, NetTarget};
+        // CUT-1: Windows per-host egress needs an AppContainer loopback exemption to reach
+        // the parent proxy — unwired — so an enforced net with ANY allow rule degrades to
+        // coarse-deny and MUST report `net-per-host` (fail-safe, not silent). The twin of
+        // the macOS `degradation_reports_lost_per_host_only_without_proxy` unit test.
+        // Asserted at the `apply` fold (the emission point) with a clean deny-all fs so no
+        // fs degradation confounds the net signal.
+        let per_host = SandboxPolicy {
+            fs: fs(Effect::Deny, vec![]),
+            net: NetPolicy {
+                enforce: true,
+                rules: vec![NetRule {
+                    target: NetTarget::Host("example.com".to_string()),
+                    effect: Effect::Allow,
+                }],
+                default_effect: Effect::Deny,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let lost = |port| {
+            apply(
+                &per_host,
+                crate::CommandSpec::new("cmd.exe"),
+                port,
+                None,
+                None,
+            )
+            .expect("apply")
+            .degradation
+            .lost
+        };
+        assert!(
+            lost(None).iter().any(|s| s == "net-per-host"),
+            "an enforced net with an allow rule must report net-per-host"
+        );
+        // Windows-specific contract: unlike macOS (where a proxy resolves per-host), the
+        // exemption is unwired, so a proxy port does NOT resolve it — it STILL degrades.
+        assert!(
+            lost(Some(9999)).iter().any(|s| s == "net-per-host"),
+            "Windows degrades per-host even WITH a proxy port (exemption unwired)"
+        );
+
+        // Positive control: a pure deny-all net (no allow rules) is fully enforced.
+        let deny_all = SandboxPolicy {
+            fs: fs(Effect::Deny, vec![]),
+            net: NetPolicy {
+                enforce: true,
+                default_effect: Effect::Deny,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let deg = apply(
+            &deny_all,
+            crate::CommandSpec::new("cmd.exe"),
+            None,
+            None,
+            None,
+        )
+        .expect("apply")
+        .degradation;
+        assert!(
+            !deg.lost.iter().any(|s| s == "net-per-host"),
+            "a pure deny-all net must not report net-per-host (got {:?})",
+            deg.lost
+        );
+    }
 }

@@ -622,6 +622,65 @@ fn env_extras_reject_the_old_secret_public_keys() {
     }
 }
 
+#[test]
+fn env_integer_format_leniency_is_the_rust_i64_parse() {
+    // D19: the `integer` format validates via Rust's i64 parse — it ACCEPTS a leading
+    // sign and leading zeros (`+5`, `007`) but REJECTS a radix prefix (`0x10`), a
+    // non-integer shape (`5.0`, `1_000`), and an out-of-i64-range value. Pin the exact
+    // leniency so a future validator swap can't silently widen or narrow it.
+    for good in ["5", "+5", "007", "-42", "0"] {
+        let ctx = common::ctx(true, &[("N", good)]);
+        assert!(
+            compile(&json!({ "env": { "N": "integer" } }), &ctx).is_ok(),
+            "`{good}` must validate as an integer"
+        );
+    }
+    for bad in ["0x10", "99999999999999999999999999", "5.0", "1_000"] {
+        let ctx = common::ctx(true, &[("N", bad)]);
+        assert!(
+            matches!(
+                compile(&json!({ "env": { "N": "integer" } }), &ctx),
+                Err(CompileError::Validation { .. })
+            ),
+            "`{bad}` must be rejected as an integer"
+        );
+    }
+}
+
+#[test]
+fn env_empty_array_is_strip_all_not_passthrough() {
+    // D13: `env: []` is an allowlist with ZERO allow entries → deny base, no allow =
+    // strip-all. The mental-model trap is reading an empty list as "no restrictions";
+    // it is the opposite. Enforcing, every ambient var withheld, none constructed.
+    let ctx = common::ctx(true, &[("FOO", "1"), ("BAR", "2"), ("BAZ", "3")]);
+    let p = compile(&json!({ "env": [] }), &ctx).unwrap();
+    assert!(p.env.enforce, "an explicit env axis always enforces");
+    for k in ["FOO", "BAR", "BAZ"] {
+        assert!(!p.env.constructed.contains_key(k), "{k} must be stripped");
+        assert!(
+            p.env.withheld.contains(&k.to_string()),
+            "{k} must be recorded withheld"
+        );
+    }
+}
+
+#[test]
+fn env_lone_deny_strips_everything_not_all_but_x() {
+    // D14: a lone `["!X"]` is the other trap — it reads like "allow all EXCEPT X", but
+    // an array is an allowlist and there is no allow base, so it strips EVERYTHING (X and
+    // every other var alike). To keep sibling vars you must allow them explicitly first.
+    let ctx = common::ctx(true, &[("X", "1"), ("Y", "2"), ("Z", "3")]);
+    let p = compile(&json!({ "env": ["!X"] }), &ctx).unwrap();
+    assert!(p.env.enforce);
+    for k in ["X", "Y", "Z"] {
+        assert!(
+            !p.env.constructed.contains_key(k),
+            "{k} stripped — no allow base means `!X` does not spare Y/Z"
+        );
+        assert!(p.env.withheld.contains(&k.to_string()), "{k} withheld");
+    }
+}
+
 // ── $(…) substitution + trust gate ────────────────────────────────────────────
 
 #[test]

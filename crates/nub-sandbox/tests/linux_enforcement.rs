@@ -461,6 +461,109 @@ fn env_passthrough_does_not_close_proc() {
     );
 }
 
+#[test]
+fn bind_mounted_procfs_at_nonstandard_path_is_a_bounded_residual() {
+    if skip_without_landlock() {
+        return;
+    }
+    let f = fixture();
+    // `is_proc_or_sys` filters by `path.starts_with("/proc")` — a path-LITERAL check. A
+    // procfs bind-mounted OUTSIDE that prefix, inside a read-granted subtree, is not
+    // recognized as procfs and IS granted → its non-sensitive files leak. This test
+    // reproduces that residual AND its bound: real `/proc` stays blocked (the canonical
+    // filter works), and the ancestor `environ` stays closed by the ORTHOGONAL ptrace
+    // gate on `/proc/<pid>/environ`, which the alt mount does not bypass.
+    //
+    // The bind-mount needs CAP_SYS_ADMIN. Prefer a PRE-PROVISIONED mount named by
+    // `NUB_SANDBOX_ALTPROC` (a privileged setup step points it at a `mount --bind /proc`
+    // target) so the residual is exercised UNPRIVILEGED — the setting it's documented for
+    // and where the ptrace bound is crisp. Else bind-mount in-test (root). Skip cleanly
+    // (never a hollow pass) when neither yields a live procfs.
+    struct Unmount(Option<String>);
+    impl Drop for Unmount {
+        fn drop(&mut self) {
+            if let Some(p) = &self.0 {
+                let _ = std::process::Command::new("umount").arg(p).status();
+            }
+        }
+    }
+    let (altproc, _guard) = match std::env::var_os("NUB_SANDBOX_ALTPROC") {
+        Some(p) => {
+            let p = PathBuf::from(p);
+            if !p.join("version").exists() {
+                panic!("NUB_SANDBOX_ALTPROC={p:?} is not a live procfs bind mount");
+            }
+            (p, Unmount(None))
+        }
+        None => {
+            let altproc = f.root.join("altproc");
+            std::fs::create_dir_all(&altproc).unwrap();
+            let mounted = std::process::Command::new("mount")
+                .args(["--bind", "/proc", &s(&altproc)])
+                .status()
+                .map(|st| st.success())
+                .unwrap_or(false);
+            if !mounted {
+                eprintln!(
+                    "skipping: no NUB_SANDBOX_ALTPROC and cannot bind-mount /proc (needs CAP_SYS_ADMIN)"
+                );
+                return;
+            }
+            (altproc.clone(), Unmount(Some(s(&altproc))))
+        }
+    };
+
+    // Grant read of the REGULAR PARENT dir that CONTAINS the alt mount — never the mount
+    // itself (a procfs bind mount shares /proc's dentries, so granting it would grant real
+    // /proc too and dissolve the control). The subtree grant on the parent reaches down
+    // into the bind mount during path-walk — that reach is the residual. `**/altproc` is
+    // the covering shape the task documents (`{fs:["/tmp"]}` over `/tmp/altproc`).
+    let grant_dir = altproc
+        .parent()
+        .expect("alt mount has a parent dir")
+        .to_path_buf();
+    let grant = serde_json::json!({ "fs": [s(&grant_dir)] });
+
+    // Canonical `/proc` filter WORKS: real `/proc/version` is denied under read-confine.
+    let (_c, real) = f.run(grant.clone(), &[], CAT, &["/proc/version"]);
+    assert!(
+        !real.contains("Linux"),
+        "real /proc must stay blocked under read-confine (got {real:?})"
+    );
+    // RESIDUAL: the bind-mounted procfs is granted → `version` leaks at the alt path.
+    let alt_version = s(&altproc.join("version"));
+    let (_c, altver) = f.run(grant.clone(), &[], CAT, &[&alt_version]);
+    assert!(
+        altver.contains("Linux"),
+        "residual: procfs bind-mounted outside `/proc` leaks `version` (got {altver:?})"
+    );
+
+    // BOUND: the crown-jewel — the ancestor's `environ` — is read the SAME way (same
+    // `$PPID/environ` path through the alt mount) with and without the sandbox, so the
+    // only variable is confinement. Unconfined it IS readable (a same-uid /proc read;
+    // yama ptrace_scope gates ATTACH, not READ) — that is the negative control proving the
+    // vector is real. Under confinement it is NOT readable: the sandbox's isolation (the
+    // userns/credential boundary) closes the ancestor-environ read even through the alt
+    // procfs. So the path-literal residual leaks only NON-sensitive procfs (`version`),
+    // never the env — the bound.
+    let read_environ = format!("/bin/cat {}/$PPID/environ 2>/dev/null || true", s(&altproc));
+    let (_c, env_confined) = f.run(grant, &[], SH, &["-c", &read_environ]);
+    let (_c, env_control) = f.run(serde_json::json!(false), &[], SH, &["-c", &read_environ]);
+    if env_control.contains("PATH=") {
+        assert!(
+            !env_confined.contains("PATH="),
+            "bound: the ancestor environ must stay closed under confinement via the alt \
+             mount (unconfined control read it; confined must not)"
+        );
+    } else {
+        // The ambient policy (ptrace/root creds) already blocks the read, so the residual
+        // can expose nothing here regardless — no attributable bound to assert.
+        eprintln!(
+            "note: unconfined control could not read the ancestor environ; the bound holds trivially"
+        );
+    }
+}
+
 // ── env-scrub (construction) ────────────────────────────────────────────────────
 
 #[test]
