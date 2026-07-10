@@ -1,0 +1,139 @@
+# Ad-hoc probe (NOT a merge gate): does the macOS env-read closure hold across
+# macOS majors? The closure is the Seatbelt `(deny process-info*)` +
+# `(allow process-info* (target self))` profile that blocks cross-process
+# `KERN_PROCARGS2` env reads. It is version-INDEPENDENT in code but was only ever
+# exercised on macos-latest — this runs the flagship `macos_envread` suite (+ the
+# broader `macos_enforcement` suite as a supporting signal) on macos-13 / -14 / -15
+# to record per-version HOLD vs LEAK from REAL runner output.
+#
+# Branch-scoped per the ci-adhoc-test skill: no PR required. `push` to this branch is
+# the live trigger; `workflow_dispatch` is inert until the file reaches the default
+# branch (kept for that day). See tests/sandbox-macos-envread-matrix/README.md.
+name: sandbox macOS env-read version matrix
+
+on:
+  push:
+    branches: [sandbox-macos-envread-matrix]
+    paths:
+      - "crates/nub-sandbox/tests/macos_envread.rs"
+      - "crates/nub-sandbox/tests/macos_enforcement.rs"
+      - "tests/sandbox-macos-envread-matrix/**"
+      - ".github/workflows/sandbox-macos-envread-matrix.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  envread-matrix:
+    name: env-read closure — ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-13, macos-14, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: sandbox-envread-${{ matrix.os }}
+          save-if: false
+      # node is needed by `node_runs_under_the_env_read_closure`; without it that
+      # case cleanly SKIPs (no signal), so provision it to exercise the full suite.
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "24"
+      - name: Record runner OS version
+        shell: bash
+        run: |
+          echo "sw_vers:"; sw_vers
+          echo "uname -m: $(uname -m)"
+          echo "cc: $(cc --version | head -1)"
+
+      # The flagship suite. Capture output so we can render an explicit HOLD/LEAK
+      # verdict even when a test FAILS — a failure here is the finding, not noise.
+      - name: Run env-read closure suite (macos_envread)
+        id: envread
+        shell: bash
+        run: |
+          set -o pipefail
+          set +e
+          cargo test -p nub-sandbox --test macos_envread -- --nocapture --test-threads=1 \
+            2>&1 | tee /tmp/envread.log
+          echo "rc=$?" | tee /tmp/envread.rc
+          exit 0
+
+      # Supporting signal: the general Seatbelt fs/net enforcement suite. If this
+      # LEAKs/fails on an older major, the whole confinement primitive is suspect
+      # there, not just the env-read node.
+      - name: Run enforcement suite (macos_enforcement)
+        id: enforcement
+        shell: bash
+        run: |
+          set -o pipefail
+          set +e
+          cargo test -p nub-sandbox --test macos_enforcement -- --nocapture --test-threads=1 \
+            2>&1 | tee /tmp/enforcement.log
+          echo "rc=$?" | tee /tmp/enforcement.rc
+          exit 0
+
+      - name: Classify verdict and write summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          er=$(cat /tmp/envread.rc | sed 's/rc=//')
+          fr=$(cat /tmp/enforcement.rc | sed 's/rc=//')
+          log=/tmp/envread.log
+
+          # Verdict logic keyed to the suite's own assertion messages:
+          #   rc==0                         -> HOLD  (confined read got BLOCKED/EPERM)
+          #   confined got "LEAK"           -> LEAK  (closure FAILED — the secret was recovered)
+          #   neg-control not "LEAK"        -> INFRA (vector never went live; result inconclusive)
+          #   otherwise (self/node broke)   -> OTHER (a non-leak regression — inspect log)
+          verdict="UNKNOWN"
+          if [ "$er" = "0" ]; then
+            verdict="HOLD"
+          elif grep -q 'confined reader must get EPERM.*got "LEAK"' "$log" \
+            || grep -q 'must NOT read its same-sandbox child.*got "LEAK"' "$log"; then
+            verdict="LEAK"
+          elif grep -qE 'neg-control:.*got "(NOSECRET|BLOCKED[^"]*)"' "$log"; then
+            verdict="INFRA"
+          else
+            verdict="OTHER"
+          fi
+
+          {
+            echo "## env-read closure — ${{ matrix.os }}"
+            echo ""
+            echo "| suite | rc | outcome |"
+            echo "|---|---|---|"
+            echo "| macos_envread (flagship) | $er | **$verdict** |"
+            echo "| macos_enforcement (support) | $fr | $([ "$fr" = 0 ] && echo PASS || echo FAIL) |"
+            echo ""
+            echo "**Verdict: $verdict** — HOLD = cross-process env read denied (closure holds); LEAK = scrubbed secret recovered under confinement (closure fails); INFRA = neg-control vector never went live (inconclusive); OTHER = a non-leak regression."
+            echo ""
+            echo "<details><summary>macos_envread output</summary>"
+            echo ""
+            echo '```'
+            cat "$log"
+            echo '```'
+            echo "</details>"
+            echo ""
+            echo "<details><summary>macos_enforcement output</summary>"
+            echo ""
+            echo '```'
+            cat /tmp/enforcement.log
+            echo '```'
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "VERDICT=${{ matrix.os }}:$verdict"
+          # A LEAK is the security-relevant failure — fail the job so it is unmissable.
+          # INFRA/OTHER also fail (inconclusive must not read as green); HOLD passes.
+          [ "$verdict" = "HOLD" ]
