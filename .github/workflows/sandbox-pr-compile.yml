@@ -1,0 +1,43 @@
+# Cheap PRE-MERGE cross-OS COMPILE gate for the sandbox crate. The full
+# sandbox-conformance matrix (real Seatbelt/Landlock/AppContainer enforcement,
+# sandbox-conformance.yml) only runs on `push` to sandbox-primitives — i.e.
+# POST-merge — so a cfg(windows)-only (or cfg(linux)/cfg(macos)-only) compile
+# break can land on a PR and slip through ~N merges before the next branch push
+# surfaces it (see the E0063 NetPolicy-initializer break that slipped through
+# ~10 merges). This workflow closes that gap with a fast, compile-only signal
+# ON THE PR ITSELF: build (never full-test) nub-sandbox on all three OSes.
+#
+# Deliberately advisory: not wired as a required status check. Its job is
+# VISIBILITY (a red "compile (windows-latest)" on the PR is obvious at a
+# glance), not to gate merges — the maintainer merges via `--admin` regardless.
+name: sandbox-pr-compile
+on:
+  pull_request:
+    branches: [sandbox-primitives, main]
+    paths:
+      - "crates/nub-sandbox/**"
+      - "crates/**/Cargo.toml"
+      - "Cargo.lock"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compile:
+    name: compile (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: sandbox-pr-compile
+      # Compile-only — NOT the full sandbox-conformance test suite. --all-targets
+      # pulls in test/bench compile units (where the cfg(windows)-only E0063 lived)
+      # without running them, so this stays fast on every OS.
+      - run: cargo build -p nub-sandbox --all-targets --all-features
