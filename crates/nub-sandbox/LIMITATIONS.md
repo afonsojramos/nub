@@ -330,19 +330,23 @@ Each is documented in code at the site noted; none is silently mis-reported.
   read-granting Windows policy reports reduced mode for the `.env*` carve while the
   read-CONFINE itself (deny everything outside the allow-set) is fully enforced.
 
-### Private tmp (`<tmp>: "private"`/`"deny"`) — macOS ENFORCED; Linux/Windows REPORTED, not enforced
+### Private tmp (`<tmp>: "rw"`/`false`) — macOS ENFORCED; Linux/Windows REPORTED, not enforced
 
-`{ "fs": { "<tmp>": "private" } }` gives the child a fresh per-run temp dir (its `TMPDIR`/
-`TMP`/`TEMP` point there) with the SHARED system tmp hidden; `"deny"` hides the shared tmp
-with no private dir; `"rw"`/`true` is today's shared tmp. Per-OS state:
+`<tmp>` is a SENTINEL that always denotes a specially-provisioned per-run PRIVATE dir — never
+the shared system tmp — so its value is a plain fs permission on that dir. `{ "fs": { "<tmp>":
+"rw" } }` (or `true`) gives the child a fresh per-run temp dir (its `TMPDIR`/`TMP`/`TEMP` point
+there) with the SHARED system tmp hidden; `false` hides the shared tmp with no private dir. The
+shared system tmp is a SEPARATE literal path — reach it only by granting `/tmp` (`{ "fs": {
+"/tmp": "r" } }`), which leaves the tmp mode unconfined. Per-OS state:
 
 - **macOS — ENFORCED (real-kernel verified).** The Seatbelt profile denies read+write on the
   shared tmp roots (the confstr `$TMPDIR` scratch `/private/var/folders/<uid>/T` and the
   world-shared `/private/tmp`) after the fs grants, and — for `Private` — grants the fresh
   per-run dir `(allow file* (subpath …))`. The deny is last-match-wins, so it hides the shared
   tmp even under a generous `(subpath "/")` read. Verified: a file in `/private/tmp` is DENIED
-  under `<tmp>: "private"`/`"deny"` and readable without (`tests/macos_enforcement.rs`
-  `private_tmp_hides_the_shared_system_tmp` / `deny_tmp_hides_the_shared_system_tmp_too`).
+  under `<tmp>: "rw"`/`false` and readable without, and reachable via a literal `/tmp` grant
+  (`tests/macos_enforcement.rs` `private_tmp_hides_the_shared_system_tmp` /
+  `deny_tmp_hides_the_shared_system_tmp_too` / `literal_tmp_path_is_the_only_way_to_the_shared_system_tmp`).
   - **Tradeoff (forced, documented):** the shared-tmp deny INCLUDES the confstr scratch that
     the backend otherwise write-grants for the Apple toolchain (`xcrun_db`), so a from-source
     native compile that needs it fails under `Private`/`Deny`. You cannot both hide the shared

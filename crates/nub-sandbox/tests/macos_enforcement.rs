@@ -286,16 +286,16 @@ fn private_tmp_hides_the_shared_system_tmp() {
     let _c = Cleanup(shared.clone());
     let f = fixture();
 
-    // A generous read that WOULD expose the shared-tmp file, plus `<tmp>: "private"`. The
+    // A generous read that WOULD expose the shared-tmp file, plus `<tmp>: "rw"` (private). The
     // private-tmp deny is emitted after the generous read (last-match-wins), so the kernel
     // must DENY the shared-tmp file even though `/` is otherwise readable.
-    let private = serde_json::json!({ "fs": { "/": "r", "<tmp>": "private" } });
+    let private = serde_json::json!({ "fs": { "/": "r", "<tmp>": "rw" } });
     assert!(
         !f.allowed(private, CAT, &[&s(&shared)]),
         "private tmp must hide the shared /private/tmp"
     );
-    // NEG-CONTROL: the SAME generous read WITHOUT private tmp reads the shared-tmp file —
-    // proving the deny is the `<tmp>: private` confinement, not the fixture.
+    // NEG-CONTROL: the SAME generous read WITHOUT the private tmp reads the shared-tmp file —
+    // proving the deny is the `<tmp>: "rw"` private confinement, not the fixture.
     assert!(
         f.allowed(
             serde_json::json!({ "fs": { "/": "r" } }),
@@ -321,14 +321,42 @@ fn deny_tmp_hides_the_shared_system_tmp_too() {
     }
     let _c = Cleanup(shared.clone());
     let f = fixture();
-    // `<tmp>: "deny"` also hides the shared system tmp (no private dir is minted).
+    // `<tmp>: false` also hides the shared system tmp (no private dir is minted).
     assert!(
         !f.allowed(
-            serde_json::json!({ "fs": { "/": "r", "<tmp>": "deny" } }),
+            serde_json::json!({ "fs": { "/": "r", "<tmp>": false } }),
             CAT,
             &[&s(&shared)]
         ),
         "deny tmp must hide the shared /private/tmp"
+    );
+}
+
+#[test]
+fn literal_tmp_path_is_the_only_way_to_the_shared_system_tmp() {
+    // The clarified model: the `<tmp>` sentinel NEVER grants the shared system tmp — the only
+    // way to reach it is granting the literal path `/tmp` (canonicalizes to `/private/tmp`),
+    // which leaves the tmp mode Shared (no confinement).
+    let shared = PathBuf::from(format!(
+        "/private/tmp/nub-tmptest-lit-{}.secret",
+        std::process::id()
+    ));
+    fs::write(&shared, "SHAREDTMPSECRET").unwrap();
+    struct Cleanup(PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+    let _c = Cleanup(shared.clone());
+    let f = fixture();
+    assert!(
+        f.allowed(
+            serde_json::json!({ "fs": { "/tmp": "r" } }),
+            CAT,
+            &[&s(&shared)]
+        ),
+        "a literal `/tmp` read grant reaches the shared system tmp"
     );
 }
 

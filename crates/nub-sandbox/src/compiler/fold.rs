@@ -48,11 +48,14 @@ pub fn fold_fs(
         entries: Vec::new(),
         default_effect: Effect::Deny,
     };
-    // Throwaway-tmp mode (default Shared). A `{ "<tmp>": "private" | "deny" }` object
-    // entry sets it; the backend owns the private-dir creation + shared-tmp denial at
-    // spawn time (the per-run dir path is not knowable at compile time), so those two
-    // values set the MODE and emit no ordinary fs rule. `<tmp>: "r"|"rw"|true` stays
-    // Shared and folds as a normal path grant.
+    // Throwaway-tmp mode. `<tmp>` is a SENTINEL that ALWAYS denotes the specially-provisioned
+    // per-run PRIVATE dir (never the shared system tmp), so its value is a plain fs permission
+    // on that dir: a truthy grant (`"r"`/`"rw"`/`true`) → `Private` (fresh per-run dir, shared
+    // tmp hidden); `false` → `Deny` (no tmp). The backend owns the private-dir creation +
+    // shared-tmp denial at spawn time (the per-run path is not knowable at compile time), so a
+    // `<tmp>` entry sets only the MODE and emits no ordinary fs rule. Shared system tmp is a
+    // SEPARATE literal path, reached only by granting `/tmp` — never via this sentinel; `Shared`
+    // (the default when `<tmp>` is absent) means "no tmp confinement, host tmp per fs rules".
     let mut tmp = TmpMode::Shared;
     match value {
         // `true` fully relaxes the axis; `false` fully denies it.
@@ -86,26 +89,28 @@ pub fn fold_fs(
     Ok(FsPolicy { rules: set, tmp })
 }
 
-/// Parse a `<tmp>` object entry's tmp-MODE value. Returns `Some(mode)` only for the
-/// two mode-setting strings on the `<tmp>` key — `"private"` (a fresh per-run temp dir,
-/// shared system tmp hidden) and `"deny"` (no tmp) — which the backend enforces from
-/// the mode, so they emit no path rule. Returns `None` for every other key, and for the
-/// `<tmp>` access values (`"r"`/`"rw"`/`true`/`false`) which fold as an ordinary path
-/// grant on the shared tmp (`TmpMode::Shared`). The mode strings are REJECTED on any key
-/// other than the bare `<tmp>` root (they are not fs access values), and `<tmp>` cannot
-/// take BOTH a mode and be a path grant, so the caller treats a `Some` as consumed.
+/// Fold a `<tmp>` sentinel entry into a tmp MODE. `<tmp>` ALWAYS denotes the per-run PRIVATE
+/// dir, so its value is a plain fs permission on that dir: a truthy grant (`"r"`/`"rw"`/`true`)
+/// → `Private` (provision the fresh dir + grant it rw); `false` → `Deny` (no tmp). Read-only
+/// on a fresh empty dir is degenerate, so `"r"` is treated as `"rw"` — `Private` always grants
+/// rw. Either mode's dir is backend-owned, so the caller consumes a `Some` and emits no path
+/// rule. Returns `None` for every other key (a normal path). Shared system tmp is a SEPARATE
+/// literal path (`/tmp`); `TmpMode::Shared` is unreachable through this sentinel by design.
 fn parse_tmp_mode(key: &str, val: &Value, path: &str) -> Result<Option<TmpMode>, CompileError> {
-    let mode = match val {
-        Value::String(s) if s == "private" => TmpMode::Private,
-        Value::String(s) if s == "deny" => TmpMode::Deny,
-        _ => return Ok(None),
-    };
     if key.trim() != "<tmp>" {
-        return Err(CompileError::shape(
-            path,
-            "`\"private\"`/`\"deny\"` are tmp-mode values valid ONLY on the `<tmp>` key (e.g. `{ \"<tmp>\": \"private\" }`) — a path takes \"r\"/\"rw\"/true/false",
-        ));
+        return Ok(None);
     }
+    let mode = match val {
+        Value::Bool(true) => TmpMode::Private,
+        Value::Bool(false) => TmpMode::Deny,
+        Value::String(s) if s == "r" || s == "rw" => TmpMode::Private,
+        _ => {
+            return Err(CompileError::shape(
+                path,
+                "`<tmp>` takes an fs permission: \"rw\"/`true` (a fresh per-run private tmp dir, shared system tmp hidden) or `false` (no tmp) — for the shared system tmp, grant the literal path `/tmp`",
+            ));
+        }
+    };
     Ok(Some(mode))
 }
 
