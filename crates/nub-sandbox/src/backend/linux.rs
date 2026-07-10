@@ -137,7 +137,7 @@ pub fn apply(
         if confine_fs {
             let DerivedGrants {
                 grants,
-                read_partial,
+                mut read_partial,
             } = linux_grants::derive_read_grants(policy);
             for g in grants {
                 push_grant(&mut grant_specs, g, read_bits, rw_bits);
@@ -154,11 +154,28 @@ pub fn apply(
             }
             // Essential system read set + /dev (rw for /dev/null redirects) + the
             // program file, so a dynamically-linked child can exec, link, and
-            // redirect under read-confine. These are granted WHOLESALE for the loader;
-            // an explicit policy deny landing INSIDE one (e.g. `!/etc/x`) is not
-            // carved out of them (documented limitation — net-deny mitigates exfil).
+            // redirect under read-confine. Granted WHOLESALE for the loader in the
+            // common case — but when an explicit policy deny lands INSIDE one (e.g.
+            // `!/etc/secret`) the dir is CARVED instead (implicit-allow walk excluding
+            // the denied path), so a secret placed under `/etc` is not silently
+            // readable while the loader's own files stay granted.
             for dir in ESSENTIAL_READ_DIRS {
-                add_if_exists(&mut grant_specs, Path::new(dir), read_bits);
+                let p = Path::new(dir);
+                if !p.exists() {
+                    continue;
+                }
+                if linux_grants::essential_dir_needs_carve(policy, p) {
+                    let DerivedGrants {
+                        grants: carved,
+                        read_partial: carve_partial,
+                    } = linux_grants::derive_essential_dir_carve(policy, p);
+                    for g in carved {
+                        push_grant(&mut grant_specs, g, read_bits, rw_bits);
+                    }
+                    read_partial |= carve_partial;
+                } else {
+                    add_if_exists(&mut grant_specs, p, read_bits);
+                }
             }
             add_if_exists(&mut grant_specs, Path::new("/dev"), rw_bits);
             if let Some(prog) = resolve_program(&spec.program, spec.cwd.as_deref()) {

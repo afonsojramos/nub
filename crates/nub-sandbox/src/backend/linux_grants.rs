@@ -163,6 +163,33 @@ pub(crate) fn derive_write_grants(policy: &SandboxPolicy) -> (Vec<Grant>, bool) 
     (out, partial)
 }
 
+/// Whether an explicit USER-authored (non-`.env*`-builtin) deny reaches into the
+/// essential system dir `dir`. The Linux backend grants the essential loader set
+/// (`/usr`,`/etc`,…) WHOLESALE so a dynamically-linked child can exec/link; but an
+/// explicit deny landing inside one (`!/etc/secret`) must still carve — otherwise a
+/// secret placed under `/etc` stays readable despite the user asking to deny it.
+/// Built-in `.env*` globs are excluded: they never target system dirs, and skipping
+/// them keeps the wholesale fast-path for the common no-deny case.
+pub(crate) fn essential_dir_needs_carve(policy: &SandboxPolicy, dir: &Path) -> bool {
+    View::essential(&policy.fs.rules).has_nonbuiltin_deny_reaching(dir)
+}
+
+/// Carve a single essential system dir under the IMPLICIT-ALLOW view: the dir would
+/// otherwise be granted wholesale for the loader, so the base effect is `Allow` and
+/// the policy's rules overlay it — a clean subtree is granted whole, and only a
+/// subtree a user deny reaches is descended into, excluding the denied file. The
+/// loader's files (`/etc/ld.so.cache`, `resolv.conf`, CA bundles) stay readable
+/// while `!/etc/secret` is honored. Budget-capped like [`derive_read_grants`]; on
+/// overflow the remainder is left ungranted (fail-safe) and `read_partial` is set.
+pub(crate) fn derive_essential_dir_carve(policy: &SandboxPolicy, dir: &Path) -> DerivedGrants {
+    let mut out = DerivedGrants::default();
+    let view = View::essential(&policy.fs.rules);
+    let mut visits = 0usize;
+    walk_read(dir, &view, &mut out, &mut visits);
+    dedup(&mut out.grants);
+    out
+}
+
 // ── the carve walks ────────────────────────────────────────────────────────────
 
 /// Directory entries, SORTED by path, symlinks dropped — so the walk (and thus the
@@ -304,6 +331,15 @@ impl View {
             (Effect::Allow, FsAccess::ReadWrite) => Effect::Allow,
             _ => Effect::Deny,
         })
+    }
+
+    /// The essential-dir carve view: an implicit-allow base (the loader dir would be
+    /// granted wholesale) with the policy's rules overlaid, so a USER deny inside a
+    /// system dir carves it while the loader keeps the rest. An `Allow` of any access
+    /// is readable; a `Deny` denies read (same read projection as [`View::read`], only
+    /// the default flips to `Allow`).
+    fn essential(set: &FsRuleSet) -> Self {
+        Self::project(set, Effect::Allow, |r| r.effect)
     }
 
     fn project(
@@ -727,6 +763,52 @@ mod tests {
         assert!(is_builtin_env_glob("**/.envrc"));
         assert!(!is_builtin_env_glob("**/*.pem"));
         assert!(!is_builtin_env_glob("/etc/secret"));
+    }
+
+    #[test]
+    fn essential_dir_carve_honors_user_deny_keeps_rest() {
+        // The essential loader dirs (/usr,/etc,…) are granted wholesale, but an
+        // explicit USER deny landing inside one must CARVE — a secret placed under
+        // /etc is not silently readable despite the deny. Exercised on a fixture
+        // "etc" dir (the derivation is dir-agnostic; the real /etc close is proven by
+        // an ad-hoc VM run). Regression guard for the LIMITATIONS.md "/etc granted
+        // wholesale (no deny-inside carve)" residual now that the carve exists.
+        let f = fixture();
+        let etc = f.root.join("etc");
+        fs::create_dir_all(&etc).unwrap();
+        fs::write(etc.join("resolv.conf"), "nameserver 1.1.1.1").unwrap();
+        fs::write(etc.join("secret.txt"), "ETCSECRET").unwrap();
+        let deny = format!("!{}", etc.join("secret.txt").to_str().unwrap());
+        let policy = f.compile(serde_json::json!({ "fs": [f.root.to_str().unwrap(), deny] }));
+        assert!(
+            essential_dir_needs_carve(&policy, &etc),
+            "a user deny reaching an essential dir must trigger the carve"
+        );
+        let d = derive_essential_dir_carve(&policy, &etc);
+        assert!(
+            read_reachable(&d.grants, &etc.join("resolv.conf")),
+            "loader-essential files stay readable under the essential-dir carve"
+        );
+        assert!(
+            !read_reachable(&d.grants, &etc.join("secret.txt")),
+            "the explicitly-denied secret under the essential dir is carved out"
+        );
+    }
+
+    #[test]
+    fn essential_dir_without_user_deny_stays_wholesale() {
+        // With no user deny reaching it, an essential dir stays on the wholesale
+        // fast-path — the built-in `.env*` secret globs must NOT force a carve (they
+        // never target system dirs, and forcing a carve would regress the common
+        // generous-read path).
+        let f = fixture();
+        let etc = f.root.join("etc");
+        fs::create_dir_all(&etc).unwrap();
+        let policy = f.compile(serde_json::json!({ "fs": ["..."] }));
+        assert!(
+            !essential_dir_needs_carve(&policy, &etc),
+            "the built-in .env carve must not force an essential-dir carve"
+        );
     }
 
     #[test]

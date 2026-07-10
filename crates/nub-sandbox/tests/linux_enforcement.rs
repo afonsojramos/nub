@@ -141,6 +141,7 @@ fn s(p: &Path) -> String {
 const CAT: &str = "/bin/cat";
 const TOUCH: &str = "/usr/bin/touch";
 const SH: &str = "/bin/sh";
+const TRUE: &str = "/bin/true";
 
 // ── fs read-confine (allowlist) ────────────────────────────────────────────────
 
@@ -573,5 +574,110 @@ fn enforcement_is_full_on_a_landlock_kernel() {
     assert!(
         prepared.degradation.is_full(),
         "read-confine fully enforces on a Landlock kernel"
+    );
+}
+
+// ── documented, bounded residuals — CAPTURED so they are no longer reasoned-only ──
+// These assert the CURRENT (bounded) behavior of a residual recorded in
+// LIMITATIONS.md. If a future mechanism closes one, its assertion flips and flags the
+// change — that is the point (a residual is a known bound, not a silent gap).
+
+#[test]
+fn hardlink_to_denied_secret_leaks_via_alias() {
+    if skip_without_landlock() {
+        return;
+    }
+    // Landlock keys on the INODE reached, not the path. A pre-existing same-uid
+    // hardlink to a secret, at a name the deny never targets, is granted `ReadFile`,
+    // which grants read on the SHARED inode — so the path-denied secret is reachable
+    // through the alias. BOUNDED: requires a hardlink created OUTSIDE the sandbox
+    // beforehand (no clean Landlock fix — the inode was legitimately named twice).
+    let f = fixture();
+    let secret = f.proj.join("secret.txt");
+    std::fs::write(&secret, "REALSECRET").unwrap();
+    let alias = f.proj.join("alias.txt");
+    std::fs::hard_link(&secret, &alias).unwrap();
+    let surface = serde_json::json!({ "fs": [s(&f.proj), format!("!{}", s(&secret))] });
+    // Residual: the alias (un-denied name) reads the secret's inode.
+    let (_c, out) = f.run(surface.clone(), &[], CAT, &[&s(&alias)]);
+    assert!(
+        out.contains("REALSECRET"),
+        "hardlink residual: an alias to the denied inode reads the secret"
+    );
+    // Control: WITHOUT any hardlink, the same path-deny holds (proving the alias, not
+    // a broken carve, is the escape).
+    let f2 = fixture();
+    let secret2 = f2.proj.join("secret.txt");
+    std::fs::write(&secret2, "REALSECRET").unwrap();
+    let surf2 = serde_json::json!({ "fs": [s(&f2.proj), format!("!{}", s(&secret2))] });
+    assert!(
+        !f2.ok(surf2, CAT, &[&s(&secret2)]),
+        "no hardlink: the path-deny denies the secret"
+    );
+}
+
+#[test]
+fn write_grant_to_nonexistent_file_becomes_dir_no_parent_widen() {
+    if skip_without_landlock() {
+        return;
+    }
+    // Landlock cannot grant write to a not-yet-existing FILE, so the backend
+    // pre-creates the target as a DIRECTORY and grants that subtree. Captured
+    // behavior (correcting LIMITATIONS.md "write-target widening"): the leaf becomes a
+    // dir and its subtree is writable, but the PARENT is NOT widened — a sibling in
+    // the parent stays denied.
+    let f = fixture();
+    let target = f.proj.join("writable/newfile.txt");
+    let surface = serde_json::json!({ "fs": ["...", s(&target)] });
+    // Applying the policy pre-creates the target; assert it became a directory.
+    let policy = compile(&surface, &f.ctx(&[])).unwrap();
+    let _ = apply(&policy, CommandSpec::new(TRUE).cwd(&f.proj)).unwrap();
+    assert!(
+        target.is_dir(),
+        "a not-yet-existing write target is pre-created as a directory"
+    );
+    // Writing UNDER the granted target dir succeeds; a sibling in the parent is denied.
+    assert!(
+        f.ok(surface.clone(), TOUCH, &[&s(&target.join("inside"))]),
+        "write under the granted target dir is allowed"
+    );
+    assert!(
+        !f.ok(surface, TOUCH, &[&s(&f.proj.join("writable/sibling"))]),
+        "the parent dir is NOT widened — a sibling stays denied"
+    );
+}
+
+#[test]
+fn etc_user_deny_is_carved_from_the_essential_base() {
+    if skip_without_landlock() {
+        return;
+    }
+    // The essential loader dirs (/etc,…) are granted wholesale, but an explicit user
+    // deny reaching one must CARVE it. End-to-end proof needs a secret planted under
+    // the REAL /etc (root only), so this runs only where /etc is writable (the
+    // conformance real-kernel/root leg); it SKIPS as a non-root user rather than
+    // reporting a hollow pass. The dir-agnostic derivation is covered portably by
+    // `linux_grants::essential_dir_carve_honors_user_deny_keeps_rest`.
+    let secret = Path::new("/etc/nub_sandbox_etc_carve_secret");
+    if std::fs::write(secret, "ETCSECRET").is_err() {
+        return; // not root — the portable unit test covers the derivation
+    }
+    let f = fixture();
+    let surface = serde_json::json!({ "fs": ["...", "!/etc/nub_sandbox_etc_carve_secret"] });
+    let leaked = f.run(
+        surface.clone(),
+        &[],
+        CAT,
+        &["/etc/nub_sandbox_etc_carve_secret"],
+    );
+    let hostname_ok = f.ok(surface, CAT, &["/etc/hostname"]);
+    let _ = std::fs::remove_file(secret);
+    assert!(
+        !leaked.1.contains("ETCSECRET"),
+        "a user deny under /etc must be carved (secret not readable)"
+    );
+    assert!(
+        hostname_ok,
+        "the rest of /etc stays readable for the loader after the carve"
     );
 }
