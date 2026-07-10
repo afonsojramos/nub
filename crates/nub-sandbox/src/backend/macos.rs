@@ -73,6 +73,7 @@ pub fn apply(
     policy: &SandboxPolicy,
     spec: CommandSpec,
     proxy_port: Option<u16>,
+    proxy_token: Option<&str>,
     ca_bundle: Option<&std::path::Path>,
 ) -> Result<Prepared, Degradation> {
     if !needs_wrap(policy) {
@@ -108,7 +109,7 @@ pub fn apply(
     // Point the child at the loopback proxy (cooperative hint; the Seatbelt carve is
     // the real boundary). Set AFTER env_clear so it survives an enforced env scrub.
     if let Some(port) = proxy_port {
-        super::set_proxy_env(&mut wrapped, port);
+        super::set_proxy_env(&mut wrapped, port, proxy_token);
     }
     // CA trust for the child (the leaf-verifying bundle). The read grant lives in the
     // SBPL profile (see build_profile); this is the env half so tools find the bundle.

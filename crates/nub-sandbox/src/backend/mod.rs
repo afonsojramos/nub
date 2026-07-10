@@ -251,8 +251,24 @@ fn emit_mitm_notice(policy: &SandboxPolicy) {
 /// through the loopback proxy. NOT the boundary (a malicious client ignores it — the
 /// OS deny-layer forces the traffic through); numeric host so the child needs no name
 /// resolution. Both upper/lower case (tools split on which they read).
-fn set_proxy_env(command: &mut Command, port: u16) {
-    let url = format!("http://127.0.0.1:{port}");
+///
+/// The per-session `token` is embedded as the URL userinfo (`http://<token>@127.0.0.1:
+/// <port>`), so proxy-honoring clients send it as `Proxy-Authorization: Basic` (SOCKS
+/// clients as RFC-1929 user-pass) automatically — the proxy rejects any handshake that
+/// lacks it, closing the tokenless-egress-borrow. The token is the CHILD's own (it is
+/// meant to have it); the point is that OTHER same-user processes do not. A `None` token
+/// (defensive — should not occur when a proxy is running) yields a credential-less URL
+/// the proxy will reject, i.e. fail-safe over-confinement, never a bypass.
+///
+/// `NODE_USE_ENV_PROXY=1` makes Node 24+ global `fetch` (undici) honor these proxy env
+/// vars — without it a bare `fetch()` tries a direct connect the deny-layer blocks
+/// (fail-closed but broken), instead of routing through the loopback proxy. Harmless
+/// (ignored) on older Node. Internal nub-set plumbing var — brand-clean.
+fn set_proxy_env(command: &mut Command, port: u16, token: Option<&str>) {
+    let url = match token {
+        Some(t) => format!("http://{t}@127.0.0.1:{port}"),
+        None => format!("http://127.0.0.1:{port}"),
+    };
     for key in [
         "HTTP_PROXY",
         "HTTPS_PROXY",
@@ -262,6 +278,7 @@ fn set_proxy_env(command: &mut Command, port: u16) {
     ] {
         command.env(key, &url);
     }
+    command.env("NODE_USE_ENV_PROXY", "1");
 }
 
 /// Apply a resolved policy to a command, dispatching to the per-OS backend.
@@ -284,19 +301,23 @@ pub fn apply(policy: &SandboxPolicy, spec: CommandSpec) -> Result<Prepared, Degr
     // so it outlives the child (design.md §2.5).
     let proxy = start_proxy_if_needed(policy);
     let proxy_port = proxy.as_ref().map(EgressProxy::port);
+    // The per-session egress-proxy token, delivered to the child via the proxy URL. Same
+    // presence as `proxy_port` (both derive from `proxy`), threaded into each backend so
+    // the child authenticates to the loopback proxy.
+    let proxy_token = proxy.as_ref().map(EgressProxy::token);
     // The child CA-bundle path, when TLS termination engaged. Threaded into each backend
     // so the child both TRUSTS the minted leaves (CA-env) and can READ the bundle even
     // under a confining fs policy (an explicit read grant — nub infra, not user config).
     let ca_bundle = proxy.as_ref().and_then(|p| p.ca_bundle_path());
 
     #[cfg(target_os = "macos")]
-    let mut prepared = macos::apply(policy, spec, proxy_port, ca_bundle)?;
+    let mut prepared = macos::apply(policy, spec, proxy_port, proxy_token, ca_bundle)?;
     #[cfg(target_os = "linux")]
-    let mut prepared = linux::apply(policy, spec, proxy_port, ca_bundle)?;
+    let mut prepared = linux::apply(policy, spec, proxy_port, proxy_token, ca_bundle)?;
     #[cfg(target_os = "windows")]
-    let mut prepared = windows::apply(policy, spec, proxy_port, ca_bundle)?;
+    let mut prepared = windows::apply(policy, spec, proxy_port, proxy_token, ca_bundle)?;
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    let mut prepared = generic_apply(policy, spec, proxy_port, ca_bundle)?;
+    let mut prepared = generic_apply(policy, spec, proxy_port, proxy_token, ca_bundle)?;
 
     // One-line stderr notice when TLS termination ACTUALLY engages — never silent, but
     // never MISLEADING either: suppress it where the backend degraded net (e.g. Windows,
@@ -323,6 +344,7 @@ fn generic_apply(
     policy: &SandboxPolicy,
     spec: CommandSpec,
     proxy_port: Option<u16>,
+    proxy_token: Option<&str>,
     ca_bundle: Option<&std::path::Path>,
 ) -> Result<Prepared, Degradation> {
     let mut command = Command::new(&spec.program);
@@ -339,7 +361,7 @@ fn generic_apply(
         }
     }
     if let Some(port) = proxy_port {
-        set_proxy_env(&mut command, port);
+        set_proxy_env(&mut command, port, proxy_token);
     }
     if let Some(bundle) = ca_bundle {
         set_ca_env(&mut command, bundle);
@@ -376,4 +398,53 @@ fn generic_apply(
 fn fs_confines(policy: &SandboxPolicy) -> bool {
     !matches!(policy.fs.rules.default_effect, crate::policy::Effect::Allow)
         || !policy.fs.rules.entries.is_empty()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The proxy env embeds the per-session token as the URL userinfo (so proxy-honoring
+    /// clients authenticate automatically) and sets `NODE_USE_ENV_PROXY=1` so Node 24+
+    /// global `fetch` routes through the loopback proxy rather than a direct-connect the
+    /// deny-layer blocks.
+    #[test]
+    fn set_proxy_env_embeds_token_and_enables_node_env_proxy() {
+        let mut cmd = Command::new("true");
+        set_proxy_env(&mut cmd, 4321, Some("abc123"));
+        let envs: std::collections::HashMap<_, _> = cmd
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            envs.get("HTTP_PROXY").and_then(|v| v.as_deref()),
+            Some("http://abc123@127.0.0.1:4321"),
+            "the token must be the URL userinfo"
+        );
+        assert_eq!(
+            envs.get("NODE_USE_ENV_PROXY").and_then(|v| v.as_deref()),
+            Some("1"),
+            "NODE_USE_ENV_PROXY must be set so Node 24+ fetch honors the proxy"
+        );
+    }
+
+    /// Defensive: a missing token (should not occur when a proxy is live) yields a
+    /// credential-less URL the proxy will reject — fail-safe over-confinement, not a
+    /// tokenless bypass.
+    #[test]
+    fn set_proxy_env_without_token_is_credential_less() {
+        let mut cmd = Command::new("true");
+        set_proxy_env(&mut cmd, 4321, None);
+        let url = cmd
+            .get_envs()
+            .find(|(k, _)| *k == std::ffi::OsStr::new("HTTP_PROXY"))
+            .and_then(|(_, v)| v)
+            .map(|v| v.to_string_lossy().into_owned());
+        assert_eq!(url.as_deref(), Some("http://127.0.0.1:4321"));
+    }
 }

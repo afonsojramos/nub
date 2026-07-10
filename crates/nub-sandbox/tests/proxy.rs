@@ -7,6 +7,7 @@
 //! hermetic; no external host is contacted. The "ClientHello" is a well-formed SNI
 //! byte blob (the proxy does NOT terminate TLS, so the echo server just reflects it).
 
+use base64::Engine;
 use nub_sandbox::StaticDecider;
 use nub_sandbox::policy::{Effect, NetPolicy, NetRule, NetTarget};
 use nub_sandbox::proxy::{Decision, EgressProxy, GrantDecider, Host};
@@ -14,6 +15,13 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+/// The `Proxy-Authorization: Basic <b64(token:)>` header line (token as username, empty
+/// password — the shape the child's `HTTP_PROXY` URL userinfo produces).
+fn basic_auth(token: &str) -> String {
+    let b64 = base64::engine::general_purpose::STANDARD.encode(format!("{token}:"));
+    format!("Proxy-Authorization: Basic {b64}\r\n")
+}
 
 // ── throwaway upstream: a loopback echo server ──────────────────────────────────
 
@@ -81,12 +89,18 @@ fn client_hello(sni: &str) -> Vec<u8> {
 
 // ── proxy client helpers ────────────────────────────────────────────────────────
 
-/// HTTP CONNECT to `target` (a `host:port` authority) through the proxy. Returns the
-/// tunnel stream after the `200` ACK, or an error string on a non-2xx response.
-fn http_connect(proxy_port: u16, target: &str) -> Result<TcpStream, String> {
+/// HTTP CONNECT to `target` (a `host:port` authority) through the proxy, presenting
+/// `token` as the Basic proxy credential. Returns the tunnel stream after the `200` ACK,
+/// or the response's status line on a non-2xx (e.g. `407`/`403`).
+fn http_connect(proxy_port: u16, target: &str, token: &str) -> Result<TcpStream, String> {
     let mut s = TcpStream::connect(("127.0.0.1", proxy_port)).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    write!(s, "CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n").unwrap();
+    write!(
+        s,
+        "CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n{}\r\n",
+        basic_auth(token)
+    )
+    .unwrap();
     let mut resp = Vec::new();
     let mut one = [0u8; 1];
     loop {
@@ -108,15 +122,28 @@ fn http_connect(proxy_port: u16, target: &str) -> Result<TcpStream, String> {
     }
 }
 
-/// SOCKS5 CONNECT to an IPv4 `addr` through the proxy. Returns the tunnel stream after
-/// a success reply, or `Err` on a non-success reply.
-fn socks5_connect_ip(proxy_port: u16, addr: SocketAddr) -> Result<TcpStream, u8> {
+/// SOCKS5 CONNECT to an IPv4 `addr` through the proxy, authenticating with `token` via
+/// RFC 1929 user/pass (token as the username, empty password). Returns the tunnel stream
+/// after a success reply, or `Err` on a non-success request reply.
+fn socks5_connect_ip(proxy_port: u16, addr: SocketAddr, token: &str) -> Result<TcpStream, u8> {
     let mut s = TcpStream::connect(("127.0.0.1", proxy_port)).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    s.write_all(&[0x05, 0x01, 0x00]).unwrap(); // greeting: 1 method (no-auth)
+    s.write_all(&[0x05, 0x01, 0x02]).unwrap(); // greeting: 1 method (username/password)
     let mut sel = [0u8; 2];
     s.read_exact(&mut sel).unwrap();
-    assert_eq!(sel, [0x05, 0x00]);
+    assert_eq!(
+        sel,
+        [0x05, 0x02],
+        "proxy must select username/password auth"
+    );
+    // RFC 1929 sub-negotiation: token as username, empty password.
+    let mut auth = vec![0x01, token.len() as u8];
+    auth.extend_from_slice(token.as_bytes());
+    auth.push(0x00);
+    s.write_all(&auth).unwrap();
+    let mut ar = [0u8; 2];
+    s.read_exact(&mut ar).unwrap();
+    assert_eq!(ar, [0x01, 0x00], "proxy must accept the token");
     let ip = match addr.ip() {
         std::net::IpAddr::V4(v4) => v4.octets(),
         _ => panic!("ipv4 only"),
@@ -192,7 +219,12 @@ fn http_connect_allowed_host_forwards() {
         allow_cidr("127.0.0.0/8"),
         allow_host("*.allowed.example"),
     ]));
-    let mut t = http_connect(proxy.port(), &format!("127.0.0.1:{}", upstream.port())).unwrap();
+    let mut t = http_connect(
+        proxy.port(),
+        &format!("127.0.0.1:{}", upstream.port()),
+        proxy.token(),
+    )
+    .unwrap();
     assert!(
         tunnel_forwards(&mut t, "api.allowed.example"),
         "an allowed SNI to an admitted target must forward end-to-end"
@@ -207,7 +239,12 @@ fn http_connect_denied_sni_drops() {
         allow_cidr("127.0.0.0/8"),
         allow_host("*.allowed.example"),
     ]));
-    let mut t = http_connect(proxy.port(), &format!("127.0.0.1:{}", upstream.port())).unwrap();
+    let mut t = http_connect(
+        proxy.port(),
+        &format!("127.0.0.1:{}", upstream.port()),
+        proxy.token(),
+    )
+    .unwrap();
     assert!(
         !tunnel_forwards(&mut t, "evil.example"),
         "a denied SNI must be dropped even when the target IP is admitted (shared-IP guard)"
@@ -220,7 +257,12 @@ fn http_connect_denied_target_host_refused_before_ack() {
     // Only a host glob is allowed; the loopback IP target is NOT admitted → gate 1
     // refuses with a non-200 before any tunnel is established.
     let proxy = start(net(vec![allow_host("*.allowed.example")]));
-    let err = http_connect(proxy.port(), &format!("127.0.0.1:{}", upstream.port())).unwrap_err();
+    let err = http_connect(
+        proxy.port(),
+        &format!("127.0.0.1:{}", upstream.port()),
+        proxy.token(),
+    )
+    .unwrap_err();
     assert!(
         err.contains("403"),
         "denied target must get a 403, got {err:?}"
@@ -233,7 +275,12 @@ fn http_connect_hostname_target_resolves_and_forwards() {
     // DNS. SNI `localhost` also admitted.
     let upstream = echo_server();
     let proxy = start(net(vec![allow_host("localhost")]));
-    let mut t = http_connect(proxy.port(), &format!("localhost:{}", upstream.port())).unwrap();
+    let mut t = http_connect(
+        proxy.port(),
+        &format!("localhost:{}", upstream.port()),
+        proxy.token(),
+    )
+    .unwrap();
     assert!(
         tunnel_forwards(&mut t, "localhost"),
         "an allowed hostname target must resolve and forward"
@@ -248,13 +295,13 @@ fn socks5_allowed_forwards_denied_sni_drops() {
         allow_host("*.allowed.example"),
     ]));
     // allowed SNI over SOCKS5
-    let mut ok = socks5_connect_ip(proxy.port(), upstream).unwrap();
+    let mut ok = socks5_connect_ip(proxy.port(), upstream, proxy.token()).unwrap();
     assert!(
         tunnel_forwards(&mut ok, "cdn.allowed.example"),
         "socks5 allow forwards"
     );
     // denied SNI over SOCKS5 → dropped
-    let mut bad = socks5_connect_ip(proxy.port(), upstream).unwrap();
+    let mut bad = socks5_connect_ip(proxy.port(), upstream, proxy.token()).unwrap();
     assert!(
         !tunnel_forwards(&mut bad, "evil.example"),
         "socks5 denied SNI drops"
@@ -266,7 +313,7 @@ fn socks5_denied_target_ip_gets_refusal_reply() {
     let upstream = echo_server();
     // No CIDR allowed → the loopback target IP is refused at the SOCKS request reply.
     let proxy = start(net(vec![allow_host("*.allowed.example")]));
-    let rep = socks5_connect_ip(proxy.port(), upstream).unwrap_err();
+    let rep = socks5_connect_ip(proxy.port(), upstream, proxy.token()).unwrap_err();
     assert_eq!(rep, 0x02, "SOCKS5 refusal REP=2 (not allowed by ruleset)");
 }
 
@@ -276,7 +323,12 @@ fn non_tls_stream_to_admitted_target_forwards() {
     // cross-route on → forwarded. Proves NotTls admits (not fail-closed).
     let upstream = echo_server();
     let proxy = start(net(vec![allow_cidr("127.0.0.0/8")]));
-    let mut t = http_connect(proxy.port(), &format!("127.0.0.1:{}", upstream.port())).unwrap();
+    let mut t = http_connect(
+        proxy.port(),
+        &format!("127.0.0.1:{}", upstream.port()),
+        proxy.token(),
+    )
+    .unwrap();
     let payload = b"PING plain-tcp\n";
     t.write_all(payload).unwrap();
     let mut got = vec![0u8; payload.len()];
@@ -294,7 +346,12 @@ fn stalled_tls_tunnel_fails_closed() {
         allow_cidr("127.0.0.0/8"),
         allow_host("*.allowed.example"),
     ]));
-    let mut t = http_connect(proxy.port(), &format!("127.0.0.1:{}", _upstream.port())).unwrap();
+    let mut t = http_connect(
+        proxy.port(),
+        &format!("127.0.0.1:{}", _upstream.port()),
+        proxy.token(),
+    )
+    .unwrap();
     t.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
     // A handshake record header claiming a large body, then nothing more.
     t.write_all(&[0x16, 0x03, 0x01, 0x02, 0x00, 0x01, 0x00])
@@ -335,7 +392,12 @@ fn decider_seam_is_consulted_for_target_and_sni() {
     let upstream = echo_server();
     let rec = Arc::new(Recorder::default());
     let proxy = EgressProxy::start(rec.clone(), None).unwrap();
-    let mut t = http_connect(proxy.port(), &format!("127.0.0.1:{}", upstream.port())).unwrap();
+    let mut t = http_connect(
+        proxy.port(),
+        &format!("127.0.0.1:{}", upstream.port()),
+        proxy.token(),
+    )
+    .unwrap();
     assert!(tunnel_forwards(&mut t, "keep.allowed.example"));
     let seen = rec.seen.lock().unwrap().clone();
     assert!(
@@ -361,5 +423,83 @@ fn dropping_proxy_stops_the_listener() {
     assert!(
         TcpStream::connect(("127.0.0.1", port)).is_err(),
         "the proxy port must be closed after the handle drops"
+    );
+}
+
+// ── per-session token gate (defense-in-depth) ──────────────────────────────────────
+
+#[test]
+fn http_connect_without_token_is_rejected_with_407() {
+    // A co-resident same-user process that does NOT know the token cannot use the proxy:
+    // a CONNECT with no Proxy-Authorization is answered 407 and dropped — BEFORE the
+    // (admitted) target host is consulted.
+    let upstream = echo_server();
+    let proxy = start(net(vec![allow_cidr("127.0.0.0/8")]));
+    let mut s = TcpStream::connect(("127.0.0.1", proxy.port())).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    write!(
+        s,
+        "CONNECT 127.0.0.1:{} HTTP/1.1\r\nHost: x\r\n\r\n",
+        upstream.port()
+    )
+    .unwrap();
+    let mut resp = Vec::new();
+    let _ = s.read_to_end(&mut resp);
+    assert!(
+        String::from_utf8_lossy(&resp).starts_with("HTTP/1.1 407"),
+        "a tokenless CONNECT to an admitted target must be refused 407, got {:?}",
+        String::from_utf8_lossy(&resp)
+    );
+}
+
+#[test]
+fn http_connect_with_wrong_token_is_rejected() {
+    // A wrong token is refused exactly like a missing one (no oracle for a near-miss).
+    let upstream = echo_server();
+    let proxy = start(net(vec![allow_cidr("127.0.0.0/8")]));
+    let wrong = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+    let err = http_connect(
+        proxy.port(),
+        &format!("127.0.0.1:{}", upstream.port()),
+        wrong,
+    )
+    .expect_err("a wrong token must be refused");
+    assert!(err.contains("407"), "wrong token must get 407, got {err:?}");
+}
+
+#[test]
+fn correct_token_still_forwards() {
+    // Positive control paired with the two negatives: the CHILD's own token forwards.
+    let upstream = echo_server();
+    let proxy = start(net(vec![
+        allow_cidr("127.0.0.0/8"),
+        allow_host("*.allowed.example"),
+    ]));
+    let mut t = http_connect(
+        proxy.port(),
+        &format!("127.0.0.1:{}", upstream.port()),
+        proxy.token(),
+    )
+    .unwrap();
+    assert!(
+        tunnel_forwards(&mut t, "api.allowed.example"),
+        "the correct token must forward end-to-end"
+    );
+}
+
+#[test]
+fn socks5_without_userpass_auth_is_refused() {
+    // A SOCKS client offering only no-auth (0x00) gets `0x05 0xFF` (no acceptable method)
+    // — the tokenless SOCKS path is closed just like the HTTP one.
+    let proxy = start(net(vec![allow_cidr("127.0.0.0/8")]));
+    let mut s = TcpStream::connect(("127.0.0.1", proxy.port())).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    s.write_all(&[0x05, 0x01, 0x00]).unwrap(); // greeting: only no-auth offered
+    let mut sel = [0u8; 2];
+    let _ = s.read_exact(&mut sel);
+    assert_eq!(
+        sel,
+        [0x05, 0xFF],
+        "a no-auth-only SOCKS greeting must be refused"
     );
 }

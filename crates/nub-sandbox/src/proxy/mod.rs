@@ -101,6 +101,11 @@ const MAX_PRELUDE: usize = 16 * 1024;
 /// connections (the parent owns this; it drops after the sandboxed child exits).
 pub struct EgressProxy {
     port: u16,
+    /// The per-session bearer every client must present (HTTP `Proxy-Authorization` /
+    /// SOCKS5 user-pass) — the defense-in-depth guard against a co-resident same-user
+    /// process borrowing the child's loopback egress hole. Minted per [`start`] from the
+    /// OS CSPRNG; delivered to the child as the `HTTP_PROXY` URL userinfo.
+    token: Arc<str>,
     shutdown: Arc<AtomicBool>,
     accept_thread: Option<JoinHandle<()>>,
     /// The MITM engine, when the policy engages TLS termination (credential brokering /
@@ -123,14 +128,17 @@ impl EgressProxy {
         // should ever see this listener.
         let listener = TcpListener::bind((IpAddr::from([127, 0, 0, 1]), 0))?;
         let port = listener.local_addr()?.port();
+        let token: Arc<str> = Arc::from(mint_token());
         let shutdown = Arc::new(AtomicBool::new(false));
         let sh = shutdown.clone();
         let engine = mitm.clone();
+        let tok = token.clone();
         let accept_thread = std::thread::Builder::new()
             .name("nub-egress-proxy".into())
-            .spawn(move || accept_loop(listener, sh, decider, engine))?;
+            .spawn(move || accept_loop(listener, sh, decider, engine, tok))?;
         Ok(EgressProxy {
             port,
+            token,
             shutdown,
             accept_thread: Some(accept_thread),
             mitm,
@@ -140,6 +148,12 @@ impl EgressProxy {
     /// The loopback port the child must be pointed at (env hint + OS carve-out).
     pub fn port(&self) -> u16 {
         self.port
+    }
+
+    /// The per-session bearer token the child presents to the proxy — delivered via the
+    /// `HTTP_PROXY` URL userinfo so ordinary proxy-honoring clients send it automatically.
+    pub fn token(&self) -> &str {
+        &self.token
     }
 
     /// The child-scoped CA-bundle path, when TLS termination is engaged — the value the
@@ -170,6 +184,7 @@ fn accept_loop(
     shutdown: Arc<AtomicBool>,
     decider: Arc<dyn GrantDecider>,
     mitm: Option<Arc<mitm::MitmEngine>>,
+    token: Arc<str>,
 ) {
     for conn in listener.incoming() {
         if shutdown.load(Ordering::SeqCst) {
@@ -178,14 +193,30 @@ fn accept_loop(
         let Ok(stream) = conn else { continue };
         let d = decider.clone();
         let m = mitm.clone();
+        let tok = token.clone();
         // Best-effort spawn; if the OS refuses a thread we simply drop the connection
         // (fail-closed — no unproxied path opens).
         let _ = std::thread::Builder::new()
             .name("nub-egress-tunnel".into())
             .spawn(move || {
-                let _ = handle_conn(stream, d, m);
+                let _ = handle_conn(stream, d, m, &tok);
             });
     }
+}
+
+/// Mint the per-session bearer token: 256 bits from the OS CSPRNG, hex-encoded (64
+/// URL-safe chars, so it drops into the `HTTP_PROXY` userinfo with no escaping). A
+/// getrandom failure is unrecoverable for a security token → panic rather than fall
+/// back to a weak source (fail-closed: no proxy, no egress).
+fn mint_token() -> String {
+    let mut bytes = [0u8; 32];
+    getrandom::getrandom(&mut bytes).expect("OS CSPRNG unavailable for egress-proxy token");
+    let mut s = String::with_capacity(64);
+    for b in bytes {
+        use std::fmt::Write;
+        let _ = write!(s, "{b:02x}");
+    }
+    s
 }
 
 /// Handle one client tunnel: parse the request, gate the target host, ACK, gate the
@@ -195,9 +226,13 @@ fn handle_conn(
     mut stream: TcpStream,
     decider: Arc<dyn GrantDecider>,
     mitm: Option<Arc<mitm::MitmEngine>>,
+    token: &str,
 ) -> io::Result<()> {
     stream.set_read_timeout(Some(CLIENT_HELLO_TIMEOUT))?;
-    let req = read_request(&mut stream)?;
+    // Token gate FIRST: an unauthenticated caller is answered (407 / SOCKS auth-fail)
+    // and dropped before any host decision. `?` propagates the auth error → connection
+    // closed (fail-closed).
+    let req = read_request(&mut stream, token)?;
 
     // Gate 1 — the CONNECT/SOCKS target host (before the ACK).
     if decider.decide(&req.host) == Decision::Deny {
