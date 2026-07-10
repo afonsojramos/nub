@@ -28,6 +28,11 @@ const EMPTY_FS_ENTRY_MSG: &str = "an empty fs entry is not allowed (it would gra
 /// it has no defined meaning, so it is rejected rather than silently treated as a
 /// literal path/host named `...` (fail loud, parity with env-object + the array).
 const OBJECT_SENTINEL_MSG: &str = "`\"...\"` inheritance is only valid in fs/net array form (e.g. [\"...\", …]), not as an object key";
+/// A `$(` opener with no balanced close: nub does no shell substitution outside a
+/// complete `$(…)`, so an unterminated one is named rather than passed through as a
+/// literal or mislabeled "unknown env type" (D18).
+const UNTERMINATED_SUBST_MSG: &str =
+    "unterminated `$(…)` command substitution — expected a closing `)`";
 
 // ── fs ───────────────────────────────────────────────────────────────────────
 
@@ -341,7 +346,7 @@ struct EnvEntry {
     /// The key or glob key the entry governs.
     pattern: String,
     action: EnvAction,
-    secret: bool,
+    sensitive: bool,
     optional: bool,
     format: Option<EnvFormat>,
     /// How `pattern` matches an ambient key. User patterns are case-sensitive
@@ -423,7 +428,7 @@ fn parse_env_array(
             } else {
                 EnvAction::Allow(None)
             },
-            secret: !deny, // an allow defaults sensitive; a deny mark is irrelevant
+            sensitive: !deny, // an allow defaults sensitive; a deny mark is irrelevant
             // The array form is a concise ALLOWLIST (pass-through-if-present),
             // never a required-var declaration — an exact key here means "permit
             // it", not "demand it" (required/optional is an object-form concept
@@ -474,11 +479,14 @@ fn parse_env_object(
                 }
             }
         }
-        // A trailing `?` on the key marks it optional.
+        // A trailing `?` on the key marks it optional; a glob key is inherently
+        // optional (D9 — a glob matches however many keys, zero included), so it is
+        // never a required-var declaration and reports optional in the schema.
         let (key, optional) = match raw_key.strip_suffix('?') {
             Some(k) => (k.to_string(), true),
             None => (raw_key.clone(), false),
         };
+        let optional = optional || is_glob(&key);
         let entry = parse_env_object_value(key, optional, val, ctx, &p)?;
         out.push(entry);
     }
@@ -496,7 +504,7 @@ fn parse_env_object_value(
         Value::Bool(true) => Ok(EnvEntry {
             pattern: key,
             action: EnvAction::Allow(None),
-            secret: true,
+            sensitive: true,
             optional,
             format: None,
             key_match: KeyMatch::User,
@@ -505,7 +513,7 @@ fn parse_env_object_value(
         Value::Bool(false) => Ok(EnvEntry {
             pattern: key,
             action: EnvAction::Deny,
-            secret: true,
+            sensitive: true,
             optional,
             format: None,
             key_match: KeyMatch::User,
@@ -546,12 +554,18 @@ fn parse_env_string_value(
         return Ok(EnvEntry {
             pattern: key,
             action: EnvAction::Literal(resolved),
-            secret: true,
+            sensitive: true,
             optional,
             format: None,
             key_match: KeyMatch::User,
             builtin: false,
         });
+    }
+    // An unterminated `$(` reached here (no balanced close → not a substitution).
+    // Name it as a substitution error instead of falling through to a confusing
+    // "unknown env type `$(…`". Skip regex/union forms, which may hold a literal `$(`.
+    if resolve::has_open_substitution(s) && !s.starts_with('/') && !s.contains('\'') {
+        return Err(CompileError::substitution(path, UNTERMINATED_SUBST_MSG));
     }
     // Otherwise a type from the grammar.
     let ty = parse_env_type(s).map_err(|e| CompileError::shape(path, &e))?;
@@ -559,7 +573,7 @@ fn parse_env_string_value(
     Ok(EnvEntry {
         pattern: key,
         action: EnvAction::Allow(Some(ty)),
-        secret: true,
+        sensitive: true,
         optional,
         format,
         key_match: KeyMatch::User,
@@ -567,7 +581,7 @@ fn parse_env_string_value(
     })
 }
 
-/// The object extras form: `{ secret, public, format, value, optional }`.
+/// The object extras form: `{ sensitive, format, value, optional }`.
 fn parse_env_extras(
     key: String,
     optional_from_key: bool,
@@ -575,7 +589,7 @@ fn parse_env_extras(
     ctx: &CompileCtx,
     path: &str,
 ) -> Result<EnvEntry, CompileError> {
-    const ALLOWED: &[&str] = &["secret", "public", "format", "value", "optional"];
+    const ALLOWED: &[&str] = &["sensitive", "format", "value", "optional"];
     for k in extras.keys() {
         if !ALLOWED.contains(&k.as_str()) {
             return Err(CompileError::shape(
@@ -584,14 +598,12 @@ fn parse_env_extras(
             ));
         }
     }
-    let public = extras
-        .get("public")
+    // Single `sensitive` mark (D17), default-on; `sensitive: false` opts out of
+    // redaction. Collapses the old `secret`/`public` pair.
+    let sensitive = extras
+        .get("sensitive")
         .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let secret = extras
-        .get("secret")
-        .and_then(Value::as_bool)
-        .unwrap_or(!public);
+        .unwrap_or(true);
     let optional = optional_from_key
         || extras
             .get("optional")
@@ -627,6 +639,13 @@ fn parse_env_extras(
             }
             resolve::resolve_with(raw, ctx.runner.as_ref())
                 .map_err(|e| CompileError::substitution(&child(path, "value"), &e))?
+        } else if resolve::has_open_substitution(raw) {
+            // An unterminated `$(` — do NOT pass it through as a literal value
+            // (silently shipping shell-looking text is the footgun); name it.
+            return Err(CompileError::substitution(
+                &child(path, "value"),
+                UNTERMINATED_SUBST_MSG,
+            ));
         } else {
             raw.to_string()
         };
@@ -637,7 +656,7 @@ fn parse_env_extras(
         return Ok(EnvEntry {
             pattern: key,
             action: EnvAction::Literal(resolved),
-            secret,
+            sensitive,
             optional,
             format,
             key_match: KeyMatch::User,
@@ -647,7 +666,7 @@ fn parse_env_extras(
     Ok(EnvEntry {
         pattern: key,
         action: EnvAction::Allow(ty),
-        secret,
+        sensitive,
         optional,
         format,
         key_match: KeyMatch::User,
@@ -665,7 +684,7 @@ fn splice_env_inherit(parent: Option<&EnvPolicy>, out: &mut Vec<EnvEntry>) {
         Some(_) => out.push(EnvEntry {
             pattern: "...".to_string(),
             action: EnvAction::Allow(None),
-            secret: false,
+            sensitive: false,
             optional: true,
             format: None,
             key_match: KeyMatch::InheritedKeys,
@@ -685,7 +704,7 @@ fn splice_env_defaults(out: &mut Vec<EnvEntry>) {
     let secret_deny = |pattern: String, key_match: KeyMatch| EnvEntry {
         pattern,
         action: EnvAction::Deny,
-        secret: true,
+        sensitive: true,
         optional: false,
         format: None,
         key_match,
@@ -710,7 +729,7 @@ fn splice_env_defaults(out: &mut Vec<EnvEntry>) {
     out.push(EnvEntry {
         pattern: "...".to_string(),
         action: EnvAction::Allow(None),
-        secret: false,
+        sensitive: false,
         optional: true,
         format: None,
         key_match: KeyMatch::CuratedBaseline,
@@ -820,7 +839,7 @@ fn construct_env(
         if seen.insert(e.pattern.clone()) {
             policy.schema.push(EnvRule {
                 key: e.pattern.clone(),
-                secret: e.secret,
+                sensitive: e.sensitive,
                 format: e.format,
                 optional: e.optional,
             });

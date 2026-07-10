@@ -11,6 +11,15 @@ pub fn has_substitution(value: &str) -> bool {
     find_next(value, 0).is_some()
 }
 
+/// Does the value contain a `$(` opener at all (balanced or not)? Paired with
+/// [`has_substitution`] to detect an UNTERMINATED substitution: opener present but
+/// no balanced close (`has_substitution` false). nub does no shell substitution
+/// outside a complete `$(…)`, so such a value is named as a substitution error
+/// rather than passed through literally (a footgun) or mislabeled "unknown env type".
+pub fn has_open_substitution(value: &str) -> bool {
+    value.contains("$(")
+}
+
 /// Locate the next `$(` … `)` span (with paren nesting) starting at `from`.
 /// Returns `(open_idx, close_idx_exclusive, inner)`.
 fn find_next(value: &str, from: usize) -> Option<(usize, usize, String)> {

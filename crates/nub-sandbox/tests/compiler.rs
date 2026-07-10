@@ -496,17 +496,43 @@ fn env_required_missing_key_errors_optional_is_ok() {
 }
 
 #[test]
-fn env_secret_and_public_marks() {
-    let ctx = common::ctx(true, &[("PUB", "1"), ("PRIV", "2")]);
+fn env_sensitive_mark_defaults_on_and_opts_out() {
+    // The single `sensitive` mark (D17): default-on, `sensitive: false` opts out.
+    let ctx = common::ctx(true, &[("PUB", "1"), ("PRIV", "2"), ("DEFLT", "3")]);
     let p = compile(
-        &json!({ "env": { "PUB": { "public": true }, "PRIV": { "secret": true } } }),
+        &json!({ "env": {
+            "PUB": { "sensitive": false },
+            "PRIV": { "sensitive": true },
+            "DEFLT": { "format": "string" },
+        } }),
         &ctx,
     )
     .unwrap();
-    let pub_rule = p.env.schema.iter().find(|r| r.key == "PUB").unwrap();
-    let priv_rule = p.env.schema.iter().find(|r| r.key == "PRIV").unwrap();
-    assert!(!pub_rule.secret, "public opts out of sensitive");
-    assert!(priv_rule.secret);
+    let rule = |k: &str| p.env.schema.iter().find(|r| r.key == k).unwrap();
+    assert!(
+        !rule("PUB").sensitive,
+        "sensitive:false opts out of redaction"
+    );
+    assert!(rule("PRIV").sensitive);
+    assert!(rule("DEFLT").sensitive, "default-on when unmarked");
+}
+
+#[test]
+fn env_extras_reject_the_old_secret_public_keys() {
+    // The collapsed pair (D17): `secret`/`public` are no longer valid extras keys.
+    let ctx = common::ctx(true, &[("X", "1")]);
+    for key in ["secret", "public"] {
+        let err = compile(&json!({ "env": { "X": { key: true } } }), &ctx).unwrap_err();
+        match err {
+            CompileError::Shape { message, .. } => {
+                assert!(
+                    message.contains(key) && message.contains("sensitive"),
+                    "{message}"
+                );
+            }
+            other => panic!("expected a shape error naming `{key}`, got {other:?}"),
+        }
+    }
 }
 
 // ── $(…) substitution + trust gate ────────────────────────────────────────────
@@ -547,6 +573,53 @@ fn substitution_failure_surfaces() {
     let ctx = common::ctx(true, &[]);
     let err = compile(&json!({ "env": { "X": "$(fail)" } }), &ctx).unwrap_err();
     assert!(matches!(err, CompileError::Substitution { .. }));
+}
+
+#[test]
+fn unterminated_substitution_is_named_not_unknown_type() {
+    // D18: a `$(` with no balanced close is a substitution-shaped error at BOTH the
+    // type position and the `value:` position — never a silent literal or a
+    // confusing "unknown env type". The runner must NOT fire (nothing to run).
+    struct PanicRunner;
+    impl nub_sandbox::CommandRunner for PanicRunner {
+        fn run(&self, _: &str) -> Result<String, String> {
+            panic!("an unterminated `$(` must not reach the runner");
+        }
+    }
+    let ctx = nub_sandbox::compiler::CompileCtx {
+        homes: common::homes(),
+        cwd: common::homes().project,
+        trusted: true,
+        ambient_env: std::collections::BTreeMap::new(),
+        runner: Box::new(PanicRunner),
+    };
+    for surface in [
+        json!({ "env": { "X": "$(op read" } }),
+        json!({ "env": { "X": { "value": "postgres://$(op read@h" } } }),
+    ] {
+        match compile(&surface, &ctx).unwrap_err() {
+            CompileError::Substitution { message, .. } => {
+                assert!(
+                    message.contains("$(") && message.contains("closing"),
+                    "{message}"
+                );
+            }
+            other => panic!("expected a substitution-shaped error, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn glob_object_key_reports_optional_in_schema() {
+    // D9: a glob object key is inherently optional (matches however many keys, zero
+    // included) — it reports optional in the schema even without a trailing `?`, and
+    // never triggers the required-var check when it matches nothing.
+    let ctx = common::ctx(true, &[("VITE_URL", "x")]);
+    let p = compile(&json!({ "env": { "VITE_*": true } }), &ctx).unwrap();
+    let rule = p.env.schema.iter().find(|r| r.key == "VITE_*").unwrap();
+    assert!(rule.optional, "a glob key is optional in the schema");
+    // A glob matching nothing does not error (contrast a required exact key).
+    assert!(compile(&json!({ "env": { "NOPE_*": true } }), &ctx).is_ok());
 }
 
 #[test]

@@ -163,7 +163,7 @@ pub enum NetTarget {
 /// Environment confinement. `constructed` is the ACTUAL child env nub builds —
 /// env access is undetectable (a plain memory read of the populated environ), so
 /// enforcement is construction, not interception: a withheld var is simply absent.
-/// `schema` carries per-key validation + secret/public marks for downstream
+/// `schema` carries per-key validation + the `sensitive` mark for downstream
 /// consumers (log redaction); the `$(…)` resolver's output is already baked into
 /// `constructed` by the compiler.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -186,8 +186,9 @@ pub struct EnvPolicy {
 pub struct EnvRule {
     /// The key or glob key (`VITE_*`) the rule governs.
     pub key: String,
-    /// Whether the value is sensitive (default-sensitive unless `public`).
-    pub secret: bool,
+    /// Whether the value is sensitive (default-on; `sensitive: false` opts out of
+    /// redaction). The single mark replacing the old `secret`/`public` pair (D17).
+    pub sensitive: bool,
     /// Optional value type the compiler validated the value against.
     pub format: Option<EnvFormat>,
     /// `true` if the key is optional (object-form trailing `?` / `optional`).

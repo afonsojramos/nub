@@ -7,6 +7,11 @@
 //! No comparison/intersection operators. String formats (email/url/…) deliberately
 //! do NOT ship — `/regex/` covers them. Unrecognized → hard error naming the set
 //! (closed vocab, so re-adding later is non-breaking).
+//!
+//! FUTURE (deferred, not implemented): `minLength`/`maxLength` value-length
+//! constraints on the extras object. Left out deliberately (re-add alongside the
+//! string formats if demand appears; non-breaking by the closed-vocab discipline).
+//! Tracked in wiki/sandbox-config.md §5.
 
 use crate::policy::EnvFormat;
 
