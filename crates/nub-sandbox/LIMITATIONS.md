@@ -1,10 +1,14 @@
 # nub-sandbox — known limitations
 
 An honest record of what the engine does NOT close, why each residual is bounded, and
-where the fix lives. The sandbox never *silently* drops enforcement: every item below
-that a policy could reach is also surfaced at runtime via `Degradation` (fail-safe, not
-fail-silent). This file is the companion to those runtime signals — the durable
-"what's-not-covered" record the final PR and the build-jail thread depend on.
+where the fix lives. The sandbox fails safe, not silent: an **axis-level** degradation a
+policy reaches (a per-host net policy with no proxy → coarse deny; per-host Windows egress
+→ coarse deny) is surfaced at runtime via `Degradation`. The **within-axis over-grant**
+residuals below are a different class — documented here, NOT signalled: hardlink-to-secret,
+the `/etc` no-deny-carve edge, derive→open TOCTOU, bind-mounted procfs, the macOS
+floating-name move-block shapes, Linux `ConnectTcp` at `ptrace_scope≥2`, and NAT64/6to4.
+This file is the durable "what's-not-covered" record the final PR and the build-jail thread
+depend on.
 
 Two kinds of residual appear here:
 
@@ -114,19 +118,33 @@ which this phase does not wire.
 
 ## Launcher-handoff items (engine correct; launcher must complete the guarantee)
 
-### macOS ascendant-env via `KERN_PROCARGS2`
+### macOS ascendant-env via `KERN_PROCARGS2` — CLOSED in-engine
 
-A sandboxed child can recover a scrubbed secret verbatim by reading the *parent's*
-(nub's) argv+environ via `sysctl(KERN_PROCARGS2, getppid())`. This sysctl is not routed
-through Seatbelt's `sysctl-read` MACF hook, so Seatbelt cannot block it. The engine
-constructs the child's own env correctly (least-privilege); it cannot scrub nub's OWN
-environ.
+`sysctl(KERN_PROCARGS2, <pid>)` returns any same-uid process's exec-time argv+environ, so
+a confined child could recover a scrubbed secret from a co-resident process (`getppid()` →
+nub, a sibling, a spawned kin). The read is a disjunction — the kernel permits it if EITHER
+`sysctl-read` OR `process-info*` is allowed for the target — so every wrapped Seatbelt
+profile denies both arms:
 
-- **Why bounded / status:** the child's own env-scrub holds; only *co-resident same-uid*
-  ascendant-env recovery is open. Reported, never claimed closed.
-- **Where fixed:** the launcher must not HOLD ambient secrets in nub's own environ when
-  it spawns the child (scrub nub's environ pre-spawn, or clean-env re-exec). Launcher
-  owns the parent env. See design.md §2.4.
+- `process-info*` is allowed-by-default even under `(deny default)`, so it is denied
+  explicitly, with `(allow process-info* (target self))` restoring only self-introspection
+  (node needs it); never `(target others)`/`(target same-sandbox)`, which re-open the hole
+  (a confined child's own siblings/children ARE same-sandbox).
+- the sysctl arm is already shut by `(deny default)` — the pid-parameterized procargs2
+  sysctl is unnameable (queried by numeric MIB) and the base admits `kern.*` only by
+  narrow name (specific names plus two `kern.proc.*` prefixes, neither covering procargs2),
+  never a bare `kern.` prefix (which would re-admit it).
+
+Emitted UNCONDITIONALLY on every wrapped profile — including an env-scrub-only policy (the
+`env_needs_closure` gate) — so a confined child can read no procargs2 but its own. Sibling
+and same-sandbox-child reads are both EPERM, verified with negative controls
+(`tests/macos_envread.rs`; `emit_env_read_closure` in `backend/macos.rs`).
+
+- **Residual (irreducible at same-uid, bounded):** the closure binds every process nub
+  confines, but nub cannot scrub a secret out of a co-resident process it never launched. A
+  secret held in the *own* exec-time env of such a process (a CI runner injecting job
+  secrets, `env SECRET=x tool`) stays readable within the same-uid trust domain. Closed only
+  by a privileged uid boundary — the dedicated-account tier (post-v0).
 
 ### Windows ascendant-env via same-user `PROCESS_VM_READ` — OS-CLOSED (not a residual)
 
@@ -181,14 +199,18 @@ under `%TEMP%`, `tests/windows_enforcement.rs` + `windows_residuals.rs`). nub ne
   the `windows_residuals.rs` RT-B probe; the fixtures strip inherited ACEs
   (`icacls /inheritance:r`) to model the clean root the launcher provides.
 
-### Untrusted-tier tighten-only layering
+### Untrusted-tier tighten-only layering — by design, the caller's responsibility
 
-For the granular object form an omitted axis is currently **relaxed** (the "boolean is
-the de-nesting mechanism" contract — you confine what you name). A future *untrusted*
-tier wants the opposite default (omitted axis fail-closed / tighten-only), which is a
-front-end posture, not an engine mechanism.
+For the granular object form an omitted axis is **relaxed** (the "boolean is the de-nesting
+mechanism" contract — you confine what you name). An *untrusted* tier would want the opposite
+default (omitted axis fail-closed / tighten-only), but the engine does **not** detect trust —
+it applies whatever config it is given. Securing an untrusted-config run is the caller's
+responsibility, not an engine mechanism nub supplies.
 
-- **Where fixed:** the front-end tier that layers tighten-only defaults over the engine.
+- **Status:** decided — nub does not detect untrusted config; the caller owns that trust
+  boundary (the standalone "untrusted-tier tighten-only launcher" item is dropped). Distinct
+  from the cross-layer tighten-only *intersection* (CLI > user-global > project), which IS
+  enforced — a lower-trust layer may only add restrictions, never widen.
 
 ## Filesystem (bounded P2s, threat-model-mitigated)
 
