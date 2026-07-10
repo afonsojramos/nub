@@ -152,6 +152,15 @@ fn push_fs_rules(
     ctx: &CompileCtx,
     out: &mut Vec<FsRule>,
 ) {
+    // Normalize a deny's access to the canonical inert value (D20): the array
+    // form grants ReadWrite even to a `!`-deny, the object form emits Read — same
+    // enforcement (a deny removes read+write), divergent IR. Fold both to one here,
+    // the single funnel for user fs rules, so the IR carries a uniform deny.
+    let access = if effect == Effect::Deny {
+        FsAccess::DENY
+    } else {
+        access
+    };
     let expanded = expand_symbolic(pattern, &ctx.homes);
     for g in defaults::subtree_globs(&expanded) {
         out.push(FsRule {
@@ -373,8 +382,10 @@ struct EnvEntry {
 /// How an [`EnvEntry`]'s pattern is matched against an ambient env key.
 #[derive(Clone, Copy)]
 enum KeyMatch {
-    /// A user-authored glob/exact key, matched case-SENSITIVELY (POSIX env keys
-    /// are case-sensitive; an explicit rule means exactly what it says).
+    /// A user-authored glob/exact key. Matched OS-mirrored (D16): case-SENSITIVE
+    /// on POSIX (env names are), case-INSENSITIVE on Windows (env names are one
+    /// var regardless of case by OS contract — a `PATH` rule must catch an ambient
+    /// `Path`). Toggled by [`ENV_KEYS_CASE_INSENSITIVE`].
     User,
     /// A built-in secret-KEY guard (`AWS_*`, `NPM_TOKEN`), matched as a
     /// case-INsensitive glob.
@@ -841,7 +852,11 @@ fn construct_env(
         if e.optional || is_glob(&e.pattern) {
             continue;
         }
-        if matches!(e.action, EnvAction::Allow(_)) && !policy.constructed.contains_key(&e.pattern) {
+        // Case-mirrored (D16): on Windows a `PATH` requirement is satisfied by an
+        // ambient `Path` — `constructed` is keyed by the source casing, so an
+        // exact-string lookup would false-miss. Match how the key matcher matched.
+        let satisfied = policy.constructed.keys().any(|k| env_key_eq(k, &e.pattern));
+        if matches!(e.action, EnvAction::Allow(_)) && !satisfied {
             return Err(CompileError::missing_required(&e.pattern));
         }
     }
@@ -875,12 +890,30 @@ fn is_glob(s: &str) -> bool {
     s.contains(['*', '?', '[', '{'])
 }
 
+/// Env var NAMES are case-insensitive on Windows (OS contract: `PATH`/`Path`/
+/// `path` are one var) and case-sensitive on POSIX. The user env-key matcher
+/// mirrors that (D16) so a `PATH` allow/deny catches an ambient `Path` on Windows
+/// but stays exact on unix. Compile-gated like the fs-matcher `CASE_INSENSITIVE`:
+/// env is folded on the host it runs on, so host OS == target OS. (Env is
+/// Windows-only insensitive, unlike fs which is also macOS-insensitive.)
+const ENV_KEYS_CASE_INSENSITIVE: bool = cfg!(windows);
+
+/// Compare two env keys honoring the OS case rule ([`ENV_KEYS_CASE_INSENSITIVE`]).
+fn env_key_eq(a: &str, b: &str) -> bool {
+    if ENV_KEYS_CASE_INSENSITIVE {
+        a.eq_ignore_ascii_case(b)
+    } else {
+        a == b
+    }
+}
+
 /// A compiled env-key matcher — the runtime form of an entry's [`KeyMatch`].
 enum KeyMatcher {
-    /// A compiled glob (user case-sensitive, or a secret-KEY case-insensitive).
+    /// A compiled glob (user OS-mirrored, or a secret-KEY case-insensitive).
     Glob(GlobMatcher),
-    /// Exact fallback when a user pattern fails to compile as a glob.
-    Exact(String),
+    /// Exact fallback when a pattern fails to compile as a glob; `bool` carries the
+    /// same case-insensitivity the glob would have (OS-mirrored user / secret-KEY).
+    Exact(String, bool),
     /// A secret token matched as a case-insensitive substring.
     SecretSubstr(String),
     /// A secret token matched as a case-insensitive whole segment.
@@ -895,7 +928,13 @@ impl KeyMatcher {
     fn hit(&self, name: &str) -> bool {
         match self {
             KeyMatcher::Glob(m) => m.is_match(name),
-            KeyMatcher::Exact(s) => s == name,
+            KeyMatcher::Exact(s, ci) => {
+                if *ci {
+                    s.eq_ignore_ascii_case(name)
+                } else {
+                    s == name
+                }
+            }
             KeyMatcher::SecretSubstr(word) => defaults::word_in_substr(word, name),
             KeyMatcher::SecretSegment(word) => defaults::word_is_segment(word, name),
             KeyMatcher::Baseline => defaults::baseline_allows(name),
@@ -914,12 +953,14 @@ fn compile_key_matcher(e: &EnvEntry, parent_keys: &BTreeSet<String>) -> KeyMatch
         KeyMatch::CuratedBaseline => KeyMatcher::Baseline,
         KeyMatch::InheritedKeys => KeyMatcher::InheritedKeys(parent_keys.clone()),
         KeyMatch::User | KeyMatch::SecretGlob => {
-            let case_insensitive = matches!(e.key_match, KeyMatch::SecretGlob);
+            // SecretGlob is always case-insensitive; a user key mirrors the OS.
+            let case_insensitive =
+                matches!(e.key_match, KeyMatch::SecretGlob) || ENV_KEYS_CASE_INSENSITIVE;
             GlobBuilder::new(&e.pattern)
                 .case_insensitive(case_insensitive)
                 .build()
                 .map(|g| KeyMatcher::Glob(g.compile_matcher()))
-                .unwrap_or_else(|_| KeyMatcher::Exact(e.pattern.clone()))
+                .unwrap_or_else(|_| KeyMatcher::Exact(e.pattern.clone(), case_insensitive))
         }
     }
 }
