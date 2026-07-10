@@ -284,6 +284,12 @@ pub(crate) fn apply(
     policy: &SandboxPolicy,
     spec: super::CommandSpec,
     proxy_port: Option<u16>,
+    // CUT-1: Windows per-host egress-via-proxy is NOT wired (an AppContainer child needs a
+    // loopback exemption — `NetworkIsolationSetAppContainerConfig` — to reach the loopback
+    // proxy), so TLS termination degrades here just as per-host does. The bundle is still
+    // threaded (CA-env set on the plain path) so trust works IF a future change wires the
+    // exemption; today `net-per-host`/`net-per-request` is reported instead.
+    ca_bundle: Option<&std::path::Path>,
 ) -> Result<super::Prepared, super::Degradation> {
     use super::{Degradation, Prepared};
 
@@ -306,6 +312,9 @@ pub(crate) fn apply(
         }
         if let Some(port) = proxy_port {
             super::set_proxy_env(&mut command, port);
+        }
+        if let Some(bundle) = ca_bundle {
+            super::set_ca_env(&mut command, bundle);
         }
         return Ok(Prepared {
             command,
@@ -379,6 +388,13 @@ pub(crate) fn apply(
     // branch-scoped windows-latest CI probe investigates the exemption's feasibility.
     if policy.net.enforce && policy.net.rules.iter().any(|r| r.effect == Effect::Allow) {
         deg.lost.push("net-per-host".to_string());
+        // A credential-inject rule is a per-REQUEST capability layered atop per-host: it
+        // degrades identically here (the loopback exemption that per-host needs gates the
+        // MITM proxy the same way), so report it explicitly rather than silently — the
+        // broker is fail-safe DENIED, never forwarded un-inspected (proposal §6).
+        if !policy.net.brokers.is_empty() {
+            deg.lost.push("net-per-request".to_string());
+        }
         reason.get_or_insert_with(|| {
             "per-host egress needs an AppContainer loopback exemption to reach the proxy \
              (not wired) — per-host allows denied (coarse network deny)"

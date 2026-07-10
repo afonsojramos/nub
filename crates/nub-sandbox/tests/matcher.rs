@@ -214,6 +214,7 @@ fn net_matcher_admits_by_last_match_and_cidr() {
                 effect: Effect::Allow,
             },
         ],
+        ..Default::default()
     };
     let m = HostMatcher::new(&policy);
     assert!(m.admits("ingest.sentry.io"));

@@ -10,8 +10,8 @@ use super::resolve;
 use super::{CompileCtx, CompileError};
 use crate::matcher::path::expand_symbolic;
 use crate::policy::{
-    CanonGlob, Effect, EnvFormat, EnvPolicy, EnvRule, FsAccess, FsPolicy, FsRule, FsRuleSet,
-    NetPolicy, NetRule, NetTarget,
+    CanonGlob, CredentialBroker, Effect, EnvFormat, EnvPolicy, EnvRule, FsAccess, FsPolicy, FsRule,
+    FsRuleSet, HeaderInject, NetPolicy, NetRule, NetTarget, Secret,
 };
 use globset::{GlobBuilder, GlobMatcher};
 use serde_json::Value;
@@ -196,13 +196,14 @@ fn splice_fs_defaults(ctx: &CompileCtx, out: &mut Vec<FsRule>) {
 /// `net: false` denies all egress.
 pub fn fold_net(
     value: &Value,
+    ctx: &CompileCtx,
     path: &str,
     parent: Option<&NetPolicy>,
 ) -> Result<NetPolicy, CompileError> {
     let mut policy = NetPolicy {
         enforce: true,
-        rules: Vec::new(),
         default_effect: Effect::Deny,
+        ..Default::default()
     };
     match value {
         Value::Bool(true) => policy.enforce = false,
@@ -223,8 +224,7 @@ pub fn fold_net(
                 if key == "..." {
                     return Err(CompileError::shape(&p, OBJECT_SENTINEL_MSG));
                 }
-                let effect = net_value_effect(val, &p)?;
-                push_net_rule(key, effect, &p, &mut policy.rules)?;
+                fold_net_object_value(key, val, ctx, &p, &mut policy)?;
             }
         }
         _ => {
@@ -262,15 +262,194 @@ fn fold_net_entry(
     push_net_rule(pattern, effect, path, out)
 }
 
-fn net_value_effect(val: &Value, path: &str) -> Result<Effect, CompileError> {
+/// One entry of the net OBJECT form: `"<host>": true | false | { rule object }`. A
+/// bool is a plain allow/deny (host-only, connection-level). A rule OBJECT is the
+/// per-host capability grammar; cut-1's ONLY key is `inject` (credential brokering),
+/// which implicitly ALLOWS the host and forces it to the TlsInspect tier.
+fn fold_net_object_value(
+    host: &str,
+    val: &Value,
+    ctx: &CompileCtx,
+    path: &str,
+    policy: &mut NetPolicy,
+) -> Result<(), CompileError> {
     match val {
-        Value::Bool(true) => Ok(Effect::Allow),
-        Value::Bool(false) => Ok(Effect::Deny),
+        Value::Bool(true) => push_net_rule(host, Effect::Allow, path, &mut policy.rules),
+        Value::Bool(false) => push_net_rule(host, Effect::Deny, path, &mut policy.rules),
+        Value::Object(rule) => fold_net_rule_object(host, rule, ctx, path, policy),
         _ => Err(CompileError::shape(
             path,
-            "net value must be true or false (per-host options are not yet supported)",
+            "net host value must be true, false, or a rule object (e.g. { \"inject\": { … } })",
         )),
     }
+}
+
+/// Parse a per-host net rule OBJECT. Cut-1 vocabulary is credential brokering ONLY;
+/// the request-filter fields the proposal reserves (`methods`/`paths`/`headers`) are
+/// DEFERRED to a future request filter, so naming one fails loud rather than silently
+/// under-enforcing. The brokered host is recorded both as an ordinary Allow rule (a
+/// later explicit `!deny` can still override it — last-match-wins is preserved) and as
+/// a [`CredentialBroker`] (→ TlsInspect tier for that host).
+fn fold_net_rule_object(
+    host: &str,
+    rule: &serde_json::Map<String, Value>,
+    ctx: &CompileCtx,
+    path: &str,
+    policy: &mut NetPolicy,
+) -> Result<(), CompileError> {
+    for key in rule.keys() {
+        if key != "inject" {
+            return Err(CompileError::shape(
+                &child(path, key),
+                &format!(
+                    "`{key}` is not supported in this cut — the only per-host net capability is `inject` (credential brokering); verb/path/header filtering is deferred to a future request filter"
+                ),
+            ));
+        }
+    }
+    // Credential brokering is a TRUSTED-ONLY capability. An untrusted grant
+    // (`dependenciesMeta`) must not be able to force TLS termination of an allowed host
+    // or inject ANY header (a literal value would otherwise slip past the `$(…)` gate).
+    if !ctx.trusted {
+        return Err(CompileError::shape(
+            path,
+            "credential brokering (`inject`) is a trusted-only capability — it is not permitted in an untrusted (dependenciesMeta) grant",
+        ));
+    }
+    let inject = rule.get("inject").ok_or_else(|| {
+        CompileError::shape(
+            path,
+            "a net rule object must contain `inject` (credential brokering) — it is the only per-host capability in this cut",
+        )
+    })?;
+    // Reject an unbrokerable host BEFORE it becomes an allow rule: a CIDR can't carry
+    // HTTP header injection, and a wildcard would hand the credential to any matching
+    // subdomain (including an attacker-owned one — laundering).
+    validate_broker_host(host, path)?;
+    let injects = parse_inject(inject, ctx, &child(path, "inject"))?;
+    push_net_rule(host, Effect::Allow, path, &mut policy.rules)?;
+    policy.brokers.push(CredentialBroker {
+        host: crate::matcher::host::strip_trailing_dot(host).to_string(),
+        injects,
+    });
+    Ok(())
+}
+
+/// A broker host must be a single LITERAL hostname. No CIDR (no HTTP layer) and — the
+/// security-critical rule — no wildcard: a `*.example.com` broker mints + injects to the
+/// CLIENT-SUPPLIED SNI, so a child connecting to an attacker-owned `evil.example.com`
+/// (with a valid real cert) would receive the `example.com` credential (laundering). A
+/// user needing several hosts lists each one explicitly.
+fn validate_broker_host(pattern: &str, path: &str) -> Result<(), CompileError> {
+    if pattern.contains('/') {
+        return Err(CompileError::shape(
+            path,
+            "credential brokering targets a host, not a CIDR — name a literal hostname",
+        ));
+    }
+    if pattern.contains('*') {
+        return Err(CompileError::shape(
+            path,
+            "credential brokering requires a LITERAL host — a wildcard would hand the credential to any matching subdomain (including an attacker's); list each host explicitly",
+        ));
+    }
+    if !crate::matcher::host::host_pattern_is_valid(pattern) {
+        return Err(CompileError::shape(
+            path,
+            &format!("`{pattern}` is not a valid host for a credential broker"),
+        ));
+    }
+    Ok(())
+}
+
+/// Parse the `inject` map (header-name → value string) into resolved [`HeaderInject`]s.
+/// A `$(…)` value resolves through the SAME trusted gate as env values — an untrusted
+/// (`dependenciesMeta`) `$(…)` is a hard error, never a silent exec. The resolved
+/// secret is wrapped in [`Secret`] (redacting Debug, serde-skipped) so it never reaches
+/// a dump, a log, or the child env.
+fn parse_inject(
+    value: &Value,
+    ctx: &CompileCtx,
+    path: &str,
+) -> Result<Vec<HeaderInject>, CompileError> {
+    let map = value.as_object().ok_or_else(|| {
+        CompileError::shape(
+            path,
+            "`inject` must be a header-name → value object (e.g. { \"Authorization\": \"Bearer $(op read …)\" })",
+        )
+    })?;
+    if map.is_empty() {
+        return Err(CompileError::shape(
+            path,
+            "`inject` must name at least one header to set",
+        ));
+    }
+    let mut out = Vec::with_capacity(map.len());
+    for (header, raw) in map {
+        let p = child(path, header);
+        validate_header_name(header, &p)?;
+        let raw_str = as_str(raw, &p)?;
+        let resolved = resolve_credential_value(raw_str, ctx, &p)?;
+        if resolved.is_empty() {
+            return Err(CompileError::shape(
+                &p,
+                "an inject header value must not be empty",
+            ));
+        }
+        // CRLF / NUL guard: a resolved value carrying a line break would smuggle a header
+        // (request splitting) into the reconstructed request. Reject at compile time — the
+        // proxy's serializer trusts values to be single-line.
+        if resolved.bytes().any(|b| matches!(b, b'\r' | b'\n' | b'\0')) {
+            return Err(CompileError::shape(
+                &p,
+                "an inject header value must not contain a newline or NUL (request-splitting guard)",
+            ));
+        }
+        out.push(HeaderInject {
+            header: header.clone(),
+            value: Secret::new(resolved),
+        });
+    }
+    Ok(out)
+}
+
+/// Resolve a credential value's `$(…)` through the trusted gate, mirroring env values.
+fn resolve_credential_value(
+    raw: &str,
+    ctx: &CompileCtx,
+    path: &str,
+) -> Result<String, CompileError> {
+    if resolve::has_substitution(raw) {
+        if !ctx.trusted {
+            return Err(CompileError::untrusted_substitution(path));
+        }
+        resolve::resolve_with(raw, ctx.runner.as_ref())
+            .map_err(|e| CompileError::substitution(path, &e))
+    } else if resolve::has_open_substitution(raw) {
+        Err(CompileError::substitution(
+            path,
+            resolve::UNTERMINATED_SUBST_MSG,
+        ))
+    } else {
+        Ok(raw.to_string())
+    }
+}
+
+/// Conservative HTTP header-name validation (RFC 7230 token subset): ASCII
+/// alphanumerics plus `-`/`_`. Fail-closed on anything exotic so a crafted name can't
+/// smuggle a CRLF or a `:` into the reconstructed request line.
+fn validate_header_name(name: &str, path: &str) -> Result<(), CompileError> {
+    if name.is_empty()
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err(CompileError::shape(
+            path,
+            &format!("`{name}` is not a valid HTTP header name (letters, digits, `-`, `_`)"),
+        ));
+    }
+    Ok(())
 }
 
 /// Classify a net target as a CIDR (contains `/` and parses as one) or a host
