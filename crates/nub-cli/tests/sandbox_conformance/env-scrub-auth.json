@@ -1,7 +1,7 @@
 {
   "name": "env-scrub-auth",
   "policy": true,
-  "relaxed": { "env": true },
+  "relaxed": false,
   "ambient_env": {
     "npm_config_target": "22.0.0",
     "npm_config_arch": "arm64",

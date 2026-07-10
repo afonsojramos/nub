@@ -349,13 +349,9 @@ fn ancestor_proc_environ_is_unreadable() {
         "ancestor environ must be unreadable under read-confine (got {} bytes)",
         out.len()
     );
-    // negative control — nothing enforced (relaxed fs, no env scrub) → readable.
-    let (_c2, out2) = f.run(
-        serde_json::json!({ "fs": true }),
-        &[],
-        SH,
-        &["-c", read_environ],
-    );
+    // negative control — nothing enforced → readable. `sandbox: false` is the
+    // unambiguous fully-unjailed surface (a bare `{ fs: true }` now floors net+env).
+    let (_c2, out2) = f.run(serde_json::json!(false), &[], SH, &["-c", read_environ]);
     assert!(
         out2.contains("PATH="),
         "neg-control: relaxed fs CAN read the ancestor environ"

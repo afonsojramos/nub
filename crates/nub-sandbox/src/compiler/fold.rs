@@ -24,6 +24,10 @@ const SENTINEL_NEGATE_MSG: &str =
 /// An empty / whitespace-only fs entry used to expand to `**` (a silent whole-fs
 /// grant, fail-OPEN); it is now a hard shape error (D3).
 const EMPTY_FS_ENTRY_MSG: &str = "an empty fs entry is not allowed (it would grant the whole filesystem) — name a path or remove it";
+/// `"..."` inheritance in fs/net is positional in the ARRAY form; as an OBJECT key
+/// it has no defined meaning, so it is rejected rather than silently treated as a
+/// literal path/host named `...` (fail loud, parity with env-object + the array).
+const OBJECT_SENTINEL_MSG: &str = "`\"...\"` inheritance is only valid in fs/net array form (e.g. [\"...\", …]), not as an object key";
 
 // ── fs ───────────────────────────────────────────────────────────────────────
 
@@ -106,6 +110,12 @@ fn fold_fs_object_entry(
     path: &str,
     out: &mut Vec<FsRule>,
 ) -> Result<(), CompileError> {
+    if key == "!..." {
+        return Err(CompileError::shape(path, SENTINEL_NEGATE_MSG));
+    }
+    if key == "..." {
+        return Err(CompileError::shape(path, OBJECT_SENTINEL_MSG));
+    }
     if key.trim().is_empty() {
         return Err(CompileError::shape(path, EMPTY_FS_ENTRY_MSG));
     }
@@ -198,6 +208,12 @@ pub fn fold_net(
         Value::Object(map) => {
             for (key, val) in map {
                 let p = child(path, key);
+                if key == "!..." {
+                    return Err(CompileError::shape(&p, SENTINEL_NEGATE_MSG));
+                }
+                if key == "..." {
+                    return Err(CompileError::shape(&p, OBJECT_SENTINEL_MSG));
+                }
                 let effect = net_value_effect(val, &p)?;
                 push_net_rule(key, effect, &p, &mut policy.rules)?;
             }

@@ -156,15 +156,22 @@ fn sentinel_negation_is_a_shape_error_on_every_axis() {
     // all three axis array parsers (never treated as a deny of a literal `...`).
     let ctx = common::ctx(true, &[]);
     for surface in [
+        // array form, every axis
         json!({ "fs": ["!..."] }),
         json!({ "net": ["!..."] }),
         json!({ "env": ["!..."] }),
+        // object-key form, every axis (env supports `"..."` inherit but rejects `"!..."`;
+        // fs/net reject both a negated sentinel AND a bare `"..."` object key)
         json!({ "env": { "!...": true } }),
+        json!({ "fs": { "!...": "rw" } }),
+        json!({ "net": { "!...": true } }),
+        json!({ "fs": { "...": "rw" } }),
+        json!({ "net": { "...": true } }),
     ] {
         let err = compile(&surface, &ctx).unwrap_err();
         assert!(
             matches!(err, CompileError::Shape { .. }),
-            "`!...` must be a shape error for {surface}"
+            "`!...`/`...` object key must be a shape error for {surface}"
         );
     }
 }

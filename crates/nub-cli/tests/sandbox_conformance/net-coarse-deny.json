@@ -1,7 +1,7 @@
 {
   "name": "net-coarse-deny",
-  "policy": { "net": false },
-  "relaxed": { "net": true },
+  "policy": { "net": false, "fs": true, "env": true },
+  "relaxed": false,
   "cases": [
     { "probe": "env", "target": "PATH", "expect": true },
     { "probe": "connect", "target": "1.1.1.1:443", "expect": false }
