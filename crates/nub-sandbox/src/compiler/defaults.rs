@@ -49,28 +49,22 @@ const SECRET_READ_RELPATHS: &[&str] = &[
     ".config/microsoft-edge",
 ];
 
-/// `.env*` / `.envrc` deny globs — legit code reads secrets via the injected
-/// process env, not by `fs.read()`-ing the file, so denying these is
-/// near-zero-breakage. Both `.env` and `.env.<x>` are denied as a leaf (`**/.env`,
-/// `**/.env.*`) AND as a SUBTREE (`**/.env/**`, `**/.env.*/**`) so a `.env/` or
-/// `.env.local/` DIRECTORY holding per-target secret files is covered, not just the
-/// single-file form. `.envrc` is direnv's secret-bearing shell config, project-local
-/// at any depth like `.env`.
+/// The default `.env*` READ-deny globs: any file whose BASENAME starts with `.env`
+/// (`.env`, `.env.local`, `.env.production`, `.envrc`, …), at any depth. These files
+/// hold the exact secrets the sandbox scrubs from the env, so reading them is denied
+/// by DEFAULT on every read-granting fs policy (not only via the `"..."` splice) —
+/// see [`env_deny_rules`] and the injection in `fold::fold_fs`. Denying reads is
+/// near-zero-breakage: legit code reads secrets via the injected process env, not by
+/// `fs.read()`-ing the file. Each basename form is denied as a LEAF (`**/.env*`) AND
+/// as a SUBTREE (`**/.env*/**`) so a `.env.d/`-style DIRECTORY of per-target secret
+/// files is covered too. The rootless twins mirror the leaf/subtree pair for a
+/// depth-0 match. Canonical candidates are absolute, so `**/.env*` is the form that
+/// actually bites; the rootless entries are kept for structural parity.
 ///
-/// MUST STAY IN SYNC with `linux_grants::BUILTIN_ENV_DENY_GLOBS` (the generous-`**`
-/// system-dir seeding skips exactly these depth-independent builtin denies).
-const SECRET_READ_GLOBS: &[&str] = &[
-    "**/.env",
-    "**/.env.*",
-    "**/.env/**",
-    "**/.env.*/**",
-    ".env",
-    ".env.*",
-    ".env/**",
-    ".env.*/**",
-    "**/.envrc",
-    ".envrc",
-];
+/// SINGLE SOURCE OF TRUTH — re-exported as `crate::compiler::ENV_DENY_GLOBS` and
+/// consumed by `linux_grants::is_builtin_env_glob` (the generous-`**` system-dir
+/// seeding skips exactly these builtin denies), so the deny set never drifts.
+pub(crate) const ENV_DENY_GLOBS: &[&str] = &["**/.env*", "**/.env*/**", ".env*", ".env*/**"];
 
 /// Secret name-word tokens matched as a case-insensitive SUBSTRING anywhere in a
 /// key (via [`word_in_substr`]). These are long/specific enough that a substring
@@ -125,8 +119,11 @@ fn segments(s: &str) -> Vec<String> {
         .collect()
 }
 
-/// Build the default fs-read DENY entries (secret paths + `.env*` globs). These
-/// are what `"..."` splices into a read ruleset. Deny access is neutral (Read).
+/// Build the default secret-PATH read DENY entries (`~/.ssh`, `~/.aws`, wallets, …).
+/// These are what `"..."` splices into a read ruleset. Deny access is neutral (Read).
+/// The depth-independent `.env*` denies are handled SEPARATELY (`env_deny_rules`,
+/// injected unconditionally on every read-granting policy) so they get the exact-file
+/// override precedence — see `fold::fold_fs`.
 pub fn secret_read_denies(homes: &Homes) -> Vec<FsRule> {
     let mut out = Vec::new();
     for rel in SECRET_READ_RELPATHS {
@@ -135,13 +132,15 @@ pub fn secret_read_denies(homes: &Homes) -> Vec<FsRule> {
             out.push(deny(g));
         }
     }
-    // `.env*` denies are depth-independent (`**/.env` matches any component
-    // ending in `.env`), so they are NOT anchored under any root — passed to the
-    // matcher verbatim.
-    for g in SECRET_READ_GLOBS {
-        out.push(deny(g.to_string()));
-    }
     out
+}
+
+/// The default `.env*` READ-deny entries ([`ENV_DENY_GLOBS`]). Depth-independent
+/// (matched by basename anywhere), so NOT anchored under any root — passed to the
+/// matcher verbatim. Injected as its own precedence band on every read-granting fs
+/// policy (`fold::fold_fs`), so a broad dir-allow can't re-expose a `.env*` file.
+pub(crate) fn env_deny_rules() -> Vec<FsRule> {
+    ENV_DENY_GLOBS.iter().map(|g| deny(g.to_string())).collect()
 }
 
 /// The generous read base entry: allow everything, then the secret denies (added
@@ -648,15 +647,11 @@ mod tests {
     }
 
     #[test]
-    fn secret_denies_include_the_new_additions() {
+    fn secret_path_denies_are_home_anchored_and_exclude_dotenv() {
         let globs: Vec<String> = secret_read_denies(&homes())
             .into_iter()
             .map(|r| r.matcher.as_str().to_string())
             .collect();
-        // Depth-independent `.env`/`.envrc` globs are verbatim (never anchored).
-        for g in ["**/.env", "**/.env/**", "**/.env.*/**", "**/.envrc"] {
-            assert!(globs.contains(&g.to_string()), "missing verbatim deny {g}");
-        }
         // Home-anchored secret files/dirs appear as subtree denies (substring match
         // tolerates OS firmlink canonicalization of the fake home prefix).
         for frag in [".gnupg", ".pgpass", ".pypirc", ".config/git/credentials"] {
@@ -664,6 +659,24 @@ mod tests {
                 globs.iter().any(|g| g.contains(frag)),
                 "missing home secret deny containing {frag}"
             );
+        }
+        // `.env*` is NOT in the secret-PATH set — it is injected separately (with the
+        // exact-file override precedence) via `env_deny_rules`, so it must not appear here.
+        assert!(
+            globs.iter().all(|g| !g.contains(".env")),
+            "`.env*` must be handled by env_deny_rules, not the secret-path splice"
+        );
+    }
+
+    #[test]
+    fn env_deny_rules_cover_dotenv_basenames_as_deny() {
+        let rules = env_deny_rules();
+        let globs: Vec<&str> = rules.iter().map(|r| r.matcher.as_str()).collect();
+        // Every rule is a Deny with the canonical inert access.
+        assert!(rules.iter().all(|r| r.effect == Effect::Deny));
+        // The leaf + subtree, depth-independent (`**/`) and rootless forms.
+        for g in ["**/.env*", "**/.env*/**", ".env*", ".env*/**"] {
+            assert!(globs.contains(&g), "env_deny_rules missing {g}");
         }
     }
 }

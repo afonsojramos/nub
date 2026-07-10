@@ -71,10 +71,89 @@ pub fn fold_fs(
             ));
         }
     }
+    finalize_env_deny(&mut set);
     Ok(FsPolicy {
         rules: set,
         tmp: Default::default(),
     })
+}
+
+/// Inject the default `.env*` READ-deny at a precedence a broad dir/glob allow can NOT
+/// override but an EXPLICIT exact-file allow can. `.env*` files hold the exact secrets
+/// the sandbox scrubs, so reading them is denied by default on any read-granting fs
+/// policy — including the OBJECT form, which never spliced the `"..."` secret set. The
+/// rule composes with the last-match-wins fs algebra as three ordered bands (backends
+/// stay pure IR replicators — every one evaluates last-match-wins over these entries):
+///   band 1 — the folded user + default entries, unchanged;
+///   band 2 — the `.env*` default deny, appended so it beats every band-1 broad/glob
+///            allow (the `["...", "./"]` footgun where a trailing dir-allow re-exposed
+///            `<proj>/.env` is closed here);
+///   band 3 — the user's EXACT-FILE `.env*` allows re-emitted so they beat band 2
+///            (informed consent: `{ "./.env.production": "r" }` grants that one file).
+/// A band-1 entry the user later DENIES for that exact path is NOT re-emitted (its
+/// band-1 verdict is Deny), so an explicit `!./.env` stays denied.
+///
+/// Skipped only for a FULLY-relaxed axis (`fs: true` / `sandbox: false` — the explicit
+/// escape hatch) and for a policy that grants no reads at all (a deny-all fs), where the
+/// deny would be inert noise.
+fn finalize_env_deny(set: &mut FsRuleSet) {
+    let fully_relaxed = set.default_effect == Effect::Allow && set.entries.is_empty();
+    let grants_read = set.default_effect == Effect::Allow
+        || set.entries.iter().any(|e| e.effect == Effect::Allow);
+    if fully_relaxed || !grants_read {
+        return;
+    }
+    // Compute band 3 from band 1 BEFORE appending band 2, so the survivor test reflects
+    // the user's own last-match verdict (not the deny we are about to add).
+    let band3 = exact_env_allows_surviving(set);
+    set.entries.extend(defaults::env_deny_rules());
+    set.entries.extend(band3);
+}
+
+/// The band-3 survivors: each EXACT-FILE `.env*` allow entry whose band-1 (user)
+/// verdict for its own path is Allow. An exact-file entry is a literal path (or its
+/// `/**` subtree twin) whose basename starts with `.env`; a glob-bearing allow
+/// (`**/.env*`, `./*`) is NOT an exact-file allow and does not override the deny.
+fn exact_env_allows_surviving(set: &FsRuleSet) -> Vec<FsRule> {
+    let mut out = Vec::new();
+    for r in &set.entries {
+        if r.effect != Effect::Allow {
+            continue;
+        }
+        // The literal file identity is the matcher minus a `/**` subtree twin.
+        let literal = r
+            .matcher
+            .as_str()
+            .strip_suffix("/**")
+            .unwrap_or(r.matcher.as_str());
+        if is_glob(literal) || !basename_is_dotenv(literal) {
+            continue;
+        }
+        if band1_verdict_allows(set, literal) {
+            out.push(r.clone());
+        }
+    }
+    out
+}
+
+/// Whether a path's final component's basename starts with `.env` (the deny target).
+fn basename_is_dotenv(path: &str) -> bool {
+    path.rsplit('/').next().unwrap_or(path).starts_with(".env")
+}
+
+/// The band-1 last-match-wins verdict for the concrete `candidate` path over the set's
+/// current (pre-band-2) entries. Pure string glob matching over the canonical IR globs
+/// — deterministic, no filesystem touch (the candidate is already a canonical IR path).
+fn band1_verdict_allows(set: &FsRuleSet, candidate: &str) -> bool {
+    let mut effect = set.default_effect;
+    for r in &set.entries {
+        if let Ok(m) = crate::matcher::path::compile_glob(r.matcher.as_str())
+            && m.is_match(candidate)
+        {
+            effect = r.effect;
+        }
+    }
+    effect == Effect::Allow
 }
 
 fn fold_fs_array_entry(

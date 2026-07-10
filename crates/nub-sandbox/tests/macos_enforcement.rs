@@ -193,6 +193,56 @@ fn env_files_denied_under_generous_read() {
     );
 }
 
+// ── fs .env deny under an OBJECT-form allowlist + exact-file override (Feature 2) ─
+
+#[test]
+fn env_files_denied_under_object_form_allowlist() {
+    let f = fixture();
+    // The core Feature-2 gap: an object-form `{ "./": "r" }` grants the project but the
+    // kernel must DENY `<proj>/.env` — before the fix the object form spliced no secret
+    // set, so the LowBox/Seatbelt profile left `.env` readable inside the granted subtree.
+    let confine = serde_json::json!({ "fs": { "./": "r" } });
+    assert!(
+        f.allowed(confine.clone(), CAT, &[&s(&f.proj.join("pub.txt"))]),
+        "project file readable under object-form allow"
+    );
+    assert!(
+        !f.allowed(confine.clone(), CAT, &[&s(&f.proj.join(".env"))]),
+        ".env denied under an object-form dir allow"
+    );
+    assert!(
+        !f.allowed(confine.clone(), CAT, &[&s(&f.proj.join("sub/.env"))]),
+        "nested .env denied under an object-form dir allow"
+    );
+    // negative control — relaxed fs reads .env fine (the deny is the confinement, not the fixture):
+    assert!(
+        f.allowed(
+            serde_json::json!({ "fs": true }),
+            CAT,
+            &[&s(&f.proj.join(".env"))]
+        ),
+        "neg-control: relaxed fs reads .env"
+    );
+}
+
+#[test]
+fn exact_file_allow_grants_that_dotenv_but_siblings_stay_denied() {
+    let f = fixture();
+    fs::write(f.proj.join(".env.production"), "PRODVALUE").unwrap();
+    // Informed consent: naming the exact file grants reading it, while a sibling `.env`
+    // the user did NOT name stays denied — the kernel enforces both, proving the
+    // band-3 exact-file re-emission beats the `.env*` deny and nothing else does.
+    let confine = serde_json::json!({ "fs": { "./": "r", "./.env.production": "r" } });
+    assert!(
+        f.allowed(confine.clone(), CAT, &[&s(&f.proj.join(".env.production"))]),
+        "the explicitly-allowed .env.production is readable"
+    );
+    assert!(
+        !f.allowed(confine, CAT, &[&s(&f.proj.join(".env"))]),
+        "a sibling .env the user did not name stays denied"
+    );
+}
+
 // ── new secret deny-set additions (A2): each denied under a generous read ──────
 
 #[test]
