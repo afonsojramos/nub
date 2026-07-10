@@ -3,7 +3,8 @@
 An honest record of what the engine does NOT close, why each residual is bounded, and
 where the fix lives. The sandbox fails safe, not silent: an **axis-level** degradation a
 policy reaches (a per-host net policy with no proxy → coarse deny; per-host Windows egress
-→ coarse deny) is surfaced at runtime via `Degradation`. The **within-axis over-grant**
+without elevation → a fail-CLOSED `Degradation` error, never a silent coarse-degrade) is
+surfaced via `Degradation`. The **within-axis over-grant**
 residuals below are a different class — documented here, NOT signalled: hardlink-to-secret,
 the `/etc` no-deny-carve edge, derive→open TOCTOU, bind-mounted procfs, the macOS
 floating-name move-block shapes, Linux `ConnectTcp` at `ptrace_scope≥2`, and NAT64/6to4.
@@ -103,18 +104,48 @@ an inbound listener remains creatable on an unpredictable port. Explicit `bind()
   for full inbound closure. Same full-close as above (seccomp `user_notify` / netns).
   Documented in `backend/linux.rs` (`apply_landlock`).
 
-### Windows per-host egress is not wired (coarse deny holds)
+### Windows per-host egress + MITM: opt-in elevated "strict Windows" tier
 
-Windows has proven coarse egress-deny (no `internetClient` capability blocks all egress,
-loopback included), but not per-host. An AppContainer child cannot reach the loopback
-proxy without a registered loopback exemption (`NetworkIsolationSetAppContainerConfig`),
-which this phase does not wire.
+Per-host net (Q21) and the MITM/credential-brokering tier (Q22) enforce on Windows the
+same way as macOS/Linux — the confined child's sole egress is nub's loopback proxy — but
+reaching that proxy needs a step the other platforms don't. An AppContainer child is
+WFP-blocked from ALL loopback regardless of capability, and the only lift
+(`NetworkIsolationSetAppContainerConfig`, a per-run AC-SID loopback exemption) requires
+administrator. So per-host/MITM on Windows is an **opt-in elevated tier**; coarse on/off
+(allow-all or deny-all, which need no proxy) stays the unprivileged default, unchanged.
 
-- **Why bounded:** fail-safe — a per-host allow policy degrades to coarse **deny**, not
-  to open egress, and reports a `net-per-host` `Degradation`. Nothing is silently
-  allowed.
-- **Where fixed:** wire the loopback exemption so the child can reach the proxy —
-  build-jail thread or a later hardening slot.
+- **How it enforces (elevated):** before spawn the backend registers the per-run unique AC
+  SID in the machine-wide loopback-exemption list (a read-modify-write that never clobbers
+  other apps' entries), keeps `internetClient` WITHHELD so the exemption opens loopback
+  ONLY — nub's proxy is the child's sole egress — and tears the exemption down when the
+  child exits (RAII, alongside the ACE/profile teardown). MITM rides the same proxy: the
+  ephemeral CA reaches the child through the CA-env bundle, exactly as on mac/Linux.
+- **The widening tradeoff (bounded).** A loopback exemption is not scoped to the proxy
+  port — for the run's lifetime the exempted child can reach EVERY loopback listener (a
+  local DB on `127.0.0.1:5432`, a Docker daemon, an SSH-agent pipe, …), not just nub's
+  proxy. Narrowing it to only the proxy port would need admin WFP filters, which nub does
+  not install. The widening is BOUNDED to the ephemeral per-run AC SID and removed on exit,
+  so it never persists past the sandboxed child's own lifetime. One consequence to note:
+  if a loopback listener is itself an OPEN FORWARDER with external reach (a user's own
+  local proxy, an SSRF-able localhost service), a hostile child could relay egress through
+  it and sidestep the per-host allowlist — the same local-forwarder caveat that applies to
+  any localhost-reachable sandbox, now in scope on the elevated Windows tier because the
+  child can reach all of loopback (macOS/Linux keep loopback closed except the proxy port).
+- **Fail-CLOSED, never silent.** A policy that REQUIRES the proxy (any per-host rule, or a
+  MITM/`inject` broker) on a host where the exemption cannot be registered — nub not
+  elevated, or the write fails — surfaces a clear error naming the elevation requirement
+  and does NOT coarse-degrade an allow-list into a deny-all. A coarse-only policy needs no
+  elevation and is unaffected.
+- **Crash-leak (bounded).** A nub that dies without running teardown leaks one orphaned
+  exemption entry for its per-run AC SID. Since the SID is unique per run and its profile is
+  deleted, no future child is ever created under it, so the stale entry exempts no live
+  process — it only accretes an unused list row. (A subsequent nub run re-reads the list
+  and would preserve, not reuse, the orphan; it is inert until the machine's exemption list
+  is manually pruned.)
+- **Prior art:** Codex and SRT hit the same wall and answer it the same way — per-host net
+  on Windows is an elevated setup with unprivileged reuse, never unprivileged outright.
+  (`backend/windows.rs` `plan_net` / `WindowsLaunch::run`; `tests/windows_enforcement.rs`
+  `net_tier`.)
 
 ### MITM tier: credential-brokering residuals (INFO, doc-only)
 
