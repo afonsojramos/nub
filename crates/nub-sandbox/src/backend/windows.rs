@@ -1368,6 +1368,7 @@ mod tests {
                 port,
                 None,
                 None,
+                None,
             )
             .expect("apply")
             .degradation
@@ -1397,6 +1398,7 @@ mod tests {
         let deg = apply(
             &deny_all,
             crate::CommandSpec::new("cmd.exe"),
+            None,
             None,
             None,
             None,
