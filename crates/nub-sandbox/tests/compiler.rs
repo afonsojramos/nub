@@ -185,7 +185,8 @@ fn sentinel_scalar_value_is_a_shape_error_but_file_ref_defers() {
     // string is a legit frontend-deferred file-ref and stays FileRefUnresolved.
     let ctx = common::ctx(true, &[("PORT", "80")]);
 
-    // Non-path-like scalars → shape error, both at the wrapper level and in env.
+    // Malformed `"..."` values → shape error: bare scalars and arrays at the
+    // wrapper level and in env, plus the fs/net array-only-sentinel object keys.
     for surface in [
         json!({ "...": "r" }),
         json!({ "...": "port" }),
