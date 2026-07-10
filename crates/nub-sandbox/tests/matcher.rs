@@ -149,6 +149,86 @@ fn host_wildcard_matches_apex_and_any_depth() {
 }
 
 #[test]
+fn net_wildcard_matches_any_depth_but_not_sibling_domains() {
+    // Security-critical wildcard contract (ratified): `*.example.com` admits the apex
+    // and EVERY subdomain at any depth, and admits NOTHING that merely shares the
+    // string "example.com" without a label boundary. The negative set is the real
+    // vulnerability surface — a sibling/suffix-confusion host slipping past an allow
+    // rule is an egress breakout. Enumerated exhaustively so a regression fails loudly.
+    let pat = "*.example.com";
+
+    // Property 1 — matches at every depth (apex counts as depth 0).
+    for host in [
+        "example.com",              // apex
+        "a.example.com",            // one label
+        "a.b.example.com",          // two labels
+        "evil.deep.example.com",    // three labels
+        "w.x.y.z.deep.example.com", // arbitrarily deep
+        "API.Example.COM",          // case-insensitive apex
+        "Api.Example.Com",          // case-insensitive subdomain
+        "api.example.com.",         // FQDN trailing dot (D12)
+    ] {
+        assert!(host_glob_matches(pat, host), "must match: {host}");
+    }
+
+    // Property 2 — must NOT over-match. Every shape shares the substring "example.com"
+    // (or a near-miss of it) but is a DIFFERENT registrable domain an attacker controls.
+    for host in [
+        "notexample.com", // prefix glued, no label boundary
+        "evilexample.com",
+        "fooexample.com",
+        "myexample.com",
+        "xexample.com",             // single-char prefix glue
+        "example.comx",             // TLD suffix-extended
+        "example.com.attacker.com", // apex as a leading label of an attacker zone
+        "example.com.evil.com",
+        "example.com-attacker.com", // hyphen-glued sibling
+        "example.co",               // truncated TLD
+        "example.org",              // different TLD
+        "example.net",
+        "wexample.com",
+        "aexample.com",
+    ] {
+        assert!(!host_glob_matches(pat, host), "must NOT match: {host}");
+    }
+}
+
+#[test]
+fn net_wildcard_holds_on_enforced_proxy_decider() {
+    // The per-host allow/deny verdict on BOTH the Linux (Landlock+proxy) and macOS
+    // (Seatbelt+proxy) enforced paths flows through the egress proxy's StaticDecider,
+    // which delegates to the SAME HostMatcher. Assert the wildcard contract survives
+    // that delegation end-to-end — a match/no-match set proven at the enforcement seam,
+    // not only the matcher unit.
+    use nub_sandbox::proxy::{Decision, GrantDecider, Host, StaticDecider};
+
+    let decider = StaticDecider::new(NetPolicy {
+        enforce: true,
+        default_effect: Effect::Deny,
+        rules: vec![NetRule {
+            target: NetTarget::Host("*.example.com".into()),
+            effect: Effect::Allow,
+        }],
+        ..Default::default()
+    });
+    let allowed = |h: &str| matches!(decider.decide(&Host::Name(h.into())), Decision::Allow);
+
+    assert!(allowed("example.com"), "apex admitted at the proxy seam");
+    assert!(
+        allowed("a.b.example.com"),
+        "any-depth admitted at the proxy seam"
+    );
+    assert!(
+        !allowed("example.com.attacker.com"),
+        "suffix-confusion denied at the proxy seam"
+    );
+    assert!(
+        !allowed("evilexample.com"),
+        "sibling denied at the proxy seam"
+    );
+}
+
+#[test]
 fn host_literal_is_exact_case_insensitive() {
     assert!(host_glob_matches("Example.COM", "example.com"));
     assert!(!host_glob_matches("example.com", "api.example.com"));
