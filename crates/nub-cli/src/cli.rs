@@ -3634,6 +3634,7 @@ fn build_script_command(
     );
     let aug = nub_core::node::spawn::compute_augmentation_env(
         &nub_binary,
+        node.path.as_std_path(),
         node.version,
         compat_mode,
         pnp_ctx.as_ref().map(|c| c.pnp_cjs.as_path()),
@@ -4558,11 +4559,13 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     let mut node_args = vec!["--watch".to_string(), "--watch-preserve-output".to_string()];
 
     let node_options = env::var("NODE_OPTIONS").ok();
+    let accepted = nub_core::node::discovery::accepted_env_flags(node.path.as_std_path());
     let inject = nub_core::node::flags::compute_inject_flags(
         node.version.clone(),
         args,
         node_options.as_deref(),
         false,
+        accepted.as_ref(),
     );
     for flag in &inject {
         node_args.push(flag.to_string());
@@ -4923,6 +4926,7 @@ fn apply_exec_augmentation(cmd: &mut std::process::Command, cwd: &Path) {
     let pnp_ctx = nub_core::pnp::detect(cwd);
     let Some(aug) = nub_core::node::spawn::compute_augmentation_env(
         &nub_binary,
+        node.path.as_std_path(),
         node.version,
         false,
         pnp_ctx.as_ref().map(|c| c.pnp_cjs.as_path()),

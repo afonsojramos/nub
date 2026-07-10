@@ -467,18 +467,29 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
     // a half-setup (flags + a nested shim, no preload). See
     // wiki/runtime/hijack-by-default.md.
     if !config.compat_mode && !is_reentrant && preload.is_some() {
-        // Flag injection.
+        // Flag injection — intersected with the binary's actual accepted-flag set
+        // (probed + cached) so an open-ended `Unflag` band never injects a flag a
+        // future Node has removed (which would abort startup with "bad option").
+        let accepted = super::discovery::accepted_env_flags(config.node.path.as_std_path());
         let inject = flags::compute_inject_flags(
             config.node.version.clone(),
             config.user_args,
             node_options.as_deref(),
             config.show_warnings,
+            accepted.as_ref(),
         );
         for flag in &inject {
             cmd.arg(flag);
         }
 
-        // Web Storage: nub ALWAYS injects `--experimental-webstorage` on the band
+        // Web Storage: injected here, NOT through `compute_inject_flags`, so it sits
+        // OUTSIDE the Stage-4 accepted-flag intersection above. Safe: its band is
+        // CLOSED (`22.4–<25`) and the flag stabilized (not removed) at 25 — no
+        // open-ended-removal hazard, so it needs no probe guard. (Any FUTURE
+        // open-ended flag should go through `compute_inject_flags` to inherit the
+        // guard, not this direct-injection path.)
+        //
+        // nub ALWAYS injects `--experimental-webstorage` on the band
         // where that flag is the enabling mechanism (Node 22.4 through <25, i.e.
         // `webstorage_flag_needed`), regardless of whether the user opted into
         // localStorage persistence (the maintainer, 2026-06-15: "a flag that we inject no
@@ -1007,6 +1018,7 @@ fn setup_path_shim(nub_binary: &Path) -> Result<Utf8PathBuf> {
 /// out from under sibling scripts still running.
 pub fn compute_augmentation_env(
     nub_binary: &Path,
+    node_path: &Path,
     node_version: super::version::NodeVersion,
     compat_mode: bool,
     pnp: Option<&Path>,
@@ -1045,11 +1057,16 @@ pub fn compute_augmentation_env(
     // NODE_OPTIONS — injected experimental flags, the preload, and webstorage.
     // Dedupe injected flags against any existing NODE_OPTIONS so we don't emit a
     // flag the user already set.
+    // Intersected with the binary's actual accepted-flag set (probed + cached),
+    // same self-correcting guard as the direct-spawn path: a flag a future Node has
+    // removed is dropped instead of aborting the script-runner child at startup.
+    let accepted = super::discovery::accepted_env_flags(node_path);
     let inject = flags::compute_inject_flags(
         node_version.clone(),
         &[],
         existing_node_options.as_deref(),
         false,
+        accepted.as_ref(),
     );
     let mut node_opts_parts: Vec<String> = inject.iter().map(|f| f.to_string()).collect();
     // Yarn PnP `--require <.pnp.cjs>` BEFORE nub's preload token so PnP's

@@ -1393,6 +1393,7 @@ fn apply_lifecycle_augmentation(cwd: &Path) {
     let pnp_ctx = nub_core::pnp::detect(cwd);
     let Some(aug) = nub_core::node::spawn::compute_augmentation_env(
         &nub_binary,
+        node.path.as_std_path(),
         node.version,
         // Lifecycle scripts are never compat: PM verbs run augmented (there is
         // no `--node` lifecycle path).
