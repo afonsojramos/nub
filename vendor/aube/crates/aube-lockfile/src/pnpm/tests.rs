@@ -320,6 +320,52 @@ snapshots:
     assert_eq!(pkg.libc.as_slice(), &["glibc".to_string()]);
 }
 
+/// Some registry packages ship an `engines` map whose value is itself a
+/// map rather than a version string — `cordova-plugin-inappbrowser`
+/// declares `engines: {cordovaDependencies: {...}}`, and pnpm preserves
+/// it verbatim in `pnpm-lock.yaml`. A strict `BTreeMap<String, String>`
+/// deserializer trips on the nested map and fails the whole parse
+/// (issue #417). The parser mirrors the manifest's `engines_tolerant`
+/// handling: drop non-string entries, keep the ordinary string ranges.
+#[test]
+fn parse_package_engines_tolerates_nested_map_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let lockfile_path = dir.path().join("pnpm-lock.yaml");
+    std::fs::write(
+        &lockfile_path,
+        r#"
+lockfileVersion: '9.0'
+
+importers:
+  .:
+    dependencies:
+      cordova-plugin-inappbrowser:
+        specifier: 6.0.0
+        version: 6.0.0
+
+packages:
+  cordova-plugin-inappbrowser@6.0.0:
+    resolution: {integrity: sha512-nMJ67YQZwkx1WMfA4tKFdVdTg6FNkh}
+    engines: {node: '>=14', cordovaDependencies: {0.2.3: {cordova: '>=3.1.0'}, 6.0.0: {cordova: '>=9.0.0'}}}
+
+snapshots:
+  cordova-plugin-inappbrowser@6.0.0: {}
+"#,
+    )
+    .unwrap();
+
+    let graph = parse(&lockfile_path).unwrap();
+    let pkg = graph
+        .packages
+        .get("cordova-plugin-inappbrowser@6.0.0")
+        .unwrap();
+    assert_eq!(pkg.engines.get("node").map(String::as_str), Some(">=14"));
+    assert!(
+        !pkg.engines.contains_key("cordovaDependencies"),
+        "nested-map engine value must be dropped, not preserved as junk"
+    );
+}
+
 #[test]
 fn parse_local_snapshot_optional_dependencies_as_edges() {
     let dir = tempfile::tempdir().unwrap();
