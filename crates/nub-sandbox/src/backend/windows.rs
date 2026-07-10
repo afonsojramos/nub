@@ -647,8 +647,7 @@ mod launch {
         SetHandleInformation, WAIT_ABANDONED, WAIT_OBJECT_0,
     };
     use windows_sys::Win32::NetworkManagement::WindowsFirewall::{
-        NetworkIsolationFreeAppContainers, NetworkIsolationGetAppContainerConfig,
-        NetworkIsolationSetAppContainerConfig,
+        NetworkIsolationGetAppContainerConfig, NetworkIsolationSetAppContainerConfig,
     };
     use windows_sys::Win32::Security::Authorization::{
         ConvertStringSidToSidW, EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW,
@@ -668,6 +667,7 @@ mod launch {
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
         SetInformationJobObject,
     };
+    use windows_sys::Win32::System::Memory::{GetProcessHeap, HeapFree};
     use windows_sys::Win32::System::Threading::{
         CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateMutexW, CreateProcessW,
         DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess,
@@ -762,6 +762,32 @@ mod launch {
         out
     }
 
+    /// Free the buffer `NetworkIsolationGetAppContainerConfig` hands back. That buffer is a
+    /// process-heap allocation — the `SID_AND_ATTRIBUTES` array plus a separate heap block per
+    /// entry `Sid` — so the matching deallocator is `HeapFree` on the process heap for each
+    /// `Sid` then the array (the MSDN `FreeAppContainerConfig` sample). It is NOT freed with
+    /// `NetworkIsolationFreeAppContainers`: that is the deallocator for
+    /// `NetworkIsolationEnumAppContainers`'s much larger `INET_FIREWALL_APP_CONTAINER` records,
+    /// and pointing it at a `SID_AND_ATTRIBUTES` array type-confuses the walk into freeing
+    /// garbage interior pointers → STATUS_HEAP_CORRUPTION (windows-latest MSVC; #433).
+    fn free_app_container_config(arr: *mut SID_AND_ATTRIBUTES, count: u32) {
+        if arr.is_null() {
+            return;
+        }
+        // SAFETY: `arr`/`count` come from a successful `NetworkIsolationGetAppContainerConfig`,
+        // which allocates the array and each entry's `Sid` on the process heap.
+        unsafe {
+            let heap = GetProcessHeap();
+            for i in 0..count as usize {
+                let sid = (*arr.add(i)).Sid;
+                if !sid.is_null() {
+                    HeapFree(heap, 0, sid.cast());
+                }
+            }
+            HeapFree(heap, 0, arr.cast());
+        }
+    }
+
     /// Add or remove `sid` in the machine-wide AppContainer loopback-exemption list via a
     /// read-modify-write (`NetworkIsolationSetAppContainerConfig` REPLACES the whole list,
     /// so the current entries must be preserved — never clobber other apps' exemptions).
@@ -806,9 +832,7 @@ mod launch {
                 )
             };
             // Free the got list AFTER Set (new_list borrowed its Sid pointers).
-            if !arr.is_null() {
-                unsafe { NetworkIsolationFreeAppContainers(arr.cast()) };
-            }
+            free_app_container_config(arr, count);
             if set_rc != 0 {
                 return Err(io::Error::from_raw_os_error(set_rc as i32));
             }

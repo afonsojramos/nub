@@ -946,20 +946,39 @@ mod win {
         }
     }
 
+    /// Free the `NetworkIsolationGetAppContainerConfig` buffer with its matching process-heap
+    /// deallocator (HeapFree each entry's `Sid`, then the array — the MSDN `FreeAppContainerConfig`
+    /// sample). NOT `NetworkIsolationFreeAppContainers`, whose `INET_FIREWALL_APP_CONTAINER` walk
+    /// type-confuses a `SID_AND_ATTRIBUTES` array into a STATUS_HEAP_CORRUPTION (#433).
+    fn free_ac_config(arr: *mut windows_sys::Win32::Security::SID_AND_ATTRIBUTES, count: u32) {
+        use windows_sys::Win32::System::Memory::{GetProcessHeap, HeapFree};
+        if arr.is_null() {
+            return;
+        }
+        // SAFETY: `arr`/`count` come from a successful Get, which allocates the array and each
+        // entry's `Sid` on the process heap.
+        unsafe {
+            let heap = GetProcessHeap();
+            for i in 0..count as usize {
+                let sid = (*arr.add(i)).Sid;
+                if !sid.is_null() {
+                    HeapFree(heap, 0, sid.cast());
+                }
+            }
+            HeapFree(heap, 0, arr.cast());
+        }
+    }
+
     /// Size of the machine-wide AppContainer loopback-exemption list (read path is open
     /// even unprivileged). Used to prove per-run teardown leaves no accretion.
     fn exemption_count() -> u32 {
-        use windows_sys::Win32::NetworkManagement::WindowsFirewall::{
-            NetworkIsolationFreeAppContainers, NetworkIsolationGetAppContainerConfig,
-        };
+        use windows_sys::Win32::NetworkManagement::WindowsFirewall::NetworkIsolationGetAppContainerConfig;
         use windows_sys::Win32::Security::SID_AND_ATTRIBUTES;
         let mut count: u32 = 0;
         let mut arr: *mut SID_AND_ATTRIBUTES = std::ptr::null_mut();
         // SAFETY: out-params for the current list; the returned array is freed immediately.
         let rc = unsafe { NetworkIsolationGetAppContainerConfig(&mut count, &mut arr) };
-        if !arr.is_null() {
-            unsafe { NetworkIsolationFreeAppContainers(arr.cast()) };
-        }
+        free_ac_config(arr, count);
         if rc == 0 { count } else { 0 }
     }
 
@@ -970,8 +989,7 @@ mod win {
     fn exemption_admin_gate(fails: &mut u32, elevated: bool) {
         use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
         use windows_sys::Win32::NetworkManagement::WindowsFirewall::{
-            NetworkIsolationFreeAppContainers, NetworkIsolationGetAppContainerConfig,
-            NetworkIsolationSetAppContainerConfig,
+            NetworkIsolationGetAppContainerConfig, NetworkIsolationSetAppContainerConfig,
         };
         use windows_sys::Win32::Security::Isolation::DeriveAppContainerSidFromAppContainerName;
         use windows_sys::Win32::Security::{FreeSid, PSID, SID_AND_ATTRIBUTES};
@@ -1015,9 +1033,7 @@ mod win {
             // SAFETY: `existing` (borrowing `arr`) is still alive here.
             unsafe { NetworkIsolationSetAppContainerConfig(count, restore) };
         }
-        if !arr.is_null() {
-            unsafe { NetworkIsolationFreeAppContainers(arr.cast()) };
-        }
+        free_ac_config(arr, count);
         unsafe { FreeSid(sid) };
 
         if elevated {
