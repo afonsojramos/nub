@@ -615,6 +615,7 @@ fn glob_to_seatbelt_regex(pattern: &str) -> String {
     let chars: Vec<char> = pattern.chars().collect();
     let mut regex = String::from("^");
     let mut saw_glob = false;
+    let mut run = RecurRun::None;
     let mut i = 0;
     while i < chars.len() {
         // `{` opens a brace group; `}`/`,` are literals at the top level (only a `,`
@@ -622,10 +623,29 @@ fn glob_to_seatbelt_regex(pattern: &str) -> String {
         if chars[i] == '{' {
             i += 1;
             saw_glob = true;
+            run = RecurRun::None;
             regex.push_str(&brace_to_regex(&chars, &mut i, &mut saw_glob));
         } else {
-            translate_unit(&chars, &mut i, &mut regex, &mut saw_glob);
+            translate_unit(&chars, &mut i, &mut regex, &mut saw_glob, false, &mut run);
         }
+    }
+    // A WHOLE leading-slash-free pattern that is nothing but recursive prefixes ending in
+    // `/` (`**/`, `**/**/`, …) matches EVERYTHING in globset (its lone-`RecursivePrefix`
+    // whole-pattern special case), NOT just the trailing-slash-or-empty set `(.*/)?`
+    // describes — anchoring it to `.*` keeps a deny of `**/` from under-enforcing. Two
+    // guards make this precise: the body must be a pure `(.*/)?` chain (a single `*`
+    // component, a literal, or a suffix `**`→`.*` all leave residue → NOT this case, and
+    // a leading `/` emits a literal first so the body wouldn't start with `(.*/)?`), AND
+    // the source is only `*`/`/` — an empty brace (`**/{}`) also emits body `(.*/)?` but
+    // its `{` breaks globset's lone-`RecursivePrefix`, so it must stay `(.*/)?`. (In a
+    // brace BRANCH the same tokens stay `(.*/)?`; the special case is top-level-only.)
+    let body = &regex[1..];
+    if !body.is_empty()
+        && body.replace("(.*/)?", "").is_empty()
+        && chars.iter().all(|&c| c == '*' || c == '/')
+    {
+        regex.truncate(1);
+        regex.push_str(".*");
     }
     if !saw_glob {
         regex.push_str("(/.*)?");
@@ -650,11 +670,18 @@ fn glob_to_seatbelt_regex(pattern: &str) -> String {
 ///     (`{a,}` matches `a` only, NOT `a`-or-empty; `{}`/`{,}` emit nothing at all).
 ///   • an unbalanced `{` (globset hard-errors on it) is auto-closed at input end so the
 ///     emitted regex stays valid AND a deny keeps biting (fail-safe, not fail-open).
+///   • a `**` inside a branch is recursive (crosses `/`) ONLY where globset makes it so —
+///     when it forms a whole path component (see `translate_unit`); a non-component `**`
+///     like `{**,x}`/`pre{**,x}post` degrades to a single-component `[^/]*`, NOT the
+///     dir-crossing `.*` (the brace-`**` over-grant closed after the #411 review).
 /// A class-internal `,`/`}` (`{a,[,]}`) never splits: `translate_unit` consumes the
 /// whole `[…]` before this loop sees the next char.
 fn brace_to_regex(chars: &[char], i: &mut usize, saw_glob: &mut bool) -> String {
     let mut branches: Vec<String> = Vec::new();
     let mut cur = String::new();
+    // Adjacent-recursive-`**` collapse is per-branch (globset dedupes recursive tokens
+    // within one alternate, not across a branch boundary) — reset on `,` and `{`.
+    let mut run = RecurRun::None;
     while *i < chars.len() {
         match chars[*i] {
             '}' => {
@@ -663,13 +690,15 @@ fn brace_to_regex(chars: &[char], i: &mut usize, saw_glob: &mut bool) -> String 
             }
             ',' => {
                 *i += 1;
+                run = RecurRun::None;
                 branches.push(std::mem::take(&mut cur));
             }
             '{' => {
                 *i += 1;
+                run = RecurRun::None;
                 cur.push_str(&brace_to_regex(chars, i, saw_glob));
             }
-            _ => translate_unit(chars, i, &mut cur, saw_glob),
+            _ => translate_unit(chars, i, &mut cur, saw_glob, true, &mut run),
         }
     }
     branches.push(cur);
@@ -683,23 +712,101 @@ fn brace_to_regex(chars: &[char], i: &mut usize, saw_glob: &mut bool) -> String 
     }
 }
 
+/// State of an in-progress run of adjacent recursive `**` components. globset collapses
+/// such a run into ONE recursive token, and the KIND is sticky in a globset-specific way
+/// (`parse_star`): a run that starts at a pattern/branch boundary is a `RecursivePrefix`
+/// and STAYS one no matter what follows; a run that starts after a literal `/` takes the
+/// kind of its LAST `**` (a trailing suffix `**` makes the whole run `.*`). `translate_unit`
+/// mirrors that so `**/**` never emits the `(.*/)?.*`-matches-everything over-grant.
+#[derive(Clone, Copy, PartialEq)]
+enum RecurRun {
+    None,
+    Prefix,
+    Slash,
+}
+
 /// Translate ONE glob unit at `chars[*i]` — `*`/`**`/`?`/`[…]`/`]`/literal — into
 /// `out`, advancing `*i`. `{`/`}`/`,` are handled by the callers (top level +
 /// `brace_to_regex`), so this never sees an unescaped brace; a top-level `}`/`,`
-/// reaches the literal arm and is escaped like any other char.
-fn translate_unit(chars: &[char], i: &mut usize, out: &mut String, saw_glob: &mut bool) {
+/// reaches the literal arm and is escaped like any other char. `in_brace` tells the
+/// `**` recursion test whether a `{`/`,` before it is a branch boundary and whether a
+/// `,`/`}` after it is a branch end (both are literals at the top level). `run` carries
+/// the adjacent-recursive-`**` collapse state (see [`RecurRun`]).
+fn translate_unit(
+    chars: &[char],
+    i: &mut usize,
+    out: &mut String,
+    saw_glob: &mut bool,
+    in_brace: bool,
+    run: &mut RecurRun,
+) {
     let ch = chars[*i];
     *i += 1;
+    // Any unit other than a recursive `**` breaks the run; the `**` arm restarts it.
+    let prev_run = std::mem::replace(run, RecurRun::None);
     match ch {
         '*' => {
             *saw_glob = true;
             if chars.get(*i) == Some(&'*') {
-                *i += 1;
-                if chars.get(*i) == Some(&'/') {
-                    *i += 1;
-                    out.push_str("(.*/)?");
+                // `**`. It is RECURSIVE (crosses `/`) only where globset recognizes a
+                // whole path component (globset `parse_star`); a non-component `**`
+                // degrades to two `*` = one `[^/]*` there, so emitting the dir-crossing
+                // `.*`/`(.*/)?` outside a component OVER-grants (the brace-`**` leak).
+                // Recursive iff:
+                //   • Case A — `**` at pattern-start or brace-branch-start: peek is `/`
+                //     or end (a branch-end `,`/`}` does NOT count → `{**,x}` is literal);
+                //   • Case B — `**` right after a literal `/`: peek is `/`, end, or (in a
+                //     brace) a branch-end `,`/`}` → `{a/**,b}` stays recursive.
+                // The recursive SHAPES: `**/`→`(.*/)?` (consuming the `/`), a suffix
+                // `**`→`.*`; both are already globset-equivalent.
+                let first_star = *i - 1;
+                *i += 1; // consume the second `*`
+                let prev = first_star.checked_sub(1).map(|p| chars[p]);
+                let case_a = first_star == 0 || (in_brace && matches!(prev, Some('{') | Some(',')));
+                let peek = chars.get(*i).copied();
+                let peek_slash = peek == Some('/');
+                let peek_boundary =
+                    peek.is_none() || (in_brace && matches!(peek, Some(',') | Some('}')));
+                let recursive = if case_a {
+                    peek_slash || peek.is_none()
+                } else if prev == Some('/') {
+                    peek_slash || peek_boundary
                 } else {
-                    out.push_str(".*");
+                    false
+                };
+                if !recursive {
+                    out.push_str("[^/]*");
+                    return;
+                }
+                // Consume a trailing `/` so `**/` spans zero+ components.
+                if peek_slash {
+                    *i += 1;
+                }
+                match prev_run {
+                    // A fresh run: emit this `**`'s shape and record which kind of run it
+                    // opens (boundary-start → sticky prefix; slash-preceded → slash run).
+                    RecurRun::None => {
+                        out.push_str(if peek_slash { "(.*/)?" } else { ".*" });
+                        *run = if case_a {
+                            RecurRun::Prefix
+                        } else {
+                            RecurRun::Slash
+                        };
+                    }
+                    // A `RecursivePrefix` run stays a prefix no matter what follows —
+                    // absorb this `**` entirely (globset's prefix stickiness).
+                    RecurRun::Prefix => *run = RecurRun::Prefix,
+                    // A slash-started run takes its LAST `**`'s kind: a trailing suffix
+                    // `**` (peek is end/branch-end) turns the whole run into `.*`, so
+                    // rewrite the `(.*/)?` the run's head emitted; a `/`-followed `**`
+                    // leaves it a zero-or-more `(.*/)?` (absorb, no change).
+                    RecurRun::Slash => {
+                        if !peek_slash && out.ends_with("(.*/)?") {
+                            out.truncate(out.len() - "(.*/)?".len());
+                            out.push_str(".*");
+                        }
+                        *run = RecurRun::Slash;
+                    }
                 }
             } else {
                 out.push_str("[^/]*");
@@ -922,6 +1029,33 @@ mod tests {
             "/p/{}x",
             "/p/{,}x",
             "/p/pre{}post",
+            // `**`-in-brace shapes — the over-grant closed after the #411 review. A
+            // non-component `**` (`{**,x}`, `pre{**,x}post`, `a**b`) must NOT cross `/`;
+            // a component `**` (`{**/x,y}`, `{a/**,b}`) stays recursive. globset is the
+            // oracle for every one.
+            "/p/{**/*.k,x}",
+            "/p/{**/a.k,x}",
+            "/p/{a,**/b}",
+            "/p/pre{**,x}post",
+            "/p/{**,*}",
+            "/p/{a,{**,b}}",
+            "/p/{**}",
+            "/p/{a/**,b}",
+            "/p/a**b",
+            "/p/{a**b,c}",
+            "/p/foo**/bar",
+            "/p/a**/b",
+            "/p/**bar",
+            "/p/bar**",
+            // Consecutive-`**` collapse chains (longer than the generative 3-token space):
+            // globset folds adjacent recursive components into one, so these must match
+            // globset exactly — the over-grant closed here was `(.*/)?.*`-matches-all.
+            "**/**",
+            "**/**/x.k",
+            "/p/**/**/a.k",
+            "/p/a/**/**/b",
+            "{**/**/x,y}",
+            "{a/**/**,b}",
         ];
         // A pool that exercises match + non-match for every glob above, including the
         // literal-brace spelling (must NOT match — the leak was matching only that).
@@ -950,6 +1084,28 @@ mod tests {
             "/p/x",
             "/p/prepost",
             "/p/x/sub",
+            // dir-crossing candidates — these separate a recursive `**` (matches) from a
+            // degraded single-component `**` (must NOT match across `/`).
+            "/p/deep/a.k",
+            "/p/deep/nested/a.k",
+            "/p/deep/x.k",
+            "/p/deep/b",
+            "/p/pre/deep/post",
+            "/p/predeeppost",
+            "/p/a/deep/thing",
+            "/p/deep/thing",
+            "/p/a/x.k",
+            "/p/anything",
+            "/p/a**b",
+            "/p/aXXb",
+            "/p/aX/Yb",
+            "/p/ab",
+            "/p/c",
+            "/p/bar",
+            "/p/barXX",
+            "/p/bar/deep",
+            "/p/XXbar",
+            "/p/X/Ybar",
         ];
         for g in globs {
             let emitted = super::glob_to_seatbelt_regex(g);
@@ -971,6 +1127,113 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// EXHAUSTIVE `**`-fidelity oracle: enumerate every 2-and-3-token glob over an
+    /// alphabet that mixes `**` with the boundaries that flip its meaning (`/`, a
+    /// literal, a brace open/branch/close), wrap each in a top-level and a braced
+    /// frame, and cross-check the emitted Seatbelt regex against globset over a
+    /// dir-depth-varied candidate pool. The invariant PROVEN: for EVERY compilable
+    /// shape the Seatbelt match set EQUALS the globset set — never a superset (the
+    /// over-grant) and never a subset (an under-enforcement). globset-rejected shapes
+    /// (unbalanced braces) are skipped; the auto-close fail-safe is covered above.
+    #[test]
+    fn starstar_fidelity_exhaustive_oracle() {
+        use globset::GlobBuilder;
+        use regex::Regex;
+
+        // Tokens whose adjacency to `**` decides recursive-vs-single-component (`?` and a
+        // literal are in here so a `**` neighbored by a single-char glob or text is
+        // covered too).
+        let toks = ["**", "*", "?", "a", "/", "x.k", "{", "}", ",", "b"];
+        let candidates = [
+            "a",
+            "b",
+            "x.k",
+            "a.k",
+            "ab",
+            "aXb",
+            "a/b",
+            "a/x.k",
+            "deep/a.k",
+            "a/deep/b",
+            "x/y/z",
+            "a/b/c/d",
+            "pre/mid/post",
+            "",
+            "a/",
+            "/a",
+            "a.k/b",
+            "deep/nested/x.k",
+            "abc",
+            "a/x/y.k",
+            // exercise the `p…q` / `p/…/q` literal frames and `?`
+            "pq",
+            "paq",
+            "pXq",
+            "pabq",
+            "pa/bq",
+            "p/a/q",
+            "p/x.k/q",
+            "p/deep/nested/q",
+            "p//q",
+            "p/q",
+        ];
+        // Frames: raw (top-level), braced (forces the in_brace path), and pre/post
+        // literals (a `**` glued to surrounding text, where the boundary rule differs).
+        let frames: [&dyn Fn(&str) -> String; 4] = [
+            &|s: &str| s.to_string(),
+            &|s: &str| format!("{{{s},zz}}"),
+            &|s: &str| format!("p{s}q"),
+            &|s: &str| format!("p/{s}/q"),
+        ];
+
+        let mut checked = 0usize;
+        // 2-, 3-, and 4-token bodies; every body must contain at least one `**`.
+        let mut bodies: Vec<String> = Vec::new();
+        for a in toks {
+            for b in toks {
+                bodies.push(format!("{a}{b}"));
+                for c in toks {
+                    bodies.push(format!("{a}{b}{c}"));
+                    for d in toks {
+                        bodies.push(format!("{a}{b}{c}{d}"));
+                    }
+                }
+            }
+        }
+        for body in &bodies {
+            if !body.contains("**") {
+                continue;
+            }
+            for frame in frames {
+                let g = frame(body);
+                let Ok(glob) = GlobBuilder::new(&g).literal_separator(true).build() else {
+                    continue; // globset rejected (e.g. unbalanced brace) — skip.
+                };
+                let gs = glob.compile_matcher();
+                let emitted = super::glob_to_seatbelt_regex(&g);
+                let Ok(re) = Regex::new(&emitted) else {
+                    panic!("emitted regex invalid for `{g}`: {emitted}");
+                };
+                for c in candidates {
+                    assert_eq!(
+                        re.is_match(c),
+                        gs.is_match(c),
+                        "DIVERGENCE glob=`{g}` candidate=`{c}` emitted=`{emitted}` \
+                         gsregex=`{}` (seatbelt={}, globset={})",
+                        glob.regex(),
+                        re.is_match(c),
+                        gs.is_match(c),
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(
+            checked > 5_000,
+            "oracle coverage too thin: {checked} checks"
+        );
     }
 
     #[test]
