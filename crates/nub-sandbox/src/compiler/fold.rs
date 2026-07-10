@@ -322,9 +322,11 @@ fn fold_net_rule_object(
             "a net rule object must contain `inject` (credential brokering) — it is the only per-host capability in this cut",
         )
     })?;
-    // Reject an unbrokerable host BEFORE it becomes an allow rule: a CIDR can't carry
-    // HTTP header injection, and a wildcard would hand the credential to any matching
-    // subdomain (including an attacker-owned one — laundering).
+    // Reject a CIDR BEFORE it becomes an allow rule — it can't carry HTTP header
+    // injection. Wildcard/glob broker hosts ARE accepted and match via the same
+    // universal host-glob matcher as net allow/deny (maintainer decision): a
+    // `*.example.com` broker brokers exactly the hosts it would allow, at the user's
+    // own risk (see `validate_broker_host`).
     validate_broker_host(host, path)?;
     let injects = parse_inject(inject, ctx, &child(path, "inject"))?;
     push_net_rule(host, Effect::Allow, path, &mut policy.rules)?;
@@ -335,22 +337,19 @@ fn fold_net_rule_object(
     Ok(())
 }
 
-/// A broker host must be a single LITERAL hostname. No CIDR (no HTTP layer) and — the
-/// security-critical rule — no wildcard: a `*.example.com` broker mints + injects to the
-/// CLIENT-SUPPLIED SNI, so a child connecting to an attacker-owned `evil.example.com`
-/// (with a valid real cert) would receive the `example.com` credential (laundering). A
-/// user needing several hosts lists each one explicitly.
+/// A broker host is any valid net host pattern — a literal, or the SAME universal
+/// host-glob syntax used for net allow/deny (`*.example.com`, bare `*`). Only a CIDR is
+/// rejected: brokering is an HTTP-header capability with no CIDR form. Wildcards are
+/// intentionally permitted (maintainer decision): a `*.example.com` broker mints +
+/// injects to the CLIENT-SUPPLIED SNI, so it brokers exactly the hosts the same pattern
+/// would allow as a net rule — including, if the user points it at a too-broad wildcard,
+/// an attacker-owned subdomain. That laundering-to-a-misconfigured-wildcard is the user's
+/// own risk (identical to any wildcard net allow), out of the threat model — no warning.
 fn validate_broker_host(pattern: &str, path: &str) -> Result<(), CompileError> {
     if pattern.contains('/') {
         return Err(CompileError::shape(
             path,
-            "credential brokering targets a host, not a CIDR — name a literal hostname",
-        ));
-    }
-    if pattern.contains('*') {
-        return Err(CompileError::shape(
-            path,
-            "credential brokering requires a LITERAL host — a wildcard would hand the credential to any matching subdomain (including an attacker's); list each host explicitly",
+            "credential brokering targets a host, not a CIDR — name a hostname (a literal or a `*.` wildcard)",
         ));
     }
     if !crate::matcher::host::host_pattern_is_valid(pattern) {

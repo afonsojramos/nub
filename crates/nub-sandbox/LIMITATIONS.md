@@ -131,8 +131,14 @@ residuals:
   Brokering protects the secret from the child's environment and its outbound view, not
   from a reflecting upstream — only broker to upstreams trusted not to reflect
   credentials back.
-- **Port-agnostic broker scoping.** A literal broker host matches regardless of port —
+- **Port-agnostic broker scoping.** A broker host matches regardless of port —
   brokering configured for `api.example.com` applies to that host on any port.
+- **Wildcard broker scoping is the user's own risk.** A broker host accepts the same
+  universal host-glob syntax as any net rule (`*.example.com`, bare `*`); it brokers to
+  the client-supplied SNI of every matching host. Pointing a broker at too broad a
+  wildcard can hand the credential to an attacker-owned subdomain that presents a valid
+  real cert — identical exposure to any over-broad wildcard net allow, out of the threat
+  model and un-warned (maintainer decision). Scope the wildcard to hosts you trust.
 
 ## Launcher-handoff items (engine correct; launcher must complete the guarantee)
 
