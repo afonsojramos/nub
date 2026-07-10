@@ -142,7 +142,13 @@ mod win {
         let mut ret_len = 0u32;
         // SAFETY: NtQueryInformationProcess(ProcessBasicInformation) into a 0x30 buffer.
         let status = unsafe {
-            NtQueryInformationProcess(h, 0, pbi.as_mut_ptr().cast(), pbi.len() as u32, &mut ret_len)
+            NtQueryInformationProcess(
+                h,
+                0,
+                pbi.as_mut_ptr().cast(),
+                pbi.len() as u32,
+                &mut ret_len,
+            )
         };
         if status != 0 {
             return None;
@@ -194,12 +200,22 @@ mod win {
         use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
         let mut read = 0usize;
         let ok = unsafe {
-            ReadProcessMemory(h, addr.cast(), buf.as_mut_ptr().cast(), buf.len(), &mut read)
+            ReadProcessMemory(
+                h,
+                addr.cast(),
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+                &mut read,
+            )
         };
         ok != 0 || read > 0
     }
 
-    fn read_bytes(h: windows_sys::Win32::Foundation::HANDLE, addr: *const u8, buf: &mut [u8]) -> bool {
+    fn read_bytes(
+        h: windows_sys::Win32::Foundation::HANDLE,
+        addr: *const u8,
+        buf: &mut [u8],
+    ) -> bool {
         use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
         let mut read = 0usize;
         // SAFETY: read `buf.len()` bytes from the target's address space.
@@ -255,7 +271,11 @@ mod win {
         expect(
             &mut fails,
             "child's own env is scrubbed (secret withheld)",
-            code(&policy, &child, &["__ascchild__", "getenv", "NUB_ASC_SECRET"]),
+            code(
+                &policy,
+                &child,
+                &["__ascchild__", "getenv", "NUB_ASC_SECRET"],
+            ),
             4,
         );
 

@@ -236,7 +236,13 @@ mod win {
                 let _ = ConnectNamedPipe(h, std::ptr::null_mut());
                 let msg = b"PIPE_SECRET=leak";
                 let mut wrote = 0u32;
-                WriteFile(h, msg.as_ptr(), msg.len() as u32, &mut wrote, std::ptr::null_mut());
+                WriteFile(
+                    h,
+                    msg.as_ptr(),
+                    msg.len() as u32,
+                    &mut wrote,
+                    std::ptr::null_mut(),
+                );
                 CloseHandle(h);
             }
         });
