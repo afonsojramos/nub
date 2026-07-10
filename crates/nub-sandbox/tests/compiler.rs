@@ -1135,21 +1135,53 @@ fn host_only_policy_stays_connection_tier_no_mitm() {
 }
 
 #[test]
-fn wildcard_broker_is_rejected_as_a_laundering_guard() {
-    // A wildcard broker would inject the credential to any matching subdomain — including
-    // an attacker-owned one. Only a literal host is allowed.
+fn wildcard_broker_is_accepted_and_scopes_via_the_universal_matcher() {
+    // A wildcard broker host is admitted (maintainer decision) and matches EXACTLY what
+    // the same pattern matches as a net rule — the runtime `broker_for` selects it via
+    // `host_glob_matches`, so proving the matcher's verdict here proves inject-selection.
+    use nub_sandbox::matcher::host::host_glob_matches;
     let ctx = common::ctx(true, &[]);
-    for host in ["*.example.com", "*"] {
-        let err = compile(
-            &json!({ "net": { host: { "inject": { "Authorization": "Bearer x" } } } }),
+    let p = compile(
+        &json!({ "net": { "*.example.com": { "inject": { "Authorization": "Bearer secret" } } } }),
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(p.net.brokers.len(), 1);
+    assert_eq!(p.net.brokers[0].host, "*.example.com");
+    // The wildcard host is implicitly allowed and engages TLS inspection.
+    assert!(p.net.rules.iter().any(
+        |r| matches!(&r.target, NetTarget::Host(h) if h == "*.example.com")
+            && matches!(r.effect, Effect::Allow)
+    ));
+    assert!(matches!(p.net.inspection, Inspection::TlsInspect));
+    // Injects for the apex and any-depth subdomain; NOT for a sibling / suffix-confusable.
+    let broker_host = &p.net.brokers[0].host;
+    assert!(host_glob_matches(broker_host, "example.com"));
+    assert!(host_glob_matches(broker_host, "a.example.com"));
+    assert!(host_glob_matches(broker_host, "a.b.example.com"));
+    assert!(!host_glob_matches(broker_host, "evil.com"));
+    assert!(!host_glob_matches(broker_host, "notexample.com"));
+    assert!(!host_glob_matches(broker_host, "example.com.evil.com"));
+    // A bare `*` broker is likewise accepted (same universal syntax, the user's own risk).
+    assert!(
+        compile(
+            &json!({ "net": { "*": { "inject": { "Authorization": "Bearer x" } } } }),
             &ctx,
         )
-        .unwrap_err();
-        assert!(
-            matches!(err, CompileError::Shape { .. }),
-            "wildcard broker `{host}` must be rejected"
-        );
-    }
+        .is_ok()
+    );
+}
+
+#[test]
+fn cidr_broker_is_rejected_no_http_layer() {
+    // Brokering is an HTTP-header capability; a CIDR has no host to terminate/inject on.
+    let ctx = common::ctx(true, &[]);
+    let err = compile(
+        &json!({ "net": { "10.0.0.0/8": { "inject": { "Authorization": "Bearer x" } } } }),
+        &ctx,
+    )
+    .unwrap_err();
+    assert!(matches!(err, CompileError::Shape { .. }));
 }
 
 #[test]

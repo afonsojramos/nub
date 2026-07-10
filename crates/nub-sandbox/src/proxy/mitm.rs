@@ -457,6 +457,30 @@ pub(super) mod http1 {
         }
 
         #[test]
+        fn wildcard_broker_terminates_and_injects_only_for_matching_hosts() {
+            // A `*.example.com` broker fires `broker_for`/`should_terminate` for the apex
+            // and any-depth subdomain, and NOT for a sibling — the runtime selection uses
+            // the same universal host-glob matcher as net allow/deny.
+            let broker = crate::policy::CredentialBroker {
+                host: "*.example.com".to_string(),
+                injects: vec![inject("Authorization", "Bearer REAL-SECRET")],
+            };
+            let engine = super::super::MitmEngine::new(vec![broker], false)
+                .expect("MITM engine needs a populated native root store");
+            assert!(engine.should_terminate("example.com"));
+            assert!(engine.should_terminate("api.example.com"));
+            assert!(engine.should_terminate("a.b.example.com"));
+            assert_eq!(
+                engine
+                    .broker_for("api.example.com")
+                    .map(|i| i[0].value.expose()),
+                Some("Bearer REAL-SECRET")
+            );
+            assert!(!engine.should_terminate("evil.com"));
+            assert!(engine.broker_for("example.com.evil.com").is_none());
+        }
+
+        #[test]
         fn chunked_request_body_is_refused() {
             let raw = "POST /x HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
             assert!(read_request(&mut Cursor::new(raw.as_bytes())).is_err());
