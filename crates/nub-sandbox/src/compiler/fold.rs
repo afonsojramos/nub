@@ -315,8 +315,10 @@ pub fn fold_env(
             return Ok(policy);
         }
         Value::Bool(false) => {
-            policy.withheld = ctx.ambient_env.keys().cloned().collect();
-            return Ok(policy);
+            // Explicit strip-all — same floor as an unlisted axis: withhold all
+            // user/ambient env but inject the minimal OS-startup essentials so the
+            // child spawns reliably. Single source of truth with `floor_env`.
+            return Ok(defaults::strip_all_env(&ctx.ambient_env));
         }
         Value::Array(items) => {
             let entries = parse_env_array(items, parent, path)?;

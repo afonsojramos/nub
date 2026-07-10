@@ -329,12 +329,11 @@ fn floor_net() -> NetPolicy {
     }
 }
 fn floor_env(ctx: &CompileCtx) -> EnvPolicy {
-    EnvPolicy {
-        enforce: true,
-        constructed: BTreeMap::new(),
-        schema: Vec::new(),
-        withheld: ctx.ambient_env.keys().cloned().collect(),
-    }
+    // Strip-all withholds all user/ambient env, but still injects the minimal
+    // OS-startup essentials (Windows: SystemRoot &c.) so a floored child SPAWNS
+    // reliably rather than succeeding only where the OS tolerates an empty block —
+    // OS mechanism, not a floor breach. Shared with `env: false`.
+    defaults::strip_all_env(&ctx.ambient_env)
 }
 
 /// `sandbox: false` — every axis relaxed. The explicit escape hatch.
