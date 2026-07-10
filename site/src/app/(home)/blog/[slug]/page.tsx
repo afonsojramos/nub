@@ -5,6 +5,7 @@ import { InlineTOC } from 'fumadocs-ui/components/inline-toc';
 import { blog } from '@/lib/source';
 import { getMDXComponents } from '../../../../../mdx-components';
 import { BlogTOC } from './blog-toc';
+import { HnTitle } from './hn-title';
 
 export default async function BlogPost(props: {
   params: Promise<{ slug: string }>;
@@ -39,7 +40,11 @@ export default async function BlogPost(props: {
             <span className="text-fd-muted-foreground">{page.data.author}</span>
           </div>
           <h1 className="mt-5 font-display text-4xl font-medium leading-[1.15] tracking-tight md:text-5xl">
-            {page.data.title}
+            {page.data.hnTitle ? (
+              <HnTitle title={page.data.title} hnTitle={page.data.hnTitle} />
+            ) : (
+              page.data.title
+            )}
           </h1>
           {page.data.description ? (
             <p className="mt-5 text-xl leading-relaxed text-fd-muted-foreground">

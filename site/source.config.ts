@@ -36,6 +36,10 @@ export const blog = defineCollections({
   schema: frontmatterSchema.extend({
     author: z.string(),
     date: z.string().date().or(z.date()),
+    // Alternate headline shown when the page is visited with `?hn` in the
+    // query string (Hacker News submissions), swapped in client-side so the
+    // route stays statically prerendered.
+    hnTitle: z.string().optional(),
   }),
   postprocess: {
     includeProcessedMarkdown: true,
