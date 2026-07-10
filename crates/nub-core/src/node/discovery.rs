@@ -1,9 +1,10 @@
 //! Node binary discovery: pin-file walk-up, PATH probe, nvm scan.
 
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use camino::Utf8PathBuf;
 use thiserror::Error;
@@ -857,11 +858,22 @@ fn which_node_in(
     Err(DiscoveryError::NoNodeOnPath)
 }
 
-/// Run `node --version` and parse the output, with a disk cache
-/// keyed on the binary's path + mtime to avoid spawning on repeat calls.
+/// Detect a binary's Node version, with a disk cache keyed on path + mtime to avoid
+/// spawning on repeat calls. The one spawn nub already pays here is FOLDED with the
+/// structured flag probe (see [`probe_node`]): it returns the version AND the binary's
+/// accepted `--experimental-*` flags in a single spawn, both cached in the same entry,
+/// so the injection path never pays a second spawn for a binary discovered this way.
+/// If the probe spawn fails (a build that rejects `--expose-internals`, or not-a-node),
+/// fall back to plain `node --version` so version detection keeps its prior robustness,
+/// and negative-cache the flags so the injection path doesn't re-probe it every run.
 fn detect_version(node_path: &Path) -> Result<NodeVersion, DiscoveryError> {
     if let Some(cached) = read_version_cache(node_path) {
         return Ok(cached);
+    }
+
+    if let Some((version, flags)) = probe_node(node_path) {
+        upsert_discovery_entry(node_path, Some(&version), Some(&flags), true);
+        return Ok(version);
     }
 
     let output = Command::new(node_path)
@@ -882,8 +894,245 @@ fn detect_version(node_path: &Path) -> Result<NodeVersion, DiscoveryError> {
         .parse::<NodeVersion>()
         .map_err(|e| DiscoveryError::VersionDetection(e.to_string()))?;
 
-    write_version_cache(node_path, &version);
+    // Probe spawn failed but --version worked → negative-cache the flags (probed,
+    // introspection unavailable) so the injection path fails safe without re-probing.
+    upsert_discovery_entry(node_path, Some(&version), None, true);
     Ok(version)
+}
+
+/// A probed Node's accepted `--experimental-*` option flags → `(OptionType,
+/// envVarSettings)`, read from Node's own option table via `internalBinding('options')`.
+/// Drives the injection-policy seam in [`super::flags`]: the arity guard (bare-inject
+/// only `type ∈ {kNoOp=0, kBoolean=2}`) and the NODE_OPTIONS-legality gate (`env == 0`).
+pub type AcceptedFlags = HashMap<String, (u8, u8)>;
+
+/// The structured introspection script, run in nub's OWN throwaway spawn (never user
+/// code). Reachable behind `--expose-internals`; the accessor name drifts across
+/// versions (`getCLIOptionsInfo()` newer, `getCLIOptions()` older — verified 18.19→26.5)
+/// so it tries both. Line 1 is `process.version` (identical to `node --version`, so the
+/// version fold is transparent); line 2 is a JSON object `{flag: [type, env]}`, or empty
+/// when introspection is unavailable — the caller then fails safe. `internalBinding`'s
+/// `options` is an internal-realm Map (`instanceof Map` is false) but is iterable, so
+/// `for..of` yields `[name, meta]`.
+const FLAG_PROBE_SCRIPT: &str = "let v=process.version,f=null;\
+try{const{internalBinding:b}=require('internal/test/binding');\
+const o=b('options');const i=o.getCLIOptionsInfo?o.getCLIOptionsInfo():o.getCLIOptions();\
+f={};for(const[n,m]of i.options){\
+if(typeof n==='string'&&n.startsWith('--experimental-')&&typeof m.type==='number'&&typeof m.envVarSettings==='number')\
+f[n]=[m.type,m.envVarSettings];}}catch{f=null;}\
+process.stdout.write(v+'\\n'+(f?JSON.stringify(f):''));";
+
+/// Run the structured flag probe. Returns `Some((version, flags))` when the spawn
+/// succeeded and line 1 parsed as a version — `flags` may be EMPTY when line 2 was
+/// absent/unparseable (introspection unavailable on this build; the caller
+/// negative-caches that). Returns `None` when the spawn failed or line 1 didn't parse
+/// (transient error, or not a Node binary). HERMETIC: `NODE_OPTIONS` is cleared — the
+/// `-e` eval would otherwise run an inherited preload that could write to stdout and
+/// corrupt the two-line parse, and an inherited below-floor flag could abort the probe —
+/// and `--no-warnings` suppresses the internal-binding notice.
+fn probe_node(node_path: &Path) -> Option<(NodeVersion, AcceptedFlags)> {
+    let output = Command::new(node_path)
+        .args([
+            "--no-warnings",
+            "--expose-internals",
+            "-e",
+            FLAG_PROBE_SCRIPT,
+        ])
+        .env_remove("NODE_OPTIONS")
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut lines = stdout.splitn(2, '\n');
+    let version: NodeVersion = lines.next()?.trim().parse().ok()?;
+    let flags = lines.next().and_then(parse_probe_flags).unwrap_or_default();
+    Some((version, flags))
+}
+
+/// Parse the probe's line-2 JSON object `{flag: [type, env]}` defensively — any shape
+/// mismatch (empty, non-object, malformed tuple) yields `None`, never a panic.
+fn parse_probe_flags(line: &str) -> Option<AcceptedFlags> {
+    let line = line.trim();
+    if line.is_empty() {
+        return None;
+    }
+    let value = serde_json::from_str::<serde_json::Value>(line).ok()?;
+    let map = flags_from_json_object(value.as_object()?);
+    (!map.is_empty()).then_some(map)
+}
+
+/// Build an [`AcceptedFlags`] from a `{flag: [type, env]}` JSON object, skipping any
+/// entry that isn't a two-element numeric array. Shared by the probe parser and the
+/// cache reader; both must decode the same on-disk/on-wire shape identically.
+fn flags_from_json_object(obj: &serde_json::Map<String, serde_json::Value>) -> AcceptedFlags {
+    let byte = |v: &serde_json::Value| v.as_u64().filter(|n| *n <= u8::MAX as u64).map(|n| n as u8);
+    let mut map = AcceptedFlags::with_capacity(obj.len());
+    for (name, te) in obj {
+        if let Some(arr) = te.as_array()
+            && arr.len() == 2
+            && let (Some(t), Some(e)) = (byte(&arr[0]), byte(&arr[1]))
+        {
+            map.insert(name.clone(), (t, e));
+        }
+    }
+    map
+}
+
+/// The binary's accepted `--experimental-*` flags for the injection-policy seam.
+/// Reads the mtime-checked cache first; on a cold entry (pre-feature, or a mtime
+/// change) runs [`probe_node`] once and caches the result. `None` means "inject via
+/// the fail-safe path" — either the binary doesn't accept introspection (negative-
+/// cached so we never re-probe it) or the probe failed. Cache-amortized: a binary
+/// already discovered via [`detect_version`] is a cache hit here (no second spawn).
+pub fn accepted_experimental_flags(node_path: &Path) -> Option<AcceptedFlags> {
+    // Only probe a real, resolved binary. A relative path — chiefly the
+    // `ResolvedNode::fallback()` sentinel `"node"` — must not be probed: `Command::new`
+    // would resolve it via `$PATH` (a spawn that didn't happen before, possibly
+    // re-entering nub's own node shim), and its metadata read fails so the cache would
+    // accrue a mtime-less junk entry that re-probes every run. Fall safe to the matrix
+    // version bands instead (what the fallback path already did).
+    if !node_path.is_absolute() {
+        return None;
+    }
+    match read_flags_cache(node_path) {
+        FlagsCache::Fresh(flags) => return Some(flags),
+        FlagsCache::NegativeCached => return None,
+        FlagsCache::Cold => {}
+    }
+    match probe_node(node_path) {
+        Some((version, flags)) => {
+            let has = !flags.is_empty();
+            upsert_discovery_entry(node_path, Some(&version), Some(&flags), true);
+            has.then_some(flags)
+        }
+        None => {
+            // Probe SPAWN failed (transient, or a build that rejects --expose-internals).
+            // Do NOT write here: we have no version to record, so a negative-cache write
+            // would risk pairing a stale version with the fresh mtime. A transient failure
+            // simply retries next run; a persistently-unintrospectable binary reached via
+            // PATH is already negative-cached (with its correct version) by detect_version.
+            None
+        }
+    }
+}
+
+/// Cache state for a binary's probed flags.
+enum FlagsCache {
+    /// Probed, introspection succeeded — the accepted-flags map.
+    Fresh(AcceptedFlags),
+    /// Probed, introspection unavailable (empty/absent flags) — do NOT re-probe.
+    NegativeCached,
+    /// No completed probe for this (path, mtime) — probe now.
+    Cold,
+}
+
+/// Read a binary's probed flags from the discovery cache. `flags_probed:true` marks a
+/// COMPLETED probe, distinguishing a negative result (probed, empty) from a pre-feature
+/// entry (no marker → cold → probe). mtime-keyed exactly like [`read_version_cache`].
+fn read_flags_cache(node_path: &Path) -> FlagsCache {
+    let Some(cache) = cache_dir().map(|d| d.join("node-discovery.json")) else {
+        return FlagsCache::Cold;
+    };
+    let Some(data) = fs::read_to_string(&cache)
+        .ok()
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+    else {
+        return FlagsCache::Cold;
+    };
+    let key = node_path.to_string_lossy();
+    let Some(entry) = data.get(key.as_ref()) else {
+        return FlagsCache::Cold;
+    };
+    if entry.get("mtime").and_then(|m| m.as_u64()) != mtime_secs(node_path) {
+        return FlagsCache::Cold;
+    }
+    if entry.get("flags_probed").and_then(|v| v.as_bool()) != Some(true) {
+        return FlagsCache::Cold; // pre-feature entry → probe to populate flags
+    }
+    match entry.get("flags").and_then(|f| f.as_object()) {
+        Some(obj) if !obj.is_empty() => {
+            let map = flags_from_json_object(obj);
+            if map.is_empty() {
+                FlagsCache::NegativeCached
+            } else {
+                FlagsCache::Fresh(map)
+            }
+        }
+        _ => FlagsCache::NegativeCached,
+    }
+}
+
+/// The binary's mtime in whole seconds since the epoch, matching the cache key format.
+fn mtime_secs(node_path: &Path) -> Option<u64> {
+    fs::metadata(node_path)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs())
+}
+
+/// Merge `{version?, mtime, flags?, flags_probed?}` into this path's discovery-cache
+/// entry (read-modify-write of the whole JSON, preserving sibling entries + any field
+/// not being updated). `flags_probed` set writes the `flags` object (possibly empty —
+/// the negative-cache marker). Written atomically (temp + rename) so a concurrent reader
+/// never sees a torn file (which would parse-fail → cold → a spawn storm across callers).
+fn upsert_discovery_entry(
+    node_path: &Path,
+    version: Option<&NodeVersion>,
+    flags: Option<&AcceptedFlags>,
+    flags_probed: bool,
+) {
+    let Some(dir) = cache_dir() else { return };
+    let _ = fs::create_dir_all(&dir);
+    let cache = dir.join("node-discovery.json");
+
+    let mut data: serde_json::Value = fs::read_to_string(&cache)
+        .ok()
+        .and_then(|c| serde_json::from_str(&c).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    let key = node_path.to_string_lossy().to_string();
+    let mut entry = data
+        .get(&key)
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_default();
+
+    if let Some(v) = version {
+        entry.insert("version".into(), serde_json::json!(v.to_string()));
+    }
+    entry.insert(
+        "mtime".into(),
+        serde_json::json!(mtime_secs(node_path).unwrap_or(0)),
+    );
+    if flags_probed {
+        entry.insert("flags_probed".into(), serde_json::json!(true));
+        let fobj: serde_json::Map<String, serde_json::Value> = flags
+            .into_iter()
+            .flatten()
+            .map(|(name, (t, e))| (name.clone(), serde_json::json!([t, e])))
+            .collect();
+        entry.insert("flags".into(), serde_json::Value::Object(fobj));
+    }
+    data[key] = serde_json::Value::Object(entry);
+    write_cache_atomic(&cache, &data);
+}
+
+/// Atomically replace the cache file: write a per-PID temp sibling, then rename over
+/// the target (atomic on POSIX + Windows). Prevents a concurrent reader from seeing a
+/// half-written file.
+fn write_cache_atomic(cache: &Path, data: &serde_json::Value) {
+    let tmp = cache.with_extension(format!("json.tmp.{}", std::process::id()));
+    if fs::write(&tmp, serde_json::to_string_pretty(data).unwrap_or_default()).is_ok() {
+        if fs::rename(&tmp, cache).is_err() {
+            let _ = fs::remove_file(&tmp);
+        }
+    }
 }
 
 /// Resolve the `NODE_EXECUTABLE` override, if set. Split from the env read so the
@@ -1066,35 +1315,6 @@ fn read_version_cache(node_path: &Path) -> Option<NodeVersion> {
     } else {
         None
     }
-}
-
-fn write_version_cache(node_path: &Path, version: &NodeVersion) {
-    let Some(dir) = cache_dir() else { return };
-    let _ = fs::create_dir_all(&dir);
-    let cache = dir.join("node-discovery.json");
-
-    let mut data: serde_json::Value = fs::read_to_string(&cache)
-        .ok()
-        .and_then(|c| serde_json::from_str(&c).ok())
-        .unwrap_or_else(|| serde_json::json!({}));
-
-    let mtime = fs::metadata(node_path)
-        .ok()
-        .and_then(|m| m.modified().ok())
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-
-    let key = node_path.to_string_lossy().to_string();
-    data[key] = serde_json::json!({
-        "version": version.to_string(),
-        "mtime": mtime,
-    });
-
-    let _ = fs::write(
-        &cache,
-        serde_json::to_string_pretty(&data).unwrap_or_default(),
-    );
 }
 
 /// Scan the nvm install directory for a version matching the pin.
@@ -1365,6 +1585,31 @@ mod tests {
             let version = detect_version(&path).unwrap();
             assert!(version.major() >= 18, "expected Node 18+, got {version}");
         }
+    }
+
+    #[test]
+    fn parse_probe_flags_reads_the_probe_shape() {
+        let m =
+            parse_probe_flags(r#"{"--experimental-sqlite":[2,0],"--experimental-loader":[7,0]}"#)
+                .expect("valid probe JSON parses");
+        assert_eq!(m.get("--experimental-sqlite"), Some(&(2u8, 0u8)));
+        assert_eq!(m.get("--experimental-loader"), Some(&(7u8, 0u8)));
+    }
+
+    #[test]
+    fn parse_probe_flags_is_defensive_never_panics() {
+        // Fail-safe: any unusable line-2 (empty, non-JSON, non-object, or a malformed
+        // tuple) yields None — the injection path then falls back to the matrix bands.
+        // A malformed entry alongside a valid one is skipped, not fatal.
+        assert!(parse_probe_flags("").is_none());
+        assert!(parse_probe_flags("   ").is_none());
+        assert!(parse_probe_flags("not json at all").is_none());
+        assert!(parse_probe_flags("[1,2,3]").is_none()); // not an object
+        assert!(parse_probe_flags(r#"{"--experimental-x":"nope"}"#).is_none()); // no valid tuple → empty → None
+        let m = parse_probe_flags(r#"{"--experimental-x":[2,0],"--experimental-bad":[1]}"#)
+            .expect("the one valid entry survives");
+        assert_eq!(m.len(), 1);
+        assert_eq!(m.get("--experimental-x"), Some(&(2u8, 0u8)));
     }
 
     #[test]

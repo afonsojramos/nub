@@ -615,6 +615,26 @@ pub fn unflag_flags_for(node_version: &NodeVersion) -> Vec<&'static str> {
         .collect()
 }
 
+/// Every distinct flag that ANY `Unflag` band in the matrix injects — nub's set of
+/// deliberately-wanted experimental *enablers* (feature intent, independent of the
+/// per-version bands). The injection-policy seam in [`super::flags`] uses this as the
+/// allowlist it injects wherever the probed binary accepts them (deriving it here keeps
+/// the wanted set single-sourced against the matrix — a new `Unflag` row joins it
+/// automatically). Sorted + deduped for determinism.
+pub fn all_unflag_enabler_names() -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = FEATURES
+        .iter()
+        .flat_map(|f| f.mitigations.iter())
+        .filter_map(|(_, m)| match m {
+            Mitigation::Unflag(flag) => Some(*flag),
+            _ => None,
+        })
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    names
+}
+
 /// The lowest Node version at which `flag` EXISTS — the minimum `lo` across every
 /// `Unflag(flag)` band in the matrix — or `None` if no band unflags `flag`.
 ///

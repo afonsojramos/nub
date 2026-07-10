@@ -1391,6 +1391,7 @@ fn apply_lifecycle_augmentation(cwd: &Path) {
     let node = nub_core::node::discovery::discover_node(cwd)
         .unwrap_or_else(|_| nub_core::node::discovery::ResolvedNode::fallback());
     let pnp_ctx = nub_core::pnp::detect(cwd);
+    let accepted = nub_core::node::discovery::accepted_experimental_flags(node.path.as_std_path());
     let Some(aug) = nub_core::node::spawn::compute_augmentation_env(
         &nub_binary,
         node.version,
@@ -1398,6 +1399,7 @@ fn apply_lifecycle_augmentation(cwd: &Path) {
         // no `--node` lifecycle path).
         false,
         pnp_ctx.as_ref().map(|c| c.pnp_cjs.as_path()),
+        accepted.as_ref(),
     ) else {
         return;
     };

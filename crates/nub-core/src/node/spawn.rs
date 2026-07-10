@@ -467,12 +467,17 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
     // a half-setup (flags + a nested shim, no preload). See
     // wiki/runtime/hijack-by-default.md.
     if !config.compat_mode && !is_reentrant && preload.is_some() {
-        // Flag injection.
+        // Flag injection. The structured probe (cache-amortized once per (path,mtime))
+        // tells compute_inject_flags which experimental flags THIS binary accepts, so
+        // it injects wherever they exist and never emits one the binary would reject.
+        let accepted =
+            super::discovery::accepted_experimental_flags(config.node.path.as_std_path());
         let inject = flags::compute_inject_flags(
             config.node.version.clone(),
             config.user_args,
             node_options.as_deref(),
             config.show_warnings,
+            accepted.as_ref(),
         );
         for flag in &inject {
             cmd.arg(flag);
@@ -1010,6 +1015,7 @@ pub fn compute_augmentation_env(
     node_version: super::version::NodeVersion,
     compat_mode: bool,
     pnp: Option<&Path>,
+    accepted: Option<&super::discovery::AcceptedFlags>,
 ) -> Option<AugmentationEnv> {
     if compat_mode {
         return None;
@@ -1050,6 +1056,7 @@ pub fn compute_augmentation_env(
         &[],
         existing_node_options.as_deref(),
         false,
+        accepted,
     );
     let mut node_opts_parts: Vec<String> = inject.iter().map(|f| f.to_string()).collect();
     // Yarn PnP `--require <.pnp.cjs>` BEFORE nub's preload token so PnP's

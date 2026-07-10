@@ -50,6 +50,8 @@ const letters = /\p{Letter}/v;
 
 A file with nothing to lower is handed to Node untouched — byte for byte, no reformatting and no source-map footer — so a plain `.js` that needs no transform is exactly the file you wrote. Files inside `node_modules` are never transpiled; they load as the package shipped them, on every tier.
 
+An ambiguous `.js` — ES-module syntax with no `"type"` field in `package.json` — runs as an ES module on Node 20.10 and up, matching a current Node. A bare older Node refuses the same file with `To load an ES module, set "type": "module"`; under Nub it just runs. Add a `"type"` field, or use an `.mjs` / `.cjs` extension, to set the format explicitly.
+
 JSX in a `.js` file is out of scope — use `.jsx`. Nub parses `.js` as JavaScript, not JSX, so a `<` is a comparison, not an element.
 
 ## Explicit resource management

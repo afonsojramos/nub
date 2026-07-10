@@ -9,6 +9,7 @@
 //! hygiene injections (`--disable-warning`, `--test-coverage-exclude`) are nub's
 //! own startup hygiene, not user-facing *features*, so they stay local.
 
+use super::discovery::AcceptedFlags;
 use super::feature_matrix::{self, Mitigation};
 use super::version::NodeVersion;
 
@@ -99,6 +100,55 @@ pub fn test_coverage_exclude_supported(node_version: &NodeVersion) -> bool {
     *node_version >= MIN_TEST_COVERAGE_EXCLUDE
 }
 
+/// The injection-policy SEAM — the ONE function to change to swap policy. Given the
+/// `--experimental-*` flags a binary actually accepts (from the structured probe), it
+/// produces the experimental flags nub injects.
+///
+/// DEFAULT = **option 1, allowlist**: inject nub's deliberately-wanted enablers
+/// ([`wanted_experimental_enablers`]) that THIS binary accepts. The probe is the
+/// version gate — no hand-coded version bands — so a flag is injected wherever it
+/// exists and dropped wherever it doesn't (the 21.x eventsource hole, a future
+/// removal, a patched/lying-version build all fall out for free). The arity guard
+/// (`type ∈ {kNoOp=0, kBoolean=2}`) + NODE_OPTIONS-legality (`env == 0`) ensure a
+/// value-taker or env-illegal flag is never bare-injected (that would be exit-9).
+///
+/// To widen to **option 2** (accepted-minus-denylist), change only
+/// [`wanted_experimental_enablers`] to return the full accepted set minus a denylist;
+/// the guard and everything downstream are unchanged. This is the single seam the
+/// maintainer's 1/2/3 policy choice moves.
+fn experimental_inject_set(accepted: &AcceptedFlags) -> Vec<&'static str> {
+    wanted_experimental_enablers()
+        .into_iter()
+        .filter(|flag| match accepted.get(*flag) {
+            // Accepted here AND bare-injectable (boolean/no-op) AND NODE_OPTIONS-legal.
+            Some(&(ty, env)) => (ty == 0 || ty == 2) && env == 0,
+            // Not accepted by this binary → don't inject (removal-/hole-safe).
+            None => false,
+        })
+        .collect()
+}
+
+/// nub's deliberately-wanted experimental enabler flags — the allowlist the mechanism
+/// injects wherever the probed binary accepts them. DERIVED from the feature matrix's
+/// `Unflag` rows (the single source of feature *intent*) plus
+/// `--experimental-detect-module` (a wanted enabler with no matrix band). One flag is
+/// held out on purpose: `--experimental-webstorage` — spawn.rs owns it (paired with a
+/// runtime `--localstorage-file` + a localStorage-neutralization signal); bare-injecting
+/// it here would install a throwing `localStorage` getter.
+///
+/// A `V8_HARMONY_UNFLAG_DENYLIST` flag (e.g. `--experimental-shadow-realm`, which crashes
+/// embedded Node/Electron via a snapshot-hash mismatch, #246) needs no filtering here: it
+/// is never an `Unflag` row, so it is structurally absent from the derived set — asserted
+/// by a test.
+fn wanted_experimental_enablers() -> Vec<&'static str> {
+    let mut set: Vec<&'static str> = feature_matrix::all_unflag_enabler_names()
+        .into_iter()
+        .filter(|f| *f != "--experimental-webstorage")
+        .collect();
+    set.push("--experimental-detect-module");
+    set
+}
+
 /// Compute the flags Nub should inject for the given Node version,
 /// after subtracting any user opt-outs from argv and NODE_OPTIONS.
 ///
@@ -129,11 +179,22 @@ pub fn test_coverage_exclude_supported(node_version: &NodeVersion) -> bool {
 /// (Webstorage's `--experimental-webstorage` is injected in `spawn.rs`, not here —
 /// always-injected on the `webstorage_flag_needed` band, suppressed only when the
 /// user already supplied the flag in either polarity; see there.)
+///
+/// ## Experimental enablers: probe-gated (with a version-band fail-safe)
+///
+/// `accepted` is the binary's accepted `--experimental-*` flag set (structured probe,
+/// [`super::discovery::accepted_experimental_flags`]). When present, the experimental
+/// enablers come from the injection-policy seam ([`experimental_inject_set`]) — injected
+/// wherever the binary accepts them, no version bands. When absent (probe unavailable on
+/// this build), nub FAILS SAFE to the matrix version bands ([`feature_matrix::unflag_flags_for`],
+/// today's crash-safe behavior). The hygiene flags (`--enable-source-maps`,
+/// `--disable-warning`) are version-gated as before and never depend on the probe.
 pub fn compute_inject_flags(
     node_version: NodeVersion,
     user_argv: &[String],
     node_options: Option<&str>,
     show_warnings: bool,
+    accepted: Option<&AcceptedFlags>,
 ) -> Vec<&'static str> {
     // Stage 1: compute the would-inject set.
     let mut flags: Vec<&str> = Vec::new();
@@ -153,21 +214,17 @@ pub fn compute_inject_flags(
         flags.push("--disable-warning=ExperimentalWarning");
     }
 
-    // The version-banded experimental unflags are DERIVED from the canonical
-    // feature matrix — for each feature whose mitigation at this version is
-    // `Unflag(flag)`, the flag is injected. Tuned per band so the flag is present
-    // exactly where it both EXISTS (else "bad option" / "not allowed in
-    // NODE_OPTIONS" startup abort) and is still REQUIRED (not yet default-on). See
-    // `feature_matrix::FEATURES` for the bands + changelog evidence. (webstorage's
-    // flag is injected separately in spawn.rs, since it pairs with a
-    // runtime-computed `--localstorage-file` path — but its bands live in the same
-    // matrix, read via `webstorage_flag_needed` / `webstorage_supported`.)
-    for flag in feature_matrix::unflag_flags_for(&node_version) {
-        // Skip the webstorage flag here: spawn.rs owns its injection (paired with
-        // the workspace-keyed --localstorage-file), gated on the same matrix bands
-        // via `webstorage_flag_needed`. Injecting it in this static set too would
-        // emit it without the file (the global never materializes) and bypass the
-        // user-override suppression spawn.rs applies.
+    // Experimental enablers. With a probe result, inject the wanted enablers THIS
+    // binary accepts (the seam — probe is the version gate, no bands). Without one,
+    // FAIL SAFE to the matrix version bands (crash-safe by construction). The
+    // webstorage flag is skipped on BOTH paths — spawn.rs owns its injection (paired
+    // with the workspace-keyed `--localstorage-file`); emitting it here would install
+    // a throwing `localStorage` getter and bypass spawn.rs's user-override handling.
+    let experimental = match accepted {
+        Some(acc) => experimental_inject_set(acc),
+        None => feature_matrix::unflag_flags_for(&node_version),
+    };
+    for flag in experimental {
         if flag == "--experimental-webstorage" {
             continue;
         }
@@ -304,14 +361,14 @@ mod tests {
 
     #[test]
     fn always_injects_warning_suppression_and_source_maps() {
-        let flags = compute_inject_flags(v(22, 15, 0), &[], None, false);
+        let flags = compute_inject_flags(v(22, 15, 0), &[], None, false, None);
         assert!(flags.contains(&"--disable-warning=ExperimentalWarning"));
         assert!(flags.contains(&"--enable-source-maps"));
     }
 
     #[test]
     fn injects_unflag_set_on_22_15() {
-        let flags = compute_inject_flags(v(22, 15, 0), &[], None, false);
+        let flags = compute_inject_flags(v(22, 15, 0), &[], None, false, None);
         assert!(flags.contains(&"--experimental-vm-modules"));
         assert!(flags.contains(&"--experimental-eventsource"));
         // webstorage is NOT in this static set: spawn.rs owns its injection (it
@@ -327,11 +384,11 @@ mod tests {
         // vm.Module is never unflagged — inject from the 18.19 floor through 26.x.
         // (Regression: the old min:22.15.0 left vm.Module broken on 18.19–22.14.)
         assert!(
-            compute_inject_flags(v(18, 19, 0), &[], None, false)
+            compute_inject_flags(v(18, 19, 0), &[], None, false, None)
                 .contains(&"--experimental-vm-modules")
         );
         assert!(
-            compute_inject_flags(v(26, 2, 0), &[], None, false)
+            compute_inject_flags(v(26, 2, 0), &[], None, false, None)
                 .contains(&"--experimental-vm-modules")
         );
     }
@@ -341,16 +398,16 @@ mod tests {
         // EventSource landed at 22.3.0 + 20.18.0 backport; never shipped on 21.x.
         // Injecting on 21.x is a "bad option" crash — the highest-stakes boundary here.
         let yes = "--experimental-eventsource";
-        assert!(!compute_inject_flags(v(20, 17, 0), &[], None, false).contains(&yes));
-        assert!(compute_inject_flags(v(20, 18, 0), &[], None, false).contains(&yes));
+        assert!(!compute_inject_flags(v(20, 17, 0), &[], None, false, None).contains(&yes));
+        assert!(compute_inject_flags(v(20, 18, 0), &[], None, false, None).contains(&yes));
         // The hole: must NOT inject anywhere on the 21.x line.
         assert!(
-            !compute_inject_flags(v(21, 0, 0), &[], None, false).contains(&yes),
+            !compute_inject_flags(v(21, 0, 0), &[], None, false, None).contains(&yes),
             "must NOT inject --experimental-eventsource on 21.0 (flag never existed there → crash)"
         );
-        assert!(!compute_inject_flags(v(22, 2, 0), &[], None, false).contains(&yes));
-        assert!(compute_inject_flags(v(22, 3, 0), &[], None, false).contains(&yes));
-        assert!(compute_inject_flags(v(26, 2, 0), &[], None, false).contains(&yes));
+        assert!(!compute_inject_flags(v(22, 2, 0), &[], None, false, None).contains(&yes));
+        assert!(compute_inject_flags(v(22, 3, 0), &[], None, false, None).contains(&yes));
+        assert!(compute_inject_flags(v(26, 2, 0), &[], None, false, None).contains(&yes));
     }
 
     #[test]
@@ -358,13 +415,13 @@ mod tests {
         // node:sqlite: flag added 22.5.0, unflagged 22.13.0 (22.x) and 23.4.0 (23.x).
         // Inject only where the flag exists AND is still required.
         let sql = "--experimental-sqlite";
-        assert!(!compute_inject_flags(v(22, 4, 0), &[], None, false).contains(&sql)); // flag absent
-        assert!(compute_inject_flags(v(22, 5, 0), &[], None, false).contains(&sql)); // band 1 floor
-        assert!(compute_inject_flags(v(22, 12, 0), &[], None, false).contains(&sql));
-        assert!(!compute_inject_flags(v(22, 13, 0), &[], None, false).contains(&sql)); // unflagged on 22.x
-        assert!(compute_inject_flags(v(23, 3, 0), &[], None, false).contains(&sql)); // band 2
-        assert!(!compute_inject_flags(v(23, 4, 0), &[], None, false).contains(&sql)); // unflagged on 23.x
-        assert!(!compute_inject_flags(v(24, 0, 0), &[], None, false).contains(&sql)); // unflagged everywhere after
+        assert!(!compute_inject_flags(v(22, 4, 0), &[], None, false, None).contains(&sql)); // flag absent
+        assert!(compute_inject_flags(v(22, 5, 0), &[], None, false, None).contains(&sql)); // band 1 floor
+        assert!(compute_inject_flags(v(22, 12, 0), &[], None, false, None).contains(&sql));
+        assert!(!compute_inject_flags(v(22, 13, 0), &[], None, false, None).contains(&sql)); // unflagged on 22.x
+        assert!(compute_inject_flags(v(23, 3, 0), &[], None, false, None).contains(&sql)); // band 2
+        assert!(!compute_inject_flags(v(23, 4, 0), &[], None, false, None).contains(&sql)); // unflagged on 23.x
+        assert!(!compute_inject_flags(v(24, 0, 0), &[], None, false, None).contains(&sql)); // unflagged everywhere after
     }
 
     #[test]
@@ -372,10 +429,10 @@ mod tests {
         // WebSocket global is flag-gated on [20.10.0, 22.0.0): exists on 20.10+ and all
         // 21.x, default-on from 22.0.0. Below 20.10 the flag doesn't exist ("bad option").
         let ws = "--experimental-websocket";
-        assert!(!compute_inject_flags(v(20, 9, 0), &[], None, false).contains(&ws));
-        assert!(compute_inject_flags(v(20, 10, 0), &[], None, false).contains(&ws));
-        assert!(compute_inject_flags(v(21, 5, 0), &[], None, false).contains(&ws)); // all of 21.x
-        assert!(!compute_inject_flags(v(22, 0, 0), &[], None, false).contains(&ws)); // default-on
+        assert!(!compute_inject_flags(v(20, 9, 0), &[], None, false, None).contains(&ws));
+        assert!(compute_inject_flags(v(20, 10, 0), &[], None, false, None).contains(&ws));
+        assert!(compute_inject_flags(v(21, 5, 0), &[], None, false, None).contains(&ws)); // all of 21.x
+        assert!(!compute_inject_flags(v(22, 0, 0), &[], None, false, None).contains(&ws)); // default-on
     }
 
     #[test]
@@ -385,14 +442,14 @@ mod tests {
         // default-on on the 23.x line (EOL before the backport). Inject on
         // [18.19, 22.19) ∪ [23.0, 24.5).
         let w = "--experimental-wasm-modules";
-        assert!(compute_inject_flags(v(18, 19, 0), &[], None, false).contains(&w)); // floor
-        assert!(compute_inject_flags(v(22, 13, 0), &[], None, false).contains(&w));
-        assert!(compute_inject_flags(v(22, 18, 0), &[], None, false).contains(&w));
-        assert!(!compute_inject_flags(v(22, 19, 0), &[], None, false).contains(&w)); // default-on 22.x
-        assert!(compute_inject_flags(v(23, 2, 0), &[], None, false).contains(&w)); // 23.x stays flagged
-        assert!(compute_inject_flags(v(24, 4, 0), &[], None, false).contains(&w));
-        assert!(!compute_inject_flags(v(24, 5, 0), &[], None, false).contains(&w)); // default-on 24.x
-        assert!(!compute_inject_flags(v(26, 0, 0), &[], None, false).contains(&w));
+        assert!(compute_inject_flags(v(18, 19, 0), &[], None, false, None).contains(&w)); // floor
+        assert!(compute_inject_flags(v(22, 13, 0), &[], None, false, None).contains(&w));
+        assert!(compute_inject_flags(v(22, 18, 0), &[], None, false, None).contains(&w));
+        assert!(!compute_inject_flags(v(22, 19, 0), &[], None, false, None).contains(&w)); // default-on 22.x
+        assert!(compute_inject_flags(v(23, 2, 0), &[], None, false, None).contains(&w)); // 23.x stays flagged
+        assert!(compute_inject_flags(v(24, 4, 0), &[], None, false, None).contains(&w));
+        assert!(!compute_inject_flags(v(24, 5, 0), &[], None, false, None).contains(&w)); // default-on 24.x
+        assert!(!compute_inject_flags(v(26, 0, 0), &[], None, false, None).contains(&w));
     }
 
     #[test]
@@ -402,12 +459,12 @@ mod tests {
         // flag is a "bad option" there). Also verify it snips out of an inherited
         // NODE_OPTIONS on a child below the 26.5.0 floor.
         let it = "--experimental-import-text";
-        assert!(!compute_inject_flags(v(26, 4, 0), &[], None, false).contains(&it));
-        assert!(compute_inject_flags(v(26, 5, 0), &[], None, false).contains(&it));
-        assert!(compute_inject_flags(v(27, 0, 0), &[], None, false).contains(&it));
+        assert!(!compute_inject_flags(v(26, 4, 0), &[], None, false, None).contains(&it));
+        assert!(compute_inject_flags(v(26, 5, 0), &[], None, false, None).contains(&it));
+        assert!(compute_inject_flags(v(27, 0, 0), &[], None, false, None).contains(&it));
         // A user opt-out subtracts it.
         let argv = vec!["--no-experimental-import-text".to_string()];
-        assert!(!compute_inject_flags(v(26, 5, 0), &argv, None, false).contains(&it));
+        assert!(!compute_inject_flags(v(26, 5, 0), &argv, None, false, None).contains(&it));
         // Inherited NODE_OPTIONS: stripped below the floor, kept at/above it.
         assert_eq!(strip_unsupported_node_options(it, &v(26, 4, 0)), "");
         assert_eq!(strip_unsupported_node_options(it, &v(26, 5, 0)), it);
@@ -422,15 +479,15 @@ mod tests {
         // so a self-disable can't catch it (#246). Never inject it, at any version.
         // The categorical guard lives in feature_matrix (no_v8_harmony_flag_in_unflag_set).
         let s = "--experimental-shadow-realm";
-        assert!(!compute_inject_flags(v(18, 19, 0), &[], None, false).contains(&s));
-        assert!(!compute_inject_flags(v(22, 19, 0), &[], None, false).contains(&s));
-        assert!(!compute_inject_flags(v(26, 0, 0), &[], None, false).contains(&s));
+        assert!(!compute_inject_flags(v(18, 19, 0), &[], None, false, None).contains(&s));
+        assert!(!compute_inject_flags(v(22, 19, 0), &[], None, false, None).contains(&s));
+        assert!(!compute_inject_flags(v(26, 0, 0), &[], None, false, None).contains(&s));
     }
 
     #[test]
     fn user_opt_out_via_argv() {
         let argv = vec!["--no-experimental-vm-modules".to_string()];
-        let flags = compute_inject_flags(v(22, 15, 0), &argv, None, false);
+        let flags = compute_inject_flags(v(22, 15, 0), &argv, None, false, None);
         assert!(!flags.contains(&"--experimental-vm-modules"));
         // Other flags still present (eventsource is in-band at 22.15).
         assert!(flags.contains(&"--experimental-eventsource"));
@@ -444,6 +501,7 @@ mod tests {
             &[],
             Some("--no-experimental-sqlite --max-old-space-size=4096"),
             false,
+            None,
         );
         assert!(!flags.contains(&"--experimental-sqlite"));
         assert!(flags.contains(&"--experimental-vm-modules"));
@@ -460,13 +518,19 @@ mod tests {
         // channels (argv and NODE_OPTIONS).
         let argv = vec!["--no-enable-source-maps".to_string()];
         assert!(
-            !compute_inject_flags(v(22, 15, 0), &argv, None, false)
+            !compute_inject_flags(v(22, 15, 0), &argv, None, false, None)
                 .contains(&"--enable-source-maps"),
             "user --no-enable-source-maps (argv) must suppress nub's always-inject"
         );
         assert!(
-            !compute_inject_flags(v(22, 15, 0), &[], Some("--no-enable-source-maps"), false)
-                .contains(&"--enable-source-maps"),
+            !compute_inject_flags(
+                v(22, 15, 0),
+                &[],
+                Some("--no-enable-source-maps"),
+                false,
+                None
+            )
+            .contains(&"--enable-source-maps"),
             "user --no-enable-source-maps (NODE_OPTIONS) must suppress it too"
         );
     }
@@ -485,6 +549,7 @@ mod tests {
             &["--disable-warning=DeprecationWarning".to_string()],
             None,
             false,
+            None,
         );
         assert!(
             flags.contains(&"--disable-warning=ExperimentalWarning"),
@@ -494,7 +559,7 @@ mod tests {
 
     #[test]
     fn show_warnings_suppresses_warning_flag() {
-        let flags = compute_inject_flags(v(22, 15, 0), &[], None, true);
+        let flags = compute_inject_flags(v(22, 15, 0), &[], None, true, None);
         assert!(!flags.contains(&"--disable-warning=ExperimentalWarning"));
         assert!(flags.contains(&"--enable-source-maps"));
     }
@@ -504,7 +569,7 @@ mod tests {
         // At 20.0.0: --enable-source-maps and vm-modules (whole-floor) inject, but the
         // version-gated entries do not — sqlite/eventsource/websocket flags don't exist
         // here ("bad option"), and --disable-warning is below its 20.11 floor.
-        let flags = compute_inject_flags(v(20, 0, 0), &[], None, false);
+        let flags = compute_inject_flags(v(20, 0, 0), &[], None, false, None);
         assert!(flags.contains(&"--enable-source-maps"));
         assert!(flags.contains(&"--experimental-vm-modules"));
         assert!(!flags.contains(&"--experimental-sqlite"));
@@ -519,7 +584,7 @@ mod tests {
         // "not allowed in NODE_OPTIONS"), which crashed the compat tier. It must
         // not be injected below 20.11; from 20.11 onward it is.
         for ver in [v(18, 19, 0), v(20, 0, 0), v(20, 10, 0)] {
-            let flags = compute_inject_flags(ver.clone(), &[], None, false);
+            let flags = compute_inject_flags(ver.clone(), &[], None, false, None);
             assert!(
                 !flags.contains(&"--disable-warning=ExperimentalWarning"),
                 "must NOT inject --disable-warning on {ver:?} (the flag aborts those versions)"
@@ -531,7 +596,7 @@ mod tests {
             );
         }
         for ver in [v(20, 11, 0), v(22, 13, 0)] {
-            let flags = compute_inject_flags(ver.clone(), &[], None, false);
+            let flags = compute_inject_flags(ver.clone(), &[], None, false, None);
             assert!(
                 flags.contains(&"--disable-warning=ExperimentalWarning"),
                 "must inject --disable-warning on {ver:?} (supported there)"
@@ -653,7 +718,7 @@ mod tests {
                 "source maps must be safe to inject on {ver:?}"
             );
             assert!(
-                compute_inject_flags(ver.clone(), &[], None, false)
+                compute_inject_flags(ver.clone(), &[], None, false, None)
                     .contains(&"--enable-source-maps"),
                 "--enable-source-maps must inject on {ver:?}"
             );
@@ -665,10 +730,156 @@ mod tests {
                 "source maps must be withheld on {ver:?}"
             );
             assert!(
-                !compute_inject_flags(ver.clone(), &[], None, false)
+                !compute_inject_flags(ver.clone(), &[], None, false, None)
                     .contains(&"--enable-source-maps"),
                 "--enable-source-maps must NOT inject on {ver:?} (assert→TypeError regression)"
             );
         }
+    }
+
+    // ── The structured-probe injection seam (option 1: allowlist + capability filter) ──
+
+    /// Build an `AcceptedFlags` map from `(name, type, env)` triples — the shape the
+    /// structured probe produces.
+    fn accepted(pairs: &[(&str, u8, u8)]) -> AcceptedFlags {
+        pairs
+            .iter()
+            .map(|(n, t, e)| (n.to_string(), (*t, *e)))
+            .collect()
+    }
+
+    #[test]
+    fn seam_injects_wanted_enablers_the_binary_accepts_and_nothing_else() {
+        // A representative accepted set: wanted enablers (vm/sqlite/detect-module),
+        // a hazard the mechanism must NOT enable (shadow-realm — not on nub's wanted
+        // list), a value-taker (loader), and a net-new experimental flag nub never
+        // chose (ffi). Only the wanted, boolean, env-legal ones inject.
+        let acc = accepted(&[
+            ("--experimental-vm-modules", 2, 0),
+            ("--experimental-sqlite", 2, 0),
+            ("--experimental-detect-module", 2, 0),
+            ("--experimental-shadow-realm", 2, 0), // hazard, NOT wanted → excluded
+            ("--experimental-ffi", 2, 0),          // net-new, NOT wanted → excluded
+            ("--experimental-loader", 7, 0),       // value-taker, NOT wanted → excluded
+        ]);
+        let flags = compute_inject_flags(v(24, 0, 0), &[], None, false, Some(&acc));
+        assert!(flags.contains(&"--experimental-vm-modules"));
+        assert!(flags.contains(&"--experimental-sqlite"));
+        assert!(flags.contains(&"--experimental-detect-module"));
+        assert!(
+            !flags.contains(&"--experimental-shadow-realm"),
+            "shadow-realm is NOT a wanted enabler — the seam must never inject it (#246)"
+        );
+        assert!(!flags.contains(&"--experimental-ffi"));
+        assert!(!flags.contains(&"--experimental-loader"));
+    }
+
+    #[test]
+    fn seam_removal_safety_drops_a_wanted_flag_the_binary_rejects() {
+        // vm-modules is wanted, but if THIS binary doesn't accept it (a hypothetical
+        // future removal), the probe omits it → the seam must not inject it (the
+        // exact crash the mechanism exists to prevent). eventsource, accepted, injects.
+        let acc = accepted(&[("--experimental-eventsource", 2, 0)]);
+        let flags = compute_inject_flags(v(24, 0, 0), &[], None, false, Some(&acc));
+        assert!(flags.contains(&"--experimental-eventsource"));
+        assert!(
+            !flags.contains(&"--experimental-vm-modules"),
+            "a wanted flag the binary rejects must be dropped (removal-safety)"
+        );
+    }
+
+    #[test]
+    fn seam_arity_guard_excludes_value_takers_and_env_illegal_wanted_flags() {
+        // Even a WANTED flag is skipped if the binary reports it as a value-taker
+        // (type ∉ {0,2} → bare-inject is exit-9) or NODE_OPTIONS-illegal (env != 0).
+        // sqlite as a (hypothetical) kString and vm-modules as env-illegal are both
+        // withheld; detect-module (clean boolean, env-legal) still injects.
+        let acc = accepted(&[
+            ("--experimental-sqlite", 5, 0),     // kString value-taker → skip
+            ("--experimental-vm-modules", 2, 1), // env-illegal → skip
+            ("--experimental-detect-module", 2, 0),
+        ]);
+        let flags = compute_inject_flags(v(24, 0, 0), &[], None, false, Some(&acc));
+        assert!(!flags.contains(&"--experimental-sqlite"));
+        assert!(!flags.contains(&"--experimental-vm-modules"));
+        assert!(flags.contains(&"--experimental-detect-module"));
+    }
+
+    #[test]
+    fn seam_injects_detect_module_wherever_accepted_no_band() {
+        // detect-module is a wanted enabler with NO version band — the probe is the
+        // gate. Accepted on an old compat-tier Node → injected; the same version with
+        // detect-module absent from the accepted set → not injected.
+        let with = accepted(&[("--experimental-detect-module", 2, 0)]);
+        assert!(
+            compute_inject_flags(v(20, 11, 0), &[], None, false, Some(&with))
+                .contains(&"--experimental-detect-module")
+        );
+        let without = accepted(&[("--experimental-vm-modules", 2, 0)]);
+        assert!(
+            !compute_inject_flags(v(20, 11, 0), &[], None, false, Some(&without))
+                .contains(&"--experimental-detect-module")
+        );
+    }
+
+    #[test]
+    fn probe_success_injects_where_accepted_even_past_the_bands_failsafe() {
+        // The mechanism's headline difference from the version-band fail-safe: on
+        // Node 22.15 sqlite is default-on (the matrix band stops at 22.13), but it is
+        // still ACCEPTED (a no-op) — so the probe path injects it (harmless), while
+        // the fail-safe (None) path does not.
+        let acc = accepted(&[("--experimental-sqlite", 2, 0)]);
+        assert!(
+            compute_inject_flags(v(22, 15, 0), &[], None, false, Some(&acc))
+                .contains(&"--experimental-sqlite"),
+            "probe path injects an accepted enabler even where the band stopped"
+        );
+        assert!(
+            !compute_inject_flags(v(22, 15, 0), &[], None, false, None)
+                .contains(&"--experimental-sqlite"),
+            "fail-safe (band) path does not inject sqlite on 22.15 (default-on band gap)"
+        );
+    }
+
+    #[test]
+    fn failsafe_none_falls_back_to_matrix_bands() {
+        // With no probe result, injection is exactly today's matrix-band behavior.
+        let flags = compute_inject_flags(v(22, 15, 0), &[], None, false, None);
+        assert!(flags.contains(&"--experimental-vm-modules")); // whole-floor band
+        assert!(flags.contains(&"--experimental-eventsource")); // in-band at 22.15
+        assert!(!flags.contains(&"--experimental-sqlite")); // default-on band gap
+        assert!(flags.contains(&"--enable-source-maps")); // hygiene unaffected by probe
+    }
+
+    #[test]
+    fn wanted_set_excludes_webstorage_and_never_includes_a_harmony_flag() {
+        // webstorage is spawn.rs-owned (paired with --localstorage-file); a
+        // V8_HARMONY_UNFLAG_DENYLIST flag (shadow-realm → #246) must never appear.
+        let wanted = wanted_experimental_enablers();
+        assert!(
+            !wanted.contains(&"--experimental-webstorage"),
+            "webstorage is spawn.rs-owned; the seam must not carry it"
+        );
+        for banned in feature_matrix::V8_HARMONY_UNFLAG_DENYLIST {
+            assert!(
+                !wanted.contains(banned),
+                "harmony flag {banned:?} must never be a wanted enabler (#246)"
+            );
+        }
+        // The wanted set is the matrix Unflag enablers (minus webstorage) + detect-module.
+        assert!(wanted.contains(&"--experimental-detect-module"));
+        assert!(wanted.contains(&"--experimental-vm-modules"));
+    }
+
+    #[test]
+    fn seam_respects_user_negation_over_an_accepted_wanted_flag() {
+        // A user's --no-experimental-vm-modules must still subtract, even on the probe
+        // path (the Stage-3 negation subtraction runs after the seam).
+        let acc = accepted(&[("--experimental-vm-modules", 2, 0)]);
+        let argv = vec!["--no-experimental-vm-modules".to_string()];
+        assert!(
+            !compute_inject_flags(v(24, 0, 0), &argv, None, false, Some(&acc))
+                .contains(&"--experimental-vm-modules")
+        );
     }
 }

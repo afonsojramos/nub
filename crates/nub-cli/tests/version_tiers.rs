@@ -258,6 +258,34 @@ fn import_text_works_via_native_on_26_5() {
     );
 }
 
+/// Module syntax detection is the headline verification case for the structured-probe
+/// mechanism. Node 20.11.0 accepts `--experimental-detect-module` but does not default
+/// it on (that came at 20.19), so an ambiguous ESM `.js` — ES-module syntax, `.js`
+/// extension, a `package.json` with no `"type"` field — that BARE Node 20.11 refuses
+/// ("To load an ES module, set type: module", exit 1) must run as ESM under nub. nub
+/// probes 20.11, sees it accepts the flag (a wanted enabler), and injects it — no
+/// hand-coded version band, the probe is the gate. This is the differential the
+/// mechanism closes; a default-on Node needs no injection so it is not the interesting
+/// case.
+#[test]
+fn detect_module_backport_runs_ambiguous_esm_on_compat_tier() {
+    let Some((stdout, stderr, code)) = run_nub_against_node((20, 11, 0), "detect-module", "amb.js")
+    else {
+        eprintln!(
+            "skipping: Node 20.11.0 not installed (set TEST_NODE_BIN_20_11_0 or nvm install)"
+        );
+        return;
+    };
+    assert_eq!(
+        code, 0,
+        "compat-tier ambiguous ESM .js must run as ESM under nub (bare Node 20.11 refuses it): stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("detect-module:ran-as-esm:true"),
+        "ambiguous .js must be detected + run as an ES module: stdout={stdout:?}"
+    );
+}
+
 /// Node 18.18.0 is one patch below the 18.19 floor — the boundary case
 /// for the hard-error tier. Contract: stderr carries the canonical
 /// refusal text, exit is non-zero, and (implicitly) Node was never
