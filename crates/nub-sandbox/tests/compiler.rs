@@ -232,13 +232,31 @@ fn build_jail_preset_expands() {
         p.env.enforce && p.env.constructed.is_empty(),
         "build-jail strips env"
     );
-    // project subtree is writable, secret set still denied.
+    // The project subtree is writable...
     let m = nub_sandbox::matcher::PathMatcher::new(&p.fs.rules);
     let proj = common::homes().project;
     let d = m.decide(&proj.join("build/out.o"));
     assert!(
         matches!(d.effect, Effect::Allow)
             && matches!(d.access, nub_sandbox::policy::FsAccess::ReadWrite)
+    );
+    // ...but the secret set stays DENIED even though `"./"` grants the whole subtree.
+    // The `"./"` grant is the LAST matching entry for `<proj>/.env`, so without the
+    // post-fold secret-floor re-assertion the jail would leak the project's own
+    // `.env` to the untrusted lifecycle script it exists to confine. Guard the leaf,
+    // a nested `.env`, the `.env` DIRECTORY form, and an outside-project secret.
+    for secret in [".env", "packages/app/.env", ".env/keys.txt", ".envrc"] {
+        assert!(
+            matches!(m.decide(&proj.join(secret)).effect, Effect::Deny),
+            "build-jail must deny <proj>/{secret}"
+        );
+    }
+    assert!(
+        matches!(
+            m.decide(&common::homes().home.join(".ssh/id_rsa")).effect,
+            Effect::Deny
+        ),
+        "build-jail must deny the home secret set"
     );
 }
 
