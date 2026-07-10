@@ -28,7 +28,9 @@ pub mod policy;
 pub mod proxy;
 
 pub use backend::{CommandSpec, Degradation, Prepared, apply};
-pub use compiler::{CommandRunner, CompileCtx, CompileError, compile};
+pub use compiler::{
+    CommandRunner, CompileCtx, CompileError, CompileWarning, compile, compile_with_warnings,
+};
 pub use matcher::Homes;
 pub use policy::SandboxPolicy;
 pub use proxy::{Decision, EgressProxy, GrantDecider, Host, StaticDecider};

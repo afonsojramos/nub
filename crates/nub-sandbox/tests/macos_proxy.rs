@@ -253,10 +253,12 @@ fn proxy_port_reachable_but_siblings_and_direct_blocked() {
         1,
         "arbitrary loopback sibling must be denied"
     );
-    // Negative control: net relaxed → the same direct connect succeeds.
+    // Negative control: net relaxed → the same direct connect succeeds. Under the
+    // complete-statement model net must be named `true` explicitly (an unlisted
+    // axis now FLOORS to deny-all, so `{ fs: true }` alone would confine egress).
     assert_eq!(
         f.run(
-            json!({ "fs": true }),
+            json!({ "fs": true, "net": true }),
             &probe,
             &["rawconnect", &ip(echo), &echo.port().to_string()]
         ),

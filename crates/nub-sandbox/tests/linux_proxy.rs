@@ -318,10 +318,12 @@ fn per_host_proxy_forwards_allowed_drops_denied_blocks_direct() {
         1,
         "direct connect bypassing the proxy is blocked by Landlock v4"
     );
-    // Negative control: net relaxed → the direct connect succeeds.
+    // Negative control: net relaxed → the direct connect succeeds. `sandbox: false`
+    // is the unambiguous fully-unjailed surface (a bare `{ fs: true }` now floors
+    // net → seccomp would block the connect, defeating the control).
     assert_eq!(
         f.run(
-            json!({ "fs": true }),
+            json!(false),
             probe,
             &["rawconnect", &echo.ip().to_string(), &port]
         ),
@@ -412,7 +414,8 @@ fn sctp_and_mptcp_egress_denied_in_proxy_mode() {
     // Negative control: MPTCP (default-on, reliably creatable) IS created when net is
     // unenforced — proving the block above is ours, not a kernel-support artifact.
     assert_eq!(
-        f.run(json!({ "fs": true }), probe, &["mksock", "262"]),
+        // `sandbox: false` = fully unjailed (a bare `{ fs: true }` now floors net).
+        f.run(json!(false), probe, &["mksock", "262"]),
         0,
         "neg-control: unenforced net leaves an MPTCP socket creatable"
     );
@@ -500,14 +503,15 @@ fn udp_and_inbound_bind_denied_in_proxy_mode() {
         1,
         "explicit TCP bind() must be denied in proxy mode"
     );
-    // Negative controls: net relaxed → both succeed.
+    // Negative controls: net relaxed → both succeed. `sandbox: false` is the
+    // unambiguous fully-unjailed surface (a bare `{ fs: true }` now floors net).
     assert_eq!(
-        f.run(json!({ "fs": true }), probe, &["udpsocket"]),
+        f.run(json!(false), probe, &["udpsocket"]),
         0,
         "neg-control: unenforced net creates a UDP socket"
     );
     assert_eq!(
-        f.run(json!({ "fs": true }), probe, &["tcpbind", "0"]),
+        f.run(json!(false), probe, &["tcpbind", "0"]),
         0,
         "neg-control: unenforced net binds a TCP port"
     );
@@ -528,15 +532,21 @@ fn af_unix_egress_closed_under_net_deny() {
     let sock = sock.to_str().unwrap();
 
     // Under coarse net-deny, socket(AF_UNIX) is denied → the local-IPC egress channel
-    // (docker.sock class) is closed.
+    // (docker.sock class) is closed. `fs: true` is NAMED (an unlisted axis floors to
+    // deny-all, which would stop the probe from exec'ing at all).
     assert_eq!(
-        f.run(json!({ "net": false }), probe, &["unixconnect", sock]),
+        f.run(
+            json!({ "net": false, "fs": true }),
+            probe,
+            &["unixconnect", sock]
+        ),
         1,
         "AF_UNIX connect to docker.sock must be denied under net-deny"
     );
     // Negative control: no net enforcement → the same AF_UNIX connect succeeds.
+    // `sandbox: false` = fully unjailed (a bare `{ fs: true }` now floors net).
     assert_eq!(
-        f.run(json!({ "fs": true }), probe, &["unixconnect", sock]),
+        f.run(json!(false), probe, &["unixconnect", sock]),
         0,
         "neg-control: unenforced net reaches the unix socket"
     );

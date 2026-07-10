@@ -2649,8 +2649,11 @@ fn run_sandboxed(policy_file: &str, program: Option<&str>, args: &[String]) -> R
 
     let cwd = std::env::current_dir().context("resolving cwd")?;
     let ctx = nub_sandbox::CompileCtx::new(sandbox_homes(&cwd), cwd.clone(), true, ambient_env());
-    let policy = nub_sandbox::compile(&block, &ctx)
+    let (policy, warnings) = nub_sandbox::compile_with_warnings(&block, &ctx)
         .map_err(|e| anyhow::anyhow!("sandbox policy did not compile: {e}"))?;
+    for w in &warnings {
+        eprintln!("warning: {w}");
+    }
 
     let spec = nub_sandbox::CommandSpec::new(program).args(prog_args.iter().map(String::as_str));
     let prepared = nub_sandbox::apply(&policy, spec)

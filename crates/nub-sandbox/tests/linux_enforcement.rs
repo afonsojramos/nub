@@ -374,8 +374,11 @@ fn env_scrub_alone_closes_proc_even_with_fs_relaxed() {
     // backend installs a relaxed-minus-/proc Landlock ruleset for the env-read
     // boundary (fs stays relaxed; only /proc,/sys are closed).
     let read_environ = "/bin/cat /proc/$PPID/environ 2>/dev/null || true";
+    // `fs: true` is now NAMED explicitly: under the complete-statement model an
+    // unlisted axis FLOORS (deny-all), so `{ env: false }` alone would confine fs
+    // and the probe could not exec — this test wants env scrub with fs RELAXED.
     let (_c, out) = f.run(
-        serde_json::json!({ "env": false }),
+        serde_json::json!({ "env": false, "fs": true }),
         &[("AMBIENT_SECRET", "s")],
         SH,
         &["-c", read_environ],
@@ -385,13 +388,9 @@ fn env_scrub_alone_closes_proc_even_with_fs_relaxed() {
         "env-scrub must close /proc even with fs relaxed (got {} bytes)",
         out.len()
     );
-    // negative control — nothing enforced (no env scrub, fs relaxed) → /proc readable.
-    let (_c2, out2) = f.run(
-        serde_json::json!({ "fs": true }),
-        &[],
-        SH,
-        &["-c", read_environ],
-    );
+    // negative control — nothing enforced → /proc readable. `sandbox: false` is the
+    // unambiguous "fully unjailed" surface (a bare `{ fs: true }` now floors net+env).
+    let (_c2, out2) = f.run(serde_json::json!(false), &[], SH, &["-c", read_environ]);
     assert!(
         out2.contains("PATH="),
         "neg-control: unsandboxed reads /proc"
@@ -408,8 +407,10 @@ fn env_passthrough_does_not_close_proc() {
     // secret to protect and /proc must stay open (a config the user chose to be
     // permissive) — the `/proc` close only fires when the scrub actually withholds.
     let read_environ = "/bin/cat /proc/$PPID/environ 2>/dev/null || true";
+    // fs named RELAXED explicitly (an unlisted axis now floors → the probe couldn't
+    // exec); this test is about env passthrough NOT closing /proc.
     let (_c, out) = f.run(
-        serde_json::json!({ "env": true }),
+        serde_json::json!({ "env": true, "fs": true }),
         &[("FOO", "bar")],
         SH,
         &["-c", read_environ],
@@ -429,7 +430,7 @@ fn env_scrub_strips_secret_keeps_baseline() {
     }
     let f = fixture();
     let env = &[("PATH", "/usr/bin:/bin"), ("MY_SECRET_TOKEN", "leaked")];
-    let strip = serde_json::json!(true); // curated baseline
+    let strip = serde_json::json!(true); // curated baseline (wrapper true → generous-read fs)
     assert!(
         f.run(strip.clone(), env, SH, &["-c", "test -n \"$PATH\""])
             .0
@@ -442,9 +443,11 @@ fn env_scrub_strips_secret_keeps_baseline() {
             == 0,
         "secret stripped"
     );
+    // fs named RELAXED (an unlisted axis floors → SH couldn't exec); this checks
+    // that axis `env: true` passthrough keeps the ambient secret.
     assert!(
         f.run(
-            serde_json::json!({ "env": true }),
+            serde_json::json!({ "env": true, "fs": true }),
             env,
             SH,
             &["-c", "test -n \"$MY_SECRET_TOKEN\""]
@@ -517,7 +520,9 @@ fn seccomp_denies_net_ptrace_and_vmread() {
     let probe = s(&probe);
 
     // net enforce → socket(AF_INET) blocked; fs relaxed so the probe still runs.
-    let net_deny = serde_json::json!({ "net": false });
+    // `fs: true` is NAMED explicitly now (an unlisted axis floors to deny-all, which
+    // would stop the probe from exec'ing at all).
+    let net_deny = serde_json::json!({ "net": false, "fs": true });
     assert_eq!(
         f.run(net_deny.clone(), &[], &probe, &["socket"]).0,
         42,
@@ -535,8 +540,10 @@ fn seccomp_denies_net_ptrace_and_vmread() {
         "process_vm_readv denied"
     );
 
-    // negative control — no sandbox (fs:true, no other axis) → every syscall goes through.
-    let relaxed = serde_json::json!({ "fs": true });
+    // negative control — no sandbox → every syscall goes through. `sandbox: false`
+    // is the unambiguous fully-unjailed surface (a bare `{ fs: true }` now floors
+    // net → seccomp would block the socket, defeating the control).
+    let relaxed = serde_json::json!(false);
     assert_eq!(
         f.run(relaxed.clone(), &[], &probe, &["socket"]).0,
         0,

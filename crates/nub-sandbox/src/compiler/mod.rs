@@ -9,6 +9,7 @@
 //! emit. Scope resolution and tighten-only layering live in sibling modules for
 //! the future project frontend; the `--sandbox` entry is single-block.
 
+mod clobber;
 mod defaults;
 mod env_grammar;
 mod fold;
@@ -20,9 +21,27 @@ pub mod scope;
 pub use resolve::{CommandRunner, ShellRunner};
 
 use crate::matcher::path::Homes;
-use crate::policy::{Effect, FsPolicy, NetPolicy, SandboxPolicy};
+use crate::policy::{Effect, EnvPolicy, FsPolicy, NetPolicy, SandboxPolicy};
 use serde_json::Value;
 use std::collections::BTreeMap;
+
+/// A non-fatal compile diagnostic. Distinct from [`CompileError`]: the policy
+/// still compiles, but something in the surface is a smell worth surfacing — today
+/// only the clobber warning (a later array entry that fully shadows an earlier
+/// one, making it dead). Carried on the side of the result, NEVER in the resolved
+/// [`SandboxPolicy`] IR (backends consume policy, not diagnostics).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompileWarning {
+    /// The surface path the warning occurred at (e.g. `fs`, `env`).
+    pub path: String,
+    pub message: String,
+}
+
+impl std::fmt::Display for CompileWarning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "sandbox.{}: {}", self.path, self.message)
+    }
+}
 
 /// Host-provided context for a compile. All fields are ALREADY-PARSED data — the
 /// engine stays PM-pure (Boundary B): nub-cli does file discovery/parse and the
@@ -147,8 +166,34 @@ impl std::fmt::Display for CompileError {
 
 impl std::error::Error for CompileError {}
 
-/// Compile a `sandbox` surface block into a resolved [`SandboxPolicy`].
+/// Compile a `sandbox` surface block into a resolved [`SandboxPolicy`]. Discards
+/// any [`CompileWarning`]s; use [`compile_with_warnings`] to surface them.
 pub fn compile(surface: &Value, ctx: &CompileCtx) -> Result<SandboxPolicy, CompileError> {
+    compile_with_warnings(surface, ctx).map(|(policy, _)| policy)
+}
+
+/// Compile a `sandbox` surface block, returning the resolved policy AND any
+/// non-fatal warnings (the clobber smell). Single-term entry: the `"..."` payload
+/// resolves against the built-in base (there is no parent scope).
+pub fn compile_with_warnings(
+    surface: &Value,
+    ctx: &CompileCtx,
+) -> Result<(SandboxPolicy, Vec<CompileWarning>), CompileError> {
+    let mut warnings = Vec::new();
+    let policy = compile_scope(surface, None, ctx, &mut warnings)?;
+    Ok((policy, warnings))
+}
+
+/// Resolve ONE scope's surface against its resolved `parent` (the enclosing
+/// scope's policy; `None` at the outermost scope → the built-in base). The
+/// wrapper trichotomy; a granular object goes to [`compile_object`]. This is the
+/// per-scope primitive the chain resolver ([`scope::resolve_chain`]) drives.
+pub(crate) fn compile_scope(
+    surface: &Value,
+    parent: Option<&SandboxPolicy>,
+    ctx: &CompileCtx,
+    warnings: &mut Vec<CompileWarning>,
+) -> Result<SandboxPolicy, CompileError> {
     match surface {
         // `false` — fully unjail: every axis relaxed.
         Value::Bool(false) => Ok(unjailed(ctx)),
@@ -158,14 +203,14 @@ pub fn compile(surface: &Value, ctx: &CompileCtx) -> Result<SandboxPolicy, Compi
         Value::String(s) => match classify_string(s) {
             StringKind::Preset => {
                 let expanded = preset::resolve(s)?;
-                compile_object(&expanded, ctx)
+                compile_object(&expanded, parent, ctx, warnings)
             }
             StringKind::FileRef => Err(CompileError::FileRefUnresolved {
                 path: String::new(),
                 reference: s.clone(),
             }),
         },
-        Value::Object(_) => compile_object(surface, ctx),
+        Value::Object(_) => compile_object(surface, parent, ctx, warnings),
         _ => Err(CompileError::shape(
             "",
             "sandbox must be a boolean, a preset name, a file-ref, or a { fs, net, env } object",
@@ -173,28 +218,52 @@ pub fn compile(surface: &Value, ctx: &CompileCtx) -> Result<SandboxPolicy, Compi
     }
 }
 
-/// Fold a granular `{ fs, net, env }` object; an absent axis takes its secure
-/// default (so a partial object still confines the axes it omits).
-fn compile_object(surface: &Value, ctx: &CompileCtx) -> Result<SandboxPolicy, CompileError> {
+/// Fold a granular `{ fs, net, env }` object. A present block is a COMPLETE
+/// statement: an axis it does NOT list FLOORS (deny fs, deny-all-enforcing net,
+/// strip env) — least-exposure, fails closed. An object-level `"..."` key
+/// (`{ "...": true }`) opts every UNLISTED axis into inheriting the enclosing
+/// scope's base instead of flooring; a LISTED axis's own `"..."` inherits that
+/// axis. So `{}` = deny-all; `{ "fs": [...] }` floors net+env; `{ "...": true }`
+/// ≡ the enclosing base for all axes.
+fn compile_object(
+    surface: &Value,
+    parent: Option<&SandboxPolicy>,
+    ctx: &CompileCtx,
+    warnings: &mut Vec<CompileWarning>,
+) -> Result<SandboxPolicy, CompileError> {
     let obj = surface
         .as_object()
         .ok_or_else(|| CompileError::shape("", "expected a { fs, net, env } object"))?;
-    fold::reject_unknown_keys(obj, &["fs", "net", "env"], "")?;
+    fold::reject_unknown_keys(obj, &["fs", "net", "env", "..."], "")?;
+    let inherit_base = object_spread(obj.get("..."))?;
 
-    // An absent axis in a granular object is UNCONFINED (relaxed) — the granular
-    // form confines what you name; use `sandbox: true` for blanket secure
-    // defaults. This is the "boolean is the de-nesting mechanism" contract.
+    // Clobber detection runs per ARRAY axis (a total shadow between two entries of
+    // the SAME array — D2b/D6); object forms have unique keys, so their granular
+    // overrides are the intended idiom.
+    if let Some(Value::Array(items)) = obj.get("fs") {
+        clobber::detect_fs(items, &ctx.homes, "fs", warnings);
+    }
+    if let Some(Value::Array(items)) = obj.get("net") {
+        clobber::detect_net(items, "net", warnings);
+    }
+    if let Some(Value::Array(items)) = obj.get("env") {
+        clobber::detect_env(items, "env", warnings);
+    }
+
     let fs = match obj.get("fs") {
-        Some(v) => fold::fold_fs(v, ctx, "fs")?,
-        None => relaxed_fs(),
+        Some(v) => fold::fold_fs(v, ctx, "fs", parent.map(|p| &p.fs))?,
+        None if inherit_base => inherit_fs(parent, ctx),
+        None => floor_fs(),
     };
     let net = match obj.get("net") {
-        Some(v) => fold::fold_net(v, "net")?,
-        None => relaxed_net(),
+        Some(v) => fold::fold_net(v, "net", parent.map(|p| &p.net))?,
+        None if inherit_base => inherit_net(parent),
+        None => floor_net(),
     };
     let env = match obj.get("env") {
-        Some(v) => fold::fold_env(v, ctx, "env")?,
-        None => crate::policy::EnvPolicy::default(), // enforce=false → inherit
+        Some(v) => fold::fold_env(v, ctx, "env", parent.map(|p| &p.env))?,
+        None if inherit_base => inherit_env(parent, ctx),
+        None => floor_env(ctx),
     };
     Ok(SandboxPolicy {
         fs,
@@ -202,6 +271,66 @@ fn compile_object(surface: &Value, ctx: &CompileCtx) -> Result<SandboxPolicy, Co
         env,
         pid: Default::default(),
     })
+}
+
+/// Parse a top-level object `"..."` key. `true` = inherit the enclosing base for
+/// unlisted axes; a string = a file-extends (frontend-resolved — deferred here);
+/// anything else is a shape error. Absent = complete statement (floor unlisted).
+fn object_spread(v: Option<&Value>) -> Result<bool, CompileError> {
+    match v {
+        None => Ok(false),
+        Some(Value::Bool(true)) => Ok(true),
+        Some(Value::String(reference)) => Err(CompileError::FileRefUnresolved {
+            path: "...".to_string(),
+            reference: reference.clone(),
+        }),
+        Some(_) => Err(CompileError::shape(
+            "...",
+            "`\"...\"` value must be true (inherit the enclosing scope) or a file-ref",
+        )),
+    }
+}
+
+/// An unlisted axis under an object-level `"..."`: inherit the resolved parent's
+/// axis at an inner scope, or the built-in base (≡ `sandbox: true`'s axis) at the
+/// outermost scope.
+fn inherit_fs(parent: Option<&SandboxPolicy>, ctx: &CompileCtx) -> FsPolicy {
+    parent
+        .map(|p| p.fs.clone())
+        .unwrap_or_else(|| secure_default_fs(ctx))
+}
+fn inherit_net(parent: Option<&SandboxPolicy>) -> NetPolicy {
+    parent
+        .map(|p| p.net.clone())
+        .unwrap_or_else(secure_default_net)
+}
+fn inherit_env(parent: Option<&SandboxPolicy>, ctx: &CompileCtx) -> EnvPolicy {
+    parent
+        .map(|p| p.env.clone())
+        .unwrap_or_else(|| secure_default_env(ctx))
+}
+
+/// The complete-statement FLOOR for an unlisted axis — the security inversion.
+/// fs: deny-all (`FsRuleSet::default` is a deny base with no entries). net:
+/// deny-all, ENFORCING. env: strip-all (enforce, empty constructed, everything
+/// withheld) — identical to folding the axis with `false`.
+fn floor_fs() -> FsPolicy {
+    FsPolicy::default()
+}
+fn floor_net() -> NetPolicy {
+    NetPolicy {
+        enforce: true,
+        rules: Vec::new(),
+        default_effect: Effect::Deny,
+    }
+}
+fn floor_env(ctx: &CompileCtx) -> EnvPolicy {
+    EnvPolicy {
+        enforce: true,
+        constructed: BTreeMap::new(),
+        schema: Vec::new(),
+        withheld: ctx.ambient_env.keys().cloned().collect(),
+    }
 }
 
 /// `sandbox: false` — every axis relaxed. The explicit escape hatch.
@@ -262,9 +391,14 @@ fn secure_default_env(ctx: &CompileCtx) -> crate::policy::EnvPolicy {
 
 fn secure_default_fs(ctx: &CompileCtx) -> FsPolicy {
     // Equivalent to `fs: ["..."]` — the generous-read + secret-deny defaults, no
-    // write grant.
-    fold::fold_fs(&Value::Array(vec![Value::String("...".into())]), ctx, "fs")
-        .expect("`[\"...\"]` fs default always folds")
+    // write grant. Outermost scope → `parent = None`.
+    fold::fold_fs(
+        &Value::Array(vec![Value::String("...".into())]),
+        ctx,
+        "fs",
+        None,
+    )
+    .expect("`[\"...\"]` fs default always folds")
 }
 
 fn secure_default_net() -> NetPolicy {

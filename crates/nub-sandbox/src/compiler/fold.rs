@@ -15,7 +15,15 @@ use crate::policy::{
 };
 use globset::{GlobBuilder, GlobMatcher};
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+
+/// A `"!..."` entry — a negated inheritance sentinel — is meaningless (you cannot
+/// deny "the inherited scope") and is a shape error on every axis (D-list).
+const SENTINEL_NEGATE_MSG: &str =
+    "`!...` is invalid — `\"...\"` is the inheritance sentinel and cannot be negated";
+/// An empty / whitespace-only fs entry used to expand to `**` (a silent whole-fs
+/// grant, fail-OPEN); it is now a hard shape error (D3).
+const EMPTY_FS_ENTRY_MSG: &str = "an empty fs entry is not allowed (it would grant the whole filesystem) — name a path or remove it";
 
 // ── fs ───────────────────────────────────────────────────────────────────────
 
@@ -23,8 +31,15 @@ use std::collections::BTreeSet;
 /// are subtree-expanded (a bare path grants the node + `/**`); a glob-bearing
 /// pattern is emitted verbatim. Access: array grants are ReadWrite (the concise
 /// "these paths are fully usable" form); object values pick `"r"`/`"rw"`. A
-/// `"..."` splices the generous-read + secret-deny defaults at its position.
-pub fn fold_fs(value: &Value, ctx: &CompileCtx, path: &str) -> Result<FsPolicy, CompileError> {
+/// `"..."` inherits the enclosing scope's fs at its position: the resolved
+/// `parent` when present (cross-scope inheritance), else the built-in generous-
+/// read + secret-deny base (outermost scope).
+pub fn fold_fs(
+    value: &Value,
+    ctx: &CompileCtx,
+    path: &str,
+    parent: Option<&FsPolicy>,
+) -> Result<FsPolicy, CompileError> {
     let mut set = FsRuleSet {
         entries: Vec::new(),
         default_effect: Effect::Deny,
@@ -35,8 +50,9 @@ pub fn fold_fs(value: &Value, ctx: &CompileCtx, path: &str) -> Result<FsPolicy, 
         Value::Bool(false) => set.default_effect = Effect::Deny,
         Value::Array(items) => {
             for (i, item) in items.iter().enumerate() {
-                let s = as_str(item, &child(path, &i.to_string()))?;
-                fold_fs_array_entry(s, ctx, &mut set.entries);
+                let p = child(path, &i.to_string());
+                let s = as_str(item, &p)?;
+                fold_fs_array_entry(s, ctx, parent, &p, &mut set.entries)?;
             }
         }
         Value::Object(map) => {
@@ -57,10 +73,22 @@ pub fn fold_fs(value: &Value, ctx: &CompileCtx, path: &str) -> Result<FsPolicy, 
     })
 }
 
-fn fold_fs_array_entry(s: &str, ctx: &CompileCtx, out: &mut Vec<FsRule>) {
+fn fold_fs_array_entry(
+    s: &str,
+    ctx: &CompileCtx,
+    parent: Option<&FsPolicy>,
+    path: &str,
+    out: &mut Vec<FsRule>,
+) -> Result<(), CompileError> {
+    if s == "!..." {
+        return Err(CompileError::shape(path, SENTINEL_NEGATE_MSG));
+    }
     if s == "..." {
-        splice_fs_defaults(ctx, out);
-        return;
+        splice_fs_inherit(ctx, parent, out);
+        return Ok(());
+    }
+    if s.trim().is_empty() {
+        return Err(CompileError::shape(path, EMPTY_FS_ENTRY_MSG));
     }
     let (pattern, effect) = match s.strip_prefix('!') {
         Some(rest) => (rest, Effect::Deny),
@@ -68,6 +96,7 @@ fn fold_fs_array_entry(s: &str, ctx: &CompileCtx, out: &mut Vec<FsRule>) {
     };
     // Array grants are ReadWrite; denies deny both.
     push_fs_rules(pattern, effect, FsAccess::ReadWrite, ctx, out);
+    Ok(())
 }
 
 fn fold_fs_object_entry(
@@ -77,6 +106,9 @@ fn fold_fs_object_entry(
     path: &str,
     out: &mut Vec<FsRule>,
 ) -> Result<(), CompileError> {
+    if key.trim().is_empty() {
+        return Err(CompileError::shape(path, EMPTY_FS_ENTRY_MSG));
+    }
     let (effect, access) = match val {
         Value::Bool(true) => (Effect::Allow, FsAccess::ReadWrite),
         Value::Bool(false) => (Effect::Deny, FsAccess::Read),
@@ -120,7 +152,17 @@ fn push_fs_rules(
     }
 }
 
-/// Splice the generous-read base + secret-deny defaults (the fs `"..."` payload).
+/// The fs `"..."` payload: at an inner scope splice the resolved parent's fs
+/// entries (cross-scope inheritance); at the outermost scope (no parent) splice
+/// the built-in generous-read + secret-deny base — the degenerate outermost case.
+fn splice_fs_inherit(ctx: &CompileCtx, parent: Option<&FsPolicy>, out: &mut Vec<FsRule>) {
+    match parent {
+        Some(p) => out.extend(p.rules.entries.iter().cloned()),
+        None => splice_fs_defaults(ctx, out),
+    }
+}
+
+/// Splice the generous-read base + secret-deny defaults (the built-in fs base).
 fn splice_fs_defaults(ctx: &CompileCtx, out: &mut Vec<FsRule>) {
     out.push(defaults::generous_read_allow());
     out.extend(defaults::secret_read_denies(&ctx.homes));
@@ -129,9 +171,15 @@ fn splice_fs_defaults(ctx: &CompileCtx, out: &mut Vec<FsRule>) {
 // ── net ──────────────────────────────────────────────────────────────────────
 
 /// Fold the `net` axis into a [`NetPolicy`]. Entries are host globs or CIDRs;
-/// `!` denies; `"..."` splices the trusted-host default allows. `net: true`
-/// disables enforcement; `net: false` denies all egress.
-pub fn fold_net(value: &Value, path: &str) -> Result<NetPolicy, CompileError> {
+/// `!` denies; `"..."` inherits the enclosing scope's net (the resolved `parent`
+/// when present; nothing at the outermost scope — the built-in net base is
+/// deny-all with no committed allowlist). `net: true` disables enforcement;
+/// `net: false` denies all egress.
+pub fn fold_net(
+    value: &Value,
+    path: &str,
+    parent: Option<&NetPolicy>,
+) -> Result<NetPolicy, CompileError> {
     let mut policy = NetPolicy {
         enforce: true,
         rules: Vec::new(),
@@ -144,7 +192,7 @@ pub fn fold_net(value: &Value, path: &str) -> Result<NetPolicy, CompileError> {
             for (i, item) in items.iter().enumerate() {
                 let p = child(path, &i.to_string());
                 let s = as_str(item, &p)?;
-                fold_net_entry(s, &p, &mut policy.rules)?;
+                fold_net_entry(s, parent, &p, &mut policy.rules)?;
             }
         }
         Value::Object(map) => {
@@ -164,12 +212,22 @@ pub fn fold_net(value: &Value, path: &str) -> Result<NetPolicy, CompileError> {
     Ok(policy)
 }
 
-fn fold_net_entry(s: &str, path: &str, out: &mut Vec<NetRule>) -> Result<(), CompileError> {
+fn fold_net_entry(
+    s: &str,
+    parent: Option<&NetPolicy>,
+    path: &str,
+    out: &mut Vec<NetRule>,
+) -> Result<(), CompileError> {
+    if s == "!..." {
+        return Err(CompileError::shape(path, SENTINEL_NEGATE_MSG));
+    }
     if s == "..." {
-        // No default trusted-host allowlist is committed in Stage 1 (the
-        // build-jail baseline owns it). `"..."` in net currently splices nothing
-        // — a self-contained net policy. Documented so a later reader wires the
-        // baseline here rather than assuming it is silently applied.
+        // Inner scope: inherit the resolved parent's rules. Outermost (no parent):
+        // the built-in net base is deny-all with no committed allowlist (the
+        // build-jail baseline owns trusted-host allows), so splice nothing.
+        if let Some(p) = parent {
+            out.extend(p.rules.iter().cloned());
+        }
         return Ok(());
     }
     let (pattern, effect) = match s.strip_prefix('!') {
@@ -224,7 +282,12 @@ fn push_net_rule(
 /// Base is default-DENY (env is constructed, not inherited): a key survives only
 /// if the LAST matching entry allows it. `true` passes the whole ambient env;
 /// `false` strips everything.
-pub fn fold_env(value: &Value, ctx: &CompileCtx, path: &str) -> Result<EnvPolicy, CompileError> {
+pub fn fold_env(
+    value: &Value,
+    ctx: &CompileCtx,
+    path: &str,
+    parent: Option<&EnvPolicy>,
+) -> Result<EnvPolicy, CompileError> {
     // An explicit env axis always enforces (constructs the child env exactly).
     let mut policy = EnvPolicy {
         enforce: true,
@@ -240,12 +303,12 @@ pub fn fold_env(value: &Value, ctx: &CompileCtx, path: &str) -> Result<EnvPolicy
             return Ok(policy);
         }
         Value::Array(items) => {
-            let entries = parse_env_array(items, path)?;
-            construct_env(&entries, ctx, &mut policy)?;
+            let entries = parse_env_array(items, parent, path)?;
+            construct_env(&entries, ctx, parent, &mut policy)?;
         }
         Value::Object(map) => {
-            let entries = parse_env_object(map, ctx, path)?;
-            construct_env(&entries, ctx, &mut policy)?;
+            let entries = parse_env_object(map, ctx, parent, path)?;
+            construct_env(&entries, ctx, parent, &mut policy)?;
         }
         _ => {
             return Err(CompileError::shape(
@@ -269,6 +332,10 @@ struct EnvEntry {
     /// globs; the built-in secret defaults are case-insensitive (glob or
     /// boundary-token) so an uppercase `MY_TOKEN` cannot slip past them.
     key_match: KeyMatch,
+    /// A compiler-spliced default entry (the `"..."` curated baseline / inherited
+    /// keys / secret denies), NOT user-authored: excluded from the emitted
+    /// `schema` (which carries user validation + redaction marks only).
+    builtin: bool,
 }
 
 /// How an [`EnvEntry`]'s pattern is matched against an ambient env key.
@@ -286,6 +353,13 @@ enum KeyMatch {
     /// A built-in short/ambiguous secret token (`pat`, `pwd`, `auth`), matched
     /// case-insensitively as a whole SEGMENT (via `defaults::word_is_segment`).
     SecretSegment,
+    /// The built-in curated baseline (the env `"..."` payload at the OUTERMOST
+    /// scope): matches a key iff `defaults::baseline_allows` admits it. One such
+    /// allow entry reproduces `sandbox: true`'s curated env exactly.
+    CuratedBaseline,
+    /// Cross-scope inheritance (the env `"..."` payload at an INNER scope):
+    /// matches a key iff it is in the resolved parent's constructed env.
+    InheritedKeys,
 }
 
 enum EnvAction {
@@ -298,12 +372,20 @@ enum EnvAction {
     Literal(String),
 }
 
-fn parse_env_array(items: &[Value], path: &str) -> Result<Vec<EnvEntry>, CompileError> {
+fn parse_env_array(
+    items: &[Value],
+    parent: Option<&EnvPolicy>,
+    path: &str,
+) -> Result<Vec<EnvEntry>, CompileError> {
     let mut out = Vec::new();
     for (i, item) in items.iter().enumerate() {
-        let s = as_str(item, &child(path, &i.to_string()))?;
+        let p = child(path, &i.to_string());
+        let s = as_str(item, &p)?;
+        if s == "!..." {
+            return Err(CompileError::shape(&p, SENTINEL_NEGATE_MSG));
+        }
         if s == "..." {
-            splice_env_defaults(&mut out);
+            splice_env_inherit(parent, &mut out);
             continue;
         }
         let (pattern, deny) = match s.strip_prefix('!') {
@@ -314,7 +396,7 @@ fn parse_env_array(items: &[Value], path: &str) -> Result<Vec<EnvEntry>, Compile
         // key/glob selectors, not values. Reject to avoid silent misuse.
         if resolve::has_substitution(&pattern) {
             return Err(CompileError::shape(
-                &child(path, &i.to_string()),
+                &p,
                 "`$(…)` is only valid as an object-form env value, not an array entry",
             ));
         }
@@ -335,6 +417,7 @@ fn parse_env_array(items: &[Value], path: &str) -> Result<Vec<EnvEntry>, Compile
             optional: true,
             format: None,
             key_match: KeyMatch::User,
+            builtin: false,
         });
     }
     Ok(out)
@@ -343,11 +426,38 @@ fn parse_env_array(items: &[Value], path: &str) -> Result<Vec<EnvEntry>, Compile
 fn parse_env_object(
     map: &serde_json::Map<String, Value>,
     ctx: &CompileCtx,
+    parent: Option<&EnvPolicy>,
     path: &str,
 ) -> Result<Vec<EnvEntry>, CompileError> {
     let mut out = Vec::new();
     for (raw_key, val) in map {
         let p = child(path, raw_key);
+        if raw_key == "!..." {
+            return Err(CompileError::shape(&p, SENTINEL_NEGATE_MSG));
+        }
+        // `"..."` as an env-object key inherits the enclosing scope's env keys at
+        // this position (positional last-match). `true` = inherit; a string is a
+        // file-extends (frontend-resolved — deferred here, as elsewhere).
+        if raw_key == "..." {
+            match val {
+                Value::Bool(true) => {
+                    splice_env_inherit(parent, &mut out);
+                    continue;
+                }
+                Value::String(reference) => {
+                    return Err(CompileError::FileRefUnresolved {
+                        path: p,
+                        reference: reference.clone(),
+                    });
+                }
+                _ => {
+                    return Err(CompileError::shape(
+                        &p,
+                        "`\"...\"` value must be true (inherit the enclosing scope) or a file-ref",
+                    ));
+                }
+            }
+        }
         // A trailing `?` on the key marks it optional.
         let (key, optional) = match raw_key.strip_suffix('?') {
             Some(k) => (k.to_string(), true),
@@ -374,6 +484,7 @@ fn parse_env_object_value(
             optional,
             format: None,
             key_match: KeyMatch::User,
+            builtin: false,
         }),
         Value::Bool(false) => Ok(EnvEntry {
             pattern: key,
@@ -382,6 +493,7 @@ fn parse_env_object_value(
             optional,
             format: None,
             key_match: KeyMatch::User,
+            builtin: false,
         }),
         Value::String(s) => parse_env_string_value(key, optional, s, ctx, path),
         Value::Object(extras) => parse_env_extras(key, optional, extras, ctx, path),
@@ -422,6 +534,7 @@ fn parse_env_string_value(
             optional,
             format: None,
             key_match: KeyMatch::User,
+            builtin: false,
         });
     }
     // Otherwise a type from the grammar.
@@ -434,6 +547,7 @@ fn parse_env_string_value(
         optional,
         format,
         key_match: KeyMatch::User,
+        builtin: false,
     })
 }
 
@@ -511,6 +625,7 @@ fn parse_env_extras(
             optional,
             format,
             key_match: KeyMatch::User,
+            builtin: false,
         });
     }
     Ok(EnvEntry {
@@ -520,15 +635,37 @@ fn parse_env_extras(
         optional,
         format,
         key_match: KeyMatch::User,
+        builtin: false,
     })
 }
 
-/// The env `"..."` payload: the default secret denies (name-token + prefix
-/// matches), spliced as trailing deny entries.
+/// The env `"..."` payload: inherit the enclosing scope's env at this position.
+/// At an INNER scope (`parent = Some`) splice one `InheritedKeys` allow so the
+/// child inherits exactly the resolved parent's keys (already secret-filtered by
+/// the parent). At the OUTERMOST scope (`parent = None`) splice the built-in
+/// curated baseline — the degenerate outermost case, ≡ `sandbox: true`'s env.
+fn splice_env_inherit(parent: Option<&EnvPolicy>, out: &mut Vec<EnvEntry>) {
+    match parent {
+        Some(_) => out.push(EnvEntry {
+            pattern: "...".to_string(),
+            action: EnvAction::Allow(None),
+            secret: false,
+            optional: true,
+            format: None,
+            key_match: KeyMatch::InheritedKeys,
+            builtin: true,
+        }),
+        None => splice_env_defaults(out),
+    }
+}
+
+/// The built-in env base (outermost `"..."`): the secret DENIES followed by the
+/// curated-baseline ALLOW. Ordered so the baseline allow is LAST — its verdict is
+/// authoritative for baseline keys (so a bare `["..."]` ≡ the curated baseline,
+/// i.e. `sandbox: true`'s env), while the secret denies bind only when a LATER
+/// user entry re-broadens (e.g. `["*", "..."]`, which allows all then re-strips
+/// secrets). All are `builtin` → excluded from the emitted user schema.
 fn splice_env_defaults(out: &mut Vec<EnvEntry>) {
-    // Each secret token is its own ordered deny entry (so a later user allow can
-    // re-permit one by ordering). Two match rules per the token's ambiguity:
-    // unambiguous → substring; short/ambiguous → whole segment.
     let secret_deny = |pattern: String, key_match: KeyMatch| EnvEntry {
         pattern,
         action: EnvAction::Deny,
@@ -536,6 +673,7 @@ fn splice_env_defaults(out: &mut Vec<EnvEntry>) {
         optional: false,
         format: None,
         key_match,
+        builtin: true,
     };
     for tok in defaults::SECRET_SUBSTR_TOKENS {
         out.push(secret_deny(tok.to_string(), KeyMatch::SecretSubstr));
@@ -551,19 +689,59 @@ fn splice_env_defaults(out: &mut Vec<EnvEntry>) {
         };
         out.push(secret_deny(pat, KeyMatch::SecretGlob));
     }
+    // The curated allowlist as ONE allow entry (matches iff `baseline_allows`),
+    // placed LAST so it is the authoritative verdict for the keys it admits.
+    out.push(EnvEntry {
+        pattern: "...".to_string(),
+        action: EnvAction::Allow(None),
+        secret: false,
+        optional: true,
+        format: None,
+        key_match: KeyMatch::CuratedBaseline,
+        builtin: true,
+    });
 }
 
 /// Build the child env map + schema + withheld list from ordered entries.
-/// Ambient keys are filtered last-match-wins; explicit-value entries are set
-/// directly. A required exact key with no ambient value and no literal errors.
+/// Source keys are filtered last-match-wins; explicit-value entries are set
+/// directly. A required exact key with no source value and no literal errors.
+///
+/// `parent` (an inner scope's resolved parent env) contributes two things: its
+/// keys become candidate SOURCE keys (with the parent's resolved value winning
+/// over ambient), and an `InheritedKeys` entry (spliced by `"..."`) admits
+/// exactly those keys. At the outermost scope `parent` is `None` and the source
+/// is the ambient env verbatim — behavior-identical to the single-term path.
 fn construct_env(
     entries: &[EnvEntry],
     ctx: &CompileCtx,
+    parent: Option<&EnvPolicy>,
     policy: &mut EnvPolicy,
 ) -> Result<(), CompileError> {
+    // The value source: ambient, overlaid with the resolved parent's keys (parent
+    // value wins — it is the already-resolved truth for an inherited key). Owned
+    // only when a parent actually contributes keys, else the ambient env verbatim.
+    let source_owned;
+    let source: &BTreeMap<String, String> = match parent.filter(|p| !p.constructed.is_empty()) {
+        Some(p) => {
+            let mut m = ctx.ambient_env.clone();
+            for (k, v) in &p.constructed {
+                m.insert(k.clone(), v.clone());
+            }
+            source_owned = m;
+            &source_owned
+        }
+        None => &ctx.ambient_env,
+    };
+    let parent_keys: BTreeSet<String> = parent
+        .map(|p| p.constructed.keys().cloned().collect())
+        .unwrap_or_default();
+
     // Compile a matcher per entry, honoring its `key_match`: user patterns are
-    // case-sensitive globs, the built-in secret defaults case-insensitive.
-    let matchers: Vec<KeyMatcher> = entries.iter().map(compile_key_matcher).collect();
+    // case-sensitive globs, the built-in defaults case-insensitive / predicate.
+    let matchers: Vec<KeyMatcher> = entries
+        .iter()
+        .map(|e| compile_key_matcher(e, &parent_keys))
+        .collect();
 
     // 1. Literal-value entries: set directly + validate + schema. (Exact keys
     //    only; a glob key has no single value to bind.)
@@ -579,8 +757,8 @@ fn construct_env(
         }
     }
 
-    // 2. Ambient keys: last-match-wins over allow/deny entries.
-    for (name, value) in &ctx.ambient_env {
+    // 2. Source keys: last-match-wins over allow/deny entries.
+    for (name, value) in source {
         if policy.constructed.contains_key(name) {
             continue; // a literal already claimed this key
         }
@@ -605,7 +783,7 @@ fn construct_env(
     }
 
     // 3. Required-key check: an exact-key Allow entry that is not optional, has no
-    //    literal, and matched no ambient value → missing required var.
+    //    literal, and matched no source value → missing required var.
     for e in entries {
         if e.optional || is_glob(&e.pattern) {
             continue;
@@ -615,10 +793,12 @@ fn construct_env(
         }
     }
 
-    // 4. Schema (one rule per non-deny entry) + withheld (ambient minus kept).
+    // 4. Schema (one rule per non-deny, non-builtin entry) + withheld (source
+    //    minus kept). Builtin baseline/inherited/secret entries carry no user
+    //    validation or redaction mark, so they never enter the schema.
     let mut seen = BTreeSet::new();
     for e in entries {
-        if matches!(e.action, EnvAction::Deny) {
+        if e.builtin || matches!(e.action, EnvAction::Deny) {
             continue;
         }
         if seen.insert(e.pattern.clone()) {
@@ -630,8 +810,7 @@ fn construct_env(
             });
         }
     }
-    policy.withheld = ctx
-        .ambient_env
+    policy.withheld = source
         .keys()
         .filter(|k| !policy.constructed.contains_key(*k))
         .cloned()
@@ -653,6 +832,10 @@ enum KeyMatcher {
     SecretSubstr(String),
     /// A secret token matched as a case-insensitive whole segment.
     SecretSegment(String),
+    /// The curated-baseline predicate (`defaults::baseline_allows`).
+    Baseline,
+    /// Cross-scope inheritance: the key is in the resolved parent's env.
+    InheritedKeys(BTreeSet<String>),
 }
 
 impl KeyMatcher {
@@ -662,15 +845,21 @@ impl KeyMatcher {
             KeyMatcher::Exact(s) => s == name,
             KeyMatcher::SecretSubstr(word) => defaults::word_in_substr(word, name),
             KeyMatcher::SecretSegment(word) => defaults::word_is_segment(word, name),
+            KeyMatcher::Baseline => defaults::baseline_allows(name),
+            KeyMatcher::InheritedKeys(keys) => keys.contains(name),
         }
     }
 }
 
 /// Compile an entry's pattern into a [`KeyMatcher`] per its [`KeyMatch`] kind.
-fn compile_key_matcher(e: &EnvEntry) -> KeyMatcher {
+/// `parent_keys` is the resolved parent's env key set (empty at the outermost
+/// scope), the match set for an `InheritedKeys` entry.
+fn compile_key_matcher(e: &EnvEntry, parent_keys: &BTreeSet<String>) -> KeyMatcher {
     match e.key_match {
         KeyMatch::SecretSubstr => KeyMatcher::SecretSubstr(e.pattern.clone()),
         KeyMatch::SecretSegment => KeyMatcher::SecretSegment(e.pattern.clone()),
+        KeyMatch::CuratedBaseline => KeyMatcher::Baseline,
+        KeyMatch::InheritedKeys => KeyMatcher::InheritedKeys(parent_keys.clone()),
         KeyMatch::User | KeyMatch::SecretGlob => {
             let case_insensitive = matches!(e.key_match, KeyMatch::SecretGlob);
             GlobBuilder::new(&e.pattern)

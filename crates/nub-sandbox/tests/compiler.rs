@@ -41,16 +41,174 @@ fn true_is_secure_default_per_axis() {
 }
 
 #[test]
-fn absent_granular_axis_is_relaxed_not_confined() {
-    // A granular object confines what you name: net + env omitted → relaxed.
+fn absent_granular_axis_floors_complete_statement() {
+    // THE security inversion (D4/D5): a present granular block is a COMPLETE
+    // statement — an axis it does NOT list FLOORS, not relaxes. `{ fs: [...] }`
+    // confines fs AND floors net (deny-all, enforcing) + env (strip-all). Fails
+    // closed, no invisible grants.
     let ctx = common::ctx(true, &[("ANYTHING", "1")]);
     let p = compile(&json!({ "fs": ["./data"] }), &ctx).unwrap();
     assert!(
         matches!(p.fs.rules.default_effect, Effect::Deny),
         "fs confined"
     );
-    assert!(!p.net.enforce, "net relaxed (absent)");
-    assert!(!p.env.enforce, "env relaxed (absent)");
+    assert!(
+        p.net.enforce && p.net.rules.is_empty(),
+        "net floors: deny-all, enforcing"
+    );
+    assert!(
+        p.env.enforce && p.env.constructed.is_empty(),
+        "env floors: strip-all"
+    );
+    assert!(
+        p.env.withheld.contains(&"ANYTHING".to_string()),
+        "the stripped ambient var is recorded withheld"
+    );
+}
+
+#[test]
+fn empty_object_is_deny_all() {
+    // `sandbox: {}` = deny-all, the opposite of `sandbox: true` (D5): every axis
+    // floors because none is listed.
+    let ctx = common::ctx(true, &[("PATH", "/bin"), ("SECRET", "s")]);
+    let p = compile(&json!({}), &ctx).unwrap();
+    assert!(
+        matches!(p.fs.rules.default_effect, Effect::Deny) && p.fs.rules.entries.is_empty(),
+        "fs deny-all"
+    );
+    assert!(p.net.enforce && p.net.rules.is_empty(), "net deny-all");
+    assert!(
+        p.env.enforce && p.env.constructed.is_empty(),
+        "env strip-all"
+    );
+}
+
+// ── complete-statement floor + `"..."` scope inheritance (U1) ──────────────────
+
+#[test]
+fn env_spread_alone_is_the_curated_baseline_equals_sandbox_true() {
+    // THE env-base fix (D2): `env: ["..."]` inherits the curated baseline — the
+    // SAME env `sandbox: true` produces, secret-free — NOT strip-all (the old
+    // denies-only bug) and NOT axis `env: true` passthrough (which keeps secrets).
+    let env = &[
+        ("PATH", "/usr/bin"),
+        ("HOME", "/home/u"),
+        ("PWD", "/proj"),
+        ("npm_config_target", "22"),
+        ("npm_config_email", "me@x.com"), // credential-shaped npm_config → dropped
+        ("AWS_SECRET_ACCESS_KEY", "sk"),
+        ("MY_TOKEN", "t"),
+        ("RANDOM_VAR", "v"), // non-baseline, non-secret → not in the curated allowlist
+    ];
+    let ctx = common::ctx(true, env);
+    let spread = compile(&json!({ "env": ["..."] }), &ctx).unwrap();
+    let truth = compile(&json!(true), &ctx).unwrap();
+    // The whole env axis is identical to `sandbox: true`'s — the single source of
+    // truth (`baseline_allows`) guarantees no drift.
+    assert_eq!(
+        spread.env, truth.env,
+        "env: [\"...\"] must equal sandbox: true's curated env exactly"
+    );
+    let c = &spread.env.constructed;
+    assert!(
+        c.contains_key("PATH") && c.contains_key("HOME"),
+        "baseline kept"
+    );
+    assert!(
+        c.contains_key("PWD"),
+        "PWD is a baseline key, kept (not stripped)"
+    );
+    assert!(c.contains_key("npm_config_target"), "build hint kept");
+    assert!(
+        !c.contains_key("npm_config_email"),
+        "npm credential dropped"
+    );
+    assert!(
+        !c.contains_key("AWS_SECRET_ACCESS_KEY") && !c.contains_key("MY_TOKEN"),
+        "secrets dropped"
+    );
+    assert!(
+        !c.contains_key("RANDOM_VAR"),
+        "non-baseline var not granted"
+    );
+}
+
+#[test]
+fn env_spread_is_not_axis_true_passthrough() {
+    // Guard the two DIFFERENT `true`s: axis `env: true` = passthrough (keeps the
+    // secret); `env: ["..."]` = curated baseline (strips it).
+    let ctx = common::ctx(true, &[("PATH", "/bin"), ("MY_TOKEN", "leak")]);
+    let passthrough = compile(&json!({ "env": true }), &ctx).unwrap();
+    let baseline = compile(&json!({ "env": ["..."] }), &ctx).unwrap();
+    assert!(
+        passthrough.env.constructed.contains_key("MY_TOKEN"),
+        "axis env:true passes the secret through"
+    );
+    assert!(
+        !baseline.env.constructed.contains_key("MY_TOKEN"),
+        "env:[\"...\"] strips the secret (curated baseline)"
+    );
+}
+
+#[test]
+fn sentinel_negation_is_a_shape_error_on_every_axis() {
+    // `"!..."` — a negated inheritance sentinel — is meaningless and rejected in
+    // all three axis array parsers (never treated as a deny of a literal `...`).
+    let ctx = common::ctx(true, &[]);
+    for surface in [
+        json!({ "fs": ["!..."] }),
+        json!({ "net": ["!..."] }),
+        json!({ "env": ["!..."] }),
+        json!({ "env": { "!...": true } }),
+    ] {
+        let err = compile(&surface, &ctx).unwrap_err();
+        assert!(
+            matches!(err, CompileError::Shape { .. }),
+            "`!...` must be a shape error for {surface}"
+        );
+    }
+}
+
+#[test]
+fn empty_fs_entry_is_rejected_fail_loud() {
+    // `fs: [""]` used to grant the whole filesystem (fail-OPEN). Now a shape error
+    // (D3), for both an empty and a whitespace-only entry, array and object forms.
+    let ctx = common::ctx(true, &[]);
+    for surface in [
+        json!({ "fs": [""] }),
+        json!({ "fs": ["   "] }),
+        json!({ "fs": { "": "rw" } }),
+    ] {
+        assert!(
+            matches!(compile(&surface, &ctx), Err(CompileError::Shape { .. })),
+            "empty fs entry must fail loud for {surface}"
+        );
+    }
+}
+
+#[test]
+fn keys_inside_an_axis_object_do_not_implicitly_inherit() {
+    // A present axis object is self-contained: `env: { FOO }` is EXACTLY {FOO},
+    // never FOO-plus-inherited. `"..."` is the only add-parent mechanism. (Locked
+    // so the future scope-chain frontend can't regress key-level inheritance.)
+    let ctx = common::ctx(true, &[("FOO", "1"), ("PATH", "/bin"), ("BAR", "2")]);
+    let p = compile(&json!({ "env": { "FOO": true } }), &ctx).unwrap();
+    assert_eq!(p.env.constructed.len(), 1, "only the named key");
+    assert!(p.env.constructed.contains_key("FOO"));
+    assert!(
+        !p.env.constructed.contains_key("PATH"),
+        "no implicit baseline inherit"
+    );
+    assert!(
+        !p.env.constructed.contains_key("BAR"),
+        "no implicit ambient inherit"
+    );
+    // fs object likewise: only the named path is granted, deny base elsewhere.
+    let fp = compile(&json!({ "fs": { "./x": "rw" } }), &ctx).unwrap();
+    assert!(
+        matches!(fp.fs.rules.default_effect, Effect::Deny),
+        "deny base"
+    );
 }
 
 // ── presets ───────────────────────────────────────────────────────────────────

@@ -261,7 +261,12 @@ fn strip_prefix_ci<'a>(key: &'a str, prefix: &str) -> Option<&'a str> {
 /// OS contract and a process may report `SYSTEMROOT` or `SystemRoot` — an
 /// exact-case miss would drop a container-essential var and re-open the
 /// `ERROR_ENVVAR_NOT_FOUND` spawn failure the baseline exists to prevent.
-fn baseline_allows(key: &str) -> bool {
+///
+/// Public because the env `"..."` fold reuses it as the match predicate for the
+/// curated-baseline allow entry — so `env: ["..."]` and `sandbox: true`'s env are
+/// the SAME allowlist by construction (single source of truth), never a drifting
+/// reimplementation.
+pub fn baseline_allows(key: &str) -> bool {
     // Registry credential keys ride the build-hint `npm_config_*` prefix; scrub them
     // before the prefix pass would admit them. Case-insensitive prefix match so a
     // Windows-cased `NPM_CONFIG_//…:_authToken` is caught too (env names are
