@@ -31,6 +31,13 @@ globset = "0.4"
 regex = "1"
 ipnet = { version = "2", features = ["serde"] }
 
+# Per-session egress-proxy token: getrandom mints the 256-bit bearer (OS CSPRNG, no
+# userspace-seeded PRNG); base64 decodes the client's HTTP `Proxy-Authorization: Basic`
+# credential + SOCKS5 user/pass. Both already in the workspace lockfile (getrandom via
+# ring/rand; base64 via rustls-pemfile) — no new supply-chain surface.
+getrandom = "0.2"
+base64 = "0.22"
+
 # TLS termination for the MITM credential-brokering tier (proxy/mitm.rs, proxy/ca.rs).
 # Engaged ONLY when a net rule uses a capability that cannot be enforced without
 # reading inside the TLS stream (a credential-inject rule); host-only policies never
@@ -85,6 +92,8 @@ features = [
 
 [dev-dependencies]
 tempfile = "3"
+# Proxy integration tests build the client-side `Proxy-Authorization: Basic` credential.
+base64 = "0.22"
 
 # The Windows enforcement probe is BOTH the runner and the AppContainer child, so it
 # needs a little FFI (token-query + process-liveness) beyond what the lib exposes.

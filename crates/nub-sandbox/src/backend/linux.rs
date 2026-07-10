@@ -108,11 +108,12 @@ pub fn apply(
     policy: &SandboxPolicy,
     spec: CommandSpec,
     proxy_port: Option<u16>,
+    proxy_token: Option<&str>,
     ca_bundle: Option<&std::path::Path>,
 ) -> Result<Prepared, Degradation> {
     let mut command = base_command(&spec, policy);
     if let Some(port) = proxy_port {
-        super::set_proxy_env(&mut command, port);
+        super::set_proxy_env(&mut command, port, proxy_token);
     }
     // CA trust for the child (the Landlock read grant is added to the fs ruleset below).
     if let Some(bundle) = ca_bundle {

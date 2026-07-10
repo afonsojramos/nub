@@ -284,6 +284,7 @@ pub(crate) fn apply(
     policy: &SandboxPolicy,
     spec: super::CommandSpec,
     proxy_port: Option<u16>,
+    proxy_token: Option<&str>,
     // CUT-1: Windows per-host egress-via-proxy is NOT wired (an AppContainer child needs a
     // loopback exemption — `NetworkIsolationSetAppContainerConfig` — to reach the loopback
     // proxy), so TLS termination degrades here just as per-host does. The bundle is still
@@ -311,7 +312,7 @@ pub(crate) fn apply(
             }
         }
         if let Some(port) = proxy_port {
-            super::set_proxy_env(&mut command, port);
+            super::set_proxy_env(&mut command, port, proxy_token);
         }
         if let Some(bundle) = ca_bundle {
             super::set_ca_env(&mut command, bundle);
@@ -420,7 +421,10 @@ pub(crate) fn apply(
         env: policy.env.enforce.then(|| {
             let mut m = policy.env.constructed.clone();
             if let Some(port) = proxy_port {
-                let url = format!("http://127.0.0.1:{port}");
+                let url = match proxy_token {
+                    Some(t) => format!("http://{t}@127.0.0.1:{port}"),
+                    None => format!("http://127.0.0.1:{port}"),
+                };
                 for k in [
                     "HTTP_PROXY",
                     "HTTPS_PROXY",
@@ -430,6 +434,7 @@ pub(crate) fn apply(
                 ] {
                     m.insert(k.to_string(), url.clone());
                 }
+                m.insert("NODE_USE_ENV_PROXY".to_string(), "1".to_string());
             }
             m
         }),

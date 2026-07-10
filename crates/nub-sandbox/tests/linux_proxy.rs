@@ -151,7 +151,8 @@ fn compile_probe(dir: &Path) -> Option<PathBuf> {
 }
 
 // rawconnect <ip> <port> 0=ok 1=fail; unixconnect <path> 0=ok 1=denied/fail;
-// proxysni <tgt> <port> <sni> 0=forwarded 5=dropped 1=err. Reads HTTP_PROXY.
+// proxysni <tgt> <port> <sni> 0=forwarded 5=dropped 1=err; proxynoauth <tgt> <port>
+// 4=refused-407 0=leaked 1=err. Reads HTTP_PROXY for the port AND the per-session token.
 const PROBE_C: &str = r#"
 #include <arpa/inet.h>
 #include <errno.h>
@@ -179,6 +180,30 @@ static int dial(const char* ip, int port) {
     return fd;
 }
 static int proxy_port(void){const char*p=getenv("HTTP_PROXY");if(!p)return 0;const char*c=strrchr(p,':');return c?atoi(c+1):0;}
+/* Extract the per-session token from HTTP_PROXY (`http://<token>@127.0.0.1:<port>`). */
+static int proxy_token(char* out,int cap){
+    const char*p=getenv("HTTP_PROXY"); if(!p)return 0;
+    const char*s=strstr(p,"//"); if(!s)return 0; s+=2;
+    const char*at=strchr(s,'@'); if(!at)return 0;
+    int n=(int)(at-s); if(n<=0||n>=cap)return 0; memcpy(out,s,n); out[n]=0; return 1;
+}
+static const char B64[]="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+static void b64enc(const unsigned char*in,int len,char*out){
+    int o=0,i=0;
+    for(;i+3<=len;i+=3){unsigned v=(in[i]<<16)|(in[i+1]<<8)|in[i+2];
+        out[o++]=B64[(v>>18)&63];out[o++]=B64[(v>>12)&63];out[o++]=B64[(v>>6)&63];out[o++]=B64[v&63];}
+    int rem=len-i;
+    if(rem==1){unsigned v=in[i]<<16;out[o++]=B64[(v>>18)&63];out[o++]=B64[(v>>12)&63];out[o++]='=';out[o++]='=';}
+    else if(rem==2){unsigned v=(in[i]<<16)|(in[i+1]<<8);out[o++]=B64[(v>>18)&63];out[o++]=B64[(v>>12)&63];out[o++]=B64[(v>>6)&63];out[o++]='=';}
+    out[o]=0;
+}
+/* `Proxy-Authorization: Basic <b64(token:)>\r\n` into hdr; 1 if a token was present. */
+static int auth_header(char* hdr,int cap){
+    char tok[128]; if(!proxy_token(tok,sizeof tok)){hdr[0]=0;return 0;}
+    char cred[160]; int n=snprintf(cred,sizeof cred,"%s:",tok);
+    char enc[256]; b64enc((const unsigned char*)cred,n,enc);
+    snprintf(hdr,cap,"Proxy-Authorization: Basic %s\r\n",enc); return 1;
+}
 static int build_hello(const char* sni, unsigned char* out){
     unsigned char body[1024]; int b=0;
     body[b++]=0x03;body[b++]=0x03; for(int i=0;i<32;i++)body[b++]=0; body[b++]=0;
@@ -193,10 +218,11 @@ static int build_hello(const char* sni, unsigned char* out){
     out[o++]=0x01;out[o++]=(b>>16)&0xff;out[o++]=(b>>8)&0xff;out[o++]=b&0xff;
     memcpy(out+o,body,b);o+=b; return o;
 }
-static int proxy_connect(const char* tgt,int tport){
+static int proxy_connect(const char* tgt,int tport,int with_auth){
     int pp=proxy_port(); if(!pp)return -1;
     int fd=dial("127.0.0.1",pp); if(fd<0)return -1;
-    char req[256]; int n=snprintf(req,sizeof req,"CONNECT %s:%d HTTP/1.1\r\nHost: %s\r\n\r\n",tgt,tport,tgt);
+    char hdr[256]; hdr[0]=0; if(with_auth) auth_header(hdr,sizeof hdr);
+    char req[512]; int n=snprintf(req,sizeof req,"CONNECT %s:%d HTTP/1.1\r\nHost: %s\r\n%s\r\n",tgt,tport,tgt,hdr);
     if(write(fd,req,n)!=n){close(fd);return -1;}
     char resp[512];int got=0;
     while(got<4||memcmp(resp+got-4,"\r\n\r\n",4)){int r=read(fd,resp+got,1);if(r<=0){close(fd);return -1;}got+=r;if(got>=(int)sizeof resp)break;}
@@ -222,10 +248,17 @@ int main(int argc,char**argv){
         if(connect(fd,(struct sockaddr*)&a,sizeof a)!=0){close(fd);return 1;} close(fd);return 0;
     }
     if(!strcmp(argv[1],"proxysni")){
-        int fd=proxy_connect(argv[2],atoi(argv[3])); if(fd<0)return 1;
+        int fd=proxy_connect(argv[2],atoi(argv[3]),1); if(fd<0)return 1;
         unsigned char hello[1024];int hl=build_hello(argv[4],hello);
         if(write(fd,hello,hl)!=hl){close(fd);return 1;}
         unsigned char e[64]; int r=read(fd,e,sizeof e); close(fd); return (r>0)?0:5;
+    }
+    /* Like proxysni's CONNECT but WITHOUT the token: proves the per-session gate. A
+       co-resident process lacking the token is refused (407). 4=refused (expected),
+       0=leaked-through (a bug), 1=couldn't reach proxy. */
+    if(!strcmp(argv[1],"proxynoauth")){
+        int fd=proxy_connect(argv[2],atoi(argv[3]),0);
+        if(fd==-2)return 4; if(fd<0)return 1; close(fd); return 0;
     }
     /* Create an AF_INET SOCK_STREAM socket with protocol argv[2] (e.g. IPPROTO_SCTP=132,
        IPPROTO_MPTCP=262, IPPROTO_TCP=6, default=0). 0=created (allowed), 2=EPERM/EACCES
@@ -329,6 +362,39 @@ fn per_host_proxy_forwards_allowed_drops_denied_blocks_direct() {
         ),
         0,
         "neg-control: unenforced net connects directly"
+    );
+}
+
+#[test]
+fn proxy_requires_the_per_session_token() {
+    // Defense-in-depth: the loopback proxy is reachable (Landlock carves the proxy port)
+    // but a caller WITHOUT the per-session token is refused (407). The `proxynoauth` mode
+    // omits the token, standing in for a co-resident same-user process that never learned
+    // it; the paired positive control (WITH the token) forwards.
+    if skip_without_landlock(4) {
+        return; // per-host needs Landlock ABI v4
+    }
+    let f = fixture();
+    let Some(probe) = compile_probe(&f.proj) else {
+        return;
+    };
+    let echo = echo_server();
+    let port = echo.port().to_string();
+    let probe = probe.to_str().unwrap();
+
+    assert_eq!(
+        f.run(net_policy(), probe, &["proxynoauth", "127.0.0.1", &port]),
+        4,
+        "a tokenless CONNECT to an admitted target must be refused (407)"
+    );
+    assert_eq!(
+        f.run(
+            net_policy(),
+            probe,
+            &["proxysni", "127.0.0.1", &port, "api.allowed.example"]
+        ),
+        0,
+        "the child's own token must still forward"
     );
 }
 
@@ -605,10 +671,12 @@ fn nonblocking_client_reaches_proxy_under_connect_notify() {
     let target = format!("127.0.0.1:{}", echo.port());
     let script = r#"
 const net = require('net');
-const pport = parseInt(process.env.HTTP_PROXY.split(':').pop(), 10);
+const u = new URL(process.env.HTTP_PROXY);
+const pport = parseInt(u.port, 10);
+const auth = 'Basic ' + Buffer.from(`${u.username}:`).toString('base64');
 const s = net.connect(pport, '127.0.0.1');
 let buf = '';
-s.on('connect', () => s.write(`CONNECT ${process.argv[1]} HTTP/1.1\r\nHost: x\r\n\r\n`));
+s.on('connect', () => s.write(`CONNECT ${process.argv[1]} HTTP/1.1\r\nHost: x\r\nProxy-Authorization: ${auth}\r\n\r\n`));
 s.on('data', d => { buf += d; if (buf.includes('\r\n\r\n')) { s.destroy(); process.exit(buf.startsWith('HTTP/1.1 200') ? 0 : 5); } });
 s.on('error', () => process.exit(3));
 setTimeout(() => process.exit(7), 5000);
