@@ -11,6 +11,13 @@
 //! blocked, OS-closed holds); 0 = secret RECOVERED from the parent env (BREAKOUT);
 //! 3 = a VM-read handle was obtained but the env read failed (PARTIAL — still alarming,
 //! the confinement's OpenProcess denial did not hold); 9 = other error.
+//!
+//! The confined leg's exit-5 is only meaningful if the SAME attack recovers the secret
+//! when NOT confined — otherwise "denied" could be a vacuous pass on a broken attack
+//! (wrong offsets, a PEB-walk bug, the secret not actually in the parent's env). So an
+//! unconfined NEGATIVE CONTROL runs the identical attack from a normal (non-AppContainer)
+//! process and asserts exit 0 (the vector is provably live); the confinement is then the
+//! only difference between recovery and denial. Mirrors `macos_envread`'s LEAK control.
 
 #[cfg(not(target_os = "windows"))]
 fn main() {}
@@ -279,6 +286,35 @@ mod win {
             4,
         );
 
+        // NEGATIVE CONTROL: the IDENTICAL attack from a NORMAL, unconfined process (same
+        // binary, same parent pid, no AppContainer token). A same-user process may open
+        // its parent for VM_READ, so this MUST recover the secret (exit 0) — proving the
+        // vector is live end-to-end (OpenProcess grants, the PEB walk reaches the env
+        // block, the secret is really there). Only then is the confined leg's exit-5 a
+        // real closure BY CONTRAST rather than a vacuous pass on a broken attack.
+        let nc = code_unconfined(&child, &["__ascchild__", &pid.to_string()]);
+        match nc {
+            0 => println!(
+                "PASS neg-control: unconfined attack recovered the parent secret (vector live)"
+            ),
+            5 => {
+                fails += 1;
+                eprintln!(
+                    "FAIL neg-control VACUOUS: unconfined OpenProcess was DENIED — the closure leg proves nothing"
+                );
+            }
+            3 => {
+                fails += 1;
+                eprintln!(
+                    "FAIL neg-control: unconfined attack opened the parent but could NOT recover the secret (PEB-walk/offsets broken) — the closure leg cannot distinguish a real block"
+                );
+            }
+            other => {
+                fails += 1;
+                eprintln!("FAIL neg-control: unexpected unconfined child exit {other}");
+            }
+        }
+
         // The attack: child tries to recover the secret from the PARENT's env.
         let attack = code(&policy, &child, &["__ascchild__", &pid.to_string()]);
         match attack {
@@ -329,6 +365,19 @@ mod win {
             Ok(s) => s.code().unwrap_or(-1),
             Err(e) => {
                 eprintln!("  [status Err] {e} os={:?}", e.raw_os_error());
+                -101
+            }
+        }
+    }
+
+    /// Spawn the child WITHOUT any sandbox wrapping — a plain, unconfined process. The
+    /// negative-control counterpart to `code`: same binary + args, no AppContainer
+    /// token, so the confinement is the ONLY difference from the confined leg.
+    fn code_unconfined(program: &Path, args: &[&str]) -> i32 {
+        match std::process::Command::new(program).args(args).status() {
+            Ok(s) => s.code().unwrap_or(-1),
+            Err(e) => {
+                eprintln!("  [unconfined status Err] {e} os={:?}", e.raw_os_error());
                 -101
             }
         }
