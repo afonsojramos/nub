@@ -136,8 +136,9 @@ fn derive_grants(fs: &FsPolicy) -> (Vec<PathBuf>, Vec<PathBuf>, FsDegrade) {
 /// of trap the AAP denylist hits), so it cannot be carved and must be reported. The
 /// rule is sound and conservative: a depth-independent glob deny (`**/.env`) shadows
 /// EVERY grant, and a deny whose literal prefix is inside a grant (or vice-versa)
-/// shadows it. Matching is case-insensitive (Windows paths are). Run with the FULL read
-/// set (incl. the program-dir grant), since a deny landing under it is defeated too.
+/// shadows it. Matching is case-insensitive (Windows paths are). Run against the
+/// policy-derived SUBTREE grants only — the caller excludes the program-file grant (a
+/// single leaf with no subtree, an exec necessity), which cannot host a deny "inside" it.
 fn deny_shadows_grant(entries: &[FsRule], read_grants: &[PathBuf]) -> bool {
     if read_grants.is_empty() {
         return false;
@@ -316,23 +317,28 @@ pub(crate) fn apply(
 
     let (read_grants, write_grants, fs_degrade) = derive_grants(&policy.fs);
 
-    // Auto-grant read on the program's own directory so the LowBox child can exec +
-    // load its sibling DLLs (system DLLs live under dirs that already grant ALL
-    // APPLICATION PACKAGES, so those need no grant). Unlike macOS (file-only), a Windows
-    // binary commonly loads sibling DLLs, so the DIR is granted. KNOWN EXPOSURE: this
-    // read-grant is subtree-inheritable, so a project-local program's siblings (a `.env`
-    // next to a tool) become readable — bounded for the build-jail (the program is the
-    // toolchain, e.g. node.exe, whose dir holds no user secrets), but for a general
-    // confined run the FRONT-END should own the program grant explicitly rather than the
-    // engine auto-widening it. Documented follow-up, not silently claimed as full.
+    // The deny-shadow degradation is judged against the POLICY-derived subtree grants
+    // ONLY — captured before the program file is folded in below. The program-file grant
+    // is a single leaf with no subtree and is an exec necessity, so no user data-policy
+    // deny can "land inside" it; including it would spuriously flag `fs-read-deny` whenever
+    // the program merely lives under a deny'd dir.
+    let policy_read_grants = read_grants.clone();
+
+    // Auto-grant read+execute on the program FILE ITSELF (not its parent dir) so the
+    // LowBox child can exec — with traverse-bypass the leaf-object ACL is what gates the
+    // image open, so a file grant suffices. This mirrors the macOS backend's file-only
+    // program grant and CLOSES the neighbor-read leak the old parent-dir grant carried (a
+    // `.env` next to a tool is no longer swept into the allow-set). A build-jail toolchain
+    // (e.g. node.exe) is self-contained and needs nothing more; a program that loads
+    // SIBLING DLLs from its own dir needs the FRONT-END to supply that toolchain dir in
+    // the read allow-set — the exact launcher contract the macOS "toolchain read-confine
+    // for a non-system interpreter" residual defines. The engine no longer auto-widens to
+    // the whole program dir.
     let mut read_grants = read_grants;
     if let Some(prog) = resolve_program(&spec.program, spec.cwd.as_deref())
-        && let Some(parent) = prog.parent()
+        && !read_grants.contains(&prog)
     {
-        let parent = parent.to_path_buf();
-        if !read_grants.contains(&parent) {
-            read_grants.push(parent);
-        }
+        read_grants.push(prog);
     }
 
     // ── degradation (fail-safe-not-silent) ──────────────────────────────────────
@@ -354,10 +360,10 @@ pub(crate) fn apply(
                 .to_string()
         });
     }
-    // A read deny landing inside a granted subtree (incl. the program-dir grant) can't
-    // be carved on Windows — the inheritable read-allow defeats it. Checked with the
-    // FULL read set (after the program dir is folded in).
-    if deny_shadows_grant(&policy.fs.rules.entries, &read_grants) {
+    // A read deny landing inside a granted subtree can't be carved on Windows — the
+    // inheritable read-allow defeats it. Checked against the policy-derived subtree grants
+    // only (the program-file grant is excluded — see `policy_read_grants` above).
+    if deny_shadows_grant(&policy.fs.rules.entries, &policy_read_grants) {
         deg.lost.push("fs-read-deny".to_string());
         reason.get_or_insert_with(|| {
             "a read deny landing inside a granted subtree can't be carved on Windows \
