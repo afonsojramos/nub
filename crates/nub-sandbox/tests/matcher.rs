@@ -193,6 +193,10 @@ fn host_pattern_grammar_accepts_only_bare_and_leading_wildcard() {
     // bare `*` allow-all (fail loud, never fail open).
     assert!(!host_pattern_is_valid("*."));
     assert!(!host_pattern_is_valid("*.."));
+    // Brace alternation is not part of the host grammar — rejected (fs globs support
+    // braces; net hosts do not).
+    assert!(!host_pattern_is_valid("{a,b}.com"));
+    assert!(!host_pattern_is_valid("api.{a,b}.com"));
 }
 
 #[test]

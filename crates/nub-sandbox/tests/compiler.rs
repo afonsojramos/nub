@@ -832,6 +832,50 @@ fn net_mid_host_glob_is_a_shape_error_at_its_path() {
 }
 
 #[test]
+fn net_host_brace_alternation_is_a_shape_error() {
+    // Braces are NOT part of the host grammar (only `*` / `*.suffix`) — a `{a,b}` host
+    // would be a literal that matches nothing, so a `!{evil,bad}.com` deny would be
+    // inert. Fail loud, same class as the mid-host glob. (fs globs DO support braces.)
+    let ctx = common::ctx(true, &[]);
+    for (cfg, want_path) in [
+        (json!({ "net": ["{a,b}.com"] }), "net.0"),
+        (json!({ "net": ["ok.example", "!{evil,bad}.com"] }), "net.1"),
+        (
+            json!({ "net": { "api.{a,b}.com": true } }),
+            "net.api.{a,b}.com",
+        ),
+    ] {
+        match compile(&cfg, &ctx).unwrap_err() {
+            CompileError::Shape { path, message } => {
+                assert_eq!(path, want_path, "error points at the offending entry");
+                assert!(message.contains("brace"), "names the problem: {message}");
+            }
+            other => panic!("expected Shape for {cfg}, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn env_key_brace_alternation_is_a_shape_error() {
+    // Env-var-NAME patterns are a narrower grammar than fs globs — a `{`/`}` is
+    // rejected the same class as a mid-host glob (list the keys, or use `*`).
+    let ctx = common::ctx(true, &[("FOO_A", "1"), ("FOO_B", "2")]);
+    for (cfg, want_path) in [
+        (json!({ "env": ["FOO_{A,B}"] }), "env.0"),
+        (json!({ "env": ["OK", "!SECRET_{X,Y}"] }), "env.1"),
+        (json!({ "env": { "FOO_{A,B}": true } }), "env.FOO_{A,B}"),
+    ] {
+        match compile(&cfg, &ctx).unwrap_err() {
+            CompileError::Shape { path, message } => {
+                assert_eq!(path, want_path, "error points at the offending entry");
+                assert!(message.contains("brace"), "names the problem: {message}");
+            }
+            other => panic!("expected Shape for {cfg}, got {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn net_leading_wildcard_and_bare_star_still_accepted() {
     // D11 must not over-reject: the two valid wildcard forms compile.
     let ctx = common::ctx(true, &[]);
