@@ -17,6 +17,9 @@ pub(super) struct FinalizePhaseInput<'a> {
     pub(super) store: &'a aube_store::Store,
     pub(super) graph: &'a aube_lockfile::LockfileGraph,
     pub(super) graph_for_link: &'a aube_lockfile::LockfileGraph,
+    pub(super) manifest: &'a aube_manifest::PackageJson,
+    pub(super) ws_dirs: &'a BTreeMap<String, std::path::PathBuf>,
+    pub(super) has_workspace: bool,
     pub(super) manifests: &'a [(String, aube_manifest::PackageJson)],
     pub(super) lifecycle_manifests: &'a [(String, aube_manifest::PackageJson)],
     pub(super) direct_dep_info: &'a std::collections::HashMap<String, aube_resolver::DirectDepInfo>,
@@ -146,6 +149,9 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
         store,
         graph,
         graph_for_link,
+        manifest,
+        ws_dirs,
+        has_workspace,
         manifests,
         lifecycle_manifests,
         direct_dep_info,
@@ -282,6 +288,31 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
         .await?;
         if ran > 0 {
             tracing::debug!("allowBuilds: ran {ran} dep lifecycle script(s)");
+            // A build script can replace a bin target — a JS launcher
+            // becomes a native binary (esbuild, #394). The link phase
+            // shimmed those bins before the scripts ran, so any such
+            // shim now wraps a native binary in `node <target>` and
+            // fails. Regenerate every `.bin/` shim against the post-build
+            // targets: `create_bin_shim` re-classifies each and emits a
+            // direct-exec symlink/wrapper for the ones that turned native.
+            super::bin_linking::link_all_bins(super::bin_linking::LinkAllBinsInput {
+                settings_ctx,
+                node_linker,
+                cwd,
+                modules_dir_name,
+                aube_dir,
+                graph_for_link,
+                virtual_store_dir_max_length,
+                placements: placements_ref,
+                manifest,
+                manifests,
+                ws_dirs,
+                has_workspace,
+                virtual_store_only,
+                ignore_scripts,
+                has_any_allow_rule: build_policy.has_any_allow_rule(),
+                floor_may_allow_any: default_trust_floor.may_allow_any(),
+            })?;
         }
         phase_timings.record("dep_lifecycle", phase_start.elapsed());
     }
