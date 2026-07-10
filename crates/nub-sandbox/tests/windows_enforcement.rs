@@ -43,8 +43,8 @@ fn main() {
 #[cfg(target_os = "windows")]
 mod win {
     use nub_sandbox::policy::{
-        CanonGlob, Effect, EnvPolicy, FsAccess, FsPolicy, FsRule, FsRuleSet, NetPolicy, PidPolicy,
-        SandboxPolicy, TmpMode,
+        CanonGlob, Effect, EnvPolicy, FsAccess, FsPolicy, FsRule, FsRuleSet, NetPolicy, NetRule,
+        NetTarget, PidPolicy, SandboxPolicy, TmpMode,
     };
     use nub_sandbox::{CommandSpec, apply};
     use std::collections::BTreeMap;
@@ -70,6 +70,7 @@ mod win {
                 Err(_) => 9,
             },
             Some("connect") => connect(&a[1], a[2].parse().unwrap_or(0)),
+            Some("connectenvproxy") => connect_env_proxy(),
             Some("getenv") => match std::env::var(&a[1]) {
                 Ok(_) => 0,
                 Err(_) => 4,
@@ -127,6 +128,27 @@ mod win {
             Err(e) if e.kind() == std::io::ErrorKind::TimedOut => 6,
             Err(_) => 9,
         }
+    }
+
+    /// Connect to the loopback egress proxy the parent injected via `HTTP_PROXY`
+    /// (`http://[token@]127.0.0.1:<port>`). A successful TCP connect proves the confined
+    /// AppContainer child can REACH the loopback proxy — i.e. the per-run loopback
+    /// exemption is live (absent it, AppContainer→loopback is WFP-blocked → WSAEACCES).
+    /// Exit 4 if the hint was not injected. Same connect exit-code contract otherwise.
+    fn connect_env_proxy() -> i32 {
+        let Ok(url) = std::env::var("HTTP_PROXY") else {
+            return 4;
+        };
+        let after = url.split("://").nth(1).unwrap_or(&url);
+        let hostport = after
+            .rsplit('@')
+            .next()
+            .unwrap_or(after)
+            .trim_end_matches('/');
+        let Some((host, port)) = hostport.rsplit_once(':') else {
+            return 9;
+        };
+        connect(host, port.parse().unwrap_or(0))
     }
 
     /// Spawn a detached grandchild (`sleep`), record its pid, exit — so the parent can
@@ -857,10 +879,234 @@ mod win {
             unsafe { windows_sys::Win32::Foundation::CloseHandle(event) };
         }
 
+        // ── strict-Windows net tier (Q21/Q22): per-host + MITM ride nub's loopback
+        //    egress proxy, reachable only through an admin-registered loopback exemption.
+        //    Prove the mechanism end-to-end against the REAL backend — the admin-gated
+        //    exemption write, the exemption→proxy reach with external egress still sealed,
+        //    the RAII teardown, and the unelevated fail-CLOSED path. Elevation-branched:
+        //    the elevated legs run under nubadmin (High IL), the fail-closed leg under a
+        //    standard user (Medium IL). ────────────────────────────────────────────────
+        net_tier(&mut fails, &f, &child);
+
         // ── process-reap (Job Object KILL_ON_JOB_CLOSE) ──────────────────────────
         job_reap(&mut fails, &f);
 
         if fails == 0 { Ok(()) } else { Err(fails) }
+    }
+
+    /// A single Host Allow rule (per-host ⇒ Tier 1 when elevated).
+    fn allow_rule(host: &str) -> NetRule {
+        NetRule {
+            target: NetTarget::Host(host.to_string()),
+            effect: Effect::Allow,
+        }
+    }
+
+    /// A per-host strict policy: fs read-confine (engages the AppContainer + grants the
+    /// child exe) plus an enforced net with one Allow rule (the per-host signal that,
+    /// elevated, selects Tier 1 — proxy started, loopback exemption registered).
+    fn per_host_policy(f: &Fixture) -> SandboxPolicy {
+        let mut policy = read_confine(&[&f.work], &[]);
+        policy.net = NetPolicy {
+            enforce: true,
+            rules: vec![allow_rule("example.com")],
+            default_effect: Effect::Deny,
+            ..Default::default()
+        };
+        policy
+    }
+
+    /// Whether THIS test process runs elevated (full admin token) — the exact condition
+    /// under which the backend selects Tier 1 (`launch::is_elevated`). Determines which
+    /// legs of the net tier are live.
+    fn test_is_elevated() -> bool {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::Security::{
+            GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
+        };
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+        // SAFETY: query-only token handle into our own process; TOKEN_ELEVATION is exactly
+        // sized for the TokenElevation class.
+        unsafe {
+            let mut tok = std::ptr::null_mut();
+            if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut tok) == 0 {
+                return false;
+            }
+            let mut elev = TOKEN_ELEVATION { TokenIsElevated: 0 };
+            let mut ret = 0u32;
+            let ok = GetTokenInformation(
+                tok,
+                TokenElevation,
+                std::ptr::from_mut(&mut elev).cast(),
+                std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+                &mut ret,
+            );
+            CloseHandle(tok);
+            ok != 0 && elev.TokenIsElevated != 0
+        }
+    }
+
+    /// Size of the machine-wide AppContainer loopback-exemption list (read path is open
+    /// even unprivileged). Used to prove per-run teardown leaves no accretion.
+    fn exemption_count() -> u32 {
+        use windows_sys::Win32::NetworkManagement::WindowsFirewall::{
+            NetworkIsolationFreeAppContainers, NetworkIsolationGetAppContainerConfig,
+        };
+        use windows_sys::Win32::Security::SID_AND_ATTRIBUTES;
+        let mut count: u32 = 0;
+        let mut arr: *mut SID_AND_ATTRIBUTES = std::ptr::null_mut();
+        // SAFETY: out-params for the current list; the returned array is freed immediately.
+        let rc = unsafe { NetworkIsolationGetAppContainerConfig(&mut count, &mut arr) };
+        if !arr.is_null() {
+            unsafe { NetworkIsolationFreeAppContainers(arr.cast()) };
+        }
+        if rc == 0 { count } else { 0 }
+    }
+
+    /// STEP-1 fact #1 — the exemption write is admin-gated. Derive a throwaway AC SID (no
+    /// profile created) and attempt to add it to the machine-wide list via a read-modify-
+    /// write that PRESERVES existing entries; on success (elevated) restore the prior list
+    /// exactly. Unelevated ⇒ the Set must return ACCESS_DENIED; elevated ⇒ it must succeed.
+    fn exemption_admin_gate(fails: &mut u32, elevated: bool) {
+        use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
+        use windows_sys::Win32::NetworkManagement::WindowsFirewall::{
+            NetworkIsolationFreeAppContainers, NetworkIsolationGetAppContainerConfig,
+            NetworkIsolationSetAppContainerConfig,
+        };
+        use windows_sys::Win32::Security::Isolation::DeriveAppContainerSidFromAppContainerName;
+        use windows_sys::Win32::Security::{FreeSid, PSID, SID_AND_ATTRIBUTES};
+
+        let name: Vec<u16> = "nub_sbx_gate_probe\0".encode_utf16().collect();
+        let mut sid: PSID = std::ptr::null_mut();
+        // SAFETY: derive-only (no profile); `sid` is an out-param freed below with FreeSid.
+        let hr = unsafe { DeriveAppContainerSidFromAppContainerName(name.as_ptr(), &mut sid) };
+        if hr != 0 || sid.is_null() {
+            *fails += 1;
+            eprintln!("FAIL exemption-gate setup: DeriveAppContainerSid hr=0x{hr:08x}");
+            return;
+        }
+        let mut count: u32 = 0;
+        let mut arr: *mut SID_AND_ATTRIBUTES = std::ptr::null_mut();
+        // SAFETY: read the current list (open unprivileged); `arr`/`count` are out-params.
+        let grc = unsafe { NetworkIsolationGetAppContainerConfig(&mut count, &mut arr) };
+        let existing: &[SID_AND_ATTRIBUTES] = if grc != 0 || arr.is_null() || count == 0 {
+            &[]
+        } else {
+            // SAFETY: `arr` names `count` entries per the successful Get.
+            unsafe { std::slice::from_raw_parts(arr, count as usize) }
+        };
+        let mut new_list = existing.to_vec();
+        new_list.push(SID_AND_ATTRIBUTES {
+            Sid: sid,
+            Attributes: 0,
+        });
+        // SAFETY: `new_list` outlives the call; its Sid pointers reference the live `arr`
+        // allocation or the caller-owned `sid` (freed only after).
+        let set_rc = unsafe {
+            NetworkIsolationSetAppContainerConfig(new_list.len() as u32, new_list.as_ptr())
+        };
+        // If the write actually landed (elevated), restore the exact prior list.
+        if set_rc == 0 {
+            let restore = if existing.is_empty() {
+                std::ptr::null()
+            } else {
+                existing.as_ptr()
+            };
+            // SAFETY: `existing` (borrowing `arr`) is still alive here.
+            unsafe { NetworkIsolationSetAppContainerConfig(count, restore) };
+        }
+        if !arr.is_null() {
+            unsafe { NetworkIsolationFreeAppContainers(arr.cast()) };
+        }
+        unsafe { FreeSid(sid) };
+
+        if elevated {
+            expect(
+                fails,
+                "exemption write SUCCEEDS when elevated",
+                set_rc as i32,
+                0,
+            );
+        } else {
+            expect(
+                fails,
+                "exemption write ACCESS_DENIED when NOT elevated (admin-gated)",
+                set_rc as i32,
+                ERROR_ACCESS_DENIED as i32,
+            );
+        }
+    }
+
+    /// STEP-1 facts #2/#3 (elevated) + the fail-closed path (unelevated), against the real
+    /// `apply`/`status` backend.
+    fn net_tier(fails: &mut u32, f: &Fixture, child: &Path) {
+        let elevated = test_is_elevated();
+        println!("== net tier: test process is_elevated = {elevated} ==");
+
+        // Fact #1: the exemption write is admin-gated (both branches assert the OS verdict).
+        exemption_admin_gate(fails, elevated);
+
+        if elevated {
+            let policy = per_host_policy(f);
+            let baseline = exemption_count();
+
+            // Fact #2a: the confined child REACHES nub's loopback egress proxy — the per-run
+            // exemption is live (contrast the "AppContainer child DENIED loopback" baseline
+            // above, which runs WITHOUT an exemption).
+            expect(
+                fails,
+                "Tier1: confined child REACHES the loopback egress proxy (exemption live)",
+                code(&policy, child, &["__sbxchild__", "connectenvproxy"]),
+                0,
+            );
+            // Fact #2b: direct external egress stays SEALED (internetClient withheld) — the
+            // exemption opens loopback ONLY, so nub's proxy is the child's sole egress.
+            expect_in(
+                fails,
+                "Tier1: direct external egress DENIED (proxy is the sole egress)",
+                code(
+                    &policy,
+                    child,
+                    &["__sbxchild__", "connect", "1.1.1.1", "443"],
+                ),
+                &[5, 6],
+            );
+            // Fact #3: the RAII teardown removed the per-run exemption — no list accretion.
+            let after = exemption_count();
+            if after == baseline {
+                println!("PASS Tier1 teardown: exemption list returned to baseline ({baseline})");
+            } else {
+                *fails += 1;
+                eprintln!(
+                    "FAIL Tier1 teardown: exemption list {after} != baseline {baseline} (leak)"
+                );
+            }
+        } else {
+            // Unelevated per-host must FAIL CLOSED with an elevation message — NEVER a silent
+            // coarse-degrade (the maintainer's informative-fail requirement).
+            let policy = per_host_policy(f);
+            let spec =
+                CommandSpec::new(child.as_os_str()).args(["__sbxchild__", "token"].iter().copied());
+            match apply(&policy, spec) {
+                Ok(_) => {
+                    *fails += 1;
+                    eprintln!("FAIL unelevated per-host must fail-closed, but apply() succeeded");
+                }
+                Err(d) => {
+                    let named = d.lost.iter().any(|s| s == "net-per-host");
+                    let explains = d.reason.as_deref().unwrap_or_default().contains("elevat");
+                    if named && explains {
+                        println!("PASS unelevated per-host FAILS CLOSED with an elevation message");
+                    } else {
+                        *fails += 1;
+                        eprintln!(
+                            "FAIL fail-closed shape: lost={:?} reason={:?}",
+                            d.lost, d.reason
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// The sandboxed run reaps the grandchild when `status()` closes the Job handle; the
