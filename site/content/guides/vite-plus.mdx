@@ -6,28 +6,19 @@ description: How Nub and Vite Plus overlap and where their goals diverge — Nub
 Nub and Vite+ overlap on the everyday Node workflow — running scripts, running package binaries, and managing Node itself — but their larger goals diverge. Nub is a full package manager and a better runtime on top of stock Node; [Vite+](https://viteplus.dev) is the integrated frontend toolchain from the Vite team.
 
 | Functionality | Nub | Vite+ |
-|---|---|---|
-| package.json script runner | ✅ | ✅ |
-| Package binary runner | ✅ | ✅ |
-| Node.js version manager | ✅ | ✅ |
-| Corepack-style package-manager shims | ✅ | ❌ |
-| Run TypeScript files directly | ✅ | ❌ |
-| Full package manager | ✅ | ❌ — passthrough |
-| Dev server | ❌ — bring your own | ✅ |
-| Application bundler | ❌ — bring your own | ✅ |
-| Library bundler / packager | ❌ — bring your own | ✅ |
-| Formatter | ❌ — bring your own | ✅ |
-| Linter | ❌ — bring your own | ✅ |
-| Type checker | ❌ — bring your own | ✅ |
-| Test runner | ❌ — bring your own | ✅ |
-
-## Where they overlap
-
-Both run `package.json` scripts (the `npm run` equivalent) and both run package binaries (the `npx` use case). Both also manage Node itself — provisioning and selecting the version a project asks for.
-
-## Package management
-
-Nub is a full package manager, powered by the embedded [aube](https://github.com/jdx/aube) engine — it resolves the dependency graph, links `node_modules`, and round-trips whatever lockfile your project already uses. Vite+ is a [passthrough](https://viteplus.dev/guide/env) to an existing package manager: in a pnpm project, `vp install` runs pnpm's install.
+| --- | :-: | :-: |
+| Script runner (`npm run` equivalent) | ✅ | ✅ |
+| Bin runner (`npx`) | ✅ | ✅ |
+| Node.js version manager (`nvm`) | ✅ | ✅ |
+| TypeScript runner (`tsx`) | ✅ | ❌ |
+| Package manager | ✅ | ❌ — passthrough |
+| Package manager shims (`corepack`) | ✅ | ❌ |
+| Dev server | ❌ — bring your own | ✅ — Vite |
+| Bundler | ❌ — bring your own | ✅ — Rolldown |
+| Formatter | ❌ — bring your own | ✅ — Oxfmt |
+| Linter | ❌ — bring your own | ✅ — Oxlint |
+| Type checker | ❌ — bring your own | ✅ — tsgo (embedded) |
+| Test runner | ❌ — bring your own | ✅ — Vitest |
 
 ## Running TypeScript
 
@@ -35,6 +26,10 @@ Running a file with Nub adds tsx-style TypeScript execution — full syntax tran
 
 This is transpilation, not type-checking. Nub supports the full TypeScript syntax surface — `tsconfig` paths, decorators, enums, parameter properties, extensionless imports — but it does not type-check. For that, bring your own type checker.
 
+## Package management
+
+Nub is a full package manager, powered by the embedded [aube](https://github.com/jdx/aube) engine — it resolves the dependency graph, links `node_modules`, and round-trips whatever lockfile your project already uses. Vite+ is a [passthrough](https://viteplus.dev/guide/env) to an existing package manager: in a pnpm project, `vp install` runs pnpm's install.
+
 ## The frontend toolchain
 
-Vite+ aims to be the whole frontend toolchain: dev server, formatter, linter, type checker, test runner, and build tooling, integrating Vite, Vitest, Oxlint, Oxfmt, Rolldown, tsdown, and a task runner. Nub intentionally leaves those concerns to whatever project-local tools you choose through `devDependencies` — the "bring your own" rows above.
+Vite+ bundles the whole frontend toolchain — the dev server, bundler, formatter, linter, type checker, and test runner named in the table above — as one tested stack. Nub intentionally leaves those concerns to whatever project-local tools you choose through `devDependencies`.
