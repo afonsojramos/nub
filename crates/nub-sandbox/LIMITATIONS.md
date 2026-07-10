@@ -136,10 +136,12 @@ administrator. So per-host/MITM on Windows is an **opt-in elevated tier**; coars
   elevated, or the write fails — surfaces a clear error naming the elevation requirement
   and does NOT coarse-degrade an allow-list into a deny-all. A coarse-only policy needs no
   elevation and is unaffected.
-- **Crash-leak (bounded).** A nub that dies without running teardown leaks one orphaned
-  exemption entry for its per-run AC SID. Since the SID is unique per run and its profile is
-  deleted, no future child is ever created under it, so the stale entry exempts no live
-  process — it only accretes an unused list row. (A subsequent nub run re-reads the list
+- **Crash-leak (bounded).** A nub that dies without running teardown — including a hard
+  kill via `TerminateProcess`, where the `ProfileGuard` RAII `Drop` also doesn't run, so
+  the AppContainer profile leaks alongside it — leaks one orphaned exemption entry for its
+  per-run AC SID. The SID is unique per run (`nub_sbx_{pid}_{nonce}_{ctr}`), so no future
+  child is ever created under the orphaned exemption — the stale entry exempts no live
+  process, it only accretes an unused list row. (A subsequent nub run re-reads the list
   and would preserve, not reuse, the orphan; it is inert until the machine's exemption list
   is manually pruned.)
 - **Prior art:** Codex and SRT hit the same wall and answer it the same way — per-host net
@@ -312,6 +314,11 @@ Each is documented in code at the site noted; none is silently mis-reported.
   hardlink created *outside* the sandbox beforehand. Fix: none clean at the Landlock layer
   (the inode was legitimately named twice). Regression test:
   `hardlink_to_denied_secret_leaks_via_alias`.
+- **macOS hardlink-to-secret (same class as the Linux residual above).** Seatbelt file-read
+  rules are path-pattern based, like Landlock's, so the same alias holds: a pre-existing
+  same-uid hardlink to a secret, at a name the deny never targets, reads through the shared
+  inode. Bounded the same way — requires a hardlink created outside the sandbox beforehand;
+  fix: none clean at the Seatbelt layer either (the inode was legitimately named twice).
 - **Linux derive→open TOCTOU.** Grant derivation canonicalizes paths on the host, then
   the kernel enforces at `open()` later; a path swapped in between could shift a target.
   Bounded: a same-uid local race within the confined tree. (Inherent to a canonicalize-
