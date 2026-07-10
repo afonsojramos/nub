@@ -177,6 +177,135 @@ fn sentinel_negation_is_a_shape_error_on_every_axis() {
 }
 
 #[test]
+fn sentinel_scalar_value_is_a_shape_error_but_file_ref_defers() {
+    // The `"..."` value grammar is `true | "<file-ref>" | [list]`. A bare scalar
+    // (`{"...": "port"}`, `{"...": 5}`, `{"...": false}`) is NOT a file-ref and must
+    // be a clear shape error — never silently admitted into the file-extends branch
+    // (which would later try to resolve a file literally named `port`). A path-like
+    // string is a legit frontend-deferred file-ref and stays FileRefUnresolved.
+    let ctx = common::ctx(true, &[("PORT", "80")]);
+
+    // Non-path-like scalars → shape error, both at the wrapper level and in env.
+    for surface in [
+        json!({ "...": "r" }),
+        json!({ "...": "port" }),
+        json!({ "...": 5 }),
+        json!({ "...": false }),
+        json!({ "...": ["./a.json"] }),
+        json!({ "env": { "...": "port" } }),
+        json!({ "env": { "...": 5 } }),
+        // fs/net reject a `"..."` OBJECT key outright (array-only sentinel).
+        json!({ "fs": { "...": "r" } }),
+        json!({ "net": { "...": "r" } }),
+    ] {
+        assert!(
+            matches!(compile(&surface, &ctx), Err(CompileError::Shape { .. })),
+            "malformed `\"...\"` value must be a shape error for {surface}"
+        );
+    }
+
+    // A genuine file-ref still defers to the frontend (unchanged) — no over-trigger.
+    for surface in [
+        json!({ "...": "./policy.json" }),
+        json!({ "env": { "...": "./p.json" } }),
+    ] {
+        assert!(
+            matches!(
+                compile(&surface, &ctx),
+                Err(CompileError::FileRefUnresolved { .. })
+            ),
+            "a path-like `\"...\"` value is a deferred file-ref for {surface}"
+        );
+    }
+
+    // `{"...": true}` still inherits (compiles clean) — the strictness must not
+    // reject the one valid inline form.
+    assert!(compile(&json!({ "...": true }), &ctx).is_ok());
+}
+
+#[test]
+fn net_bare_string_host_value_is_a_shape_error() {
+    // A net OBJECT value is `true | false | { rule }` only. A bare string
+    // (`{"example.com": "r"}`) is not a recognized net value and must fail loud,
+    // never be silently treated as anything. A bool value stays valid.
+    let ctx = common::ctx(true, &[]);
+    for surface in [
+        json!({ "net": { "example.com": "r" } }),
+        json!({ "net": { "example.com": "rw" } }),
+        json!({ "net": { "*.example.com": "allow" } }),
+    ] {
+        match compile(&surface, &ctx).unwrap_err() {
+            CompileError::Shape { message, .. } => assert!(
+                message.contains("host value"),
+                "names the offending construct: {message}"
+            ),
+            other => panic!("expected Shape for {surface}, got {other:?}"),
+        }
+    }
+    assert!(compile(&json!({ "net": { "example.com": true } }), &ctx).is_ok());
+}
+
+#[test]
+fn net_malformed_cidr_and_slash_host_are_shape_errors() {
+    // An entry with `/` is parsed as a CIDR; an out-of-range prefix, a non-numeric
+    // prefix, or a slash-bearing hostname that can't be a valid CIDR must be a
+    // shape error naming it as a failed CIDR — in both array and object forms.
+    let ctx = common::ctx(true, &[]);
+    for surface in [
+        json!({ "net": ["10.0.0.0/99"] }),    // IPv4 prefix > 32
+        json!({ "net": ["10.0.0.0/abc"] }),   // non-numeric prefix
+        json!({ "net": ["::1/129"] }),        // IPv6 prefix > 128
+        json!({ "net": ["example.com/24"] }), // slash-bearing hostname, not an IP
+        json!({ "net": { "10.0.0.0/99": true } }),
+        json!({ "net": { "example.com/24": true } }),
+    ] {
+        match compile(&surface, &ctx).unwrap_err() {
+            CompileError::Shape { message, .. } => assert!(
+                message.contains("CIDR"),
+                "names the offending construct as a CIDR: {message}"
+            ),
+            other => panic!("expected Shape for {surface}, got {other:?}"),
+        }
+    }
+    // A well-formed CIDR still compiles.
+    assert!(compile(&json!({ "net": ["10.0.0.0/8"] }), &ctx).is_ok());
+}
+
+#[test]
+fn glob_env_type_validates_every_matching_var() {
+    // A glob-keyed env type (`{ "VITE_*": "port" }`) type-validates EVERY ambient
+    // var it matches, not just the first — an invalid later var errors, and all
+    // matches pass through when every one is valid.
+    let mixed = common::ctx(true, &[("VITE_A", "80"), ("VITE_B", "notaport")]);
+    match compile(&json!({ "env": { "VITE_*": "port" } }), &mixed).unwrap_err() {
+        CompileError::Validation { path, .. } => {
+            assert_eq!(
+                path, "VITE_B",
+                "the invalid var is named, not the first match"
+            )
+        }
+        other => panic!("expected Validation naming VITE_B, got {other:?}"),
+    }
+    // The FIRST match invalid also errors (proves the fold doesn't skip index 0).
+    let first_bad = common::ctx(true, &[("VITE_A", "notaport"), ("VITE_B", "443")]);
+    assert!(matches!(
+        compile(&json!({ "env": { "VITE_*": "port" } }), &first_bad).unwrap_err(),
+        CompileError::Validation { path, .. } if path == "VITE_A"
+    ));
+    // All valid → every matching var survives, each validated.
+    let all_ok = common::ctx(true, &[("VITE_A", "80"), ("VITE_B", "443")]);
+    let p = compile(&json!({ "env": { "VITE_*": "port" } }), &all_ok).unwrap();
+    assert_eq!(
+        p.env.constructed.get("VITE_A").map(String::as_str),
+        Some("80")
+    );
+    assert_eq!(
+        p.env.constructed.get("VITE_B").map(String::as_str),
+        Some("443")
+    );
+}
+
+#[test]
 fn empty_fs_entry_is_rejected_fail_loud() {
     // `fs: [""]` used to grant the whole filesystem (fail-OPEN). Now a shape error
     // (D3), for both an empty and a whitespace-only entry, array and object forms.

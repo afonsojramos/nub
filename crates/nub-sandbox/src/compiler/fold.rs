@@ -680,17 +680,17 @@ fn parse_env_object(
                     splice_env_inherit(parent, &mut out);
                     continue;
                 }
-                Value::String(reference) => {
+                // Only a path-like string is a (frontend-deferred) file-ref; a bare
+                // scalar (`{"...": "port"}`) is a malformed sentinel value, not a
+                // file to resolve — reject it with the same message as every axis.
+                Value::String(reference) if super::is_file_ref_value(reference) => {
                     return Err(CompileError::FileRefUnresolved {
                         path: p,
                         reference: reference.clone(),
                     });
                 }
-                _ => {
-                    return Err(CompileError::shape(
-                        &p,
-                        "`\"...\"` value must be true (inherit the enclosing scope) or a file-ref",
-                    ));
+                other => {
+                    return Err(CompileError::shape(&p, &super::sentinel_value_error(other)));
                 }
             }
         }

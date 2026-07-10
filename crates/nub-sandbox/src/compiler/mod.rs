@@ -334,14 +334,15 @@ fn object_spread(v: Option<&Value>) -> Result<bool, CompileError> {
     match v {
         None => Ok(false),
         Some(Value::Bool(true)) => Ok(true),
-        Some(Value::String(reference)) => Err(CompileError::FileRefUnresolved {
-            path: "...".to_string(),
-            reference: reference.clone(),
-        }),
-        Some(_) => Err(CompileError::shape(
-            "...",
-            "`\"...\"` value must be true (inherit the enclosing scope) or a file-ref",
-        )),
+        // Only a path-like string is a (frontend-deferred) file-ref; a bare scalar
+        // (`{"...": "r"}`) is a malformed sentinel value, not a file to resolve.
+        Some(Value::String(reference)) if is_file_ref_value(reference) => {
+            Err(CompileError::FileRefUnresolved {
+                path: "...".to_string(),
+                reference: reference.clone(),
+            })
+        }
+        Some(v) => Err(CompileError::shape("...", &sentinel_value_error(v))),
     }
 }
 
@@ -485,4 +486,33 @@ fn classify_string(s: &str) -> StringKind {
     } else {
         StringKind::Preset
     }
+}
+
+/// Whether a `"..."` sentinel's STRING value is a file-ref (a `"./policy.json"`
+/// file-extends, frontend-deferred) rather than a malformed scalar. The `"..."`
+/// value grammar is `true | "<file-ref>" | [list]`; a non-path-like scalar
+/// (`"r"`, `"port"`) is NOT a file-ref and must be a clear shape error, never
+/// silently admitted into the file-extends branch (which the frontend would then
+/// try to resolve as a file named `port`). Path-likeness is defined identically to
+/// [`classify_string`]'s file-ref arm so the two never disagree.
+pub(super) fn is_file_ref_value(s: &str) -> bool {
+    matches!(classify_string(s), StringKind::FileRef)
+}
+
+/// The self-debugging shape message for a `"..."` sentinel carrying a value outside
+/// its `true | "<file-ref>"` grammar — names the offending construct so the author
+/// sees exactly what was rejected.
+pub(super) fn sentinel_value_error(offending: &Value) -> String {
+    let got = match offending {
+        Value::String(s) => format!("the string `{s}`"),
+        Value::Bool(false) => "`false`".to_string(),
+        Value::Number(n) => format!("the number `{n}`"),
+        Value::Array(_) => "an array".to_string(),
+        Value::Object(_) => "an object".to_string(),
+        Value::Null => "null".to_string(),
+        Value::Bool(true) => "`true`".to_string(),
+    };
+    format!(
+        "`\"...\"` value must be true (inherit the enclosing scope) or a file-ref (e.g. \"./policy.json\") — got {got}"
+    )
 }
