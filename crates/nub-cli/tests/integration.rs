@@ -552,11 +552,16 @@ fn project_js_decorator_routes_to_transform() {
 fn js_parent_no_extensionless_probe() {
     // Contract: a non-TS (`.js`) parent does NOT get nub's TS-parent extensionless
     // probing, so `import "./nonexistent"` from a `.js` fails. The EXACT failure is
-    // Node-version-specific (not nub's): with detect-module (default on Node 22+)
-    // the `.js` is treated as ESM and the missing specifier surfaces as
-    // ERR_MODULE_NOT_FOUND; below that the `.js` is CommonJS, so the `import`
-    // keyword itself is a SyntaxError before any resolution. Either way nub didn't
-    // probe — assert the contract (it fails) with the version-appropriate error.
+    // module-syntax-detection-specific: when detection is active the `.js` is treated as
+    // ESM and the missing specifier surfaces as ERR_MODULE_NOT_FOUND ("Cannot find
+    // module"); otherwise the `.js` is CommonJS, so the `import` keyword itself is a
+    // SyntaxError before any resolution. Detection is native default-on from Node
+    // 20.19 / 22.7, and nub's feature matrix ALSO injects `--experimental-detect-module`
+    // on the bands below that (20.10–20.18, 21.1–22.6), so under nub the ESM path applies
+    // from Node 20.10 up. The coarse `>=22` split below picks the ESM assertion for the
+    // native-default range; the below-22 in-band legs (e.g. host Node 20.11) land in the
+    // `else` and match ERR_MODULE_NOT_FOUND via its `|| "Cannot find"` clause. Either way
+    // nub didn't probe — assert the contract (it fails) with the version-appropriate error.
     let (_stdout, stderr, code) = run_nub("vanilla-ts", "js-no-probe.js");
     assert_ne!(code, 0, ".js importing extensionless should fail: {stderr}");
     if node_at_least((22, 0, 0)) {

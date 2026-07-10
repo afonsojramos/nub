@@ -515,3 +515,52 @@ fn force_async_tier_signal_gated_on_broken_band_and_foreign_loader() {
         eprintln!("skipping: Node 26.2.0 not installed (fixed-band representative)");
     }
 }
+
+/// Module syntax detection — the `--experimental-detect-module` matrix bands
+/// [20.10.0, 20.19.0) ∪ [21.1.0, 22.7.0). Node 20.11.0 carries the flag but does not
+/// default it on (that came at 20.19), so an ambiguous ESM `.js` — ES-module syntax, a
+/// `package.json` with no `"type"` field — that bare Node 20.11 refuses ("To load an ES
+/// module, set type: module", exit 1) runs as ESM under nub, which injects the flag from
+/// the matrix band. This is the in-band, still-required case; a default-on Node needs no
+/// injection.
+#[test]
+fn detect_module_ambiguous_esm_runs_as_esm_on_compat_tier() {
+    let Some((stdout, stderr, code)) = run_nub_against_node((20, 11, 0), "detect-module", "amb.js")
+    else {
+        eprintln!(
+            "skipping: Node 20.11.0 not installed (set TEST_NODE_BIN_20_11_0 or nvm install)"
+        );
+        return;
+    };
+    assert_eq!(
+        code, 0,
+        "compat-tier ambiguous ESM .js must run as ESM under nub (bare Node 20.11 refuses it): stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("detect-module:ran-as-esm:true"),
+        "ambiguous .js must be detected and run as an ES module: stdout={stdout:?}"
+    );
+}
+
+/// The node:ffi (26.1+), node:vfs (26.4+), and node:stream/iter (25.9+) enabler bands.
+/// Each module is flag-gated and default-off — bare Node throws
+/// ERR_UNKNOWN_BUILTIN_MODULE on import — so nub injecting the three `--experimental-*`
+/// flags from the matrix is exactly what makes them importable. Run on Node 26.5.0, which
+/// carries all three; the fixture imports each and the markers all read true.
+#[test]
+fn module_enabler_flags_make_ffi_vfs_stream_iter_importable() {
+    let Some((stdout, stderr, code)) =
+        run_nub_against_node((26, 5, 0), "module-enablers", "enablers.mjs")
+    else {
+        eprintln!("skipping: Node 26.5.0 not installed (set TEST_NODE_BIN_26_5_0 or nvm install)");
+        return;
+    };
+    assert_eq!(
+        code, 0,
+        "node:ffi/vfs/stream-iter must import under nub (bare Node rejects them default-off): stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("module-enablers:true,true,true"),
+        "all three enabler modules must load once nub injects their flags: stdout={stdout:?}"
+    );
+}

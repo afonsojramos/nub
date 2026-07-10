@@ -289,6 +289,80 @@ pub static FEATURES: &[Feature] = &[
         )],
         evidence: "flag added Node 26.5.0 (#62300); still flag-gated through Node 27 nightly; nub loader-polyfills below via runtime/transform-core.mjs loadTextImport",
     },
+    // ── Module syntax detection (ambiguous ESM `.js`) ────────────────────────
+    // `--experimental-detect-module` makes Node parse an ambiguous file — ES-module
+    // syntax, a `.js` extension, and a `package.json` with no `"type"` field — and run it
+    // as ESM when module syntax is found. Bare Node below the default-on cutover refuses
+    // such a file ("To load an ES module, set type: module", exit 1). Introduced on the
+    // 21.x line at 21.1.0 (#50096) and backported to the 20.x LTS line at 20.10.0; the
+    // 21.0.0 release predates the flag, so injecting it there is a "bad option" startup
+    // abort (the same EOL-line hole as eventsource). It became default-on (flag →
+    // default-true, no longer required) at 20.19.0 on the 20.x line and 22.7.0 on the 22.x
+    // line (#53619, "unflag detect-module"). Inject only where the flag both EXISTS and is
+    // still REQUIRED: [20.10.0, 20.19.0) ∪ [21.1.0, 22.7.0). Empirically confirmed —
+    // 20.18.0 needs the flag, 20.19.0 detects by default, 21.0.0 rejects the flag, 21.1.0
+    // needs it, 22.7.0 detects by default.
+    Feature {
+        name: "detect-module",
+        mitigations: &[
+            (
+                band((20, 10, 0), Some((20, 19, 0))),
+                Mitigation::Unflag("--experimental-detect-module"),
+            ),
+            (
+                band((21, 1, 0), Some((22, 7, 0))),
+                Mitigation::Unflag("--experimental-detect-module"),
+            ),
+        ],
+        evidence: "intro 21.1.0 (#50096), backported 20.10.0; default-on 20.19.0 & 22.7.0 (#53619); flag absent on 21.0.0",
+    },
+    // ── node:ffi (foreign function interface) ────────────────────────────────
+    // `--experimental-ffi` gates the `node:ffi` module (loading dynamic libraries and
+    // calling native symbols). Added on the 26.x line at 26.1.0 (#62072); the flag does
+    // not exist on 26.0.0 or below, where injecting it is a "bad option" startup abort.
+    // Snapshot-neutral (a module gate, not a V8 harmony flag — unlike ShadowRealm above),
+    // so it is safe to auto-unflag; enabling the flag only makes the module importable,
+    // and node:ffi is unsafe solely if user code actively misuses it. Stability 1.0 and
+    // still flag-gated (default-off — `import('node:ffi')` throws
+    // ERR_UNKNOWN_BUILTIN_MODULE without the flag) through Node 26.5 / 27 nightly, so this
+    // open-ended band injects it on [26.1.0, ∞). (node:ffi additionally wants --allow-ffi
+    // under the Permission Model; nub does not inject permission flags.)
+    Feature {
+        name: "ffi",
+        mitigations: &[(
+            band((26, 1, 0), None),
+            Mitigation::Unflag("--experimental-ffi"),
+        )],
+        evidence: "node:ffi added Node 26.1.0 (#62072); absent 26.0.0; default-off through Node 27 nightly",
+    },
+    // ── node:vfs (virtual file system) ───────────────────────────────────────
+    // `--experimental-vfs` gates the minimal `node:vfs` subsystem. Added on the 26.x line
+    // at 26.4.0 (#63115); absent on 26.3.0 and below (injecting there is a "bad option"
+    // abort). Snapshot-neutral. Still flag-gated (default-off — `import('node:vfs')` throws
+    // ERR_UNKNOWN_BUILTIN_MODULE without the flag) through Node 26.5 / 27 nightly, so this
+    // open-ended band injects it on [26.4.0, ∞).
+    Feature {
+        name: "vfs",
+        mitigations: &[(
+            band((26, 4, 0), None),
+            Mitigation::Unflag("--experimental-vfs"),
+        )],
+        evidence: "node:vfs added Node 26.4.0 (#63115); absent 26.3.0; default-off through Node 27 nightly",
+    },
+    // ── node:stream/iter (async-iterator stream adapters) ────────────────────
+    // `--experimental-stream-iter` gates the `node:stream/iter` module. Added on the 25.x
+    // line at 25.9.0 (#62066); absent on 25.8.x and below (injecting there is a "bad
+    // option" abort). Snapshot-neutral. Still flag-gated (default-off —
+    // `import('node:stream/iter')` throws ERR_UNKNOWN_BUILTIN_MODULE without the flag)
+    // through Node 26.5 / 27 nightly, so this open-ended band injects it on [25.9.0, ∞).
+    Feature {
+        name: "stream-iter",
+        mitigations: &[(
+            band((25, 9, 0), None),
+            Mitigation::Unflag("--experimental-stream-iter"),
+        )],
+        evidence: "node:stream/iter added Node 25.9.0 (#62066); absent 25.8.1; default-off through Node 27 nightly",
+    },
     // ── WebSocket global ────────────────────────────────────────────────────
     // Flag-gated on [20.10.0, 22.0.0) — the global exists on 20.10+ and all of the
     // 21.x line behind `--experimental-websocket`, then becomes default-on at
@@ -812,6 +886,38 @@ mod tests {
         assert!(unflag_flags_for(&v(26, 5, 0)).contains(&it));
         assert!(unflag_flags_for(&v(27, 0, 0)).contains(&it));
         assert_eq!(unflag_floor(it), Some(v(26, 5, 0)));
+        // detect-module: [20.10.0, 20.19.0) ∪ [21.1.0, 22.7.0). Below the backport
+        // floor and at each default-on cutover it is excluded; the 21.0.0 release
+        // predates the flag (injecting it is a "bad option" crash — the eventsource hole).
+        let dm = "--experimental-detect-module";
+        assert!(!unflag_flags_for(&v(20, 9, 0)).contains(&dm));
+        assert!(unflag_flags_for(&v(20, 10, 0)).contains(&dm));
+        assert!(unflag_flags_for(&v(20, 18, 0)).contains(&dm));
+        assert!(!unflag_flags_for(&v(20, 19, 0)).contains(&dm)); // default-on
+        assert!(!unflag_flags_for(&v(21, 0, 0)).contains(&dm)); // flag absent (hole)
+        assert!(unflag_flags_for(&v(21, 1, 0)).contains(&dm));
+        assert!(unflag_flags_for(&v(22, 6, 0)).contains(&dm));
+        assert!(!unflag_flags_for(&v(22, 7, 0)).contains(&dm)); // default-on
+        assert_eq!(unflag_floor(dm), Some(v(20, 10, 0)));
+        // ffi: open-ended [26.1.0, ∞); the flag doesn't exist on 26.0.0.
+        let ffi = "--experimental-ffi";
+        assert!(!unflag_flags_for(&v(26, 0, 0)).contains(&ffi));
+        assert!(unflag_flags_for(&v(26, 1, 0)).contains(&ffi));
+        assert!(unflag_flags_for(&v(26, 5, 0)).contains(&ffi));
+        assert!(unflag_flags_for(&v(27, 0, 0)).contains(&ffi));
+        assert_eq!(unflag_floor(ffi), Some(v(26, 1, 0)));
+        // vfs: open-ended [26.4.0, ∞); the flag doesn't exist on 26.3.0.
+        let vfs = "--experimental-vfs";
+        assert!(!unflag_flags_for(&v(26, 3, 0)).contains(&vfs));
+        assert!(unflag_flags_for(&v(26, 4, 0)).contains(&vfs));
+        assert!(unflag_flags_for(&v(26, 5, 0)).contains(&vfs));
+        assert_eq!(unflag_floor(vfs), Some(v(26, 4, 0)));
+        // stream-iter: open-ended [25.9.0, ∞); the flag doesn't exist on 25.8.x.
+        let si = "--experimental-stream-iter";
+        assert!(!unflag_flags_for(&v(25, 8, 1)).contains(&si));
+        assert!(unflag_flags_for(&v(25, 9, 0)).contains(&si));
+        assert!(unflag_flags_for(&v(26, 5, 0)).contains(&si));
+        assert_eq!(unflag_floor(si), Some(v(25, 9, 0)));
     }
 
     #[test]
