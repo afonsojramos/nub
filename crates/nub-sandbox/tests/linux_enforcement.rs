@@ -787,6 +787,52 @@ fn dev_allowlist_permits_pty_and_nodes_denies_rest() {
     );
 }
 
+// ── node runs cleanly under the full hardening (the ship-blocker check) ──────────
+
+/// A real Node binary if one is installed (CI runners + the dev VM have one). The
+/// hardening MUST NOT break Node — it is the runtime nub augments.
+fn node_bin() -> Option<String> {
+    for p in ["/usr/local/bin/node", "/usr/bin/node"] {
+        if Path::new(p).exists() {
+            return Some(p.to_string());
+        }
+    }
+    None
+}
+
+#[test]
+fn node_threads_and_crypto_under_full_hardening() {
+    if skip_without_landlock() {
+        return;
+    }
+    let Some(node) = node_bin() else {
+        return; // no Node on this host — skip (VM/CI runners have one)
+    };
+    let f = fixture();
+    // Read-confine engages the whole stack at once: O1 seccomp (userns/mount deny +
+    // clone3→ENOSYS) + O2 (pidfd_getfd deny) + O3 (/dev allowlist); the unlisted net
+    // axis floors to deny-all, so seccomp is installed. This is the strictest posture.
+    // The Worker spawns a libuv/V8 thread — glibc issues clone3 for pthread_create, so
+    // this exercises the ENOSYS→clone fallback; crypto.randomBytes exercises the /dev
+    // entropy allowlist FROM the worker thread.
+    let script = "const {Worker}=require('worker_threads');\
+        const w=new Worker(\"const{parentPort}=require('worker_threads');\
+        parentPort.postMessage(require('crypto').randomBytes(4).toString('hex'))\",{eval:true});\
+        w.on('message',m=>{console.log('NODEOK'+m);w.terminate();});\
+        w.on('error',e=>{console.log('NODEERR'+e);});";
+    let (code, out) = f.run(
+        serde_json::json!({ "fs": ["./"] }),
+        &[],
+        &node,
+        &["-e", script],
+    );
+    assert!(
+        out.contains("NODEOK"),
+        "node must start, spawn a Worker thread (clone3→ENOSYS→clone fallback), and use \
+         crypto under the full O1/O2/O3 hardening (exit {code}, out {out:?})"
+    );
+}
+
 // ── graceful degradation is honest ──────────────────────────────────────────────
 
 #[test]

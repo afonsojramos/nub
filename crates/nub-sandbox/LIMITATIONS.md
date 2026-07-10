@@ -277,16 +277,23 @@ probes carrying positive + negative controls; each has a committed regression te
   CHAIN — Landlock never grants `/proc` (so a `uid_map` write fails), the kernel refuses a
   mount from an unmapped userns, and host AppArmor — none of which the engine owns. The
   seccomp filter now denies `unshare`, `mount`, `umount2`, `pivot_root`, `move_mount`,
-  `fsopen`, `fsmount`, `fsconfig`, `open_tree` wholesale, and `clone` when its flags register
-  carries `CLONE_NEWUSER`/`CLONE_NEWNS`. `clone3` hides its flags behind a pointer (seccomp
-  cannot inspect them), so a companion filter returns `ENOSYS` for `clone3` — glibc then
-  falls back to the flag-filtered `clone` (the same technique Docker's default profile uses),
-  closing the `clone3(CLONE_NEWUSER)` path without breaking threading. VM-verified: `unshare`
-  and `clone(CLONE_NEWUSER)` return EPERM and `clone3` ENOSYS under sandbox, while the same
-  unprivileged forms succeed unsandboxed; normal `sh`/`python3`/PTY children (which fork via
-  the register `clone`) are unaffected. Residual: a procfs *bind-mounted before* entering the
-  sandbox is still not created via these syscalls (that residual is the "bind-mounted procfs
-  at a non-standard path" item above); O1 removes the in-sandbox mount-creation route to it.
+  `fsopen`, `fsmount`, `fsconfig`, `fspick`, `mount_setattr`, `open_tree` wholesale (the
+  classic + new-mount-API surface), and `clone` when its flags register carries
+  `CLONE_NEWUSER`/`CLONE_NEWNS`. `clone3` hides its flags behind a pointer (seccomp cannot
+  inspect them), so a companion filter returns `ENOSYS` for `clone3` — glibc then falls back
+  to the flag-filtered `clone` (the same technique Docker's default profile uses), closing the
+  `clone3(CLONE_NEWUSER)` path without breaking threading. VM-verified: `unshare` and
+  `clone(CLONE_NEWUSER)` return EPERM and `clone3` ENOSYS under sandbox, while the same
+  unprivileged forms succeed unsandboxed; normal `sh`/`python3`/PTY children AND a full Node
+  run (Worker-thread pthread_create → clone3→ENOSYS→clone fallback, plus crypto) are
+  unaffected. Two bounded trade-offs, both accepted: (a) a binary that calls `clone3`
+  DIRECTLY and does not fall back on ENOSYS loses threading — rare, and the same trade Docker's
+  default profile makes; (b) a nub-sandboxed child that builds its OWN user+mount-namespace
+  sandbox (an `unshare`/`bwrap`-based tool, a browser/Electron zygote) is denied under ANY
+  sandboxing axis, env-scrub-only included — the intended defense-in-depth posture, not a bug.
+  Residual: a procfs *bind-mounted before* entering the sandbox is still not created via these
+  syscalls (that residual is the "bind-mounted procfs at a non-standard path" item above); O1
+  removes the in-sandbox mount-creation route to it.
   (`backend/linux.rs` `build_seccomp`/`clone_userns_newns_rules`/`build_clone3_enosys`;
   `seccomp_denies_userns_and_mount_family`.)
 - **Linux pidfd fd-theft — `pidfd_getfd` now denied (O2, CLOSED).** `pidfd_getfd` steals an
@@ -303,9 +310,18 @@ probes carrying positive + negative controls; each has a committed regression te
   itself — is denied and fails CLOSED (EACCES, visible), not leaked. Landlock does no
   directory-traverse check, so a leaf grant suffices to open the node by path without
   granting the `/dev` directory. VM-verified: `/dev/null` + `/dev/urandom` and a full PTY
-  (ptmx → pts slave) work under read-confine, `python3` still spawns, and a non-allowlisted
-  node (`/dev/shm` write) is denied while relaxed-fs admits it. Residual: the env-scrub-only
-  relaxed path (fs deliberately relaxed) still grants `/dev` among the top-levels — narrowing
-  it there would contradict "fs relaxed"; the allowlist governs the read-confine path where
-  `/dev` is explicitly granted. (`backend/linux.rs` `DEV_ALLOWLIST`;
-  `dev_allowlist_permits_pty_and_nodes_denies_rest`.)
+  (ptmx → pts slave) work under read-confine, `python3` and a full Node run still spawn, and a
+  non-allowlisted node (`/dev/shm` write) is denied while relaxed-fs admits it. Bounded
+  trade-offs of the narrowing (each fails CLOSED + visible, never a silent leak): a
+  read-confined child can no longer open `/dev/shm` (POSIX shared memory —
+  `multiprocessing.shared_memory`, some native addons), `/dev/fd` / `/dev/stdin|out|err`
+  (these symlink into `/proc/self/fd`, deliberately ungranted — breaks `bash <(…)` process
+  substitution and `fs.read('/dev/stdin')`), or any device node outside the set; add the node
+  to the policy allow-set if a workload needs it. The granted `/dev/pts` subtree is rw, so a
+  child can reach ANOTHER same-uid process's PTY (Landlock + DAC do not scope by owner within
+  the subtree); on kernels older than the `dev.tty.legacy_tiocsti=0` default this permits
+  TIOCSTI keystroke injection into that terminal — bounded to same-uid, which already shares a
+  trust domain. Residual: the env-scrub-only relaxed path (fs deliberately relaxed) still
+  grants `/dev` among the top-levels — narrowing it there would contradict "fs relaxed"; the
+  allowlist governs the read-confine path where `/dev` is explicitly granted.
+  (`backend/linux.rs` `DEV_ALLOWLIST`; `dev_allowlist_permits_pty_and_nodes_denies_rest`.)

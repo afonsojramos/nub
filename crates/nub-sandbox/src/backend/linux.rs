@@ -574,6 +574,8 @@ fn build_seccomp(net_mode: NetMode) -> Result<BpfProgram, String> {
         libc::SYS_fsopen,
         libc::SYS_fsmount,
         libc::SYS_fsconfig,
+        libc::SYS_fspick,
+        libc::SYS_mount_setattr,
         libc::SYS_open_tree,
         libc::SYS_pidfd_getfd,
     ]
@@ -691,8 +693,9 @@ fn clone_userns_newns_rules() -> Result<Vec<SeccompRule>, String> {
 /// `clone3` and fall back to the register-based `clone` — which the main filter DOES
 /// flag-filter — so a `clone3(CLONE_NEWUSER)` escape is closed without breaking
 /// threading (the fallback `clone` for a normal thread carries no namespace bit).
-/// This is the same technique Docker's default seccomp profile uses. `None` when the
-/// arch/libc exposes no `clone3` number (nothing to force-fall-back).
+/// This is the same technique Docker's default seccomp profile uses. The `Option` is
+/// the extension seam for an arch that exposes no `clone3` number; on the supported
+/// x86_64/aarch64 targets `SYS_clone3` always resolves, so this returns `Some`.
 fn build_clone3_enosys() -> Result<Option<BpfProgram>, String> {
     let arch = TargetArch::try_from(std::env::consts::ARCH)
         .map_err(|e| format!("unsupported arch for seccomp: {e}"))?;
