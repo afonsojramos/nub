@@ -170,7 +170,7 @@ fn deny(glob: String) -> FsRule {
     FsRule {
         matcher: CanonGlob(canonicalize_glob_prefix(&glob)),
         effect: Effect::Deny,
-        access: FsAccess::Read,
+        access: FsAccess::DENY,
     }
 }
 

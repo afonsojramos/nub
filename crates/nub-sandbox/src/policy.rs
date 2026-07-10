@@ -109,6 +109,16 @@ pub enum FsAccess {
     ReadWrite,
 }
 
+impl FsAccess {
+    /// The single access every Deny rule carries. A deny removes both read AND
+    /// write regardless of this field (every backend/matcher reads `.access` only
+    /// under an `Effect::Allow` arm; deny arms are `(Effect::Deny, _)`), so the
+    /// mode is inert on a deny — normalized to one value so the IR has a uniform
+    /// deny representation and two denies differing only in an inert access don't
+    /// yield divergent IR/snapshots (D20).
+    pub const DENY: FsAccess = FsAccess::Read;
+}
+
 // ── network ──────────────────────────────────────────────────────────────────
 
 /// Network confinement. `enforce = false` means "no net restriction" (the

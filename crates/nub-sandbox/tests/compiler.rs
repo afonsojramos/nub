@@ -401,14 +401,101 @@ fn env_array_is_an_allowlist_not_required() {
 }
 
 #[test]
-fn env_user_deny_stays_case_sensitive() {
-    // Only the BUILT-IN secret defaults are case-insensitive; a user's explicit
-    // `!vite_url` must NOT deny `VITE_URL` (POSIX env keys are case-sensitive).
+fn env_user_key_case_mirrors_os() {
+    // D16: a user env key mirrors the OS. On POSIX env names are case-sensitive, so
+    // an explicit `!vite_url` does NOT deny `VITE_URL` (it survives). On Windows env
+    // names are one var regardless of case, so `!vite_url` DOES catch `VITE_URL`
+    // (it is withheld). Same source, opposite verdict — the enforcement follows the
+    // OS resource. (The Windows branch is exercised on the Windows VM / CI.)
     let ctx = common::ctx(true, &[("VITE_URL", "keep")]);
     let p = compile(&json!({ "env": ["VITE_*", "!vite_url"] }), &ctx).unwrap();
+    let got = p.env.constructed.get("VITE_URL").map(String::as_str);
+    if cfg!(windows) {
+        assert_eq!(
+            got, None,
+            "Windows: case-insensitive `!vite_url` denies VITE_URL"
+        );
+    } else {
+        assert_eq!(
+            got,
+            Some("keep"),
+            "POSIX: case-sensitive `!vite_url` spares VITE_URL"
+        );
+    }
+}
+
+#[test]
+fn env_user_exact_key_case_mirrors_os() {
+    // D16 for the EXACT-key form (not only globs): a `path` allow catches ambient
+    // `PATH` only on Windows; on POSIX they are distinct vars.
+    let ctx = common::ctx(true, &[("PATH", "/bin")]);
+    let p = compile(&json!({ "env": ["path"] }), &ctx).unwrap();
     assert_eq!(
-        p.env.constructed.get("VITE_URL").map(String::as_str),
-        Some("keep")
+        p.env.constructed.contains_key("PATH"),
+        cfg!(windows),
+        "exact user key mirrors OS case"
+    );
+}
+
+#[test]
+fn env_required_key_satisfied_case_mirrored() {
+    // D16 for the REQUIRED-key check: a required `PATH` is satisfied by an ambient
+    // `Path` on Windows (constructed is keyed by the source casing, so the check
+    // must compare case-mirrored, not exact) — but errors on POSIX where the
+    // casings are distinct vars.
+    let ctx = common::ctx(true, &[("Path", "/bin")]);
+    let r = compile(&json!({ "env": { "PATH": true } }), &ctx);
+    if cfg!(windows) {
+        assert!(
+            r.unwrap().env.constructed.contains_key("Path"),
+            "Windows: ambient Path satisfies required PATH"
+        );
+    } else {
+        assert!(
+            matches!(r.unwrap_err(), CompileError::MissingRequired { .. }),
+            "POSIX: Path != PATH, required PATH is missing"
+        );
+    }
+}
+
+#[test]
+fn fs_deny_access_is_normalized_to_one_value() {
+    // D20: a deny's access is inert (a deny removes read+write), so every deny rule
+    // carries `FsAccess::DENY` regardless of surface form. Without normalization the
+    // array `!x` deny would emit ReadWrite (the array's allow access) and the object
+    // `x: false` deny Read — divergent IR for identical enforcement.
+    use nub_sandbox::policy::FsAccess;
+    let ctx = common::ctx(true, &[]);
+    let obj = compile(&json!({ "fs": { "/a": "rw", "/b": false } }), &ctx).unwrap();
+    let arr = compile(&json!({ "fs": ["/a", "!/b"] }), &ctx).unwrap();
+    for set in [&obj.fs.rules, &arr.fs.rules] {
+        for rule in &set.entries {
+            if rule.effect == Effect::Deny {
+                assert_eq!(
+                    rule.access,
+                    FsAccess::DENY,
+                    "deny access must be normalized"
+                );
+            }
+        }
+    }
+    // The array `!/b` deny specifically must be Read, not the array-default ReadWrite.
+    let arr_deny = arr
+        .fs
+        .rules
+        .entries
+        .iter()
+        .find(|r| r.effect == Effect::Deny)
+        .expect("array deny present");
+    assert_eq!(arr_deny.access, FsAccess::DENY);
+    // An allow's access is untouched by the normalization.
+    assert!(
+        obj.fs
+            .rules
+            .entries
+            .iter()
+            .any(|r| r.effect == Effect::Allow && r.access == FsAccess::ReadWrite),
+        "an allow's ReadWrite is preserved"
     );
 }
 
