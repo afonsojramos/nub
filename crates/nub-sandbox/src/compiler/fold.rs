@@ -98,8 +98,10 @@ fn fold_fs_array_entry(
         Some(rest) => (rest, Effect::Deny),
         None => (s, Effect::Allow),
     };
-    // Array grants are ReadWrite; denies deny both.
-    push_fs_rules(pattern, effect, FsAccess::ReadWrite, ctx, out);
+    // `$(…)` resolves AFTER the `!` strip so a command's stdout is a path, never a
+    // deny operator it could smuggle in. Array grants are ReadWrite; denies deny both.
+    let pattern = resolve_fs_path(pattern, ctx, path)?;
+    push_fs_rules(&pattern, effect, FsAccess::ReadWrite, ctx, out);
     Ok(())
 }
 
@@ -139,7 +141,10 @@ fn fold_fs_object_entry(
             ));
         }
     };
-    push_fs_rules(key, effect, access, ctx, out);
+    // Resolve `$(…)` in the path key AFTER validating the access value, so an
+    // invalid `val` errors before any command runs (no wasted exec side effect).
+    let pattern = resolve_fs_path(key, ctx, path)?;
+    push_fs_rules(&pattern, effect, access, ctx, out);
     Ok(())
 }
 
@@ -168,6 +173,48 @@ fn push_fs_rules(
             effect,
             access,
         });
+    }
+}
+
+/// Resolve any `$(…)` command substitution in an fs PATH at config-LOAD time, via
+/// the shared [`resolve`] machinery: the command runs once and its stdout becomes
+/// the path, whole or embedded (`"$(pnpm store path)/v3"`), then flows into
+/// [`push_fs_rules`] exactly as a literal would (symbolic-expand + subtree-glob +
+/// canonicalize).
+///
+/// Fail-CLOSED corners — a resolved grant must never silently surprise. A command
+/// FAILURE surfaces via `resolve_with` as a hard [`CompileError::Substitution`]
+/// naming it. EMPTY output errors: an empty path would expand to a whole-fs `**`
+/// grant (fail-OPEN). MULTI-LINE output errors rather than silently truncating to a
+/// line that could grant the wrong subtree. Trailing whitespace is trimmed so a
+/// path is clean; interior whitespace is a legitimate path character and preserved.
+fn resolve_fs_path(raw: &str, ctx: &CompileCtx, path: &str) -> Result<String, CompileError> {
+    if resolve::has_substitution(raw) {
+        let resolved = resolve::resolve_with(raw, ctx.runner.as_ref())
+            .map_err(|e| CompileError::substitution(path, &e))?;
+        let resolved = resolved.trim_end().to_string();
+        if resolved.is_empty() {
+            return Err(CompileError::substitution(
+                path,
+                "`$(…)` produced empty output — expected a filesystem path",
+            ));
+        }
+        if resolved.contains(['\n', '\r']) {
+            return Err(CompileError::substitution(
+                path,
+                "`$(…)` produced multi-line output — a filesystem path must be a single line",
+            ));
+        }
+        Ok(resolved)
+    } else if resolve::has_open_substitution(raw) {
+        // A `$(` with no balanced close — name it rather than ship shell-looking
+        // text as a literal path (the same footgun the env path guards against).
+        Err(CompileError::substitution(
+            path,
+            resolve::UNTERMINATED_SUBST_MSG,
+        ))
+    } else {
+        Ok(raw.to_string())
     }
 }
 

@@ -1234,3 +1234,78 @@ fn crlf_in_an_inject_value_is_rejected() {
     .unwrap_err();
     assert!(matches!(err, CompileError::Shape { .. }));
 }
+
+// ── fs $(…) command substitution ───────────────────────────────────────────────
+
+#[test]
+fn fs_substitution_resolves_and_grants_whole_and_embedded() {
+    // A `$(…)` fs path resolves at load time and flows into the matcher exactly as
+    // a literal would: whole-value (object key), embedded in a larger path, and the
+    // array form (ReadWrite). The stub `store path` → `/home/u/.store`.
+    use nub_sandbox::matcher::PathMatcher;
+    use nub_sandbox::policy::FsAccess;
+    let ctx = common::ctx(true, &[]);
+
+    let obj = compile(&json!({ "fs": { "$(store path)": "rw" } }), &ctx).unwrap();
+    let d = PathMatcher::new(&obj.fs.rules).decide(&common::homes().home.join(".store/x"));
+    assert!(matches!(d.effect, Effect::Allow) && matches!(d.access, FsAccess::ReadWrite));
+
+    let emb = compile(&json!({ "fs": { "$(store path)/v3": "r" } }), &ctx).unwrap();
+    let d = PathMatcher::new(&emb.fs.rules).decide(&common::homes().home.join(".store/v3/pkg"));
+    assert!(matches!(d.effect, Effect::Allow) && matches!(d.access, FsAccess::Read));
+
+    let arr = compile(&json!({ "fs": ["$(store path)"] }), &ctx).unwrap();
+    let d = PathMatcher::new(&arr.fs.rules).decide(&common::homes().home.join(".store/y"));
+    assert!(matches!(d.effect, Effect::Allow) && matches!(d.access, FsAccess::ReadWrite));
+
+    // `$(…)` resolution is UNCONDITIONAL — nub has no trust axis to gate on, so the
+    // `ctx` trust flag does not change whether a command runs.
+    let untrusted = compile(
+        &json!({ "fs": ["$(store path)"] }),
+        &common::ctx(false, &[]),
+    )
+    .unwrap();
+    let d = PathMatcher::new(&untrusted.fs.rules).decide(&common::homes().home.join(".store/z"));
+    assert!(matches!(d.effect, Effect::Allow));
+}
+
+#[test]
+fn fs_substitution_failure_empty_and_multiline_fail_closed() {
+    // Fail-CLOSED corners: a non-zero exit, empty output (would fail-OPEN to a
+    // whole-fs grant), and multi-line output are each a hard compile error naming
+    // the substitution — never a silently-dropped or wrong grant.
+    let ctx = common::ctx(true, &[]);
+    for (surface, needle) in [
+        (json!({ "fs": ["$(fail)"] }), "failure"),
+        (json!({ "fs": ["$(empty path)"] }), "empty"),
+        (json!({ "fs": ["$(two paths)"] }), "multi-line"),
+    ] {
+        match compile(&surface, &ctx).unwrap_err() {
+            CompileError::Substitution { message, .. } => {
+                assert!(message.contains(needle), "{message} (want {needle})");
+            }
+            other => panic!("expected a substitution error for {surface}, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn fs_substitution_deny_prefix_and_unterminated() {
+    // `!$(…)` resolves the DENY target (the `!` is stripped before the command
+    // runs, so its output is a path, never a smuggled operator); an unterminated
+    // `$(` is named, not shipped as a literal path.
+    use nub_sandbox::matcher::PathMatcher;
+    let ctx = common::ctx(true, &[]);
+
+    let deny = compile(&json!({ "fs": [".", "!$(store path)"] }), &ctx).unwrap();
+    let d = PathMatcher::new(&deny.fs.rules).decide(&common::homes().home.join(".store/secret"));
+    assert!(
+        matches!(d.effect, Effect::Deny),
+        "!$(…) denies the resolved path"
+    );
+
+    match compile(&json!({ "fs": ["$(store path"] }), &ctx).unwrap_err() {
+        CompileError::Substitution { message, .. } => assert!(message.contains("closing")),
+        other => panic!("expected an unterminated-substitution error, got {other:?}"),
+    }
+}

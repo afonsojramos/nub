@@ -16,6 +16,11 @@ impl CommandRunner for StubRunner {
         match command {
             "echo hi" => Ok("hi\n".to_string()),
             "fail" => Err("stub failure".to_string()),
+            // Path-shaped stubs for fs `$(…)` tests: a clean single-line path (with
+            // the usual trailing newline), empty output, and multi-line output.
+            "store path" => Ok("/home/u/.store\n".to_string()),
+            "empty path" => Ok("\n".to_string()),
+            "two paths" => Ok("/home/u/a\n/home/u/b\n".to_string()),
             other => Ok(format!("STUB[{other}]")),
         }
     }
