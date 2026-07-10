@@ -51,6 +51,9 @@ const MAX_HTTP_HEADER: usize = 8 * 1024;
 /// auth-failure reply is written — the caller drops the connection (fail-closed), and the
 /// target host is never consulted.
 pub fn read_request(stream: &mut (impl Read + Write), token: &str) -> io::Result<Request> {
+    // Invariant: a live proxy always mints a non-empty token. An empty token would make
+    // `Basic base64(":")` (empty user+pass) authenticate — so assert it never happens.
+    debug_assert!(!token.is_empty(), "egress-proxy token must be non-empty");
     let mut first = [0u8; 1];
     stream.read_exact(&mut first)?;
     if first[0] == 0x05 {
