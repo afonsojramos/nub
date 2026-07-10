@@ -296,6 +296,49 @@ fn write_confine_allows_target_denies_rest() {
     );
 }
 
+// ── fs write-confine: dangerous-root guard (F2 cross-OS consistency) ────────────
+
+#[test]
+fn dangerous_write_root_grant_is_dropped() {
+    if skip_without_landlock() {
+        return;
+    }
+    let f = fixture();
+    let outside = s(&f.home.join("pwned.txt")); // a sibling of the project
+
+    // (1) An explicit `/` rw grant must NOT become a write-everything grant: the
+    // guard drops it (fail-safe), so a write OUTSIDE the project is denied.
+    let root_rw = serde_json::json!({ "fs": ["...", "/"] });
+    assert!(
+        !f.ok(root_rw, TOUCH, &[&outside]),
+        "explicit `/` rw must be dropped — write outside the project denied"
+    );
+
+    // (2) A `..`-collapsed surface path that resolves to `/` is the same hole: the
+    // prefix canonicalizer collapses `<proj>/../../…` to `/` at compile time.
+    let collapsed = format!("{}/../../../../../../../../../../..", s(&f.proj));
+    let dotdot_rw = serde_json::json!({ "fs": ["...", collapsed] });
+    assert!(
+        !f.ok(dotdot_rw, TOUCH, &[&outside]),
+        "`..`-collapse to `/` must be dropped — write outside denied"
+    );
+
+    // POSITIVE CONTROL — the guard drops ONLY dangerous roots: a legitimate scoped
+    // rw grant still writes inside the project.
+    let scoped = serde_json::json!({ "fs": ["...", "./writable"] });
+    assert!(
+        f.ok(scoped, TOUCH, &[&s(&f.proj.join("writable/ok.txt"))]),
+        "positive control: scoped rw grant still writes inside the project"
+    );
+
+    // NEGATIVE CONTROL — relaxed fs writes outside fine, so the denies above are the
+    // guard, not a missing target dir.
+    assert!(
+        f.ok(serde_json::json!({ "fs": true }), TOUCH, &[&outside]),
+        "neg-control: relaxed fs writes outside"
+    );
+}
+
 // ── adversarial: a symlink or `..` must not dodge read-confine ──────────────────
 
 #[test]
