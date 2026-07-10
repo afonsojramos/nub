@@ -493,7 +493,7 @@ mod win {
     /// Compile a REAL `sandbox: true` policy over the CI runner's actual ambient env, so
     /// the env axis is the compiler's own curated baseline (with the Windows-essential
     /// vars) — not the hand-rolled `base_env` list. This is the A1 fix under test.
-    fn compile_sandbox_true(f: &Fixture) -> SandboxPolicy {
+    fn compile_surface(f: &Fixture, surface: &serde_json::Value) -> SandboxPolicy {
         let ambient: BTreeMap<String, String> = std::env::vars().collect();
         let home = std::env::var("USERPROFILE")
             .map(PathBuf::from)
@@ -511,7 +511,11 @@ mod win {
             ambient_env: ambient,
             runner: Box::new(nub_sandbox::compiler::ShellRunner),
         };
-        nub_sandbox::compile(&serde_json::Value::Bool(true), &ctx).expect("sandbox:true compiles")
+        nub_sandbox::compile(surface, &ctx).expect("surface compiles")
+    }
+
+    fn compile_sandbox_true(f: &Fixture) -> SandboxPolicy {
+        compile_surface(f, &serde_json::Value::Bool(true))
     }
 
     // ── the cases ─────────────────────────────────────────────────────────────────
@@ -770,6 +774,52 @@ mod win {
                 &true_policy,
                 &child,
                 &["__sbxchild__", "getenv", "NUB_SBX_A1_SECRET"],
+            ),
+            4,
+        );
+
+        // ── env strip-all FLOOR (Q3): a complete-statement `{ fs: [...] }` FLOORS the
+        //    unlisted env axis to strip-all. The floor must still inject the minimal
+        //    OS-startup essentials so the child STARTS reliably (not just where the OS
+        //    tolerates an empty block), while every ambient user var / secret is
+        //    withheld. Compiled over the runner's REAL ambient env. ───────────────────
+        // SAFETY: single-threaded test main; seed an ambient var the floor must withhold.
+        unsafe { std::env::set_var("NUB_SBX_Q3_USERVAR", "must-not-leak") };
+        let fs_only = serde_json::json!({ "fs": [f.work.to_string_lossy()] });
+        let floored = compile_surface(&f, &fs_only);
+        assert!(
+            floored.env.enforce && !floored.env.constructed.contains_key("NUB_SBX_Q3_USERVAR"),
+            "env axis floored to strip-all, user var not constructed"
+        );
+        expect(
+            &mut fails,
+            "floored-env child STARTS (essentials injected, CreateProcessW ok)",
+            code(&floored, &child, &["__sbxchild__", "token"]),
+            0,
+        );
+        expect(
+            &mut fails,
+            "floored-env child sees the OS-startup essential SystemRoot",
+            code(&floored, &child, &["__sbxchild__", "getenv", "SystemRoot"]),
+            0,
+        );
+        expect(
+            &mut fails,
+            "floored-env child sees the AppContainer essential LOCALAPPDATA",
+            code(
+                &floored,
+                &child,
+                &["__sbxchild__", "getenv", "LOCALAPPDATA"],
+            ),
+            0,
+        );
+        expect(
+            &mut fails,
+            "floored-env child does NOT see an ambient user var (withheld)",
+            code(
+                &floored,
+                &child,
+                &["__sbxchild__", "getenv", "NUB_SBX_Q3_USERVAR"],
             ),
             4,
         );

@@ -283,6 +283,105 @@ pub fn curated_baseline_env(
         .collect()
 }
 
+/// OS-STARTUP-mechanism env names a sandboxed child needs merely to EXIST — the
+/// spawning OS's own bootstrap essentials, per OS. Distinct from (and far narrower
+/// than) [`BASELINE_ENV_EXACT`]: the baseline is "what a build child needs to
+/// operate usefully" (PATH/HOME/USERPROFILE/npm hints); THIS is "what any child
+/// needs before it can run at all."
+///
+/// Empirically pinned on the Windows VM (see the env-essentials thread) against
+/// BOTH backend spawn paths — subsets tried until the true minimum that STARTS was
+/// found — because the two paths need different things:
+///  - `SystemRoot` — the loader/CLR essential. A real managed exe (`powershell.exe`)
+///    launched with an EMPTY env block fails `rc=-65536` ("Internal Windows
+///    PowerShell error / Loading managed…" — the CLR resolves `mscoree`/System32
+///    relative to `SystemRoot`); `SystemRoot` ALONE flips it to rc=0. A native exe
+///    (`node.exe`) happens to tolerate an empty block — but the sandbox must not
+///    depend on every child being that lenient (the "starts only incidentally" gap).
+///  - `LOCALAPPDATA` — the AppContainer essential. The ENFORCING path (fs/net
+///    confined → a LowBox AppContainer) resolves the per-container profile dir
+///    (`%LOCALAPPDATA%\Packages\…`) from the environment, so a block missing it fails
+///    `CreateProcessW` with `ERROR_ENVVAR_NOT_FOUND` (203) BEFORE the child runs.
+///    The VM subset sweep pinned this exactly: `{SystemRoot}` and
+///    `{SystemRoot,USERPROFILE}` both still fail 203; `{SystemRoot,LOCALAPPDATA}` is
+///    the smallest set that starts. `SystemDrive`/`windir`/`USERPROFILE`/`APPDATA`
+///    are NOT needed to start and are deliberately NOT injected (no over-injection).
+///
+/// The set is injected on every strip-all (the compiler folds env before the backend
+/// picks its path; `LOCALAPPDATA` is inert on the plain path, `SystemRoot` inert to
+/// the AppContainer resolution — each is load-bearing on exactly one path). Both are
+/// OS MECHANISM — an install-location and a profile-storage path pointer, never a
+/// credential — so injecting them does not breach the deny-all floor (which denies
+/// USER/ambient env + secrets, not the OS-startup essentials the process needs to
+/// exist). `LOCALAPPDATA` embeds the OS username, but that disclosure is REDUNDANT
+/// (the child runs AS that user and can already read its own username via its
+/// SID/token/`whoami`, so the path leaks nothing new) and is empirically REQUIRED to
+/// start an AppContainer child — injecting the real value is the minimal correct
+/// choice. (A synthetic non-disclosing `LOCALAPPDATA` was considered and rejected: it
+/// needs a real writable scratch dir + an fs grant, adding coupling for zero real
+/// privacy gain given the redundancy.) POSIX has NO startup essential: an
+/// absolute-path `execve` starts with an empty environ (`/usr/bin/true`, `sh`,
+/// `node` all verified rc=0), so its list is empty and the floor injects nothing.
+///
+/// `#[cfg]`-gated on the SPAWNING OS (= the child's OS) so a POSIX floor provably
+/// injects nothing regardless of ambient contents, while the selection logic stays
+/// host-independently testable via [`os_essential_env_from`].
+#[cfg(windows)]
+const OS_ESSENTIAL_ENV: &[&str] = &["SystemRoot", "LOCALAPPDATA"];
+#[cfg(not(windows))]
+const OS_ESSENTIAL_ENV: &[&str] = &[];
+
+/// Select the OS-essential names present in `ambient`, matched case-insensitively
+/// (Windows env names are case-insensitive by OS contract — `SYSTEMROOT` and
+/// `SystemRoot` are the same var — and the child keeps the ambient's actual cased
+/// key + real value). Split from [`os_essential_env`] so the selection is unit-
+/// testable on any host by passing an explicit name list.
+fn os_essential_env_from(
+    ambient: &std::collections::BTreeMap<String, String>,
+    names: &[&str],
+) -> std::collections::BTreeMap<String, String> {
+    ambient
+        .iter()
+        .filter(|(k, _)| names.iter().any(|n| n.eq_ignore_ascii_case(k)))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
+}
+
+/// The OS-essential env for the spawning OS, read from the host ambient env at
+/// compile time. Only the whitelisted NAMES are admitted; their VALUES come from
+/// the real ambient env, and an essential absent from the host is skipped (never
+/// fabricated).
+pub fn os_essential_env(
+    ambient: &std::collections::BTreeMap<String, String>,
+) -> std::collections::BTreeMap<String, String> {
+    os_essential_env_from(ambient, OS_ESSENTIAL_ENV)
+}
+
+/// The strip-all env FLOOR: an enforcing env that WITHHOLDS all user/ambient env
+/// but injects the minimal OS-startup essentials so the child spawns reliably
+/// instead of only where the OS tolerates an empty block. Injecting these does NOT
+/// breach the deny-all floor — the floor denies USER/ambient env and secrets; the
+/// essentials are OS MECHANISM (where Windows is installed / how its loader finds
+/// System32), never user config or a credential. Single source of truth for both
+/// strip-all constructors: the complete-statement floor (`floor_env`) and the
+/// explicit `env: false`.
+pub fn strip_all_env(
+    ambient: &std::collections::BTreeMap<String, String>,
+) -> crate::policy::EnvPolicy {
+    let constructed = os_essential_env(ambient);
+    let withheld = ambient
+        .keys()
+        .filter(|k| !constructed.contains_key(*k))
+        .cloned()
+        .collect();
+    crate::policy::EnvPolicy {
+        enforce: true,
+        constructed,
+        schema: Vec::new(),
+        withheld,
+    }
+}
+
 /// Case-insensitive prefix strip: returns the remainder after `prefix` if `key`
 /// starts with it (ignoring ASCII case), else `None`. Used to gate the credential
 /// carve-out uniformly across platforms.
@@ -381,6 +480,89 @@ mod tests {
             !out.contains_key("AWS_SECRET_ACCESS_KEY"),
             "aws secret not in baseline"
         );
+    }
+
+    fn ambient(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn os_essential_selection_is_case_insensitive_and_value_preserving() {
+        // Host-independent: exercise the selection with an explicit name list so the
+        // Windows contract (case-insensitive names, real ambient value kept) is proven
+        // on any dev host. A non-essential name is never admitted.
+        let env = ambient(&[
+            ("SYSTEMROOT", "C:/Windows"), // upper-cased ambient key still matches
+            ("windir", "C:/Windows"),
+            ("SECRET_TOKEN", "leak"),
+        ]);
+        let out = os_essential_env_from(&env, &["SystemRoot", "windir"]);
+        assert_eq!(
+            out.get("SYSTEMROOT").map(String::as_str),
+            Some("C:/Windows"),
+            "case-insensitive name match keeps the ambient key + value"
+        );
+        assert!(out.contains_key("windir"));
+        assert!(
+            !out.contains_key("SECRET_TOKEN"),
+            "a non-essential (secret) name is never injected"
+        );
+    }
+
+    #[test]
+    fn strip_all_injects_only_essentials_and_withholds_the_rest() {
+        // The security property that matters: an ambient secret must NEVER ride the
+        // strip-all floor's constructed env; only whitelisted OS essentials do, and
+        // everything else is recorded withheld. On POSIX the essential set is empty,
+        // so `constructed` is empty and even a `SystemRoot`-named ambient var is
+        // withheld — the floor injects nothing where the OS needs nothing.
+        let env = ambient(&[
+            ("SystemRoot", "C:/Windows"),
+            ("LOCALAPPDATA", "C:/Users/me/AppData/Local"),
+            ("AWS_SECRET_ACCESS_KEY", "leak"),
+            ("GITHUB_TOKEN", "leak"),
+            ("PATH", "/bin"),
+        ]);
+        let p = strip_all_env(&env);
+        assert!(p.enforce, "strip-all always enforces");
+        // No secret or user-config var ever appears in the constructed child env.
+        for secret in ["AWS_SECRET_ACCESS_KEY", "GITHUB_TOKEN", "PATH"] {
+            assert!(
+                !p.constructed.contains_key(secret),
+                "{secret} must never ride the strip-all floor"
+            );
+            assert!(
+                p.withheld.contains(&secret.to_string()),
+                "{secret} must be recorded withheld"
+            );
+        }
+        #[cfg(windows)]
+        {
+            for essential in ["SystemRoot", "LOCALAPPDATA"] {
+                assert!(
+                    p.constructed.contains_key(essential),
+                    "Windows floor injects the OS-startup essential {essential}"
+                );
+                assert!(
+                    !p.withheld.contains(&essential.to_string()),
+                    "an injected essential is provided, not withheld"
+                );
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            assert!(
+                p.constructed.is_empty(),
+                "POSIX floor injects no essentials (empty-env exec starts fine)"
+            );
+            assert!(
+                p.withheld.contains(&"SystemRoot".to_string()),
+                "on POSIX a SystemRoot-named ambient var is withheld, not injected"
+            );
+        }
     }
 
     #[test]
