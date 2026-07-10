@@ -103,7 +103,7 @@ base64 = "0.22"
 # needs a little FFI (token-query + process-liveness) beyond what the lib exposes.
 [target.'cfg(target_os = "windows")'.dev-dependencies.windows-sys]
 version = "0.61"
-features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Isolation", "Win32_System_Threading", "Win32_System_Diagnostics_Debug", "Win32_System_Pipes", "Win32_Storage_FileSystem", "Win32_NetworkManagement_WindowsFirewall"]
+features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Isolation", "Win32_System_Threading", "Win32_System_Memory", "Win32_System_Diagnostics_Debug", "Win32_System_Pipes", "Win32_Storage_FileSystem", "Win32_NetworkManagement_WindowsFirewall"]
 
 # The Windows enforcement probe self-reexecs as the AppContainer child, so it owns
 # `main` (dispatch on argv) rather than the libtest harness. windows-latest CI only; a
