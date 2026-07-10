@@ -330,6 +330,33 @@ Each is documented in code at the site noted; none is silently mis-reported.
   read-granting Windows policy reports reduced mode for the `.env*` carve while the
   read-CONFINE itself (deny everything outside the allow-set) is fully enforced.
 
+### Private tmp (`<tmp>: "private"`/`"deny"`) — macOS ENFORCED; Linux/Windows REPORTED, not enforced
+
+`{ "fs": { "<tmp>": "private" } }` gives the child a fresh per-run temp dir (its `TMPDIR`/
+`TMP`/`TEMP` point there) with the SHARED system tmp hidden; `"deny"` hides the shared tmp
+with no private dir; `"rw"`/`true` is today's shared tmp. Per-OS state:
+
+- **macOS — ENFORCED (real-kernel verified).** The Seatbelt profile denies read+write on the
+  shared tmp roots (the confstr `$TMPDIR` scratch `/private/var/folders/<uid>/T` and the
+  world-shared `/private/tmp`) after the fs grants, and — for `Private` — grants the fresh
+  per-run dir `(allow file* (subpath …))`. The deny is last-match-wins, so it hides the shared
+  tmp even under a generous `(subpath "/")` read. Verified: a file in `/private/tmp` is DENIED
+  under `<tmp>: "private"`/`"deny"` and readable without (`tests/macos_enforcement.rs`
+  `private_tmp_hides_the_shared_system_tmp` / `deny_tmp_hides_the_shared_system_tmp_too`).
+  - **Tradeoff (forced, documented):** the shared-tmp deny INCLUDES the confstr scratch that
+    the backend otherwise write-grants for the Apple toolchain (`xcrun_db`), so a from-source
+    native compile that needs it fails under `Private`/`Deny`. You cannot both hide the shared
+    tmp and keep a grant into it; the mode is opt-in, and a native-build run stays on Shared.
+- **Linux / Windows — REPORTED, not enforced (fail-safe).** The child's temp env is pointed at
+  the fresh dir best-effort, but the shared-tmp is NOT yet hidden, so the backend reports a
+  `tmp-private`/`tmp-deny` `Degradation` (reduced mode) rather than silently running the child
+  on the visible shared tmp. Fix is a MAINTAINER-DECISION follow-up: Linux needs a Landlock
+  allow-only carve that excludes the shared tmp from the read/write grants (allow-only has no
+  deny primitive); Windows needs a decision on redirecting `TEMP`/`TMP` while satisfying the
+  OS-essential temp floor the child needs to start. Wired through the IR + reported so the axis
+  is honest today; enforcement lands per-OS later. (`backend/{linux,windows}.rs` `apply`,
+  `backend::tmp_lost_axis`.)
+
 ## Linux syscall-boundary hardening (defense-in-depth, seccomp/`/dev`)
 
 Three former residuals now closed at the syscall boundary so FS/env confinement no longer

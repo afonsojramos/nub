@@ -464,3 +464,40 @@ fn dotenv_deny_matches_the_env_basename_prefix_at_any_depth() {
     // A non-`.env`-prefixed dotfile is NOT swept.
     assert!(!read_denied(json!({ "fs": { "./": "r" } }), ".gitignore"));
 }
+
+#[test]
+fn env_prefixed_directory_allow_does_not_reexpose_its_contents() {
+    use serde_json::json;
+    // THE SUB-DIRECTORY BYPASS: a `.env*`-NAMED directory is a secret container, and its
+    // contents are covered by the `.env*/**` subtree deny. An exact allow of the DIRECTORY
+    // (or its glob subtree) must NOT re-expose those contents — only a `.env*` LEAF file is
+    // re-grantable (the subtree deny is ordered after the exact-file allows). This is the
+    // regression guard for the band-3 subtree-twin over-grant.
+    for (surface, leaked) in [
+        (json!({ "fs": { "./.env.d": "r" } }), ".env.d/prod"),
+        (json!({ "fs": { "./.env.d": "r" } }), ".env.d/nested/deep"),
+        (
+            json!({ "fs": { "./.environments": "r" } }),
+            ".environments/prod.env",
+        ),
+        // A glob subtree allow of a `.env*` dir is a glob (not an exact FILE) → no override.
+        (json!({ "fs": { "./.env.d/**": "r" } }), ".env.d/prod"),
+        // array (rw) directory allow — same guarantee.
+        (json!({ "fs": ["./.env.d"] }), ".env.d/prod"),
+    ] {
+        assert!(
+            read_denied(surface.clone(), leaked),
+            "{leaked} must stay denied under {surface}"
+        );
+    }
+    // An exact-file allow of a `.env*` FILE inside a subdir still grants THAT one file.
+    assert!(!read_denied(
+        json!({ "fs": { "./": "r", "./sub/.env.local": "r" } }),
+        "sub/.env.local"
+    ));
+    // …but a sibling `.env` in the same subdir stays denied.
+    assert!(read_denied(
+        json!({ "fs": { "./": "r", "./sub/.env.local": "r" } }),
+        "sub/.env"
+    ));
+}

@@ -907,6 +907,32 @@ mod tests {
     }
 
     #[test]
+    fn env_prefixed_directory_allow_does_not_grant_its_secret_contents() {
+        // THE SUB-DIRECTORY BYPASS on Landlock: a `.env*`-NAMED directory is a secret
+        // container. Naming the directory (`{ "./.env.d": "r" }`) keeps the dir LISTABLE
+        // (ReadDir) but must NOT read-grant its `.env*/**`-denied contents — the carve
+        // descends and skips the denied child. The subtree deny (band 2c) is ordered after
+        // the exact-file allows, so no re-emitted directory subtree twin can re-grant them.
+        let f = fixture();
+        let envd = f.proj.join(".env.d");
+        fs::create_dir_all(&envd).unwrap();
+        fs::write(envd.join("prod"), "DIRSECRET").unwrap();
+        let allow = f.proj.join(".env.d").to_str().unwrap().to_string();
+        let d = derive_read_grants(&f.compile(serde_json::json!({ "fs": { allow: "r" } })));
+        assert!(
+            !read_reachable(&d.grants, &envd.join("prod")),
+            "a .env.d directory allow must not read-grant the secret inside it"
+        );
+        // The directory node itself stays listable (a ReadDir, not a subtree read).
+        assert!(
+            d.grants
+                .iter()
+                .any(|g| g.kind == GrantKind::ReadDir && g.path == envd),
+            "the .env.d directory stays listable"
+        );
+    }
+
+    #[test]
     fn literal_prefix_extraction() {
         assert!(matches!(literal_prefix("**"), Prefix::WholeFs));
         assert!(matches!(literal_prefix("/"), Prefix::WholeFs));

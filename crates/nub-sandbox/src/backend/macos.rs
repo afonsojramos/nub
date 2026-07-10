@@ -75,6 +75,7 @@ pub fn apply(
     proxy_port: Option<u16>,
     proxy_token: Option<&str>,
     ca_bundle: Option<&std::path::Path>,
+    tmp_dir: Option<&std::path::Path>,
 ) -> Result<Prepared, Degradation> {
     if !needs_wrap(policy) {
         // Nothing to confine and no withheld secret to protect: the env-scrub is pure
@@ -86,10 +87,11 @@ pub fn apply(
             command: base_command(&spec, policy),
             degradation: Degradation::full(),
             proxy: None,
+            _private_tmp: None,
         });
     }
 
-    let profile = build_profile(policy, &spec, proxy_port, ca_bundle);
+    let profile = build_profile(policy, &spec, proxy_port, ca_bundle, tmp_dir);
     let mut wrapped = Command::new("sandbox-exec");
     wrapped.arg("-p").arg(&profile).arg("--");
     wrapped.arg(&spec.program).args(&spec.args);
@@ -116,11 +118,18 @@ pub fn apply(
     if let Some(bundle) = ca_bundle {
         super::set_ca_env(&mut wrapped, bundle);
     }
+    // Private tmp: point the child's TMPDIR/TMP/TEMP at the fresh per-run dir (the SBPL
+    // profile grants it rw + denies the shared system tmp). Set after env_clear so it
+    // survives the scrub. `Deny` sets nothing — the child inherits no usable tmp.
+    if let Some(dir) = tmp_dir {
+        super::set_tmp_env(&mut wrapped, dir);
+    }
 
     Ok(Prepared {
         command: wrapped,
         degradation: degradation(policy, proxy_port),
         proxy: None,
+        _private_tmp: None,
     })
 }
 
@@ -153,9 +162,16 @@ fn needs_wrap(policy: &SandboxPolicy) -> bool {
 }
 
 /// A profile is emitted for an fs or net axis to enforce. A fully relaxed fs +
-/// non-enforcing net needs no kernel confinement (on its own).
+/// non-enforcing net needs no kernel confinement (on its own) — UNLESS the tmp mode
+/// confines (`Private`/`Deny`), which is enforced by an SBPL fs deny on the shared tmp
+/// and so requires a wrap even with an otherwise-relaxed fs.
 fn needs_sandbox(policy: &SandboxPolicy) -> bool {
-    fs_confines(policy) || policy.net.enforce
+    fs_confines(policy) || tmp_confines(policy) || policy.net.enforce
+}
+
+/// Whether the tmp mode confines (anything other than the default `Shared`).
+fn tmp_confines(policy: &SandboxPolicy) -> bool {
+    policy.fs.tmp != crate::policy::TmpMode::Shared
 }
 
 /// Whether the env axis has a secret to protect cross-process. A passthrough
@@ -179,6 +195,7 @@ fn build_profile(
     spec: &CommandSpec,
     proxy_port: Option<u16>,
     ca_bundle: Option<&std::path::Path>,
+    tmp_dir: Option<&std::path::Path>,
 ) -> String {
     let mut out = String::with_capacity(MACOS_SEATBELT_BASE.len() + 2048);
     out.push_str(MACOS_SEATBELT_BASE);
@@ -187,6 +204,10 @@ fn build_profile(
     emit_env_read_closure(&mut out);
     emit_net(policy, proxy_port, &mut out);
     emit_fs(policy, spec, &mut out);
+    // Tmp-mode enforcement — emitted AFTER emit_fs so the shared-tmp deny and the
+    // private-dir grant win last-match-wins over any generous read/write. (No-op for
+    // `Shared`.)
+    emit_tmp(policy, tmp_dir, &mut out);
     // The child must READ the CA bundle to trust the minted leaves — grant it explicitly,
     // AFTER emit_fs so it survives even a deny-all fs floor (nub infra, not user config).
     if let Some(bundle) = ca_bundle {
@@ -197,6 +218,54 @@ fn build_profile(
     }
 
     out
+}
+
+/// The macOS shared-system-tmp roots hidden under `TmpMode::{Private,Deny}`: the per-user
+/// DARWIN confstr scratch (`$TMPDIR` = `/private/var/folders/<uid>/T`) and the world-shared
+/// `/private/tmp` (the `/tmp` firmlink target). Canonical (confstr dirs already resolved;
+/// `/private/tmp` is canonical). These are the only tmp surfaces a child normally reaches.
+fn shared_tmp_dirs() -> Vec<String> {
+    let mut out = confstr_scratch_dirs();
+    out.push("/private/tmp".to_string());
+    out
+}
+
+/// Emit the tmp-mode SBPL. `Shared` is a no-op (the confstr write grant that emit_fs
+/// already emitted stands). `Private`/`Deny` DENY read+write on every shared-tmp root
+/// (last-match-wins over a generous read); `Private` additionally grants the fresh
+/// per-run dir rw (`file*` subpath). Emitted after emit_fs so the shared-tmp deny is
+/// authoritative even under a `(subpath "/")` generous read.
+///
+/// PROVENANCE / tradeoff: the shared-tmp deny INCLUDES the confstr scratch that emit_fs
+/// otherwise write-grants for the Apple toolchain (`xcrun_db`) — so under Private/Deny a
+/// from-source native compile that needs that scratch will fail. This is the forced,
+/// documented consequence of hiding the shared tmp (you cannot both hide it and keep the
+/// grant into it); Private/Deny is opt-in, and a native-build user stays on Shared. See
+/// LIMITATIONS.md.
+fn emit_tmp(policy: &SandboxPolicy, tmp_dir: Option<&std::path::Path>, out: &mut String) {
+    use crate::policy::TmpMode;
+    if policy.fs.tmp == TmpMode::Shared {
+        return;
+    }
+    for dir in shared_tmp_dirs() {
+        let term = format!("(subpath \"{}\")", sbpl_escape(&dir));
+        out.push_str(&format!("(deny file-read* {term})\n"));
+        out.push_str(&format!("(deny file-write* {term})\n"));
+    }
+    if policy.fs.tmp == TmpMode::Private
+        && let Some(dir) = tmp_dir
+    {
+        // Canonicalize (the tempdir root can sit under a firmlink) so the grant matches
+        // the kernel's canonical view; grant read+write+map of the fresh dir.
+        let canon = canonicalize_including_nonexistent(dir);
+        let p = normalize_slashes(&canon.to_string_lossy());
+        if !p.is_empty() && p != "/" {
+            out.push_str(&format!(
+                "(allow file* (subpath \"{}\"))\n",
+                sbpl_escape(&p)
+            ));
+        }
+    }
 }
 
 /// The macOS env-read closure — the load-bearing security default that stops a
@@ -1282,7 +1351,7 @@ mod tests {
                 rule("**/.env", Effect::Deny, FsAccess::Read),
             ],
         );
-        let prof = build_profile(&p, &spec(), None, None);
+        let prof = build_profile(&p, &spec(), None, None, None);
         assert!(prof.contains("(allow file-read* (subpath \"/\"))"));
         // The `.env` deny is emitted AFTER the generous allow (last-match-wins).
         let allow_at = prof.find("(allow file-read* (subpath \"/\"))").unwrap();
@@ -1303,7 +1372,7 @@ mod tests {
             Effect::Deny,
             vec![rule("/proj", Effect::Allow, FsAccess::ReadWrite)],
         );
-        let prof = build_profile(&p, &spec(), None, None);
+        let prof = build_profile(&p, &spec(), None, None, None);
         assert!(!prof.contains("(allow file-read* (subpath \"/\"))\n"));
         assert!(prof.contains("(allow file-read* (subpath \"/proj\"))"));
     }
@@ -1320,7 +1389,7 @@ mod tests {
                 rule("/proj/secret", Effect::Deny, FsAccess::Read),
             ],
         );
-        let prof = build_profile(&p, &spec(), None, None);
+        let prof = build_profile(&p, &spec(), None, None, None);
         assert!(prof.contains("(allow file-write* (subpath \"/proj\"))"));
         assert!(prof.contains("(deny file-write* (subpath \"/proj/ro\"))"));
         assert!(prof.contains("(deny file-write* (subpath \"/proj/secret\"))"));
@@ -1339,7 +1408,7 @@ mod tests {
                 rule("/proj", Effect::Allow, FsAccess::ReadWrite),
             ],
         );
-        let prof = build_profile(&p, &spec(), None, None);
+        let prof = build_profile(&p, &spec(), None, None, None);
         let cap = prof.find("(deny file-write* (subpath \"/\"))").unwrap();
         let confstr = prof
             .find("(allow file-write* (subpath \"/private/var/folders/")
@@ -1363,7 +1432,7 @@ mod tests {
                 rule("**/.env", Effect::Deny, FsAccess::Read),
             ],
         );
-        let prof = build_profile(&p, &spec(), None, None);
+        let prof = build_profile(&p, &spec(), None, None, None);
         let confstr = prof
             .find("(allow file-write* (subpath \"/private/var/folders/")
             .expect("confstr temp grant present");
@@ -1392,7 +1461,7 @@ mod tests {
                 rule("/proj", Effect::Allow, FsAccess::ReadWrite),
             ],
         );
-        let prof = build_profile(&p, &spec(), None, None);
+        let prof = build_profile(&p, &spec(), None, None, None);
         assert!(!prof.contains("(deny file-write-unlink (subpath \"/\"))"));
         assert!(!prof.contains("(deny file-write-create (subpath \"/\"))"));
         // And the confstr grant is still the last word on the temp dir.
@@ -1412,7 +1481,7 @@ mod tests {
                 rule("/root/proj/.env", Effect::Deny, FsAccess::Read),
             ],
         );
-        let prof = build_profile(&p, &spec(), None, None);
+        let prof = build_profile(&p, &spec(), None, None, None);
         assert!(prof.contains("(deny file-write-unlink (literal \"/root/proj\"))"));
         assert!(prof.contains("(deny file-write-create (literal \"/root/proj\"))"));
         assert!(prof.contains("(deny file-write-unlink (literal \"/root\"))"));
@@ -1433,7 +1502,7 @@ mod tests {
                 rule("**/.env", Effect::Deny, FsAccess::Read),
             ],
         );
-        let prof = build_profile(&p, &spec(), None, None);
+        let prof = build_profile(&p, &spec(), None, None, None);
         assert!(!prof.contains("(deny file-write-unlink (literal \"/root\"))"));
     }
 
@@ -1451,7 +1520,7 @@ mod tests {
                 rule("/root/secrets/*.key", Effect::Deny, FsAccess::Read),
             ],
         );
-        let prof = build_profile(&p, &spec(), None, None);
+        let prof = build_profile(&p, &spec(), None, None, None);
         assert!(prof.contains("(deny file-write-unlink (literal \"/root/secrets\"))"));
         assert!(prof.contains("(deny file-write-create (literal \"/root/secrets\"))"));
         assert!(prof.contains("(deny file-write-unlink (literal \"/root\"))"));
@@ -1489,7 +1558,7 @@ mod tests {
                 rule("**/secrets/**", Effect::Deny, FsAccess::Read),
             ],
         );
-        let prof = build_profile(&p, &spec(), None, None);
+        let prof = build_profile(&p, &spec(), None, None, None);
         assert!(!prof.contains("(deny file-write-unlink (literal \"/root\"))"));
     }
 
@@ -1504,7 +1573,7 @@ mod tests {
                 rule("/root/proj/.env", Effect::Deny, FsAccess::Read),
             ],
         );
-        let prof = build_profile(&p, &spec(), None, None);
+        let prof = build_profile(&p, &spec(), None, None, None);
         assert!(!prof.contains("(deny file-write-unlink (literal \"/root/proj\"))"));
         assert!(!prof.contains("(deny file-write-unlink (literal \"/root\"))"));
     }
@@ -1517,7 +1586,7 @@ mod tests {
             Effect::Deny,
             vec![rule("/proj", Effect::Allow, FsAccess::ReadWrite)],
         );
-        let prof = build_profile(&p, &spec(), None, None);
+        let prof = build_profile(&p, &spec(), None, None, None);
         if let Some(cache) = confstr_dir(libc::_CS_DARWIN_USER_CACHE_DIR) {
             let cache =
                 normalize_slashes(&canonicalize_including_nonexistent(&cache).to_string_lossy());
@@ -1536,7 +1605,7 @@ mod tests {
             Effect::Deny,
             vec![rule("/private", Effect::Allow, FsAccess::ReadWrite)],
         );
-        let prof = build_profile(&p, &spec(), None, None);
+        let prof = build_profile(&p, &spec(), None, None, None);
         assert!(!prof.contains("(allow file-write* (subpath \"/private\"))"));
         assert!(is_dangerous_write_root(&MatchTerm::Subpath(
             "/private".to_string()
@@ -1574,7 +1643,7 @@ mod tests {
             default_effect: Effect::Deny,
             ..Default::default()
         };
-        let prof = build_profile(&p, &spec(), None, None);
+        let prof = build_profile(&p, &spec(), None, None, None);
         assert!(prof.contains("(allow file*)"));
     }
 
@@ -1590,7 +1659,7 @@ mod tests {
             default_effect: Effect::Deny,
             ..Default::default()
         };
-        let prof = build_profile(&p, &spec(), Some(54321), None);
+        let prof = build_profile(&p, &spec(), Some(54321), None, None);
         assert!(prof.contains("(allow network* (remote ip \"localhost:54321\"))"));
         assert!(
             !prof.contains("localhost:*"),
@@ -1610,7 +1679,7 @@ mod tests {
             default_effect: Effect::Deny,
             ..Default::default()
         };
-        let prof = build_profile(&p, &spec(), None, None);
+        let prof = build_profile(&p, &spec(), None, None, None);
         assert!(
             !prof.contains("(allow network*"),
             "coarse deny emits no egress carve"
@@ -1624,7 +1693,7 @@ mod tests {
             Effect::Deny,
             vec![rule("/proj", Effect::Allow, FsAccess::ReadWrite)],
         );
-        let prof = build_profile(&p, &spec(), None, None);
+        let prof = build_profile(&p, &spec(), None, None, None);
         assert!(prof.contains("(allow network*)\n"));
         assert!(prof.contains("com.apple.trustd"));
     }
@@ -1687,7 +1756,7 @@ mod tests {
             Effect::Deny,
             vec![rule("/proj", Effect::Allow, FsAccess::ReadWrite)],
         );
-        let prof = build_profile(&p, &spec(), None, None);
+        let prof = build_profile(&p, &spec(), None, None, None);
         assert!(prof.contains("(deny process-info*)\n"));
         assert!(prof.contains("(allow process-info* (target self))"));
         assert!(

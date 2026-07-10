@@ -4,7 +4,7 @@
 mod common;
 
 use nub_sandbox::compiler::{CompileError, compile};
-use nub_sandbox::policy::{Effect, EnvFormat, Inspection, NetTarget};
+use nub_sandbox::policy::{Effect, EnvFormat, Inspection, NetTarget, TmpMode};
 use serde_json::json;
 
 // ── wrapper trichotomy ────────────────────────────────────────────────────────
@@ -64,6 +64,36 @@ fn absent_granular_axis_floors_complete_statement() {
         p.env.withheld.contains(&"ANYTHING".to_string()),
         "the stripped ambient var is recorded withheld"
     );
+}
+
+#[test]
+fn tmp_mode_folds_from_the_tmp_key() {
+    let ctx = common::ctx(true, &[]);
+    // `<tmp>: "private"` / `"deny"` set the TmpMode and emit NO ordinary fs rule (the
+    // backend owns the per-run dir + shared-tmp denial). The rest of the fs axis folds
+    // normally alongside.
+    let p = compile(&json!({ "fs": { "./": "r", "<tmp>": "private" } }), &ctx).unwrap();
+    assert_eq!(p.fs.tmp, TmpMode::Private);
+    let p = compile(&json!({ "fs": { "<tmp>": "deny" } }), &ctx).unwrap();
+    assert_eq!(p.fs.tmp, TmpMode::Deny);
+    // The default and the access-value forms stay Shared (a `<tmp>: "rw"` is a plain
+    // shared-tmp path grant, not a mode).
+    assert_eq!(
+        compile(&json!({ "fs": ["./"] }), &ctx).unwrap().fs.tmp,
+        TmpMode::Shared
+    );
+    assert_eq!(
+        compile(&json!({ "fs": { "<tmp>": "rw" } }), &ctx)
+            .unwrap()
+            .fs
+            .tmp,
+        TmpMode::Shared
+    );
+    // The mode strings are rejected on any key other than the bare `<tmp>` root.
+    assert!(matches!(
+        compile(&json!({ "fs": { "./data": "private" } }), &ctx),
+        Err(CompileError::Shape { .. })
+    ));
 }
 
 #[test]

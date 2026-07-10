@@ -110,6 +110,7 @@ pub fn apply(
     proxy_port: Option<u16>,
     proxy_token: Option<&str>,
     ca_bundle: Option<&std::path::Path>,
+    tmp_dir: Option<&std::path::Path>,
 ) -> Result<Prepared, Degradation> {
     let mut command = base_command(&spec, policy);
     if let Some(port) = proxy_port {
@@ -119,20 +120,35 @@ pub fn apply(
     if let Some(bundle) = ca_bundle {
         super::set_ca_env(&mut command, bundle);
     }
+    // Private tmp: point the child's temp env at the fresh dir (best-effort — the
+    // Landlock allow-only carve that HIDES the shared tmp is not yet wired, so the axis
+    // is honestly reported below rather than silently under-enforced).
+    if let Some(dir) = tmp_dir {
+        super::set_tmp_env(&mut command, dir);
+    }
 
     let confine_fs = fs_confines(&policy.fs);
     let sandboxing = confine_fs || policy.net.enforce || policy.env.enforce;
-    if !sandboxing {
-        // Fully relaxed + no env scrub — nothing to enforce (mirrors macOS).
+    // A private/deny tmp is requested but this backend does not yet ENFORCE it (the
+    // Landlock allow-only carve to exclude the shared tmp is a follow-up). Report it lost
+    // (fail-safe honesty: never claim a private tmp we didn't isolate). Also forces the
+    // sandbox on so `tmp` alone still produces a reported policy.
+    let tmp_lost = super::tmp_lost_axis(policy);
+    if !sandboxing && tmp_lost.is_none() {
+        // Fully relaxed + no env scrub + shared tmp — nothing to enforce (mirrors macOS).
         return Ok(Prepared {
             command,
             degradation: Degradation::full(),
             proxy: None,
             connect_notify: None,
+            _private_tmp: None,
         });
     }
 
     let mut deg = Degradation::full();
+    if let Some(axis) = tmp_lost {
+        deg.lost.push(axis.to_string());
+    }
     let mut reason: Option<String> = None;
 
     // Resolve the net mode up front — it drives BOTH the seccomp filter and whether
@@ -262,7 +278,11 @@ pub fn apply(
         }
     }
 
-    deg.reason = reason;
+    // Prefer an existing net reason; else name the tmp gap so the warning isn't reasonless.
+    deg.reason = reason.or_else(|| {
+        tmp_lost
+            .map(|_| "private/deny tmp not yet enforced on Linux (shared tmp visible)".to_string())
+    });
 
     // ── the child-side hook: NNP → Landlock → seccomp ───────────────────────────
     // Precompute the seccomp BPF parent-side (pure byte assembly, no syscalls) so
@@ -340,6 +360,7 @@ pub fn apply(
         degradation: deg,
         proxy: None,
         connect_notify,
+        _private_tmp: None,
     })
 }
 

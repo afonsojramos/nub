@@ -243,6 +243,95 @@ fn exact_file_allow_grants_that_dotenv_but_siblings_stay_denied() {
     );
 }
 
+#[test]
+fn env_prefixed_directory_allow_does_not_expose_its_secret_contents() {
+    // THE SUB-DIRECTORY BYPASS regression guard (real kernel). A `.env*`-NAMED directory
+    // is a secret container (`.env.d/` per-target secret files); the `.env*/**` subtree
+    // deny covers its contents. Naming the DIRECTORY (`{ "./.env.d": "r" }`) must NOT
+    // re-expose those contents — an exact-file allow re-grants only a `.env*` LEAF, never
+    // a directory's denied children (the subtree deny is ordered LAST). On macOS a bare
+    // path becomes a `(subpath …)` grant covering descendants, so a naive re-emission of
+    // the directory's subtree twin WOULD leak here — this asserts the kernel denies it.
+    let f = fixture();
+    fs::create_dir_all(f.proj.join(".env.d")).unwrap();
+    fs::write(f.proj.join(".env.d/prod"), "DIRSECRET").unwrap();
+    let confine = serde_json::json!({ "fs": { "./": "r", "./.env.d": "r" } });
+    assert!(
+        !f.allowed(confine.clone(), CAT, &[&s(&f.proj.join(".env.d/prod"))]),
+        "a .env.d directory allow must NOT expose the secret file inside it"
+    );
+    // The project's own non-secret file is still readable — the deny is surgical.
+    assert!(
+        f.allowed(confine, CAT, &[&s(&f.proj.join("pub.txt"))]),
+        "neg-control: a normal project file stays readable"
+    );
+}
+
+// ── private tmp (TmpMode::Private) — shared system tmp hidden (real kernel) ─────
+
+#[test]
+fn private_tmp_hides_the_shared_system_tmp() {
+    // A file living in the SHARED system tmp (`/private/tmp`, the `/tmp` firmlink target).
+    let shared = PathBuf::from(format!(
+        "/private/tmp/nub-tmptest-{}.secret",
+        std::process::id()
+    ));
+    fs::write(&shared, "SHAREDTMPSECRET").unwrap();
+    struct Cleanup(PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+    let _c = Cleanup(shared.clone());
+    let f = fixture();
+
+    // A generous read that WOULD expose the shared-tmp file, plus `<tmp>: "private"`. The
+    // private-tmp deny is emitted after the generous read (last-match-wins), so the kernel
+    // must DENY the shared-tmp file even though `/` is otherwise readable.
+    let private = serde_json::json!({ "fs": { "/": "r", "<tmp>": "private" } });
+    assert!(
+        !f.allowed(private, CAT, &[&s(&shared)]),
+        "private tmp must hide the shared /private/tmp"
+    );
+    // NEG-CONTROL: the SAME generous read WITHOUT private tmp reads the shared-tmp file —
+    // proving the deny is the `<tmp>: private` confinement, not the fixture.
+    assert!(
+        f.allowed(
+            serde_json::json!({ "fs": { "/": "r" } }),
+            CAT,
+            &[&s(&shared)]
+        ),
+        "neg-control: a plain generous read reads the shared-tmp file"
+    );
+}
+
+#[test]
+fn deny_tmp_hides_the_shared_system_tmp_too() {
+    let shared = PathBuf::from(format!(
+        "/private/tmp/nub-tmptest-deny-{}.secret",
+        std::process::id()
+    ));
+    fs::write(&shared, "SHAREDTMPSECRET").unwrap();
+    struct Cleanup(PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+    let _c = Cleanup(shared.clone());
+    let f = fixture();
+    // `<tmp>: "deny"` also hides the shared system tmp (no private dir is minted).
+    assert!(
+        !f.allowed(
+            serde_json::json!({ "fs": { "/": "r", "<tmp>": "deny" } }),
+            CAT,
+            &[&s(&shared)]
+        ),
+        "deny tmp must hide the shared /private/tmp"
+    );
+}
+
 // ── new secret deny-set additions (A2): each denied under a generous read ──────
 
 #[test]

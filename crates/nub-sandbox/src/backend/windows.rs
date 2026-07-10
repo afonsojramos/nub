@@ -291,15 +291,20 @@ pub(crate) fn apply(
     // threaded (CA-env set on the plain path) so trust works IF a future change wires the
     // exemption; today `net-per-host`/`net-per-request` is reported instead.
     ca_bundle: Option<&std::path::Path>,
+    // Private-tmp fresh dir. CUT-1: enforcement (redirect TEMP/TMP + hide the shared tmp
+    // without breaking the OS-essential TEMP floor) is a follow-up decision, so the env is
+    // pointed best-effort and the axis is reported lost (never a silent under-enforce).
+    tmp_dir: Option<&std::path::Path>,
 ) -> Result<super::Prepared, super::Degradation> {
     use super::{Degradation, Prepared};
 
     let confine_fs = fs_confines(&policy.fs);
     let sandboxing = confine_fs || policy.net.enforce;
+    let tmp_lost = super::tmp_lost_axis(policy);
 
     // Nothing needs the AppContainer: only env-scrub (or nothing). Use the plain
     // command path — identical contract to the mac/linux relaxed case.
-    if !sandboxing {
+    if !sandboxing && tmp_lost.is_none() {
         let mut command = std::process::Command::new(&spec.program);
         command.args(&spec.args);
         if let Some(cwd) = &spec.cwd {
@@ -317,11 +322,15 @@ pub(crate) fn apply(
         if let Some(bundle) = ca_bundle {
             super::set_ca_env(&mut command, bundle);
         }
+        if let Some(dir) = tmp_dir {
+            super::set_tmp_env(&mut command, dir);
+        }
         return Ok(Prepared {
             command,
             degradation: Degradation::full(),
             proxy: None,
             launch: None,
+            _private_tmp: None,
         });
     }
 
@@ -406,6 +415,15 @@ pub(crate) fn apply(
     // OpenProcess(PROCESS_VM_READ), run 29043151805 — so NO `env-read-ascendant`
     // Degradation is emitted. Reporting it would falsely tell a frontend Windows is
     // degraded when it isn't. See the module doc.)
+    // Private/deny tmp is not yet enforced on Windows — hiding the shared tmp while keeping
+    // the OS-essential TEMP floor the child needs to start is a follow-up decision. Report
+    // the axis lost (fail-safe honesty) rather than silently run on the shared tmp.
+    if let Some(axis) = tmp_lost {
+        deg.lost.push(axis.to_string());
+        reason.get_or_insert_with(|| {
+            "private/deny tmp not yet enforced on Windows (shared tmp visible)".to_string()
+        });
+    }
     deg.reason = reason;
 
     let launch = WindowsLaunch {
@@ -450,6 +468,7 @@ pub(crate) fn apply(
         degradation: deg,
         proxy: None,
         launch: Some(launch),
+        _private_tmp: None,
     })
 }
 

@@ -53,17 +53,28 @@ const SECRET_READ_RELPATHS: &[&str] = &[
 /// (`.env`, `.env.local`, `.env.production`, `.envrc`, …), at any depth. These files
 /// hold the exact secrets the sandbox scrubs from the env, so reading them is denied
 /// by DEFAULT on every read-granting fs policy (not only via the `"..."` splice) —
-/// see [`env_deny_rules`] and the injection in `fold::fold_fs`. Denying reads is
-/// near-zero-breakage: legit code reads secrets via the injected process env, not by
-/// `fs.read()`-ing the file. Each basename form is denied as a LEAF (`**/.env*`) AND
-/// as a SUBTREE (`**/.env*/**`) so a `.env.d/`-style DIRECTORY of per-target secret
-/// files is covered too. The rootless twins mirror the leaf/subtree pair for a
-/// depth-0 match. Canonical candidates are absolute, so `**/.env*` is the form that
-/// actually bites; the rootless entries are kept for structural parity.
+/// see [`env_deny_leaf_rules`]/[`env_deny_subtree_rules`] and the injection in
+/// `fold::finalize_env_deny`. Denying reads is near-zero-breakage: legit code reads
+/// secrets via the injected process env, not by `fs.read()`-ing the file.
 ///
-/// SINGLE SOURCE OF TRUTH — re-exported as `crate::compiler::ENV_DENY_GLOBS` and
-/// consumed by `linux_grants::is_builtin_env_glob` (the generous-`**` system-dir
-/// seeding skips exactly these builtin denies), so the deny set never drifts.
+/// The set splits into a LEAF band ([`ENV_DENY_LEAF_GLOBS`] — `**/.env*`) and a
+/// SUBTREE band ([`ENV_DENY_SUBTREE_GLOBS`] — `**/.env*/**`, covering a `.env.d/`-style
+/// DIRECTORY of per-target secret files). The split is LOAD-BEARING for the exact-file
+/// override precedence: the exact-file allow re-emission is sandwiched BETWEEN the two
+/// (leaf-deny → exact-file allow → subtree-deny-LAST), so naming a `.env*` FILE grants
+/// that leaf while naming a `.env*`-prefixed DIRECTORY can never re-expose its denied
+/// CONTENTS (the subtree deny is unconditionally last). See `fold::finalize_env_deny`.
+/// The rootless twins (`.env*`) mirror each band for a depth-0 match; canonical
+/// candidates are absolute, so `**/…` is the form that bites.
+///
+/// SINGLE SOURCE OF TRUTH — the union is re-exported as `crate::compiler::ENV_DENY_GLOBS`
+/// and consumed by `linux_grants::is_builtin_env_glob` (the generous-`**` system-dir
+/// seeding skips exactly these builtin denies) + the write-view drop, so it never drifts.
+pub(crate) const ENV_DENY_LEAF_GLOBS: &[&str] = &["**/.env*", ".env*"];
+pub(crate) const ENV_DENY_SUBTREE_GLOBS: &[&str] = &["**/.env*/**", ".env*/**"];
+/// The union — the drift-guard the Linux grant derivation recognizes as builtin. Gated to
+/// its consumer's cfg (linux/test) so a macOS/Windows non-test build doesn't warn unused.
+#[cfg(any(target_os = "linux", test))]
 pub(crate) const ENV_DENY_GLOBS: &[&str] = &["**/.env*", "**/.env*/**", ".env*", ".env*/**"];
 
 /// Secret name-word tokens matched as a case-insensitive SUBSTRING anywhere in a
@@ -121,7 +132,7 @@ fn segments(s: &str) -> Vec<String> {
 
 /// Build the default secret-PATH read DENY entries (`~/.ssh`, `~/.aws`, wallets, …).
 /// These are what `"..."` splices into a read ruleset. Deny access is neutral (Read).
-/// The depth-independent `.env*` denies are handled SEPARATELY (`env_deny_rules`,
+/// The depth-independent `.env*` denies are handled SEPARATELY (the env-deny bands,
 /// injected unconditionally on every read-granting policy) so they get the exact-file
 /// override precedence — see `fold::fold_fs`.
 pub fn secret_read_denies(homes: &Homes) -> Vec<FsRule> {
@@ -135,12 +146,26 @@ pub fn secret_read_denies(homes: &Homes) -> Vec<FsRule> {
     out
 }
 
-/// The default `.env*` READ-deny entries ([`ENV_DENY_GLOBS`]). Depth-independent
-/// (matched by basename anywhere), so NOT anchored under any root — passed to the
-/// matcher verbatim. Injected as its own precedence band on every read-granting fs
-/// policy (`fold::fold_fs`), so a broad dir-allow can't re-expose a `.env*` file.
-pub(crate) fn env_deny_rules() -> Vec<FsRule> {
-    ENV_DENY_GLOBS.iter().map(|g| deny(g.to_string())).collect()
+/// The LEAF `.env*` READ-deny entries ([`ENV_DENY_LEAF_GLOBS`]) — the `.env*` file
+/// itself. Depth-independent (matched by basename anywhere), NOT anchored under any
+/// root. Injected BEFORE the exact-file allow band so a broad dir-allow can't expose a
+/// `.env*` file, yet an explicit exact-file allow can still re-grant that one leaf.
+pub(crate) fn env_deny_leaf_rules() -> Vec<FsRule> {
+    ENV_DENY_LEAF_GLOBS
+        .iter()
+        .map(|g| deny(g.to_string()))
+        .collect()
+}
+
+/// The SUBTREE `.env*` READ-deny entries ([`ENV_DENY_SUBTREE_GLOBS`]) — the CONTENTS of
+/// a `.env*`-named directory. Injected as the LAST band (after the exact-file allows),
+/// so it is unconditionally authoritative for a `.env.d/`-style secret directory: an
+/// exact-file allow re-grants only the leaf, never a directory's denied children.
+pub(crate) fn env_deny_subtree_rules() -> Vec<FsRule> {
+    ENV_DENY_SUBTREE_GLOBS
+        .iter()
+        .map(|g| deny(g.to_string()))
+        .collect()
 }
 
 /// The generous read base entry: allow everything, then the secret denies (added
@@ -661,22 +686,40 @@ mod tests {
             );
         }
         // `.env*` is NOT in the secret-PATH set — it is injected separately (with the
-        // exact-file override precedence) via `env_deny_rules`, so it must not appear here.
+        // exact-file override precedence) via the env-deny bands, so it must not appear here.
         assert!(
             globs.iter().all(|g| !g.contains(".env")),
-            "`.env*` must be handled by env_deny_rules, not the secret-path splice"
+            "`.env*` must be handled by the env-deny bands, not the secret-path splice"
         );
     }
 
     #[test]
-    fn env_deny_rules_cover_dotenv_basenames_as_deny() {
-        let rules = env_deny_rules();
-        let globs: Vec<&str> = rules.iter().map(|r| r.matcher.as_str()).collect();
+    fn env_deny_bands_split_leaf_and_subtree_as_deny() {
+        let leaf = env_deny_leaf_rules();
+        let subtree = env_deny_subtree_rules();
         // Every rule is a Deny with the canonical inert access.
-        assert!(rules.iter().all(|r| r.effect == Effect::Deny));
-        // The leaf + subtree, depth-independent (`**/`) and rootless forms.
-        for g in ["**/.env*", "**/.env*/**", ".env*", ".env*/**"] {
-            assert!(globs.contains(&g), "env_deny_rules missing {g}");
+        assert!(
+            leaf.iter()
+                .chain(&subtree)
+                .all(|r| r.effect == Effect::Deny)
+        );
+        let leaf_globs: Vec<&str> = leaf.iter().map(|r| r.matcher.as_str()).collect();
+        let subtree_globs: Vec<&str> = subtree.iter().map(|r| r.matcher.as_str()).collect();
+        // The LEAF band denies the `.env*` file itself; the SUBTREE band denies a
+        // `.env*/`-directory's contents. The split is what lets an exact-file allow sit
+        // between them (leaf-deny → allow → subtree-deny-last).
+        for g in ["**/.env*", ".env*"] {
+            assert!(leaf_globs.contains(&g), "leaf band missing {g}");
+            assert!(!leaf_globs.contains(&format!("{g}/**").as_str()));
         }
+        for g in ["**/.env*/**", ".env*/**"] {
+            assert!(subtree_globs.contains(&g), "subtree band missing {g}");
+        }
+        // The union still equals the drift-guarded ENV_DENY_GLOBS (is_builtin recognition).
+        let mut union: Vec<&str> = leaf_globs.iter().chain(&subtree_globs).copied().collect();
+        union.sort_unstable();
+        let mut all = ENV_DENY_GLOBS.to_vec();
+        all.sort_unstable();
+        assert_eq!(union, all, "leaf+subtree must equal ENV_DENY_GLOBS");
     }
 }

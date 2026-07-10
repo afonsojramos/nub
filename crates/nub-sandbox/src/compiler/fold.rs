@@ -11,7 +11,7 @@ use super::{CompileCtx, CompileError};
 use crate::matcher::path::expand_symbolic;
 use crate::policy::{
     CanonGlob, CredentialBroker, Effect, EnvFormat, EnvPolicy, EnvRule, FsAccess, FsPolicy, FsRule,
-    FsRuleSet, HeaderInject, NetPolicy, NetRule, NetTarget, Secret,
+    FsRuleSet, HeaderInject, NetPolicy, NetRule, NetTarget, Secret, TmpMode,
 };
 use globset::{GlobBuilder, GlobMatcher};
 use serde_json::Value;
@@ -48,6 +48,12 @@ pub fn fold_fs(
         entries: Vec::new(),
         default_effect: Effect::Deny,
     };
+    // Throwaway-tmp mode (default Shared). A `{ "<tmp>": "private" | "deny" }` object
+    // entry sets it; the backend owns the private-dir creation + shared-tmp denial at
+    // spawn time (the per-run dir path is not knowable at compile time), so those two
+    // values set the MODE and emit no ordinary fs rule. `<tmp>: "r"|"rw"|true` stays
+    // Shared and folds as a normal path grant.
+    let mut tmp = TmpMode::Shared;
     match value {
         // `true` fully relaxes the axis; `false` fully denies it.
         Value::Bool(true) => set.default_effect = Effect::Allow,
@@ -61,7 +67,12 @@ pub fn fold_fs(
         }
         Value::Object(map) => {
             for (key, val) in map {
-                fold_fs_object_entry(key, val, ctx, &child(path, key), &mut set.entries)?;
+                let p = child(path, key);
+                if let Some(mode) = parse_tmp_mode(key, val, &p)? {
+                    tmp = mode;
+                    continue;
+                }
+                fold_fs_object_entry(key, val, ctx, &p, &mut set.entries)?;
             }
         }
         _ => {
@@ -72,24 +83,53 @@ pub fn fold_fs(
         }
     }
     finalize_env_deny(&mut set);
-    Ok(FsPolicy {
-        rules: set,
-        tmp: Default::default(),
-    })
+    Ok(FsPolicy { rules: set, tmp })
+}
+
+/// Parse a `<tmp>` object entry's tmp-MODE value. Returns `Some(mode)` only for the
+/// two mode-setting strings on the `<tmp>` key — `"private"` (a fresh per-run temp dir,
+/// shared system tmp hidden) and `"deny"` (no tmp) — which the backend enforces from
+/// the mode, so they emit no path rule. Returns `None` for every other key, and for the
+/// `<tmp>` access values (`"r"`/`"rw"`/`true`/`false`) which fold as an ordinary path
+/// grant on the shared tmp (`TmpMode::Shared`). The mode strings are REJECTED on any key
+/// other than the bare `<tmp>` root (they are not fs access values), and `<tmp>` cannot
+/// take BOTH a mode and be a path grant, so the caller treats a `Some` as consumed.
+fn parse_tmp_mode(key: &str, val: &Value, path: &str) -> Result<Option<TmpMode>, CompileError> {
+    let mode = match val {
+        Value::String(s) if s == "private" => TmpMode::Private,
+        Value::String(s) if s == "deny" => TmpMode::Deny,
+        _ => return Ok(None),
+    };
+    if key.trim() != "<tmp>" {
+        return Err(CompileError::shape(
+            path,
+            "`\"private\"`/`\"deny\"` are tmp-mode values valid ONLY on the `<tmp>` key (e.g. `{ \"<tmp>\": \"private\" }`) — a path takes \"r\"/\"rw\"/true/false",
+        ));
+    }
+    Ok(Some(mode))
 }
 
 /// Inject the default `.env*` READ-deny at a precedence a broad dir/glob allow can NOT
 /// override but an EXPLICIT exact-file allow can. `.env*` files hold the exact secrets
 /// the sandbox scrubs, so reading them is denied by default on any read-granting fs
 /// policy — including the OBJECT form, which never spliced the `"..."` secret set. The
-/// rule composes with the last-match-wins fs algebra as three ordered bands (backends
+/// rule composes with the last-match-wins fs algebra as FOUR ordered bands (backends
 /// stay pure IR replicators — every one evaluates last-match-wins over these entries):
-///   band 1 — the folded user + default entries, unchanged;
-///   band 2 — the `.env*` default deny, appended so it beats every band-1 broad/glob
-///            allow (the `["...", "./"]` footgun where a trailing dir-allow re-exposed
-///            `<proj>/.env` is closed here);
-///   band 3 — the user's EXACT-FILE `.env*` allows re-emitted so they beat band 2
-///            (informed consent: `{ "./.env.production": "r" }` grants that one file).
+///   band 1  — the folded user + default entries, unchanged;
+///   band 2a — the `.env*` LEAF deny, appended so it beats every band-1 broad/glob
+///             allow (the `["...", "./"]` footgun where a trailing dir-allow re-exposed
+///             `<proj>/.env` is closed here);
+///   band 3  — the user's EXACT-FILE `.env*` allows re-emitted so they beat band 2a
+///             (informed consent: `{ "./.env.production": "r" }` grants that one file);
+///   band 2c — the `.env*` SUBTREE deny (`**/.env*/**`), appended LAST so it is
+///             unconditionally authoritative for a `.env*`-NAMED DIRECTORY's CONTENTS.
+/// Why the subtree deny goes AFTER the exact-file allows (the sub-directory-bypass fix):
+/// a bare-path allow expands to a leaf grant + a `/**` subtree twin, and a subtree grant
+/// is a SUBPATH on macOS / a ReadSubtree on Linux — so re-emitting the twin of a
+/// `.env*`-prefixed DIRECTORY allow (`{ "./.env.d": "r" }`) would re-expose every secret
+/// under `.env.d/` if the subtree deny preceded it. Ordering the subtree deny last means
+/// an exact-file allow can only re-grant the `.env*` LEAF (a file), never a directory's
+/// denied children — closing the bypass identically on every backend (pure last-match).
 /// A band-1 entry the user later DENIES for that exact path is NOT re-emitted (its
 /// band-1 verdict is Deny), so an explicit `!./.env` stays denied.
 ///
@@ -103,11 +143,12 @@ fn finalize_env_deny(set: &mut FsRuleSet) {
     if fully_relaxed || !grants_read {
         return;
     }
-    // Compute band 3 from band 1 BEFORE appending band 2, so the survivor test reflects
-    // the user's own last-match verdict (not the deny we are about to add).
+    // Compute band 3 from band 1 BEFORE appending any deny, so the survivor test reflects
+    // the user's own last-match verdict (not the denies we are about to add).
     let band3 = exact_env_allows_surviving(set);
-    set.entries.extend(defaults::env_deny_rules());
-    set.entries.extend(band3);
+    set.entries.extend(defaults::env_deny_leaf_rules()); // band 2a: leaf deny
+    set.entries.extend(band3); // band 3: exact-file allows
+    set.entries.extend(defaults::env_deny_subtree_rules()); // band 2c: subtree deny (LAST)
 }
 
 /// The band-3 survivors: each EXACT-FILE `.env*` allow entry whose band-1 (user)
