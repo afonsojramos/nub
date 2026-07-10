@@ -716,3 +716,59 @@ fn net_true_disables_enforcement_false_denies_all() {
     let denied = compile(&json!({ "net": false }), &ctx).unwrap();
     assert!(denied.net.enforce && denied.net.rules.is_empty());
 }
+
+#[test]
+fn net_mid_host_glob_is_a_shape_error_at_its_path() {
+    // D11: a `*` outside the leading `*.` position is ambiguous — it would match
+    // nothing at runtime, so it fails loud at compile time.
+    let ctx = common::ctx(true, &[]);
+    for (cfg, want_path) in [
+        (json!({ "net": ["api.*.com"] }), "net.0"),
+        (json!({ "net": ["ok.example", "foo*bar.com"] }), "net.1"),
+        (json!({ "net": { "api.*.com": true } }), "net.api.*.com"),
+        // Degenerate empty-apex wildcard: must fail loud, NOT strip down to a
+        // bare `*` allow-all (fail-open in a security primitive).
+        (json!({ "net": ["*."] }), "net.0"),
+        (json!({ "net": ["*.."] }), "net.0"),
+    ] {
+        match compile(&cfg, &ctx).unwrap_err() {
+            CompileError::Shape { path, message } => {
+                assert_eq!(path, want_path, "error points at the offending entry");
+                assert!(
+                    message.contains("host pattern"),
+                    "names the problem: {message}"
+                );
+            }
+            other => panic!("expected Shape for {cfg}, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn net_leading_wildcard_and_bare_star_still_accepted() {
+    // D11 must not over-reject: the two valid wildcard forms compile.
+    let ctx = common::ctx(true, &[]);
+    let p = compile(&json!({ "net": ["*.example.com", "*"] }), &ctx).unwrap();
+    let m = nub_sandbox::matcher::HostMatcher::new(&p.net);
+    assert!(m.admits("a.b.example.com"));
+    assert!(m.admits("anything.at.all"));
+}
+
+#[test]
+fn net_trailing_dot_is_stripped_so_it_cannot_dodge_a_deny() {
+    // D12: `evil.com.` in config normalizes to `evil.com`, and a connect to the
+    // dotted form matches a dotless rule.
+    let ctx = common::ctx(true, &[]);
+    let p = compile(&json!({ "net": ["ok.example.", "!evil.com."] }), &ctx).unwrap();
+    match &p.net.rules[0].target {
+        nub_sandbox::policy::NetTarget::Host(h) => {
+            assert_eq!(h, "ok.example", "dot stripped in IR")
+        }
+        other => panic!("expected Host, got {other:?}"),
+    }
+    let m = nub_sandbox::matcher::HostMatcher::new(&p.net);
+    assert!(m.admits("ok.example."));
+    assert!(m.admits("ok.example"));
+    assert!(!m.admits("evil.com."), "trailing-dot deny still bites");
+    assert!(!m.admits("evil.com"));
+}

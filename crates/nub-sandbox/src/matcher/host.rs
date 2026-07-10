@@ -49,10 +49,12 @@ impl<'a> HostMatcher<'a> {
 /// Match a host pattern against a concrete host. Two forms:
 ///   `*.example.com` → apex + any-depth subdomain (case-insensitive);
 ///   a literal `example.com` → exact (case-insensitive).
-/// A bare `*` matches any host.
+/// A bare `*` matches any host. A single FQDN trailing dot on either side
+/// (`example.com.`) is stripped first — the same host per DNS (D12), so a
+/// connect to `example.com.` cannot dodge a rule written as `example.com`.
 pub fn host_glob_matches(pattern: &str, host: &str) -> bool {
-    let pat = pattern.to_ascii_lowercase();
-    let host = host.to_ascii_lowercase();
+    let pat = strip_trailing_dot(pattern).to_ascii_lowercase();
+    let host = strip_trailing_dot(host).to_ascii_lowercase();
     if pat == "*" {
         return true;
     }
@@ -61,4 +63,29 @@ pub fn host_glob_matches(pattern: &str, host: &str) -> bool {
         return host == suffix || host.ends_with(&format!(".{suffix}"));
     }
     pat == host
+}
+
+/// Strip a single FQDN trailing dot (D12). Exactly one — `example.com..` keeps
+/// the inner dot so a genuinely malformed pattern still fails to match.
+pub fn strip_trailing_dot(host: &str) -> &str {
+    host.strip_suffix('.').unwrap_or(host)
+}
+
+/// Whether a host pattern is well-formed per the supported grammar: a bare `*`,
+/// a leading-subdomain wildcard `*.suffix` (the ONLY wildcard position), or a
+/// literal host with no wildcard. A `*` anywhere else (`api.*.com`, `foo*bar`)
+/// is ambiguous and rejected at compile time (D11) rather than silently matching
+/// nothing — the matcher only ever honors the two forms above, so a mid-host
+/// glob is a typo the author must see.
+pub fn host_pattern_is_valid(pattern: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+    if let Some(rest) = pattern.strip_prefix("*.") {
+        // The wildcard label must be followed by a real suffix: non-empty, not
+        // itself dot-led (`*.`/`*..` are a degenerate empty apex that would strip
+        // down to a bare `*` allow-all — a fail-OPEN), and no further wildcard.
+        return !rest.is_empty() && !rest.starts_with('.') && !rest.contains('*');
+    }
+    !pattern.contains('*')
 }

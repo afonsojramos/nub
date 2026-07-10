@@ -3,7 +3,7 @@
 
 mod common;
 
-use nub_sandbox::matcher::host::host_glob_matches;
+use nub_sandbox::matcher::host::{host_glob_matches, host_pattern_is_valid};
 use nub_sandbox::matcher::path::{canonicalize_including_nonexistent, expand_symbolic};
 use nub_sandbox::matcher::{HostMatcher, PathMatcher};
 use nub_sandbox::policy::{Effect, FsAccess, NetPolicy, NetRule, NetTarget};
@@ -152,6 +152,47 @@ fn host_wildcard_matches_apex_and_any_depth() {
 fn host_literal_is_exact_case_insensitive() {
     assert!(host_glob_matches("Example.COM", "example.com"));
     assert!(!host_glob_matches("example.com", "api.example.com"));
+}
+
+#[test]
+fn host_trailing_dot_normalized_on_both_sides() {
+    // D12: a FQDN trailing dot is the same host per DNS — it cannot dodge a rule,
+    // and a rule written with one still matches the dotless connect target.
+    assert!(
+        host_glob_matches("evil.com", "evil.com."),
+        "connect-side dot"
+    );
+    assert!(
+        host_glob_matches("evil.com.", "evil.com"),
+        "pattern-side dot"
+    );
+    assert!(host_glob_matches("evil.com.", "evil.com."), "both");
+    assert!(
+        host_glob_matches("*.example.com", "api.example.com."),
+        "wildcard vs dotted host"
+    );
+    // Exactly one dot stripped: a doubled trailing dot stays malformed.
+    assert!(!host_glob_matches("evil.com", "evil.com.."));
+}
+
+#[test]
+fn host_pattern_grammar_accepts_only_bare_and_leading_wildcard() {
+    // D11: valid forms.
+    assert!(host_pattern_is_valid("*"));
+    assert!(host_pattern_is_valid("*.example.com"));
+    assert!(host_pattern_is_valid("example.com"));
+    assert!(host_pattern_is_valid("api.internal.example.com"));
+    // Mid-host / malformed wildcards are rejected.
+    assert!(!host_pattern_is_valid("api.*.com"));
+    assert!(!host_pattern_is_valid("foo*bar.com"));
+    assert!(!host_pattern_is_valid("*foo.com"));
+    assert!(!host_pattern_is_valid("*.foo*bar.com"));
+    assert!(!host_pattern_is_valid("**.com"));
+    assert!(!host_pattern_is_valid("example.*"));
+    // Degenerate empty-apex wildcards: rejected so they can't strip down to a
+    // bare `*` allow-all (fail loud, never fail open).
+    assert!(!host_pattern_is_valid("*."));
+    assert!(!host_pattern_is_valid("*.."));
 }
 
 #[test]
