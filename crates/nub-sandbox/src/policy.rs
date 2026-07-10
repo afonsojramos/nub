@@ -239,11 +239,17 @@ pub struct HeaderInject {
 
 /// A resolved secret held in nub's PARENT process only. Serialization drops it (the
 /// containing field is `#[serde(skip)]`) and `Debug` redacts it, so a policy dump, a
-/// trace line, or a panic can never spill the credential.
+/// trace line, or a panic can never spill the credential. The inner field is PRIVATE:
+/// [`Secret::expose`] is the sole read path (grep it to audit every reader), so no
+/// `.0` access can slip past the redaction.
 #[derive(Clone, Default, PartialEq, Eq)]
-pub struct Secret(pub String);
+pub struct Secret(String);
 
 impl Secret {
+    /// Wrap a resolved secret value.
+    pub fn new(value: String) -> Self {
+        Secret(value)
+    }
     /// Borrow the raw value. The ONE call site that needs it is the proxy's egress
     /// header injection; grep for `.expose()` to audit every reader.
     pub fn expose(&self) -> &str {

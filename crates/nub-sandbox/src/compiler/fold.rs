@@ -307,6 +307,15 @@ fn fold_net_rule_object(
             ));
         }
     }
+    // Credential brokering is a TRUSTED-ONLY capability. An untrusted grant
+    // (`dependenciesMeta`) must not be able to force TLS termination of an allowed host
+    // or inject ANY header (a literal value would otherwise slip past the `$(…)` gate).
+    if !ctx.trusted {
+        return Err(CompileError::shape(
+            path,
+            "credential brokering (`inject`) is a trusted-only capability — it is not permitted in an untrusted (dependenciesMeta) grant",
+        ));
+    }
     let inject = rule.get("inject").ok_or_else(|| {
         CompileError::shape(
             path,
@@ -314,8 +323,8 @@ fn fold_net_rule_object(
         )
     })?;
     // Reject an unbrokerable host BEFORE it becomes an allow rule: a CIDR can't carry
-    // HTTP header injection, and a bare `*` would hand the credential to EVERY allowed
-    // host (a laundering footgun — SRT pins injectHosts to named domains).
+    // HTTP header injection, and a wildcard would hand the credential to any matching
+    // subdomain (including an attacker-owned one — laundering).
     validate_broker_host(host, path)?;
     let injects = parse_inject(inject, ctx, &child(path, "inject"))?;
     push_net_rule(host, Effect::Allow, path, &mut policy.rules)?;
@@ -326,25 +335,28 @@ fn fold_net_rule_object(
     Ok(())
 }
 
-/// A broker host must resolve to a concrete/bounded name the credential is scoped to —
-/// never a CIDR (no HTTP layer) and never a bare `*` (would broker into any allowed host).
+/// A broker host must be a single LITERAL hostname. No CIDR (no HTTP layer) and — the
+/// security-critical rule — no wildcard: a `*.example.com` broker mints + injects to the
+/// CLIENT-SUPPLIED SNI, so a child connecting to an attacker-owned `evil.example.com`
+/// (with a valid real cert) would receive the `example.com` credential (laundering). A
+/// user needing several hosts lists each one explicitly.
 fn validate_broker_host(pattern: &str, path: &str) -> Result<(), CompileError> {
     if pattern.contains('/') {
         return Err(CompileError::shape(
             path,
-            "credential brokering targets a host, not a CIDR — name a hostname (or a bounded `*.suffix`)",
+            "credential brokering targets a host, not a CIDR — name a literal hostname",
         ));
     }
-    if pattern == "*" {
+    if pattern.contains('*') {
         return Err(CompileError::shape(
             path,
-            "credential brokering into a bare `*` (every allowed host) is refused — a credential must be scoped to named host(s), never the whole allowlist",
+            "credential brokering requires a LITERAL host — a wildcard would hand the credential to any matching subdomain (including an attacker's); list each host explicitly",
         ));
     }
     if !crate::matcher::host::host_pattern_is_valid(pattern) {
         return Err(CompileError::shape(
             path,
-            &format!("`{pattern}` is not a valid host pattern for a credential broker"),
+            &format!("`{pattern}` is not a valid host for a credential broker"),
         ));
     }
     Ok(())
@@ -395,7 +407,7 @@ fn parse_inject(
         }
         out.push(HeaderInject {
             header: header.clone(),
-            value: Secret(resolved),
+            value: Secret::new(resolved),
         });
     }
     Ok(out)

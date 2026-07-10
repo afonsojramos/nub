@@ -223,11 +223,19 @@ fn handle_conn(
     // (and every host under a connection-tier policy) stays a blind splice. Any error on
     // the terminate path is a fail-closed drop — never a splice fallback that would send
     // the request un-injected or expose the secret.
-    if let (Some(engine), Some(host)) = (mitm.as_ref(), terminate_host.as_deref())
-        && engine.should_terminate(host)
-    {
-        let _ = mitm::terminate(engine, stream, prelude, host, req.port);
-        return Ok(());
+    if let Some(engine) = mitm.as_ref() {
+        match terminate_host.as_deref() {
+            Some(host) if engine.should_terminate(host) => {
+                let _ = mitm::terminate(engine, stream, prelude, host, req.port);
+                return Ok(());
+            }
+            // `proxy: "terminate"` but this connection carries no host to terminate (no
+            // SNI / IP literal) — FAIL CLOSED rather than blind-splice past the
+            // terminate-everything guarantee.
+            None if engine.terminates_everything() => return Ok(()),
+            // A connection-tier host, or a broker that didn't match this SNI → splice.
+            _ => {}
+        }
     }
 
     // Connection tier — connect upstream, replay the buffered prelude, blind-splice.

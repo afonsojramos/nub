@@ -36,8 +36,10 @@ use std::sync::Arc;
 /// dribbling or hostile → fail closed.
 const MAX_HEAD: usize = 64 * 1024;
 /// Cap on a buffered request body nub will forward. Bodies are read whole to re-frame
-/// with an accurate Content-Length; past this, fail closed rather than buffer unbounded.
-const MAX_BODY: usize = 32 * 1024 * 1024;
+/// with an accurate Content-Length, so the cap bounds PARENT memory across many child
+/// connections — kept small (credential brokering targets API requests, not uploads);
+/// a larger body fails closed. (Streaming the forward is the follow-up that lifts this.)
+const MAX_BODY: usize = 1024 * 1024;
 
 /// The MITM engine: the ephemeral CA, a reusable upstream-verifying client config, and
 /// the compiled broker set. Built ONLY when the tier is TlsInspect. `Arc`-shared across
@@ -93,6 +95,13 @@ impl MitmEngine {
     /// Whether `host` should be TLS-terminated (a broker demands it, or terminate-all).
     pub(super) fn should_terminate(&self, host: &str) -> bool {
         self.terminate_all || self.broker_for(host).is_some()
+    }
+
+    /// `proxy: "terminate"` — every allowed TLS host must be terminated. Used to FAIL
+    /// CLOSED on a connection that carries no host to terminate (no SNI / IP literal),
+    /// which would otherwise escape termination via a blind splice.
+    pub(super) fn terminates_everything(&self) -> bool {
+        self.terminate_all
     }
 
     fn broker_for(&self, host: &str) -> Option<&[HeaderInject]> {
@@ -421,7 +430,7 @@ pub(super) mod http1 {
         fn inject(header: &str, value: &str) -> HeaderInject {
             HeaderInject {
                 header: header.to_string(),
-                value: Secret(value.to_string()),
+                value: Secret::new(value.to_string()),
             }
         }
 

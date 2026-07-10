@@ -4,7 +4,7 @@
 mod common;
 
 use nub_sandbox::compiler::{CompileError, compile};
-use nub_sandbox::policy::{Effect, EnvFormat};
+use nub_sandbox::policy::{Effect, EnvFormat, Inspection, NetTarget};
 use serde_json::json;
 
 // ── wrapper trichotomy ────────────────────────────────────────────────────────
@@ -902,4 +902,114 @@ fn net_trailing_dot_is_stripped_so_it_cannot_dodge_a_deny() {
     assert!(m.admits("ok.example"));
     assert!(!m.admits("evil.com."), "trailing-dot deny still bites");
     assert!(!m.admits("evil.com"));
+}
+
+// ── credential brokering (the capability-derived MITM tier) ───────────────────
+
+#[test]
+fn broker_compiles_to_an_allow_rule_plus_a_broker_and_engages_tls_inspect() {
+    let ctx = common::ctx(true, &[]);
+    let p = compile(
+        &json!({ "net": { "api.example.com": { "inject": { "Authorization": "Bearer literal-secret" } } } }),
+        &ctx,
+    )
+    .unwrap();
+    // The brokered host is implicitly ALLOWED.
+    assert!(
+        p.net.rules.iter().any(
+            |r| matches!(&r.target, NetTarget::Host(h) if h == "api.example.com")
+                && matches!(r.effect, Effect::Allow)
+        ),
+        "brokered host must be allowed"
+    );
+    // The broker carries the resolved secret, readable only via `.expose()`.
+    assert_eq!(p.net.brokers.len(), 1);
+    assert_eq!(p.net.brokers[0].host, "api.example.com");
+    assert_eq!(p.net.brokers[0].injects[0].header, "Authorization");
+    assert_eq!(
+        p.net.brokers[0].injects[0].value.expose(),
+        "Bearer literal-secret"
+    );
+    // The tier auto-derives to TlsInspect (a request-level capability is present).
+    assert!(matches!(p.net.inspection, Inspection::TlsInspect));
+}
+
+#[test]
+fn host_only_policy_stays_connection_tier_no_mitm() {
+    let ctx = common::ctx(true, &[]);
+    let p = compile(&json!({ "net": { "api.example.com": true } }), &ctx).unwrap();
+    assert!(p.net.brokers.is_empty());
+    assert!(
+        matches!(p.net.inspection, Inspection::Connection),
+        "host-only config must not engage TLS termination"
+    );
+}
+
+#[test]
+fn wildcard_broker_is_rejected_as_a_laundering_guard() {
+    // A wildcard broker would inject the credential to any matching subdomain — including
+    // an attacker-owned one. Only a literal host is allowed.
+    let ctx = common::ctx(true, &[]);
+    for host in ["*.example.com", "*"] {
+        let err = compile(
+            &json!({ "net": { host: { "inject": { "Authorization": "Bearer x" } } } }),
+            &ctx,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, CompileError::Shape { .. }),
+            "wildcard broker `{host}` must be rejected"
+        );
+    }
+}
+
+#[test]
+fn inject_is_a_trusted_only_capability() {
+    // An untrusted (dependenciesMeta) grant must not be able to broker — even a literal.
+    let ctx = common::ctx(false, &[]);
+    let err = compile(
+        &json!({ "net": { "api.example.com": { "inject": { "Authorization": "Bearer x" } } } }),
+        &ctx,
+    )
+    .unwrap_err();
+    assert!(matches!(err, CompileError::Shape { .. }));
+}
+
+#[test]
+fn passthrough_with_an_inject_rule_is_a_compile_error() {
+    // The `proxy: "passthrough"` block-MITM posture contradicts a rule that requires
+    // termination — a hard error, never a silent drop.
+    let ctx = common::ctx(true, &[]);
+    let err = compile(
+        &json!({
+            "net": { "api.example.com": { "inject": { "Authorization": "Bearer x" } } },
+            "proxy": "passthrough"
+        }),
+        &ctx,
+    )
+    .unwrap_err();
+    assert!(matches!(err, CompileError::Shape { .. }));
+}
+
+#[test]
+fn terminate_mode_engages_tls_inspect_without_a_broker() {
+    let ctx = common::ctx(true, &[]);
+    let p = compile(
+        &json!({ "net": { "api.example.com": true }, "proxy": "terminate" }),
+        &ctx,
+    )
+    .unwrap();
+    assert!(matches!(p.net.inspection, Inspection::TlsInspect));
+    assert!(p.net.brokers.is_empty());
+}
+
+#[test]
+fn crlf_in_an_inject_value_is_rejected() {
+    let ctx = common::ctx(true, &[]);
+    let err = compile(
+        &json!({ "net": { "api.example.com": { "inject": { "Authorization": "Bearer x\r\nX-Evil: 1" } } } }),
+        &ctx,
+    )
+    .unwrap_err();
+    assert!(matches!(err, CompileError::Shape { .. }));
 }
