@@ -107,7 +107,7 @@ fn parse_tmp_mode(key: &str, val: &Value, path: &str) -> Result<Option<TmpMode>,
         _ => {
             return Err(CompileError::shape(
                 path,
-                "`<tmp>` takes an fs permission: \"rw\"/`true` (a fresh per-run private tmp dir, shared system tmp hidden) or `false` (no tmp) — for the shared system tmp, grant the literal path `/tmp`",
+                "`<tmp>` takes an fs permission: \"r\"/\"rw\"/`true` (a fresh per-run private tmp dir, shared system tmp hidden) or `false` (no tmp) — for the shared system tmp, grant the literal path `/tmp`",
             ));
         }
     };
