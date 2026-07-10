@@ -116,6 +116,24 @@ which this phase does not wire.
 - **Where fixed:** wire the loopback exemption so the child can reach the proxy —
   build-jail thread or a later hardening slot.
 
+### MITM tier: credential-brokering residuals (INFO, doc-only)
+
+The capability-derived MITM tier (see
+[`EMBEDDER.md`](EMBEDDER.md#net-axis--proxy-and-the-mitm-tier)) injects a secret into
+an allowed upstream request server-side, so the sandboxed child never holds it. Two
+residuals:
+
+- **Reflection-endpoint residual.** If the brokered upstream reflects request headers
+  back into its response body — a debug/echo endpoint, or a compromised/malicious
+  upstream — the injected secret comes back in a response the child CAN read. This is
+  inherent to header-injection credential brokering, not a nub-specific bug: `op run`,
+  corporate auth proxies, and every inject-at-the-proxy design carry the same residual.
+  Brokering protects the secret from the child's environment and its outbound view, not
+  from a reflecting upstream — only broker to upstreams trusted not to reflect
+  credentials back.
+- **Port-agnostic broker scoping.** A literal broker host matches regardless of port —
+  brokering configured for `api.example.com` applies to that host on any port.
+
 ## Launcher-handoff items (engine correct; launcher must complete the guarantee)
 
 ### macOS ascendant-env via `KERN_PROCARGS2` — CLOSED in-engine
