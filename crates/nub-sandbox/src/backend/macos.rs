@@ -346,9 +346,10 @@ fn emit_move_block(policy: &SandboxPolicy, out: &mut String) {
     //     `/proj/secrets`, so `mv secrets secretz` relocates the leaves past the deny. Pin
     //     the deny's literal directory PREFIX itself and up. Probe = `<prefix>/*`, so the
     //     walk pins `<prefix>` (not just its parent) upward.
-    // A deny with no absolute literal directory prefix under a grant root (`**/secrets/**` —
-    // the matched dir name floats, no fixed anchor) yields nothing to pin; documented as a
-    // residual in LIMITATIONS.md. The `(literal P)` denies are EXACT-path — they block
+    // A deny with no absolute literal directory prefix (`**/secrets/**` — the matched dir
+    // name floats, no fixed anchor), or one whose relocation-sensitive container is itself a
+    // PARTIAL non-leaf glob (`sec*/x.key`), yields nothing (or too shallow) to pin — a bounded
+    // residual documented in LIMITATIONS.md. The `(literal P)` denies are EXACT-path — they block
     // renaming dir `P` itself, never a create/write INSIDE it, so `echo > proj/other.txt`
     // and writes under `/proj/secrets/` still work.
     let grant_roots = write_grant_roots(policy);
@@ -375,11 +376,16 @@ fn emit_move_block(policy: &SandboxPolicy, out: &mut String) {
 
 /// The literal directory PREFIX of a glob deny — the leading run of glob-free path
 /// components (`/proj/secrets/*.key` → `/proj/secrets`; `/proj/packages/*/.env` →
-/// `/proj/packages`). This is the deepest directory whose rename relocates a matched
-/// secret OUT of the deny: the glob leaf below it stays matched under an in-place rename
-/// (`*` re-matches the new name), but renaming the literal prefix escapes the pattern.
+/// `/proj/packages`). Pinning it + its ancestors blocks relocating a secret whose
+/// container is this literal prefix OR a FULL glob component below it (`packages/*/.env`:
+/// renaming the `*`-matched intermediate keeps it matched; renaming `packages` is pinned).
 /// `None` when there is no absolute multi-component prefix to anchor (a first-segment or
-/// leading-`**` glob) — matching the meta set `to_match_term` uses to pick Regex.
+/// leading-`**` glob). The meta set matches `to_match_term`'s Regex classifier.
+///
+/// RESIDUAL (see LIMITATIONS.md): a PARTIAL glob in a NON-LEAF component (`sec*/x.key`)
+/// leaves its relocation-sensitive container (`/proj/secrets`, matched by `sec*`) BELOW this
+/// literal prefix and thus unpinned — renaming it to a name outside the pattern escapes. A
+/// literal `}`/`]` in a dir name hits the same residual (regex-classified, truncates here).
 fn regex_literal_dir_prefix(glob: &str) -> Option<String> {
     let meta = glob.find(['*', '?', '[', ']', '{', '}'])?;
     let slash = glob[..meta].rfind('/')?;

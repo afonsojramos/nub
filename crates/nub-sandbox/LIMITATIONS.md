@@ -246,10 +246,14 @@ Each is documented in code at the site noted; none is silently mis-reported.
   `mv secrets secretz` can no longer relocate the matched leaves. VM/host-verified: the
   ancestor rename is blocked while a legit write under the pinned dir still succeeds
   (`tests/macos_moveblock.rs`, `emit_move_block` in `backend/macos.rs`). **Residual (bounded):**
-  a floating-name deny with no fixed literal prefix (`!**/secrets/**` — the `secrets` component
-  can appear at any depth) has no single directory to anchor, so renaming an inner `secrets/`
-  dir still relocates it. Bounded — it needs a user-authored floating-glob deny AND a writable
-  container; the file-level deny still blocks renaming the leaves themselves.
+  the pin covers a secret whose container is the deny's literal directory prefix or a FULL glob
+  component below it (`packages/*/.env`). Two shapes stay open: a floating-name deny with no
+  fixed prefix (`!**/secrets/**` — the `secrets` component floats to any depth), and a PARTIAL
+  glob in a non-leaf component (`!sec*/x.key` — the relocation-sensitive `secrets/` dir is
+  matched by `sec*`, not literal, so it sits below the pinned prefix and renaming it to a
+  non-`sec*` name escapes; a literal `}`/`]` in a dir name hits the same corner). Both need a
+  user-authored glob-directory deny AND a writable container; the file-level deny still blocks
+  renaming the matched leaves themselves.
 - **Windows program grant is file-only (neighbor-read leak CLOSED).** The engine grants
   read+execute on the program FILE ITSELF, not its parent dir (traverse-bypass makes the
   leaf-object ACL sufficient to exec), so a `.env` next to a binary is no longer swept
