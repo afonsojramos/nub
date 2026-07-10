@@ -287,47 +287,46 @@ pub fn curated_baseline_env(
 /// spawning OS's own bootstrap essentials, per OS. Distinct from (and far narrower
 /// than) [`BASELINE_ENV_EXACT`]: the baseline is "what a build child needs to
 /// operate usefully" (PATH/HOME/USERPROFILE/npm hints); THIS is "what any child
-/// needs before it can run at all."
+/// needs before it can run at all." All names here are non-secret path/topology
+/// pointers, so injecting their real ambient values does NOT breach the deny-all
+/// floor (which denies USER/ambient env + secrets, not OS mechanism). Grounded in
+/// `wiki/research/sandbox-os-essentials-env.md` (libuv `required_vars[]` + prior-art
+/// survey) alongside nub's Windows-VM subset pin.
 ///
-/// Empirically pinned on the Windows VM (see the env-essentials thread) against
-/// BOTH backend spawn paths — subsets tried until the true minimum that STARTS was
-/// found — because the two paths need different things:
-///  - `SystemRoot` — the loader/CLR essential. A real managed exe (`powershell.exe`)
-///    launched with an EMPTY env block fails `rc=-65536` ("Internal Windows
-///    PowerShell error / Loading managed…" — the CLR resolves `mscoree`/System32
-///    relative to `SystemRoot`); `SystemRoot` ALONE flips it to rc=0. A native exe
-///    (`node.exe`) happens to tolerate an empty block — but the sandbox must not
-///    depend on every child being that lenient (the "starts only incidentally" gap).
+/// POSIX (macOS + Linux): EMPTY — an absolute-path `execve` starts with an empty
+/// environ (`node`/`sh`/`true` all rc=0; `os.tmpdir()` falls back to `/tmp`), so the
+/// floor injects nothing regardless of ambient contents.
+///
+/// Windows: `{SystemRoot, SystemDrive, TEMP, TMP, LOCALAPPDATA}`. Provenance:
+///  - `SystemRoot`, `SystemDrive`, `TEMP` — libuv's own Windows `required_vars[]`
+///    strict-essentials (`deps/uv/src/win/process.c`): winsock's `WSAStartup` fails
+///    without `SystemRoot`; some APIs reference `TEMP`; `SystemDrive` is the
+///    loader/CLR essential a managed child (`powershell.exe`) resolves System32 from.
+///  - `TMP` — the other half of Node's `os.tmpdir()` fallback pair (`lib/os.js`:
+///    `TEMP || TMP || <SystemRoot>\temp`); without the pair, AppContainer temp work
+///    lands in a non-writable dir.
 ///  - `LOCALAPPDATA` — the AppContainer essential. The ENFORCING path (fs/net
 ///    confined → a LowBox AppContainer) resolves the per-container profile dir
-///    (`%LOCALAPPDATA%\Packages\…`) from the environment, so a block missing it fails
-///    `CreateProcessW` with `ERROR_ENVVAR_NOT_FOUND` (203) BEFORE the child runs.
-///    The VM subset sweep pinned this exactly: `{SystemRoot}` and
-///    `{SystemRoot,USERPROFILE}` both still fail 203; `{SystemRoot,LOCALAPPDATA}` is
-///    the smallest set that starts. `SystemDrive`/`windir`/`USERPROFILE`/`APPDATA`
-///    are NOT needed to start and are deliberately NOT injected (no over-injection).
+///    (`%LOCALAPPDATA%\Packages\…`) from the env, so a block missing it fails
+///    `CreateProcessW` with `ERROR_ENVVAR_NOT_FOUND` (203). The VM subset sweep
+///    pinned it: `{SystemRoot}` and `{SystemRoot,USERPROFILE}` both fail 203,
+///    `{SystemRoot,LOCALAPPDATA}` is the smallest that starts. It embeds the OS
+///    username, but that disclosure is REDUNDANT (the child runs AS that user and
+///    can read its own username) and empirically REQUIRED — the real value is the
+///    minimal correct choice (a synthetic non-disclosing value needs a writable
+///    scratch dir + fs grant for zero privacy gain).
 ///
-/// The set is injected on every strip-all (the compiler folds env before the backend
-/// picks its path; `LOCALAPPDATA` is inert on the plain path, `SystemRoot` inert to
-/// the AppContainer resolution — each is load-bearing on exactly one path). Both are
-/// OS MECHANISM — an install-location and a profile-storage path pointer, never a
-/// credential — so injecting them does not breach the deny-all floor (which denies
-/// USER/ambient env + secrets, not the OS-startup essentials the process needs to
-/// exist). `LOCALAPPDATA` embeds the OS username, but that disclosure is REDUNDANT
-/// (the child runs AS that user and can already read its own username via its
-/// SID/token/`whoami`, so the path leaks nothing new) and is empirically REQUIRED to
-/// start an AppContainer child — injecting the real value is the minimal correct
-/// choice. (A synthetic non-disclosing `LOCALAPPDATA` was considered and rejected: it
-/// needs a real writable scratch dir + an fs grant, adding coupling for zero real
-/// privacy gain given the redundancy.) POSIX has NO startup essential: an
-/// absolute-path `execve` starts with an empty environ (`/usr/bin/true`, `sh`,
-/// `node` all verified rc=0), so its list is empty and the floor injects nothing.
+/// The `SystemDrive`/`TEMP`/`TMP` widen over the earlier VM-pinned `{SystemRoot,
+/// LOCALAPPDATA}` minimum is libuv-+-`os.tmpdir()`-grounded, not re-pinned on the VM;
+/// a `windows-latest` conformance run at main-merge validates it end-to-end. libuv's
+/// Cygwin-subprocess-compat vars (`USERNAME`/`USERDOMAIN`/`LOGONSERVER`/…) are NOT on
+/// the floor — subprocess-compat, not start-essential, and identity-bearing.
 ///
 /// `#[cfg]`-gated on the SPAWNING OS (= the child's OS) so a POSIX floor provably
 /// injects nothing regardless of ambient contents, while the selection logic stays
 /// host-independently testable via [`os_essential_env_from`].
 #[cfg(windows)]
-const OS_ESSENTIAL_ENV: &[&str] = &["SystemRoot", "LOCALAPPDATA"];
+const OS_ESSENTIAL_ENV: &[&str] = &["SystemRoot", "SystemDrive", "TEMP", "TMP", "LOCALAPPDATA"];
 #[cfg(not(windows))]
 const OS_ESSENTIAL_ENV: &[&str] = &[];
 
@@ -521,6 +520,9 @@ mod tests {
         // withheld — the floor injects nothing where the OS needs nothing.
         let env = ambient(&[
             ("SystemRoot", "C:/Windows"),
+            ("SystemDrive", "C:"),
+            ("TEMP", "C:/Users/me/AppData/Local/Temp"),
+            ("TMP", "C:/Users/me/AppData/Local/Temp"),
             ("LOCALAPPDATA", "C:/Users/me/AppData/Local"),
             ("AWS_SECRET_ACCESS_KEY", "leak"),
             ("GITHUB_TOKEN", "leak"),
@@ -541,7 +543,7 @@ mod tests {
         }
         #[cfg(windows)]
         {
-            for essential in ["SystemRoot", "LOCALAPPDATA"] {
+            for essential in ["SystemRoot", "SystemDrive", "TEMP", "TMP", "LOCALAPPDATA"] {
                 assert!(
                     p.constructed.contains_key(essential),
                     "Windows floor injects the OS-startup essential {essential}"
@@ -625,6 +627,24 @@ mod tests {
         for k in creds {
             assert!(!out.contains_key(k), "credential {k} must be scrubbed");
         }
+    }
+
+    #[test]
+    fn os_essential_floor_is_the_libuv_grounded_set() {
+        // The exact per-OS floor NAME set — the contract from
+        // wiki/research/sandbox-os-essentials-env.md. Windows keeps libuv's three
+        // strict-essentials + os.tmpdir()'s TMP + the AppContainer LOCALAPPDATA;
+        // POSIX keeps nothing (empty-environ exec starts fine).
+        #[cfg(windows)]
+        {
+            let expected: &[&str] = &["SystemRoot", "SystemDrive", "TEMP", "TMP", "LOCALAPPDATA"];
+            assert_eq!(OS_ESSENTIAL_ENV, expected);
+        }
+        #[cfg(not(windows))]
+        assert!(
+            OS_ESSENTIAL_ENV.is_empty(),
+            "POSIX floor is empty (macOS + Linux start from an empty environ)"
+        );
     }
 
     #[test]
