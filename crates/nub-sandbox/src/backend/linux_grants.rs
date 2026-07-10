@@ -141,23 +141,28 @@ pub(crate) fn derive_write_grants(policy: &SandboxPolicy) -> (Vec<Grant>, bool) 
         return (Vec::new(), false);
     }
     let view = View::write(&policy.fs.rules);
-    let (roots, whole_fs) = view.allow_roots();
+    // `whole_fs` (a `/`/`**` rw spelling) is deliberately ignored for writes — it is
+    // the dangerous `/` root, dropped by the guard below.
+    let (roots, _whole_fs) = view.allow_roots();
     let mut out = Vec::new();
     let mut visits = 0usize;
     let mut partial = false;
-    if whole_fs {
-        // A whole-fs `rw` grant (`{"**":"rw"}`): seed from `/`'s top-levels, minus
-        // `/proc`,`/sys` — symmetric with the generous-read seeding.
-        for top in read_top_levels() {
-            if is_proc_or_sys(&top) {
-                continue;
-            }
-            walk_write(&top, &view, &mut out, &mut visits, &mut partial);
+    // A write grant that resolves to a dangerous top-level root is DROPPED, not
+    // honored — fail-safe, mirroring the macOS/Windows `is_dangerous_write_root`
+    // guard so the over-grant is closed identically on every OS. WHY: a `..` in a
+    // surface path collapses lexically at compile time (`<proj>/../../..` → `/`), so
+    // an accidental (or hostile) path can widen a scoped rw grant into a
+    // filesystem-wide write hole; an explicit `/`/`**` rw grant is the same hole.
+    // Reads are exempt (a generous `(subpath "/")` read is a legitimate posture).
+    // The whole-fs spelling IS the `/` root: its grant-everything seeding is dropped
+    // entirely, while any EXPLICIT non-dangerous root in the same policy still
+    // applies (mirrors macOS dropping only the `/` rule, not the co-listed scoped
+    // grants).
+    for root in roots {
+        if is_dangerous_write_root(&root) {
+            continue;
         }
-    } else {
-        for root in roots {
-            walk_write(&root, &view, &mut out, &mut visits, &mut partial);
-        }
+        walk_write(&root, &view, &mut out, &mut visits, &mut partial);
     }
     dedup(&mut out);
     (out, partial)
@@ -533,6 +538,55 @@ fn read_top_levels() -> Vec<PathBuf> {
         .collect()
 }
 
+/// Top-level roots a WRITE grant must never cover — the Linux twin of the macOS /
+/// Windows `is_dangerous_write_root`. A `..`-collapsed surface path can resolve to a
+/// system root (`/`, `/etc`, `/usr`, …) or the all-users home container (`/home`),
+/// which would turn a scoped rw grant into a filesystem-wide write hole; drop it
+/// fail-safe instead of emitting it. The entries are the CANONICAL forms the grant
+/// derivation sees — the matcher prefix is already run through
+/// `canonicalize_glob_prefix`, so a usr-merged distro's `/bin`→`/usr/bin` symlink is
+/// resolved here (both spellings listed). `/tmp` is deliberately ABSENT: it is the
+/// legitimate broad temp write target (mirrors macOS excluding `/private/tmp`). An
+/// EXACT top-level match only — a nested grant like `/home/<user>/proj` is fine, just
+/// as macOS drops `/Users` but not `/Users/<user>`.
+fn is_dangerous_write_root(path: &Path) -> bool {
+    let Some(s) = path.to_str() else { return false };
+    let s = normalize_slashes(s);
+    let s = s.trim_end_matches('/');
+    matches!(
+        s,
+        ""  // an empty trimmed string is `/` itself
+            | "/"
+            | "/usr"
+            | "/usr/bin"
+            | "/usr/sbin"
+            | "/usr/lib"
+            | "/usr/lib32"
+            | "/usr/lib64"
+            | "/usr/libx32"
+            | "/usr/local"
+            | "/bin"
+            | "/sbin"
+            | "/lib"
+            | "/lib32"
+            | "/lib64"
+            | "/libx32"
+            | "/etc"
+            | "/opt"
+            | "/boot"
+            | "/var"
+            | "/home"
+            | "/root"
+            | "/dev"
+            | "/proc"
+            | "/sys"
+            | "/run"
+            | "/srv"
+            | "/mnt"
+            | "/media"
+    )
+}
+
 /// A system top-level (no user secrets) — granted clean under a generous read.
 fn is_system_toplevel(path: &Path) -> bool {
     // Compare on the final path component (a top-level of `/`).
@@ -683,6 +737,29 @@ mod tests {
         assert!(!write_reachable(&g, &f.proj.join("pub.txt")));
         assert!(!write_reachable(&g, &f.home.join("x")));
         assert!(g.iter().all(|x| !x.path.starts_with("/proc")));
+    }
+
+    #[test]
+    fn dangerous_write_root_yields_no_write_grant() {
+        let f = fixture();
+        // An explicit `/` rw grant must not become a write-everything grant: the
+        // whole-fs spelling is the dangerous `/` root, dropped fail-safe.
+        let (g, _) = derive_write_grants(&f.compile(serde_json::json!({ "fs": ["...", "/"] })));
+        assert!(g.is_empty(), "`/` rw must yield no write grant");
+
+        // A dangerous top-level (`/etc`) is dropped while a co-listed SCOPED grant
+        // survives — the guard filters only the dangerous root, not the whole policy.
+        let (g, _) = derive_write_grants(
+            &f.compile(serde_json::json!({ "fs": ["...", "/etc", "./writable"] })),
+        );
+        assert!(
+            write_reachable(&g, &f.proj.join("writable/out.txt")),
+            "scoped grant survives alongside a dropped dangerous root"
+        );
+        assert!(
+            g.iter().all(|x| !x.path.starts_with("/etc")),
+            "no write grant under the dropped `/etc` root"
+        );
     }
 
     #[test]

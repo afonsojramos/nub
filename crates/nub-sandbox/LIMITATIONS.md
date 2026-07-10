@@ -207,6 +207,18 @@ Each is documented in code at the site noted; none is silently mis-reported.
   with NO user deny, `/etc` is still granted whole (a secret under it is readable — user
   secrets do not live in `/etc`, and net-deny blocks exfil). (`backend/linux.rs` +
   `backend/linux_grants.rs` `essential_dir_needs_carve`/`derive_essential_dir_carve`.)
+- **Linux dangerous-write-root over-grant — CLOSED (cross-OS consistency, F2).** A write
+  grant that resolves to a dangerous top-level root (`/`, `/etc`, `/usr`, `/home`, …) was
+  HONORED on Linux while macOS/Windows dropped it, so a `..`-collapsed surface path
+  (`<proj>/../../..` → `/`, collapsed lexically at compile time) or an explicit `/`/`**`
+  rw grant became a filesystem-wide write hole. The Linux grant derivation now drops such
+  a grant fail-safe, mirroring the macOS/Windows `is_dangerous_write_root` guard. VM-verified:
+  pre-fix an explicit `/` rw and a `..`-collapse-to-`/` both wrote OUTSIDE the project;
+  post-fix both are denied while a legitimate scoped rw grant (`./writable`) still writes,
+  and a co-listed scoped grant survives alongside the dropped dangerous root. Reads are
+  exempt (a generous `(subpath "/")` read is a legitimate posture); `/tmp` is excluded (the
+  legitimate broad temp target). (`backend/linux_grants.rs` `is_dangerous_write_root` /
+  `derive_write_grants`; `tests/linux_enforcement.rs` `dangerous_write_root_grant_is_dropped`.)
 - **Linux write-target for a not-yet-existing file becomes a DIRECTORY (not a parent
   widen).** Landlock cannot grant write to a file that does not yet exist, so the backend
   pre-creates the target and grants that subtree. VM-verified: `pre_create` uses
