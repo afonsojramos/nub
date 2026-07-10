@@ -249,6 +249,76 @@ fn new_secret_paths_denied_under_generous_read() {
     }
 }
 
+// ── fs brace-alternation deny (the glob-deny-fidelity fix) ─────────────────────
+
+#[test]
+fn brace_deny_denies_every_expanded_path_not_the_literal() {
+    // Braces `{a,b}` in an fs deny must deny EACH expanded path (globset-consistent),
+    // not a file literally named `{a,b}`. Before the fix the Seatbelt regex escaped
+    // the braces as literals, so `a.key`/`b.key` stayed silently readable under a
+    // generous read — the sandbox-glob-deny-fidelity leak. This spawns sandbox-exec,
+    // so it also proves Seatbelt accepts the `(a|b)` alternation regex.
+    let f = fixture();
+    let secrets = f.proj.join("secrets");
+    fs::create_dir_all(&secrets).unwrap();
+    for name in ["a.key", "b.key", "c.key"] {
+        fs::write(secrets.join(name), "SECRET").unwrap();
+    }
+    let deny = format!("!{}/{{a,b}}.key", s(&secrets));
+    let pol = serde_json::json!({ "fs": ["...", deny] });
+    assert!(
+        !f.allowed(pol.clone(), CAT, &[&s(&secrets.join("a.key"))]),
+        "brace-expanded a.key denied"
+    );
+    assert!(
+        !f.allowed(pol.clone(), CAT, &[&s(&secrets.join("b.key"))]),
+        "brace-expanded b.key denied"
+    );
+    // c.key is NOT in the brace set → readable (the deny is selective, not a blanket
+    // over-deny), AND an unrelated file stays readable (the generous base is active).
+    assert!(
+        f.allowed(pol.clone(), CAT, &[&s(&secrets.join("c.key"))]),
+        "c.key (outside the brace) stays readable"
+    );
+    assert!(
+        f.allowed(pol, CAT, &[&s(&f.proj.join("pub.txt"))]),
+        "unrelated file readable"
+    );
+    // negative control — relaxed fs reads a.key fine, so the deny (not a missing file)
+    // is what blocks it above.
+    assert!(
+        f.allowed(
+            serde_json::json!({ "fs": true }),
+            CAT,
+            &[&s(&secrets.join("a.key"))]
+        ),
+        "neg-control: relaxed fs reads a.key"
+    );
+}
+
+#[test]
+fn nested_brace_deny_denies_all_alternatives() {
+    // A nested `{a,{b,c}}` must deny a, b AND c — the recursive-alternation shape.
+    let f = fixture();
+    let secrets = f.proj.join("nsec");
+    fs::create_dir_all(&secrets).unwrap();
+    for name in ["a.key", "b.key", "c.key", "d.key"] {
+        fs::write(secrets.join(name), "SECRET").unwrap();
+    }
+    let deny = format!("!{}/{{a,{{b,c}}}}.key", s(&secrets));
+    let pol = serde_json::json!({ "fs": ["...", deny] });
+    for name in ["a.key", "b.key", "c.key"] {
+        assert!(
+            !f.allowed(pol.clone(), CAT, &[&s(&secrets.join(name))]),
+            "nested-brace {name} denied"
+        );
+    }
+    assert!(
+        f.allowed(pol, CAT, &[&s(&secrets.join("d.key"))]),
+        "d.key (outside the nested brace) readable"
+    );
+}
+
 // ── fs write-confine ──────────────────────────────────────────────────────────
 
 #[test]

@@ -281,6 +281,19 @@ fn push_net_rule(
     path: &str,
     out: &mut Vec<NetRule>,
 ) -> Result<(), CompileError> {
+    // Brace alternation is not part of the host OR CIDR grammar (only a bare `*` /
+    // leading `*.` wildcard) — reject a `{`/`}` the same class as the mid-host glob
+    // (D11): the matcher would treat it as a literal host and silently match nothing,
+    // so a `!{evil,bad}.com` deny would be inert. Checked BEFORE the CIDR split so a
+    // brace CIDR-lookalike (`{a,b}.com/24`) gets the brace message, not a CIDR one.
+    if target.contains(['{', '}']) {
+        return Err(CompileError::shape(
+            path,
+            &format!(
+                "`{target}` is not a valid host pattern — brace alternation `{{a,b}}` is not supported; list hosts separately (a wildcard is only a bare `*` or a leading `*.` subdomain)"
+            ),
+        ));
+    }
     let net_target = if target.contains('/') {
         match target.parse::<ipnet::IpNet>() {
             Ok(net) => NetTarget::Cidr(net),
@@ -435,6 +448,7 @@ fn parse_env_array(
             Some(rest) => (rest.to_string(), true),
             None => (s.to_string(), false),
         };
+        reject_env_key_braces(&pattern, &p)?;
         // A `$(…)` in array form would have no key to bind to — array entries are
         // key/glob selectors, not values. Reject to avoid silent misuse.
         if resolve::has_substitution(&pattern) {
@@ -508,6 +522,7 @@ fn parse_env_object(
             Some(k) => (k.to_string(), true),
             None => (raw_key.clone(), false),
         };
+        reject_env_key_braces(&key, &p)?;
         let optional = optional || is_glob(&key);
         let entry = parse_env_object_value(key, optional, val, ctx, &p)?;
         out.push(entry);
@@ -888,6 +903,23 @@ fn construct_env(
 
 fn is_glob(s: &str) -> bool {
     s.contains(['*', '?', '[', '{'])
+}
+
+/// Reject brace alternation in an env-var-NAME pattern. Env keys are a NARROWER
+/// grammar than fs globs — `*` prefix/suffix names one variable family — so a
+/// `{`/`}` is rejected the same class as the mid-host net glob (D11): fail loud on
+/// the typo rather than silently expand. (fs globs DO support braces; env keys and
+/// net hosts do not.)
+fn reject_env_key_braces(key: &str, path: &str) -> Result<(), CompileError> {
+    if key.contains(['{', '}']) {
+        return Err(CompileError::shape(
+            path,
+            &format!(
+                "`{key}` is not a valid env key — brace alternation `{{a,b}}` is not supported in env-var-name patterns; list the keys separately or use a `*` wildcard"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// Env var NAMES are case-insensitive on Windows (OS contract: `PATH`/`Path`/

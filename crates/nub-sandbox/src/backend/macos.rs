@@ -608,78 +608,23 @@ fn emit_term(term: &MatchTerm) -> String {
 
 /// Translate a git-style glob into an anchored Seatbelt regex. `**/` spans zero or
 /// more components, `**` spans anything, `*`/`?` stay within one component, `[…]`
-/// stays a character class. A metachar-free pattern gets a subtree `(/.*)?` suffix.
-/// Ported from Codex's `seatbelt_regex_for_unreadable_glob` (Apache-2.0).
+/// stays a character class, `{a,b}` is brace alternation. A metachar-free pattern
+/// gets a subtree `(/.*)?` suffix. Ported from Codex's
+/// `seatbelt_regex_for_unreadable_glob` (Apache-2.0); brace support added by nub.
 fn glob_to_seatbelt_regex(pattern: &str) -> String {
     let chars: Vec<char> = pattern.chars().collect();
     let mut regex = String::from("^");
-    let mut i = 0;
     let mut saw_glob = false;
+    let mut i = 0;
     while i < chars.len() {
-        let ch = chars[i];
-        i += 1;
-        match ch {
-            '*' => {
-                saw_glob = true;
-                if chars.get(i) == Some(&'*') {
-                    i += 1;
-                    if chars.get(i) == Some(&'/') {
-                        i += 1;
-                        regex.push_str("(.*/)?");
-                    } else {
-                        regex.push_str(".*");
-                    }
-                } else {
-                    regex.push_str("[^/]*");
-                }
-            }
-            '?' => {
-                saw_glob = true;
-                regex.push_str("[^/]");
-            }
-            '[' => {
-                saw_glob = true;
-                let class_start = i;
-                let mut class = String::new();
-                let mut closed = false;
-                while i < chars.len() {
-                    let c = chars[i];
-                    i += 1;
-                    if c == ']' {
-                        closed = true;
-                        break;
-                    }
-                    class.push(c);
-                }
-                if !closed {
-                    // Unterminated `[` → literal, reprocess the rest normally.
-                    regex.push_str("\\[");
-                    i = class_start;
-                    continue;
-                }
-                regex.push('[');
-                let mut it = class.chars();
-                if let Some(first) = it.next() {
-                    match first {
-                        '!' => regex.push('^'),
-                        '^' => regex.push_str("\\^"),
-                        _ => regex.push(first),
-                    }
-                }
-                for c in it {
-                    if c == '\\' {
-                        regex.push_str("\\\\");
-                    } else {
-                        regex.push(c);
-                    }
-                }
-                regex.push(']');
-            }
-            ']' => {
-                saw_glob = true;
-                regex.push_str("\\]");
-            }
-            _ => regex.push_str(&regex_escape_char(ch)),
+        // `{` opens a brace group; `}`/`,` are literals at the top level (only a `,`
+        // *inside* a group separates branches). Everything else is one glob unit.
+        if chars[i] == '{' {
+            i += 1;
+            saw_glob = true;
+            regex.push_str(&brace_to_regex(&chars, &mut i, &mut saw_glob));
+        } else {
+            translate_unit(&chars, &mut i, &mut regex, &mut saw_glob);
         }
     }
     if !saw_glob {
@@ -687,6 +632,127 @@ fn glob_to_seatbelt_regex(pattern: &str) -> String {
     }
     regex.push('$');
     regex
+}
+
+/// Expand a brace group `{a,b}` (the `{` already consumed, `*i` at its first inner
+/// char) into a regex alternation `(a|b)`, advancing `*i` past the matching `}`.
+///
+/// WHY (security): braces are STANDARD glob syntax and nub's userspace/Linux matcher
+/// (`globset`) expands them, but Seatbelt has no glob syntax — before this, the
+/// translator escaped `{`/`}` as literals, so an fs deny `!secrets/{a,b}.key` matched
+/// only a file literally named `{a,b}.key` and silently under-enforced (the
+/// sandbox-glob-deny-fidelity leak). Alternation makes macOS consistent with globset.
+///
+/// globset-FIDELITY (the shape correctness that keeps it leak-free):
+///   • nested `{a,{b,c}}` → `(a|(b|c))` and cartesian `{a,b}/{c,d}` → `(a|b)/(c|d)`
+///     fall out for free — each `{` recurses, so two groups in sequence multiply.
+///   • an EMPTY branch is DROPPED, matching globset's default `empty_alternates=false`
+///     (`{a,}` matches `a` only, NOT `a`-or-empty; `{}`/`{,}` emit nothing at all).
+///   • an unbalanced `{` (globset hard-errors on it) is auto-closed at input end so the
+///     emitted regex stays valid AND a deny keeps biting (fail-safe, not fail-open).
+/// A class-internal `,`/`}` (`{a,[,]}`) never splits: `translate_unit` consumes the
+/// whole `[…]` before this loop sees the next char.
+fn brace_to_regex(chars: &[char], i: &mut usize, saw_glob: &mut bool) -> String {
+    let mut branches: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    while *i < chars.len() {
+        match chars[*i] {
+            '}' => {
+                *i += 1;
+                break;
+            }
+            ',' => {
+                *i += 1;
+                branches.push(std::mem::take(&mut cur));
+            }
+            '{' => {
+                *i += 1;
+                cur.push_str(&brace_to_regex(chars, i, saw_glob));
+            }
+            _ => translate_unit(chars, i, &mut cur, saw_glob),
+        }
+    }
+    branches.push(cur);
+    // Drop empty branches (globset default) — an all-empty group (`{}`/`{,}`) emits
+    // nothing, exactly as globset erases empty alternates.
+    let non_empty: Vec<String> = branches.into_iter().filter(|b| !b.is_empty()).collect();
+    if non_empty.is_empty() {
+        String::new()
+    } else {
+        format!("({})", non_empty.join("|"))
+    }
+}
+
+/// Translate ONE glob unit at `chars[*i]` — `*`/`**`/`?`/`[…]`/`]`/literal — into
+/// `out`, advancing `*i`. `{`/`}`/`,` are handled by the callers (top level +
+/// `brace_to_regex`), so this never sees an unescaped brace; a top-level `}`/`,`
+/// reaches the literal arm and is escaped like any other char.
+fn translate_unit(chars: &[char], i: &mut usize, out: &mut String, saw_glob: &mut bool) {
+    let ch = chars[*i];
+    *i += 1;
+    match ch {
+        '*' => {
+            *saw_glob = true;
+            if chars.get(*i) == Some(&'*') {
+                *i += 1;
+                if chars.get(*i) == Some(&'/') {
+                    *i += 1;
+                    out.push_str("(.*/)?");
+                } else {
+                    out.push_str(".*");
+                }
+            } else {
+                out.push_str("[^/]*");
+            }
+        }
+        '?' => {
+            *saw_glob = true;
+            out.push_str("[^/]");
+        }
+        '[' => {
+            *saw_glob = true;
+            let class_start = *i;
+            let mut class = String::new();
+            let mut closed = false;
+            while *i < chars.len() {
+                let c = chars[*i];
+                *i += 1;
+                if c == ']' {
+                    closed = true;
+                    break;
+                }
+                class.push(c);
+            }
+            if !closed {
+                // Unterminated `[` → literal, reprocess the rest normally.
+                out.push_str("\\[");
+                *i = class_start;
+                return;
+            }
+            out.push('[');
+            let mut it = class.chars();
+            if let Some(first) = it.next() {
+                match first {
+                    '!' => out.push('^'),
+                    '^' => out.push_str("\\^"),
+                    _ => out.push(first),
+                }
+            }
+            for c in it {
+                if c == '\\' {
+                    out.push_str("\\\\");
+                } else {
+                    out.push(c);
+                }
+            }
+            out.push(']');
+        }
+        ']' => {
+            *saw_glob = true;
+            out.push_str("\\]");
+        }
+        _ => out.push_str(&regex_escape_char(ch)),
+    }
 }
 
 /// Escape a literal char for embedding in a regex. `/` and ordinary chars pass
@@ -777,6 +843,134 @@ mod tests {
         // The `/**` subtree twin collapses to the same subpath (subpath already
         // covers descendants) — the two IR rows map to one grant.
         assert_eq!(term_str("/proj/data/**"), "(subpath \"/proj/data\")");
+    }
+
+    // ── brace alternation (the sandbox-glob-deny-fidelity fix) ────────────────
+
+    #[test]
+    fn brace_shapes_translate_to_alternation() {
+        // Simple, nested, cartesian, single-element, brace+star, dir-level — the
+        // exact shapes the fidelity audit flagged as silent leaks.
+        assert_eq!(term_str("/p/{a,b}.key"), "(regex #\"^/p/(a|b)\\.key$\")");
+        assert_eq!(
+            term_str("/p/{a,{b,c}}.key"),
+            "(regex #\"^/p/(a|(b|c))\\.key$\")"
+        );
+        assert_eq!(term_str("/p/{a,b}/{c,d}"), "(regex #\"^/p/(a|b)/(c|d)$\")");
+        assert_eq!(term_str("/p/{a}.key"), "(regex #\"^/p/(a)\\.key$\")");
+        assert_eq!(
+            term_str("/p/{a,b}/*.key"),
+            "(regex #\"^/p/(a|b)/[^/]*\\.key$\")"
+        );
+        assert_eq!(
+            term_str("/p/{a,b}/x.key"),
+            "(regex #\"^/p/(a|b)/x\\.key$\")"
+        );
+    }
+
+    #[test]
+    fn brace_empty_branches_are_dropped_like_globset() {
+        // globset compiles with `empty_alternates=false`, so an empty branch VANISHES
+        // (`{a,}` matches `a` only, never `a`-or-empty) and an all-empty group emits
+        // nothing. A `(a|)`/`()` translation would over-match — the `{a,}` adversarial
+        // case that would re-open the leak.
+        assert_eq!(term_str("/p/{a,}.key"), "(regex #\"^/p/(a)\\.key$\")");
+        assert_eq!(term_str("/p/{,a}.key"), "(regex #\"^/p/(a)\\.key$\")");
+        assert_eq!(term_str("/p/{a,,b}.key"), "(regex #\"^/p/(a|b)\\.key$\")");
+        // `{}` / `{,}` collapse to nothing — the group emits no regex, and (seeing a
+        // brace at all set `saw_glob`) no subtree suffix is appended, so the pattern is
+        // its exact literal remainder — matching globset's `^/p/x$` (not a subtree).
+        assert_eq!(term_str("/p/{}x"), "(regex #\"^/p/x$\")");
+        assert_eq!(term_str("/p/{,}x"), "(regex #\"^/p/x$\")");
+    }
+
+    #[test]
+    fn brace_unbalanced_open_is_auto_closed_failsafe() {
+        // globset hard-errors on `{a,b` (unclosed); the translator auto-closes so the
+        // emitted regex stays valid and a deny keeps biting `a`/`b` rather than
+        // producing a broken profile. A stray `}` is a literal.
+        assert_eq!(term_str("/p/{a,b"), "(regex #\"^/p/(a|b)$\")");
+        assert_eq!(term_str("/p/a}b*"), "(regex #\"^/p/a\\}b[^/]*$\")");
+    }
+
+    /// The globset ORACLE: nub's userspace/Linux fs matcher IS globset, so the macOS
+    /// Seatbelt regex must accept EXACTLY the paths globset accepts for the same glob.
+    /// A translation bug re-creates the silent leak, so this cross-checks the emitted
+    /// regex against globset over a shared candidate pool. Case-sensitive on both sides
+    /// isolates brace/glob STRUCTURE (case-folding is a separate, already-refuted axis).
+    #[test]
+    fn brace_regex_matches_globset_oracle() {
+        use globset::GlobBuilder;
+        use regex::Regex;
+
+        let globs = [
+            "/p/{a,b}.key",
+            "/p/{a,{b,c}}.key",
+            "/p/{a,{b,{c,d}}}.k",
+            "/p/{a,b}/{c,d}",
+            "/p/{a}.key",
+            "/p/{a,}.key",
+            "/p/{,a}.key",
+            "/p/{a,,b}.key",
+            "/p/{a,b}/*.key",
+            "/p/{a,[bc]}.k",
+            "/p/pre{a,b}post",
+            "/p/{a,b}/**",
+            // Empty-brace edges cross-checked against real globset (not just the
+            // reasoning-asserts): the group emits nothing, so the pattern is its
+            // literal remainder.
+            "/p/{}x",
+            "/p/{,}x",
+            "/p/pre{}post",
+        ];
+        // A pool that exercises match + non-match for every glob above, including the
+        // literal-brace spelling (must NOT match — the leak was matching only that).
+        let candidates = [
+            "/p/a.key",
+            "/p/b.key",
+            "/p/c.key",
+            "/p/d.key",
+            "/p/.key",
+            "/p/a/c",
+            "/p/a/d",
+            "/p/b/c",
+            "/p/b/e",
+            "/p/a/x.key",
+            "/p/b/y.key",
+            "/p/c/x.key",
+            "/p/a/x.pem",
+            "/p/a.k",
+            "/p/b.k",
+            "/p/c.k",
+            "/p/preapost",
+            "/p/prebpost",
+            "/p/{a,b}.key",
+            "/p/a/deep/nested/file",
+            "/p/b/deep",
+            "/p/x",
+            "/p/prepost",
+            "/p/x/sub",
+        ];
+        for g in globs {
+            let emitted = super::glob_to_seatbelt_regex(g);
+            let re = Regex::new(&emitted)
+                .unwrap_or_else(|e| panic!("emitted regex for `{g}` is invalid: {e}\n{emitted}"));
+            let gs = GlobBuilder::new(g)
+                .literal_separator(true)
+                .build()
+                .unwrap_or_else(|e| panic!("globset rejected `{g}`: {e}"))
+                .compile_matcher();
+            for c in candidates {
+                assert_eq!(
+                    re.is_match(c),
+                    gs.is_match(c),
+                    "DIVERGENCE glob=`{g}` candidate=`{c}` emitted=`{emitted}` \
+                     (seatbelt={}, globset={})",
+                    re.is_match(c),
+                    gs.is_match(c),
+                );
+            }
+        }
     }
 
     #[test]

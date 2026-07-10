@@ -78,6 +78,13 @@ pub fn strip_trailing_dot(host: &str) -> &str {
 /// nothing — the matcher only ever honors the two forms above, so a mid-host
 /// glob is a typo the author must see.
 pub fn host_pattern_is_valid(pattern: &str) -> bool {
+    // Brace alternation is not part of the host grammar — the matcher would treat
+    // `{a,b}.com` as a literal host and match nothing. The fold rejects it with a
+    // brace-specific message before reaching here; this keeps the predicate honest
+    // for any direct caller.
+    if pattern.contains(['{', '}']) {
+        return false;
+    }
     if pattern == "*" {
         return true;
     }
