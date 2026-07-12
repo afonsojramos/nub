@@ -106,6 +106,60 @@ fn tmp_mode_folds_from_the_tmp_key() {
         compile(&json!({ "fs": { "<tmp>": "private" } }), &ctx),
         Err(CompileError::Shape { .. })
     ));
+
+    // A `<tmp>/subpath` key maps INTO the private dir (→ Private mode), and — the fix — emits
+    // NO ordinary fs rule pointing at the shared host tmp (`/tmp`).
+    let sub = compile(&json!({ "fs": { "./": "r", "<tmp>/scratch": "rw" } }), &ctx).unwrap();
+    assert_eq!(sub.fs.tmp, TmpMode::Private);
+    assert!(
+        sub.fs
+            .rules
+            .entries
+            .iter()
+            .all(|e| !e.matcher.as_str().contains("/tmp")),
+        "`<tmp>/scratch` must not leak an fs rule into the shared host tmp"
+    );
+    // Array form: a `<tmp>` / `<tmp>/…` entry sets Private; a `!`-negated one sets Deny.
+    assert_eq!(
+        compile(&json!({ "fs": ["./", "<tmp>/scratch"] }), &ctx)
+            .unwrap()
+            .fs
+            .tmp,
+        TmpMode::Private
+    );
+    assert_eq!(
+        compile(&json!({ "fs": ["./", "!<tmp>"] }), &ctx)
+            .unwrap()
+            .fs
+            .tmp,
+        TmpMode::Deny
+    );
+    // A backslash subpath is a subpath too (path-separator), → Private.
+    assert_eq!(
+        compile(&json!({ "fs": { "<tmp>\\scratch": "rw" } }), &ctx)
+            .unwrap()
+            .fs
+            .tmp,
+        TmpMode::Private
+    );
+    // A `<tmp>` prefix with a NON-separator suffix (`<tmp>*`, `<tmp>x`) would otherwise leak
+    // into the shared host tmp via `expand_symbolic`, so it is a hard shape error — object AND
+    // array form. (`<tmpx>`, having no `<tmp>` prefix, stays a normal literal path.)
+    for bad in [
+        json!({ "fs": { "<tmp>*": "rw" } }),
+        json!({ "fs": { "<tmp>x": "r" } }),
+    ] {
+        assert!(
+            matches!(compile(&bad, &ctx), Err(CompileError::Shape { .. })),
+            "malformed `<tmp>` suffix must be a shape error, not a shared-tmp leak"
+        );
+    }
+    assert!(matches!(
+        compile(&json!({ "fs": ["<tmp>*"] }), &ctx),
+        Err(CompileError::Shape { .. })
+    ));
+    // `<tmpx>` is NOT a `<tmp>` sentinel — a normal path, folds without error.
+    assert!(compile(&json!({ "fs": { "<tmpx>": "r" } }), &ctx).is_ok());
 }
 
 #[test]

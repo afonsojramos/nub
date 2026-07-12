@@ -52,7 +52,13 @@ fn coverable(v: &Value) -> Option<&str> {
     if s == "..." || s == "!..." {
         return None;
     }
-    Some(s.strip_prefix('!').unwrap_or(s))
+    let body = s.strip_prefix('!').unwrap_or(s);
+    // Any `<tmp>`-prefixed entry is a tmp-MODE sentinel (or a malformed one the fold rejects),
+    // never an fs path — excluded from path shadow analysis (it emits no rule).
+    if body.trim_start().starts_with("<tmp>") {
+        return None;
+    }
+    Some(body)
 }
 
 /// Emit one warning per DEAD entry: an entry `i` a later entry `j` fully covers.

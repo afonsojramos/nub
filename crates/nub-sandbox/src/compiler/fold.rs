@@ -48,14 +48,15 @@ pub fn fold_fs(
         entries: Vec::new(),
         default_effect: Effect::Deny,
     };
-    // Throwaway-tmp mode. `<tmp>` is a SENTINEL that ALWAYS denotes the specially-provisioned
-    // per-run PRIVATE dir (never the shared system tmp), so its value is a plain fs permission
-    // on that dir: a truthy grant (`"r"`/`"rw"`/`true`) → `Private` (fresh per-run dir, shared
-    // tmp hidden); `false` → `Deny` (no tmp). The backend owns the private-dir creation +
-    // shared-tmp denial at spawn time (the per-run path is not knowable at compile time), so a
-    // `<tmp>` entry sets only the MODE and emits no ordinary fs rule. Shared system tmp is a
-    // SEPARATE literal path, reached only by granting `/tmp` — never via this sentinel; `Shared`
-    // (the default when `<tmp>` is absent) means "no tmp confinement, host tmp per fs rules".
+    // Throwaway-tmp mode. `<tmp>` (and any `<tmp>/subpath`) is a SENTINEL for the specially-
+    // provisioned per-run PRIVATE dir — a subpath maps INTO that dir, never the shared system
+    // tmp — so its value is a plain fs permission: a truthy grant (`"r"`/`"rw"`/`true`) →
+    // `Private` (fresh per-run dir, shared tmp hidden); `false` → `Deny` (no tmp). The backend
+    // owns the private-dir creation + whole-subtree grant + shared-tmp denial at spawn time (the
+    // per-run path is not knowable at compile time), so a `<tmp>`-prefixed entry sets only the
+    // MODE and emits no ordinary fs rule. Shared system tmp is a SEPARATE literal path, reached
+    // only by granting `/tmp` — never via this sentinel; `Shared` (the default when `<tmp>` is
+    // absent) means "no tmp confinement, host tmp per fs rules".
     let mut tmp = TmpMode::Shared;
     match value {
         // `true` fully relaxes the axis; `false` fully denies it.
@@ -65,6 +66,10 @@ pub fn fold_fs(
             for (i, item) in items.iter().enumerate() {
                 let p = child(path, &i.to_string());
                 let s = as_str(item, &p)?;
+                if let Some(mode) = parse_tmp_mode_array(s, &p)? {
+                    tmp = mode;
+                    continue;
+                }
                 fold_fs_array_entry(s, ctx, parent, &p, &mut set.entries)?;
             }
         }
@@ -89,16 +94,45 @@ pub fn fold_fs(
     Ok(FsPolicy { rules: set, tmp })
 }
 
-/// Fold a `<tmp>` sentinel entry into a tmp MODE. `<tmp>` ALWAYS denotes the per-run PRIVATE
-/// dir, so its value is a plain fs permission on that dir: a truthy grant (`"r"`/`"rw"`/`true`)
-/// → `Private` (provision the fresh dir + grant it rw); `false` → `Deny` (no tmp). Read-only
-/// on a fresh empty dir is degenerate, so `"r"` is treated as `"rw"` — `Private` always grants
-/// rw. Either mode's dir is backend-owned, so the caller consumes a `Some` and emits no path
-/// rule. Returns `None` for every other key (a normal path). Shared system tmp is a SEPARATE
-/// literal path (`/tmp`); `TmpMode::Shared` is unreachable through this sentinel by design.
+/// A `<tmp>` sentinel malformed by a suffix that is neither empty nor a path separator
+/// (`<tmp>*`, `<tmp>x`). Rejected loud rather than folded: `expand_symbolic` would otherwise
+/// root it at the SHARED host tmp (`<tmp>x` → `<host-tmp>/x`), the exact leak the sentinel
+/// exists to prevent — so any `<tmp>`-prefixed form that is not the sentinel is an error.
+const MALFORMED_TMP_MSG: &str = "malformed `<tmp>` sentinel — use `<tmp>` (a fresh per-run private tmp dir) or `<tmp>/subpath` (a path inside it); `<tmp>` followed by anything else is not a path into the shared system tmp — grant the literal `/tmp` for that";
+
+/// Classify a trimmed key/entry against the `<tmp>` sentinel. A `<tmp>`-prefixed string matches
+/// exactly what `expand_symbolic` roots at the host tmp (`strip_prefix("<tmp>")`), so the guard
+/// MUST cover the whole class or a form it misses leaks into the shared tmp. `<tmp>` or
+/// `<tmp>{/,\}subpath` is the sentinel; any other `<tmp>`-prefixed form is malformed.
+enum TmpKey {
+    Sentinel,
+    Malformed,
+    NotTmp,
+}
+fn classify_tmp_key(k: &str) -> TmpKey {
+    let Some(after) = k.strip_prefix("<tmp>") else {
+        return TmpKey::NotTmp;
+    };
+    if after.is_empty() || after.starts_with(['/', '\\']) {
+        TmpKey::Sentinel
+    } else {
+        TmpKey::Malformed
+    }
+}
+
+/// Fold a `<tmp>`-prefixed key into a tmp MODE. `<tmp>` (and any `<tmp>/subpath`) denotes the
+/// per-run PRIVATE dir — a subpath maps INTO that dir, never the shared system tmp — so the
+/// value is a plain fs permission on it: a truthy grant (`"r"`/`"rw"`/`true`) → `Private`
+/// (provision the fresh dir + grant it rw); `false` → `Deny` (no tmp). Read-only on a fresh
+/// empty dir is degenerate, so `"r"` is treated as `"rw"` — `Private` always grants rw. The
+/// whole private subtree is backend-granted, so a `<tmp>/x` key needs no path rule of its own;
+/// the caller consumes a `Some` and emits nothing. `None` for a normal (non-`<tmp>`) key; a
+/// malformed `<tmp>` suffix is a hard error (it would otherwise leak into the shared host tmp).
 fn parse_tmp_mode(key: &str, val: &Value, path: &str) -> Result<Option<TmpMode>, CompileError> {
-    if key.trim() != "<tmp>" {
-        return Ok(None);
+    match classify_tmp_key(key.trim()) {
+        TmpKey::NotTmp => return Ok(None),
+        TmpKey::Malformed => return Err(CompileError::shape(path, MALFORMED_TMP_MSG)),
+        TmpKey::Sentinel => {}
     }
     let mode = match val {
         Value::Bool(true) => TmpMode::Private,
@@ -112,6 +146,25 @@ fn parse_tmp_mode(key: &str, val: &Value, path: &str) -> Result<Option<TmpMode>,
         }
     };
     Ok(Some(mode))
+}
+
+/// Array-form `<tmp>` sentinel → tmp MODE. A `<tmp>` / `<tmp>/subpath` entry is `Private`
+/// (array grants are rw); a `!`-negated one is `Deny`. `None` for a normal entry; a malformed
+/// `<tmp>` suffix errors, same as the object [`parse_tmp_mode`], so the two agree on the class.
+fn parse_tmp_mode_array(entry: &str, path: &str) -> Result<Option<TmpMode>, CompileError> {
+    let (body, deny) = match entry.trim().strip_prefix('!') {
+        Some(rest) => (rest.trim_start(), true),
+        None => (entry.trim(), false),
+    };
+    match classify_tmp_key(body) {
+        TmpKey::NotTmp => Ok(None),
+        TmpKey::Malformed => Err(CompileError::shape(path, MALFORMED_TMP_MSG)),
+        TmpKey::Sentinel => Ok(Some(if deny {
+            TmpMode::Deny
+        } else {
+            TmpMode::Private
+        })),
+    }
 }
 
 /// Inject the default `.env*` READ-deny at a precedence a broad dir/glob allow can NOT

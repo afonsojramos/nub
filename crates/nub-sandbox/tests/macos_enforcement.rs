@@ -307,6 +307,34 @@ fn private_tmp_hides_the_shared_system_tmp() {
 }
 
 #[test]
+fn tmp_subpath_maps_into_the_private_dir_not_the_shared_tmp() {
+    // A `<tmp>/scratch` key is the private-dir sentinel too (maps INTO the private dir), so it
+    // sets Private and hides the shared system tmp exactly like a bare `<tmp>: "rw"` — it must
+    // NOT resolve to a grant on the shared host tmp.
+    let shared = PathBuf::from(format!(
+        "/private/tmp/nub-tmptest-sub-{}.secret",
+        std::process::id()
+    ));
+    fs::write(&shared, "SHAREDTMPSECRET").unwrap();
+    struct Cleanup(PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+    let _c = Cleanup(shared.clone());
+    let f = fixture();
+    assert!(
+        !f.allowed(
+            serde_json::json!({ "fs": { "/": "r", "<tmp>/scratch": "rw" } }),
+            CAT,
+            &[&s(&shared)]
+        ),
+        "`<tmp>/scratch` must map into the private dir and hide the shared /private/tmp"
+    );
+}
+
+#[test]
 fn deny_tmp_hides_the_shared_system_tmp_too() {
     let shared = PathBuf::from(format!(
         "/private/tmp/nub-tmptest-deny-{}.secret",
