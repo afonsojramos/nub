@@ -678,3 +678,43 @@ fn deny_not_dodgeable_via_dotdot_or_symlink() {
         "symlink escaping confine denied"
     );
 }
+
+// ── documented, bounded residuals — CAPTURED so they are no longer reasoned-only ──
+
+#[test]
+fn hardlink_to_denied_secret_leaks_via_alias() {
+    // Seatbelt file-read rules are path-pattern based, like Landlock's: a `!<secret>`
+    // deny matches the PATH, not the inode. A pre-existing same-uid hardlink to the
+    // secret, at a name the deny never targets, is readable — and reading it reads the
+    // SHARED inode, so the path-denied secret leaks through the alias. BOUNDED: needs a
+    // hardlink created OUTSIDE the sandbox beforehand (no clean Seatbelt fix — the inode
+    // was legitimately named twice). The macOS twin of the Linux residual of the same
+    // name; if a future mechanism closes it, this assertion flips and flags the change.
+    let f = fixture();
+    let secret = f.proj.join("secret.txt");
+    fs::write(&secret, "REALSECRET").unwrap();
+    let alias = f.proj.join("alias.txt");
+    fs::hard_link(&secret, &alias).unwrap();
+    let surface = serde_json::json!({ "fs": [s(&f.proj), format!("!{}", s(&secret))] });
+    // Residual: the alias (un-denied name) reads the secret's inode.
+    assert!(
+        f.allowed(surface.clone(), CAT, &[&s(&alias)]),
+        "hardlink residual: an alias to the denied inode reads the secret"
+    );
+    // Divergence from Landlock (inode-keyed): Seatbelt matches the PATH, so WITH the alias
+    // present the secret's OWN denied path still reads EPERM — only the alias name leaks.
+    assert!(
+        !f.allowed(surface, CAT, &[&s(&secret)]),
+        "path-based deny: the secret's own denied path stays denied even with the alias present"
+    );
+    // Control: WITHOUT any hardlink, the same path-deny holds (proving the alias, not a
+    // broken carve, is the escape).
+    let f2 = fixture();
+    let secret2 = f2.proj.join("secret.txt");
+    fs::write(&secret2, "REALSECRET").unwrap();
+    let surf2 = serde_json::json!({ "fs": [s(&f2.proj), format!("!{}", s(&secret2))] });
+    assert!(
+        !f2.allowed(surf2, CAT, &[&s(&secret2)]),
+        "no hardlink: the path-deny denies the secret"
+    );
+}
