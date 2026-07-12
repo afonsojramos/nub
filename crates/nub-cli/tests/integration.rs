@@ -4109,10 +4109,12 @@ fn single_package_run_echoes_command_to_stderr_unless_silent() {
     // #146: forwarded CLI args appear in the echoed preamble, spliced + escaped
     // exactly as executed, so the displayed command matches the effective one. A
     // metachar arg is shell-quoted in the echo (and reaches the script as one
-    // literal token), proving the echo reflects the real escaped command. The
-    // escaping is shell-specific: POSIX `sh` single-quotes, Windows `cmd.exe`
-    // caret-escapes, so the expected preamble and echoed output differ per OS.
-    // The post-target `--` is forwarded verbatim (Option A) — byte-identical to
+    // literal token), proving the echo reflects the real escaped command. Scripts
+    // run through the default POSIX-subset emulator on EVERY platform, so the echo
+    // and the execution share ONE `sh`-escaped string (single-quoted) — including
+    // on Windows, where the emulator supersedes `cmd.exe`. This is the
+    // host-agnostic guard that the emulated display uses the sh escaper. The
+    // post-target `--` is forwarded verbatim (Option A) — byte-identical to
     // `pnpm 10 run greet -- "brave new world"`.
     let out_args = Command::new(nub_binary())
         .args(["run", "greet", "--", "brave new world"])
@@ -4122,23 +4124,12 @@ fn single_package_run_echoes_command_to_stderr_unless_silent() {
     let stderr_args = String::from_utf8_lossy(&out_args.stderr);
     let stdout_args = String::from_utf8_lossy(&out_args.stdout);
     assert_eq!(out_args.status.code(), Some(0), "stderr: {stderr_args}");
-    let (want_preamble, want_output) = if cfg!(windows) {
-        (
-            "$ echo hello -- ^\"brave^ new^ world^\"",
-            "hello -- \"brave new world\"",
-        )
-    } else {
-        (
-            "$ echo hello -- 'brave new world'",
-            "hello -- brave new world",
-        )
-    };
     assert!(
-        stderr_args.contains(want_preamble),
-        "the preamble must include the escaped forwarded args: {stderr_args:?}"
+        stderr_args.contains("$ echo hello -- 'brave new world'"),
+        "the preamble must show the sh-escaped forwarded args on every platform: {stderr_args:?}"
     );
     assert!(
-        stdout_args.contains(want_output),
+        stdout_args.contains("hello -- brave new world"),
         "the forwarded args must still reach the script unchanged: {stdout_args:?}"
     );
 }

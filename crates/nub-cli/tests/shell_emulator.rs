@@ -140,6 +140,14 @@ fn forwarded_args_are_posix_escaped_as_single_tokens() {
         out.contains("a b|c"),
         "spaced arg should arrive as one token, got stdout: {out:?}"
     );
+    // The echoed `$ …` preamble is the SAME sh-escaped string the emulator runs
+    // (#146), on every platform — so the display shows `'a b'`, never the native
+    // shell's quoting. Host-agnostic guard for the Windows display regression:
+    // the preamble must not diverge from what the emulator executes.
+    assert!(
+        err.contains("'a b'"),
+        "the preamble must show the sh-escaped arg on every platform, got stderr: {err:?}"
+    );
 }
 
 #[test]
