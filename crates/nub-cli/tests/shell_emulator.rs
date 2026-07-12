@@ -178,12 +178,18 @@ fn shell_emulator_false_opts_out_to_native_shell() {
     let root = tmp_dir("optout");
     write_manifest(&root, r#"{"loop":"for i in a b c; do printf $i; done"}"#);
 
-    // Default (emulator): the `for` construct isn't in the subset, so it does not
-    // print `abc` — proving the default engine is the emulator, not native `sh`.
-    let (out_default, _e, _c) = run_nub(&root, &["run", "loop"]);
+    // Default (emulator): `for` isn't in the subset — deno reads it as a command
+    // word, so nothing prints `abc` AND the run exits nonzero (`for: command not
+    // found`). Asserting the failure documents the accepted regression instead of
+    // hiding it: a control-flow script must opt out (shellEmulator=false).
+    let (out_default, _e, code_default) = run_nub(&root, &["run", "loop"]);
     assert!(
         !out_default.contains("abc"),
         "default emulator should not run a POSIX `for` loop, got: {out_default:?}"
+    );
+    assert_ne!(
+        code_default, 0,
+        "emulated `for` should fail (control flow is outside the subset), got exit {code_default}"
     );
 
     // Opt out → native `sh` runs the loop and prints `abc`.

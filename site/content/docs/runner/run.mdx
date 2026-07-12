@@ -217,7 +217,7 @@ Script bodies run through a bundled POSIX-subset shell ([`deno_task_shell`](http
 nub run clean   # identical on Windows, macOS, and Linux
 ```
 
-It is a subset, not a full shell. Covered: the built-ins (`rm`, `cp`, `mv`, `mkdir`, `cat`, `echo`, `test`, `xargs`, `pwd`, `sleep`, …), pipes, `&&` / `||`, `;`, `$VAR` and `$(…)` expansion, `~`, brace expansion, redirection, and background `&` jobs. Not covered: shell control flow (`for`, `while`, `if`, `case`), functions, and arithmetic `$((…))`. A command that isn't a built-in is resolved on `PATH` and run as a real process, so `node`, `tsc`, and your `node_modules/.bin` tools work as usual. The subset is not byte-identical to `bash`, `sh`, or pnpm's `@yarnpkg/shell`.
+It is a subset, not a full shell. Covered: the built-ins (`rm`, `cp`, `mv`, `mkdir`, `cat`, `echo`, `test`, `xargs`, `pwd`, `sleep`, …), pipes, `&&` / `||`, `;`, `$VAR` and `$(…)` expansion, `~`, brace expansion, redirection, and background `&` jobs. Not covered: shell control flow (`for`, `while`, `if`, `case`), functions, and arithmetic `$((…))` — a script that needs those must opt out (below). Control-flow keywords aren't a clean parse error; they read as an unknown command, so a `for` loop fails with `for: command not found`. A command that isn't a built-in is resolved on `PATH` and run as a real process, so `node`, `tsc`, and your `node_modules/.bin` tools work as usual. The subset is not byte-identical to `bash`, `sh`, or pnpm's `@yarnpkg/shell`.
 
 Turn it off with `shell-emulator` in `.npmrc` to fall back to the platform shell — `sh` on Unix, `cmd.exe` on Windows:
 

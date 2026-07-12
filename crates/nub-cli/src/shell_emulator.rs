@@ -31,10 +31,39 @@ use deno_task_shell::{
 
 use crate::cli::DrainPolicy;
 
+/// Appended to every parse error. The emulator is default-on (a breaking change
+/// vs a native shell), so a user hitting a construct outside the subset —
+/// arithmetic `$((…))`, unbalanced quotes — must be pointed at the escape hatch,
+/// not left with a bare parse error. (Control-flow keywords like `for`/`if` do
+/// NOT parse-error here — deno treats them as command words → `for: command not
+/// found`, exit 127 — so they can't be intercepted; the docs cover that case.)
+const EMULATOR_OPT_OUT_HINT: &str = "\n(nub runs scripts through a POSIX-subset shell by default; set shell-emulator=false in .npmrc to use your platform's native shell)";
+
+/// Parse a script body, tagging any failure with the opt-out hint.
+fn parse_body(body: &str) -> Result<parser::SequentialList> {
+    parser::parse(body)
+        .map_err(|e| anyhow::anyhow!("shell parse error: {e}{EMULATOR_OPT_OUT_HINT}"))
+}
+
+/// deno's `ShellState::new` asserts the cwd is absolute, so a relative project
+/// root would hard-abort under `panic = "abort"`. The native `Command` path
+/// tolerates a relative root via `current_dir`; absolutize here (lexically, or
+/// joined onto the process cwd) so the emulator matches instead of panicking,
+/// surfacing a clean error if the cwd can't be resolved.
+fn absolute_cwd(cwd: PathBuf) -> Result<PathBuf> {
+    if cwd.is_absolute() {
+        Ok(cwd)
+    } else {
+        std::path::absolute(&cwd)
+            .with_context(|| format!("resolve script working directory {}", cwd.display()))
+    }
+}
+
 /// Run a script body through the emulator with inherited stdio (single-package
 /// `nub run`). Returns the shell's exit code.
 pub(crate) fn run_inherit(body: &str, env: Vec<(OsString, OsString)>, cwd: PathBuf) -> Result<i32> {
-    let list = parser::parse(body).map_err(|e| anyhow::anyhow!("shell parse error: {e}"))?;
+    let list = parse_body(body)?;
+    let cwd = absolute_cwd(cwd)?;
     let env_map = build_env_map(env);
     run_on_local_runtime(async move {
         let kill = KillSignal::default();
@@ -54,7 +83,8 @@ pub(crate) fn run_prefixed(
     out_policy: DrainPolicy,
     err_policy: DrainPolicy,
 ) -> Result<(i32, Vec<String>, Vec<String>)> {
-    let list = parser::parse(body).map_err(|e| anyhow::anyhow!("shell parse error: {e}"))?;
+    let list = parse_body(body)?;
+    let cwd = absolute_cwd(cwd)?;
     let env_map = build_env_map(env);
 
     let (out_reader, out_writer) = deno_task_shell::pipe();
@@ -174,6 +204,10 @@ async fn forward_signals(kill: KillSignal) {
     loop {
         tokio::select! {
             _ = next(&mut term) => kill.send(SignalKind::SIGTERM),
+            // SIGHUP maps to `Other(1)`, which deno delivers to the in-flight
+            // child (OS `kill(pid, SIGHUP)`) but does NOT treat as an abort, so a
+            // `;`-separated command after it could still run. Acceptable: SIGHUP
+            // reaching the running workload is the load-bearing behavior.
             _ = next(&mut hup) => kill.send(SignalKind::Other(1)),
             _ = next(&mut quit) => kill.send(SignalKind::SIGQUIT),
             _ = next(&mut int) => kill.send(SignalKind::SIGINT),
