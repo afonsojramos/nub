@@ -323,11 +323,15 @@ Each is documented in code at the site noted; none is silently mis-reported.
   hardlink created *outside* the sandbox beforehand. Fix: none clean at the Landlock layer
   (the inode was legitimately named twice). Regression test:
   `hardlink_to_denied_secret_leaks_via_alias`.
-- **macOS hardlink-to-secret (same class as the Linux residual above).** Seatbelt file-read
-  rules are path-pattern based, like Landlock's, so the same alias holds: a pre-existing
-  same-uid hardlink to a secret, at a name the deny never targets, reads through the shared
-  inode. Bounded the same way — requires a hardlink created outside the sandbox beforehand;
-  fix: none clean at the Seatbelt layer either (the inode was legitimately named twice).
+- **macOS hardlink-to-secret (host-verified).** Seatbelt file-read rules are path-pattern
+  based, like Landlock's, so the same alias holds: a pre-existing same-uid hardlink to a
+  secret, at a name the deny never targets, is readable, and reading it reads the SHARED
+  inode — so the path-denied secret leaks through the alias. Host-verified: with the alias
+  present the secret leaks; without it the path-deny holds. Unlike Landlock's inode-keyed
+  grant, Seatbelt matches the PATH, so the denied path itself stays denied — only the alias
+  name reads. Bounded: requires a hardlink created *outside* the sandbox beforehand. Fix:
+  none clean at the Seatbelt layer (the inode was legitimately named twice). Regression
+  test: `hardlink_to_denied_secret_leaks_via_alias` (`tests/macos_enforcement.rs`).
 - **Linux derive→open TOCTOU.** Grant derivation canonicalizes paths on the host, then
   the kernel enforces at `open()` later; a path swapped in between could shift a target.
   Bounded: a same-uid local race within the confined tree. (Inherent to a canonicalize-
