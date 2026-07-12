@@ -519,6 +519,17 @@ fn push_net_rule(
             ),
         ));
     }
+    // The symbolic private-range opt-in (`<private>`, alias `<local>`): the ONLY way to
+    // re-permit the RFC1918 / IPv6-ULA ranges the egress proxy blocks by default. Matched
+    // BEFORE the CIDR/host split so the angle-bracket token is not mistaken for a literal
+    // host (which would silently match nothing).
+    if target == "<private>" || target == "<local>" {
+        out.push(NetRule {
+            target: NetTarget::Private,
+            effect,
+        });
+        return Ok(());
+    }
     let net_target = if target.contains('/') {
         match target.parse::<ipnet::IpNet>() {
             Ok(net) => NetTarget::Cidr(net),

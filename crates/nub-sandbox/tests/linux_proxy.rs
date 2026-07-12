@@ -439,6 +439,49 @@ fn ssrf_metadata_target_dropped_even_when_policy_admits_it() {
 }
 
 #[test]
+fn rfc1918_egress_dropped_by_default_even_when_cidr_admits_it() {
+    // SSRF private tier: RFC1918 is blocked at the outbound connect BY DEFAULT, even when
+    // gate 1 admits the target via an explicit CIDR (`192.168.0.0/16`). A raw private CIDR
+    // admits the host but does NOT lift the SSRF private tier — only the `<private>` token
+    // does — so `connect_upstream` still refuses `192.168.1.1`. The negative control (an
+    // admitted loopback echo under the SAME policy forwards) proves this is a targeted,
+    // selective egress block, not a broken tunnel. (That the `<private>` opt-in flips the
+    // classifier is proven deterministically by the `is_blocked_egress_ip`/`connect_upstream`
+    // unit tests; a live private-range upstream isn't bindable on the test host.)
+    if skip_without_landlock(4) {
+        return; // per-host needs Landlock ABI v4
+    }
+    let f = fixture();
+    let Some(probe) = compile_probe(&f.proj) else {
+        return;
+    };
+    let echo = echo_server();
+    let port = echo.port().to_string();
+    let probe = probe.to_str().unwrap();
+    let policy =
+        json!({ "fs": true, "net": ["192.168.0.0/16", "127.0.0.0/8", "*.allowed.example"] });
+
+    assert_eq!(
+        f.run(
+            policy.clone(),
+            probe,
+            &["proxysni", "192.168.1.1", "80", "api.allowed.example"]
+        ),
+        5,
+        "RFC1918 target must be dropped at connect by default even though the CIDR admits it"
+    );
+    assert_eq!(
+        f.run(
+            policy,
+            probe,
+            &["proxysni", "127.0.0.1", &port, "api.allowed.example"]
+        ),
+        0,
+        "neg-control: an admitted loopback target still forwards under the same policy"
+    );
+}
+
+#[test]
 fn sctp_and_mptcp_egress_denied_in_proxy_mode() {
     // Landlock's ConnectTcp governs ONLY IPPROTO_TCP, so an AF_INET SOCK_STREAM socket
     // over SCTP or MPTCP passes the SOCK_STREAM narrowing yet dodges the connect hook —
