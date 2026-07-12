@@ -205,7 +205,9 @@ impl Resolver {
                     && let Some(url) = pkg.tarball_url.as_deref()
                 {
                     let config_registry = self.client.config_registry_for(pkg.registry_name());
-                    if url_authority(url) != url_authority(&config_registry) {
+                    if aube_registry::registry_host_key(url)
+                        != aube_registry::registry_host_key(&config_registry)
+                    {
                         pkg.force_tarball_url = true;
                     }
                 }
@@ -214,19 +216,6 @@ impl Resolver {
 
         Ok(contextualized)
     }
-}
-
-/// The `host[:port]` authority of an `scheme://authority/…` URL, or `None`
-/// when the string has no `://`. Used to compare a package's resolved tarball
-/// host against its config-derived registry host.
-fn url_authority(url: &str) -> Option<&str> {
-    let after_scheme = url.split_once("://")?.1;
-    Some(
-        after_scheme
-            .split(['/', '?', '#'])
-            .next()
-            .unwrap_or(after_scheme),
-    )
 }
 
 /// Apply the project's `readPackage` hook to each importer manifest in

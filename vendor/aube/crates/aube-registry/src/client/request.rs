@@ -25,6 +25,15 @@ impl RegistryClient {
     /// Record a pnpm `namedRegistries` route so a subsequent fetch of `pkg`
     /// resolves against `url` (its aliased registry) rather than the default.
     /// Called by the resolver's `preprocess_task` before the package's fetch.
+    ///
+    /// KNOWN LIMITATION: the route map is keyed by package NAME only (flat,
+    /// global). If one importer declares `@acme/foo` via a named-registry
+    /// alias and another declares the same `@acme/foo` with a plain range
+    /// expecting the default registry, the resolver dedups them to one node
+    /// and BOTH fetch from the aliased registry. pnpm encodes the registry into
+    /// the depPath and can keep the two as distinct nodes; nub cannot yet. This
+    /// is a narrow same-name-two-registries divergence, recorded here as a
+    /// known limitation rather than a bug fixed at this layer.
     pub fn record_named_route(&self, pkg: String, url: String) {
         if let Ok(mut routes) = self.named_routes.write() {
             routes.insert(pkg, url);

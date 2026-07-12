@@ -855,9 +855,29 @@ where
                     // URL-keyed auth, and the SHA-512 integrity check validates
                     // the CONTENT, so dropping the URL-consistency recheck is safe.
                     let config_registry = client.config_registry_for(&registry_name);
-                    if tarball_url_host(lockfile_url) == tarball_url_host(&config_registry) {
-                        verify_lockfile_tarball_url(&client, &registry_name, &version, lockfile_url)
+                    let host_matches = aube_registry::registry_host_key(lockfile_url)
+                        == aube_registry::registry_host_key(&config_registry);
+                    match locked_tarball_url_action(host_matches, integrity.is_some()) {
+                        LockedTarballUrlAction::Verify => {
+                            verify_lockfile_tarball_url(
+                                &client,
+                                &registry_name,
+                                &version,
+                                lockfile_url,
+                            )
                             .await?;
+                        }
+                        LockedTarballUrlAction::Skip => {}
+                        LockedTarballUrlAction::Refuse => {
+                            return Err(miette!(
+                                code = aube_codes::errors::ERR_AUBE_TARBALL_URL_MISMATCH,
+                                "{}@{}: lockfile pins tarball {} on a host that differs from its configured registry but records no integrity hash; refusing to fetch an unverifiable tarball (run `{} --no-frozen-lockfile` to refresh the lockfile)",
+                                registry_name,
+                                version,
+                                aube_util::url::redact_url(lockfile_url),
+                                aube_util::cmd("install"),
+                            ));
+                        }
                     }
                 }
 
@@ -1151,6 +1171,33 @@ async fn verify_lockfile_tarball_url(
     Ok(())
 }
 
+/// What to do with a lockfile-pinned tarball URL before fetching it.
+#[derive(Debug, PartialEq, Eq)]
+enum LockedTarballUrlAction {
+    /// Host matches the config-derived registry: re-verify the URL against
+    /// that registry's metadata.
+    Verify,
+    /// Host differs but a content hash still guards the bytes: skip the URL
+    /// recheck and fetch straight from the persisted URL (the frozen-install
+    /// path for a pnpm `namedRegistries` package).
+    Skip,
+    /// Host differs AND no integrity hash: skipping the recheck would leave
+    /// the bytes — and their lifecycle scripts — fully unverified. Refuse.
+    Refuse,
+}
+
+/// Decide how to treat a lockfile-pinned tarball URL. The verify-SKIP that a
+/// host mismatch enables is safe ONLY while the SHA-512 content hash still
+/// guards the bytes; without integrity a host-mismatched entry would bypass
+/// both the URL recheck and the content check, so it is refused.
+fn locked_tarball_url_action(host_matches: bool, has_integrity: bool) -> LockedTarballUrlAction {
+    match (host_matches, has_integrity) {
+        (true, _) => LockedTarballUrlAction::Verify,
+        (false, true) => LockedTarballUrlAction::Skip,
+        (false, false) => LockedTarballUrlAction::Refuse,
+    }
+}
+
 fn lockfile_tarball_url_matches_metadata(lockfile_url: &str, expected_url: &str) -> bool {
     lockfile_url == expected_url
         || (is_public_npm_registry_tarball(lockfile_url)
@@ -1165,19 +1212,6 @@ fn is_public_npm_registry_tarball(url: &str) -> bool {
         .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
         .as_deref()
         == Some("registry.npmjs.org")
-}
-
-/// Lowercased `host[:port]` of a URL, or `None` when unparseable. Used to
-/// decide whether a locked tarball URL points at the registry we'd resolve
-/// its package to (config-derived) or at a distinct pnpm-`namedRegistries`
-/// host that only the lockfile records.
-fn tarball_url_host(url: &str) -> Option<String> {
-    let parsed = reqwest::Url::parse(url).ok()?;
-    let host = parsed.host_str()?.to_ascii_lowercase();
-    Some(match parsed.port() {
-        Some(port) => format!("{host}:{port}"),
-        None => host,
-    })
 }
 
 fn tarball_url_path(url: &str) -> Option<String> {
@@ -1254,6 +1288,31 @@ pub(super) fn strip_peer_context_suffix(dep_path: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::lockfile_tarball_url_matches_metadata;
+    use super::{LockedTarballUrlAction, locked_tarball_url_action};
+
+    #[test]
+    fn locked_tarball_url_refuses_host_mismatch_without_integrity() {
+        // Host matches → always re-verify, integrity irrelevant.
+        assert_eq!(
+            locked_tarball_url_action(true, false),
+            LockedTarballUrlAction::Verify
+        );
+        assert_eq!(
+            locked_tarball_url_action(true, true),
+            LockedTarballUrlAction::Verify
+        );
+        // Host differs with a content hash → skip the URL recheck safely.
+        assert_eq!(
+            locked_tarball_url_action(false, true),
+            LockedTarballUrlAction::Skip
+        );
+        // Host differs AND no content hash → refuse; the bytes would run
+        // unverified.
+        assert_eq!(
+            locked_tarball_url_action(false, false),
+            LockedTarballUrlAction::Refuse
+        );
+    }
 
     #[test]
     fn tarball_url_match_accepts_exact_url() {
