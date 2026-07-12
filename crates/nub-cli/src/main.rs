@@ -12,6 +12,7 @@ mod nubx_resolve;
 mod phantom_scan;
 mod pm_engine;
 mod self_shim;
+mod shell_emulator;
 mod verify_deps;
 
 use anyhow::Result;

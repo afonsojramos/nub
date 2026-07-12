@@ -116,8 +116,21 @@ jsonc-parser.workspace = true
 console.workspace = true
 # Multi-thread runtime for the embedded aube install engine (pm_engine.rs).
 # Mirrors aube's own cli_main runtime shape; tokio is dormant on every other
-# nub code path.
-tokio = { version = "1", features = ["rt-multi-thread"] }
+# nub code path EXCEPT the shell emulator (src/shell_emulator.rs), which drives
+# deno_task_shell on a current-thread runtime + LocalSet. `signal` powers the
+# SIGTERM/SIGINT → KillSignal forwarder there; the rest mirror deno's own tokio
+# set so `enable_all()` and its spawned children work.
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "fs",
+    "io-std",
+    "io-util",
+    "process",
+    "sync",
+    "time",
+    "macros",
+    "signal",
+] }
 tracing-subscriber.workspace = true
 url = "2.5"
 # Only to SIZE the rayon GLOBAL pool under a detected PID/thread constraint
@@ -133,6 +146,11 @@ rayon = "1"
 # exactly the automaxprocs algorithm, maintained, 2-dep. Closes the v1-quota +
 # affinity-blocked gaps in std's `available_parallelism()`.
 num_cpus = "1"
+# Bundled cross-platform POSIX-subset script shell (MIT, by the Deno authors).
+# The default `nub run` script engine (src/shell_emulator.rs): parse() + async
+# execute() with Rust builtins (cp/mv/rm/mkdir/echo/test/…) so package scripts
+# get identical POSIX behavior on every platform, no system `sh` required.
+deno_task_shell = "0.33"
 
 [target.'cfg(unix)'.dependencies]
 # fd-level capture of the engine's raw println/eprintln hint lines so the

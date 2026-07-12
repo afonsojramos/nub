@@ -201,9 +201,36 @@ INIT_CWD                   # the directory you invoked `nub run` from
 
 Inside a script, spawning `node` (by shebang or `child_process.spawn("node", …)`) re-enters Nub through the PATH shim, so child processes stay transpiled and augmented — see [`--node`](#--node) below.
 
+## Cross-platform script shell
+
+Script bodies run through a bundled POSIX-subset shell ([`deno_task_shell`](https://github.com/denoland/deno_task_shell)) on every platform, so the same script behaves the same on macOS, Linux, and Windows — no system shell required. POSIX constructs that `cmd.exe` can't run work on Windows unchanged:
+
+```json
+{
+  "scripts": {
+    "clean": "rm -rf dist && mkdir -p dist && cp README.md dist/"
+  }
+}
+```
+
+```bash
+nub run clean   # identical on Windows, macOS, and Linux
+```
+
+It is a subset, not a full shell. Covered: the built-ins (`rm`, `cp`, `mv`, `mkdir`, `cat`, `echo`, `test`, `xargs`, `pwd`, `sleep`, …), pipes, `&&` / `||`, `;`, `$VAR` and `$(…)` expansion, `~`, brace expansion, redirection, and background `&` jobs. Not covered: shell control flow (`for`, `while`, `if`, `case`), functions, and arithmetic `$((…))`. A command that isn't a built-in is resolved on `PATH` and run as a real process, so `node`, `tsc`, and your `node_modules/.bin` tools work as usual. The subset is not byte-identical to `bash`, `sh`, or pnpm's `@yarnpkg/shell`.
+
+Turn it off with `shell-emulator` in `.npmrc` to fall back to the platform shell — `sh` on Unix, `cmd.exe` on Windows:
+
+```ini
+# .npmrc
+shell-emulator = false
+```
+
+This is a deliberate divergence from pnpm, where `shellEmulator` defaults off. To pin a specific real shell instead of the platform default, use `--script-shell` below — it overrides the emulator.
+
 ## `--script-shell`
 
-If your `.npmrc` sets `script-shell`, Nub uses it to invoke script bodies. The rest of `.npmrc` (registry, auth, `node-linker`, `hoist-pattern`) is package-manager territory and is not read here.
+Setting `script-shell` in `.npmrc` runs script bodies through that shell binary instead of the emulator. The rest of `.npmrc` (registry, auth, `node-linker`, `hoist-pattern`) is package-manager territory and is not read here.
 
 ```ini
 # .npmrc

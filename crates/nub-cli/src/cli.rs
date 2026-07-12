@@ -3522,13 +3522,38 @@ enum StreamMode {
     Prefixed,
 }
 
-/// Build the shell `Command` for a package script with Nub's augmentation
-/// applied exactly once: `NODE_OPTIONS` (injected flags + preload + webstorage),
-/// the PATH shim prepended to the `node_modules/.bin` walk-up chain, `.env`
-/// files, and the `npm_*` lifecycle vars.
+/// How a resolved script body is executed. The default (`shellEmulator` on) is
+/// [`Emulated`] — the bundled `deno_task_shell` POSIX-subset shell — so scripts
+/// behave identically across platforms; an explicit `--script-shell`/`.npmrc`
+/// `script-shell`, or `shellEmulator=false`, selects [`Native`] (a real shell
+/// binary). Both carry the SAME assembled environment (see
+/// [`build_script_command`]); `full_cmd` (the display + exec string) is returned
+/// alongside by that builder.
+enum ScriptInvocation {
+    /// Run via a real shell binary: `sh -c` / `cmd /d /s /c`, or the
+    /// `--script-shell`/`.npmrc script-shell` binary.
+    Native(std::process::Command),
+    /// Run via the bundled cross-platform shell emulator ([`crate::shell_emulator`]).
+    /// `env` is the ordered augmentation-override pairs the emulator layers over
+    /// the parent environment; `cwd` is the project root.
+    Emulated {
+        body: String,
+        env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+        cwd: std::path::PathBuf,
+    },
+}
+
+/// Resolve how a package script runs, with Nub's augmentation assembled exactly
+/// once: `NODE_OPTIONS` (injected flags + preload + webstorage), the PATH shim
+/// prepended to the `node_modules/.bin` walk-up chain, `.env` files, and the
+/// `npm_*` lifecycle vars.
 ///
-/// This is the single augmentation path shared by inherited and prefixed
-/// (streamed) execution — there is no second, divergent block. The PATH shim
+/// Returns a [`ScriptInvocation`] — the bundled emulator (default) or a native
+/// shell `Command` — plus the display/exec string (`full_cmd`). The environment
+/// is assembled into ONE ordered pair list that BOTH paths consume, so a script
+/// child sees an identical environment either way (the native `Command` layers
+/// the pairs over the inherited parent env; the emulator seeds the parent env
+/// then applies the same pairs — see [`crate::shell_emulator`]). The PATH shim
 /// temp dir is process-wide and reclaimed once on exit (see
 /// [`nub_core::node::spawn::cleanup_shim`]), so no per-call guard is returned.
 fn build_script_command(
@@ -3539,7 +3564,7 @@ fn build_script_command(
     lifecycle_event: &str,
     stream: StreamMode,
     script_shell_override: Option<&str>,
-) -> Result<(std::process::Command, String)> {
+) -> Result<(ScriptInvocation, String)> {
     use std::process::Command as StdCommand;
 
     // `.env` is NODE-SCOPED, not process-scoped (security + correctness, decided
@@ -3586,37 +3611,36 @@ fn build_script_command(
         &ua_product,
     );
 
-    // Shell precedence: the explicit `--script-shell <path>` flag wins, then a
-    // `.npmrc` `script-shell=` setting, then the platform default. A custom
-    // POSIX shell uses `-c`; only the implicit Windows `cmd` default uses `/d /s /c`.
+    // Shell precedence: an explicit `--script-shell <path>` flag wins, then a
+    // `.npmrc` `script-shell=` setting — either pins that real shell binary (the
+    // Native path). With neither, the bundled POSIX-subset emulator is the
+    // DEFAULT (`shellEmulator` on — nub's deliberate divergence from pnpm, whose
+    // default is off), unless `shellEmulator=false` opts back out to the
+    // platform-native `sh`/`cmd`.
     let custom_shell = script_shell_override
         .map(str::to_string)
         .or_else(|| nub_core::workspace::scripts::script_shell(&project.root));
-    let (shell, shell_flag) = if let Some(ref s) = custom_shell {
-        (s.as_str(), "-c")
-    } else if cfg!(windows) {
-        // npm's exact flags: `/d` (skip AutoRun), `/s` (strip outer quotes), `/c`.
-        ("cmd", "/d /s /c")
-    } else {
-        ("sh", "-c")
-    };
-    // The implicit Windows `cmd` default must spawn with verbatim arguments — the
-    // script body is passed to cmd.exe exactly as written (npm's
-    // `windowsVerbatimArguments: true`), so Rust's MSVCRT re-quoting never mangles
-    // a `node -e "…"` body or undoes the per-arg cmd escaping below. A custom POSIX
-    // shell (e.g. Git-Bash `sh.exe` via `--script-shell`) does its own parsing,
-    // so it takes the normal escaped-`arg` path.
-    let cmd_verbatim = custom_shell.is_none() && cfg!(windows);
+    let use_emulator =
+        custom_shell.is_none() && nub_core::workspace::scripts::shell_emulator(&project.root);
 
     // Append the user's extra args the way npm does (@npmcli/promise-spawn):
     // each arg is escaped for the target shell and spliced onto the UNescaped
     // script body, so multi-word / metachar args reach the script as single
-    // literal tokens while the body's own globs/expansions still run. A raw
-    // join (the prior behavior) let the shell re-split/expand the args. Compat,
-    // not security — the args are the user's own argv (A42). The returned
-    // `full_cmd` is also what the `$ <cmd>` preamble echoes, so the displayed
-    // command matches the effective one (issue #146).
-    let full_cmd = nub_core::workspace::shell_escape::splice_args(cmd, args, shell);
+    // literal tokens while the body's own globs/expansions still run. The
+    // emulator always parses POSIX, so it uses the `sh` escaper on EVERY platform
+    // (never the `cmd` branch); a native shell uses the escaper matching it. The
+    // returned `full_cmd` is also what the `$ <cmd>` preamble echoes, so the
+    // displayed command matches the effective one (issue #146 / A42).
+    let escaping_shell: &str = if use_emulator {
+        "sh"
+    } else if let Some(ref s) = custom_shell {
+        s.as_str()
+    } else if cfg!(windows) {
+        "cmd"
+    } else {
+        "sh"
+    };
+    let full_cmd = nub_core::workspace::shell_escape::splice_args(cmd, args, escaping_shell);
 
     // Augmentation: NODE_OPTIONS + PATH shim so child `node` processes inside
     // the script inherit transpilation, polyfills, flag injection, and
@@ -3640,12 +3664,161 @@ fn build_script_command(
         pnp_ctx.as_ref().map(|c| c.pnp_cjs.as_path()),
     );
 
+    // === Environment: the SINGLE source of truth for a script's augmentation
+    // overrides, assembled once and consumed by BOTH the native `Command` and
+    // the emulator so a script child sees an identical environment either way.
+    // ORDER MATTERS — later pairs win: the `.env`/`npm_env` overlays sit LAST so
+    // a user-set value overrides nub's. The native path layers these over the
+    // inherited parent env; the emulator seeds the parent env first then applies
+    // the same pairs (deno spawns children with `env_clear`, so its map must be
+    // complete — see crate::shell_emulator). ===
+    let mut env_pairs: Vec<(std::ffi::OsString, std::ffi::OsString)> = Vec::new();
+
+    // PATH: shim dir (when augmenting) → `.bin` walk-up chain → system PATH.
+    // `bin_path` is already `<.bin dirs>:<system PATH>`, so prepending the bare
+    // shim dir gives `shim:.bin:system` — `.bin` BEFORE the system PATH so a local
+    // tool shadows a global one (npm/pnpm parity), with the system PATH appearing
+    // exactly once.
+    let path: std::ffi::OsString = match aug.as_ref().and_then(|a| a.shim_dir.as_deref()) {
+        Some(shim) => {
+            let mut combined = std::ffi::OsString::from(shim);
+            if !bin_path.is_empty() {
+                combined.push(nub_core::PATH_LIST_SEPARATOR);
+                combined.push(std::ffi::OsString::from(bin_path.clone()));
+            }
+            combined
+        }
+        None => std::ffi::OsString::from(bin_path.clone()),
+    };
+    env_pairs.push(("PATH".into(), path));
+
+    // Default-on compile cache for script children (same decision as spawn_node,
+    // 2026-06-10): a script's node subtree inherits this env, so heavyweight
+    // single-file tools it launches (tsc/eslint/prettier-class bundles) load
+    // their V8 blobs instead of reparsing. Only the UNSET case is filled — a
+    // user value already lives in the parent env both paths carry.
+    if std::env::var_os("NODE_COMPILE_CACHE").is_none()
+        && let Some(dir) = nub_core::node::spawn::default_compile_cache_dir()
+    {
+        env_pairs.push(("NODE_COMPILE_CACHE".into(), dir));
+    }
+
+    // $NODE: npm/pnpm point this at the node binary running the script so userland
+    // `$NODE child.js` / `spawn(process.env.NODE, …)` invoke "the same Node." When
+    // we augment, point it at the PATH-shim `node` (→ nub) instead of the raw binary
+    // so an absolute-path `$NODE` re-enters nub and the child stays transpiled —
+    // identical to bare `node child.js` (which hits the shim via PATH). Falls back to
+    // the real binary with no shim (compat / re-entrant), where the inherited
+    // NODE_OPTIONS preload still augments it. `npm_node_execpath` deliberately stays
+    // the real binary (set in npm_env) — tooling derives Node's install prefix from
+    // it, and the shim dir has no such layout. Before the .env/npm_env overlays so a
+    // user `.env`-set NODE still wins (shell/.env precedence).
+    let node_env = aug
+        .as_ref()
+        .and_then(|a| a.node_shim_exe())
+        .unwrap_or_else(|| std::ffi::OsString::from(node.path.as_str()));
+    env_pairs.push(("NODE".into(), node_env));
+
+    if let Some(node_opts) = aug.as_ref().and_then(|a| a.node_options.as_ref()) {
+        env_pairs.push(("NODE_OPTIONS".into(), node_opts.clone().into()));
+    }
+    if let Some(node_path) = aug.as_ref().and_then(|a| a.node_path.as_ref()) {
+        env_pairs.push(("NODE_PATH".into(), node_path.clone()));
+    }
+    // localStorage-neutralize signal for the script subtree's node children (webstorage
+    // flag-needed band, no user --localstorage-file): the preload reads + deletes it.
+    if let Some(aug) = aug.as_ref() {
+        aug.apply_localstorage_env(|k, v| {
+            env_pairs.push((k.into(), v.into()));
+        });
+    }
+
+    // Force nub's async tier for a script that runs a foreign async loader
+    // (tsx/ts-node) on a broken-compose Node — the common `nub run dev` = `tsx …`
+    // case that otherwise crashes with ERR_METHOD_NOT_IMPLEMENTED. Only when we
+    // establish augmentation (`aug` is Some); a re-entrant child inherits the var.
+    if aug.is_some()
+        && let Some((k, val)) = force_async_tier
+    {
+        env_pairs.push((k.into(), val.into()));
+    }
+
+    // `npm_config_node_gyp`: npm/pnpm always point this at a runnable node-gyp
+    // (their bundled `node-gyp/bin/node-gyp.js`) so a script's `node
+    // $npm_config_node_gyp …` resolves without a global node-gyp install. nub
+    // hands out the engine's lazy `node-gyp.js` shim, which trampolines back
+    // into nub via `AUBE_NODE_GYP_EXE` (handled by `__node-gyp-bootstrap`) to
+    // bootstrap the real node-gyp on first use. Mirrors what the engine's
+    // lifecycle path stamps (`aube-scripts::apply_script_settings_env`) so the
+    // run and lifecycle paths agree. Before the `npm_env` overlay so a user-set
+    // value still wins; the bootstrap markers are nub-internal env (brand-exempt)
+    // and only meaningful to the shim. Failure to write the (cheap) shim degrades
+    // to leaving the var unset — same as a plain Node.
+    if let Ok(node_gyp_js) = aube::commands::install::node_gyp_bootstrap::lazy_js_shim_path() {
+        env_pairs.push(("npm_config_node_gyp".into(), node_gyp_js.into_os_string()));
+        env_pairs.push((
+            "AUBE_NODE_GYP_EXE".into(),
+            nub_binary.clone().into_os_string(),
+        ));
+        env_pairs.push((
+            "AUBE_NODE_GYP_PROJECT_DIR".into(),
+            project.root.clone().into_os_string(),
+        ));
+    }
+
+    // `npm_config_registry`: pnpm always exports the resolved registry to a
+    // script's environment (defaulting to `https://registry.npmjs.org/`); npm
+    // exports it whenever a registry is configured. nub left it unset, so a
+    // script reading `$npm_config_registry` (publish wrappers, custom fetch
+    // tooling) saw `undefined` under nub but a real URL under npm/pnpm. Read
+    // the resolved registry from the project's `.npmrc`/config chain — the same
+    // `NpmConfig` the engine resolves installs against — and export it. Before
+    // the `npm_env` overlay so a user-set value still wins.
+    let registry = aube_registry::config::NpmConfig::load(&project.root)
+        .registry_for("")
+        .to_string();
+    env_pairs.push(("npm_config_registry".into(), registry.into()));
+
+    // The `.env` (`--env-file`) overlay, then the `npm_*` lifecycle vars — both
+    // consumed by value (locals used only here) and placed last so a user-set
+    // value wins over nub's.
+    for (k, v) in env_vars {
+        env_pairs.push((k.into(), v.into()));
+    }
+    for (k, v) in npm_env {
+        env_pairs.push((k.into(), v.into()));
+    }
+
+    if use_emulator {
+        return Ok((
+            ScriptInvocation::Emulated {
+                body: full_cmd.clone(),
+                env: env_pairs,
+                cwd: project.root.clone(),
+            },
+            full_cmd,
+        ));
+    }
+
+    // Native shell: `sh -c` / `cmd /d /s /c`, or the `--script-shell`/`.npmrc`
+    // shell binary (custom POSIX shells use `-c`).
+    let (shell, shell_flag) = if let Some(ref s) = custom_shell {
+        (s.as_str(), "-c")
+    } else if cfg!(windows) {
+        // npm's exact flags: `/d` (skip AutoRun), `/s` (strip outer quotes), `/c`.
+        ("cmd", "/d /s /c")
+    } else {
+        ("sh", "-c")
+    };
+    // The implicit Windows `cmd` default must spawn with verbatim arguments — the
+    // script body is passed to cmd.exe exactly as written (npm's
+    // `windowsVerbatimArguments: true`), so Rust's MSVCRT re-quoting never mangles
+    // a `node -e "…"` body or undoes the per-arg cmd escaping. A custom POSIX
+    // shell (e.g. Git-Bash `sh.exe` via `--script-shell`) does its own parsing,
+    // so it takes the normal escaped-`arg` path.
+    let cmd_verbatim = custom_shell.is_none() && cfg!(windows);
+
     let mut command = StdCommand::new(shell);
-    // Windows cmd: split the multi-token flag (`/d /s /c`) and pass the body
-    // verbatim via `raw_arg`, the Rust equivalent of Node's
-    // `windowsVerbatimArguments: true`, so MSVCRT re-quoting never mangles a
-    // `node -e "…"` body or undoes the per-arg cmd escaping. A custom POSIX shell
-    // (e.g. Git-Bash `sh.exe`) does its own parsing → the escaped-`arg` path.
     #[cfg(windows)]
     let spawned = if cmd_verbatim {
         use std::os::windows::process::CommandExt;
@@ -3667,109 +3840,7 @@ fn build_script_command(
     }
     command.current_dir(&project.root);
 
-    // PATH: shim dir (when augmenting) → `.bin` walk-up chain → system PATH.
-    // `bin_path` is already `<.bin dirs>:<system PATH>`, so prepending the bare
-    // shim dir gives `shim:.bin:system` — `.bin` BEFORE the system PATH so a local
-    // tool shadows a global one (npm/pnpm parity), with the system PATH appearing
-    // exactly once.
-    let path: std::ffi::OsString = match aug.as_ref().and_then(|a| a.shim_dir.as_deref()) {
-        Some(shim) => {
-            let mut combined = std::ffi::OsString::from(shim);
-            if !bin_path.is_empty() {
-                combined.push(nub_core::PATH_LIST_SEPARATOR);
-                combined.push(std::ffi::OsString::from(bin_path.clone()));
-            }
-            combined
-        }
-        None => std::ffi::OsString::from(bin_path.clone()),
-    };
-    command.env("PATH", path);
-
-    // Default-on compile cache for script children (same decision as spawn_node,
-    // 2026-06-10): a script's node subtree inherits this env, so heavyweight
-    // single-file tools it launches (tsc/eslint/prettier-class bundles) load
-    // their V8 blobs instead of reparsing. User-set values are untouched —
-    // they're already in the inherited env and this only fills the unset case.
-    if std::env::var_os("NODE_COMPILE_CACHE").is_none() {
-        if let Some(dir) = nub_core::node::spawn::default_compile_cache_dir() {
-            command.env("NODE_COMPILE_CACHE", dir);
-        }
-    }
-
-    // $NODE: npm/pnpm point this at the node binary running the script so userland
-    // `$NODE child.js` / `spawn(process.env.NODE, …)` invoke "the same Node." When
-    // we augment, point it at the PATH-shim `node` (→ nub) instead of the raw binary
-    // so an absolute-path `$NODE` re-enters nub and the child stays transpiled —
-    // identical to bare `node child.js` (which hits the shim via PATH). Falls back to
-    // the real binary with no shim (compat / re-entrant), where the inherited
-    // NODE_OPTIONS preload still augments it. `npm_node_execpath` deliberately stays
-    // the real binary (set in npm_env) — tooling derives Node's install prefix from
-    // it, and the shim dir has no such layout. Set before the .env/npm_env loops so a
-    // user `.env`-set NODE still wins (shell/.env precedence).
-    let node_env = aug
-        .as_ref()
-        .and_then(|a| a.node_shim_exe())
-        .unwrap_or_else(|| std::ffi::OsString::from(node.path.as_str()));
-    command.env("NODE", node_env);
-
-    if let Some(node_opts) = aug.as_ref().and_then(|a| a.node_options.as_ref()) {
-        command.env("NODE_OPTIONS", node_opts);
-    }
-    if let Some(node_path) = aug.as_ref().and_then(|a| a.node_path.as_ref()) {
-        command.env("NODE_PATH", node_path);
-    }
-    // localStorage-neutralize signal for the script subtree's node children (webstorage
-    // flag-needed band, no user --localstorage-file): the preload reads + deletes it.
-    if let Some(aug) = aug.as_ref() {
-        aug.apply_localstorage_env(|k, v| {
-            command.env(k, v);
-        });
-    }
-
-    // Force nub's async tier for a script that runs a foreign async loader
-    // (tsx/ts-node) on a broken-compose Node — the common `nub run dev` = `tsx …`
-    // case that otherwise crashes with ERR_METHOD_NOT_IMPLEMENTED. Only when we
-    // establish augmentation (`aug` is Some); a re-entrant child inherits the var.
-    if aug.is_some()
-        && let Some((k, val)) = force_async_tier
-    {
-        command.env(k, val);
-    }
-
-    // `npm_config_node_gyp`: npm/pnpm always point this at a runnable node-gyp
-    // (their bundled `node-gyp/bin/node-gyp.js`) so a script's `node
-    // $npm_config_node_gyp …` resolves without a global node-gyp install. nub
-    // hands out the engine's lazy `node-gyp.js` shim, which trampolines back
-    // into nub via `AUBE_NODE_GYP_EXE` (handled by `__node-gyp-bootstrap`) to
-    // bootstrap the real node-gyp on first use. Mirrors what the engine's
-    // lifecycle path stamps (`aube-scripts::apply_script_settings_env`) so the
-    // run and lifecycle paths agree. Set before the `npm_env` loop so a
-    // user-set value still wins; the bootstrap markers are nub-internal env
-    // (brand-exempt) and only meaningful to the shim. Failure to write the
-    // (cheap) shim degrades to leaving the var unset — same as a plain Node.
-    if let Ok(node_gyp_js) = aube::commands::install::node_gyp_bootstrap::lazy_js_shim_path() {
-        command.env("npm_config_node_gyp", node_gyp_js);
-        command.env("AUBE_NODE_GYP_EXE", &nub_binary);
-        command.env("AUBE_NODE_GYP_PROJECT_DIR", &project.root);
-    }
-
-    // `npm_config_registry`: pnpm always exports the resolved registry to a
-    // script's environment (defaulting to `https://registry.npmjs.org/`); npm
-    // exports it whenever a registry is configured. nub left it unset, so a
-    // script reading `$npm_config_registry` (publish wrappers, custom fetch
-    // tooling) saw `undefined` under nub but a real URL under npm/pnpm. Read
-    // the resolved registry from the project's `.npmrc`/config chain — the same
-    // `NpmConfig` the engine resolves installs against — and export it. Set
-    // before the `npm_env` loop so a user-set value still wins.
-    let registry = aube_registry::config::NpmConfig::load(&project.root)
-        .registry_for("")
-        .to_string();
-    command.env("npm_config_registry", registry);
-
-    for (k, v) in &env_vars {
-        command.env(k, v);
-    }
-    for (k, v) in &npm_env {
+    for (k, v) in env_pairs {
         command.env(k, v);
     }
 
@@ -3778,7 +3849,7 @@ fn build_script_command(
         command.stderr(std::process::Stdio::piped());
     }
 
-    Ok((command, full_cmd))
+    Ok((ScriptInvocation::Native(command), full_cmd))
 }
 
 fn spawn_script(
@@ -3789,7 +3860,7 @@ fn spawn_script(
     lifecycle_event: &str,
     exec: &ScriptExecOpts,
 ) -> Result<i32> {
-    let (mut command, display_cmd) = build_script_command(
+    let (invocation, display_cmd) = build_script_command(
         cmd,
         project,
         compat_mode,
@@ -3808,12 +3879,21 @@ fn spawn_script(
     if !SILENT.load(Ordering::Relaxed) {
         eprintln!("$ {display_cmd}");
     }
-    // Forward terminating signals to the `sh -c <script>` child while it runs, so
-    // `docker stop` / Ctrl-C / systemd reach the workload — not just Nub's leader.
-    // A raw `command.status()` left the child orphaned on SIGTERM (the file-run
-    // path already forwards via spawn_node; this path did not).
-    let status = nub_core::node::spawn::status_forwarding_signals(&mut command)?;
-    Ok(nub_core::node::spawn::exit_code_from_status(&status))
+    match invocation {
+        // Forward terminating signals to the `sh -c <script>` child while it runs,
+        // so `docker stop` / Ctrl-C / systemd reach the workload — not just Nub's
+        // leader. A raw `command.status()` left the child orphaned on SIGTERM (the
+        // file-run path already forwards via spawn_node; this path did not).
+        ScriptInvocation::Native(mut command) => {
+            let status = nub_core::node::spawn::status_forwarding_signals(&mut command)?;
+            Ok(nub_core::node::spawn::exit_code_from_status(&status))
+        }
+        // The emulator wires its own signal forwarding to deno's KillSignal (it
+        // has no `std::process::Command` to hand the nub-core forwarder).
+        ScriptInvocation::Emulated { body, env, cwd } => {
+            crate::shell_emulator::run_inherit(&body, env, cwd)
+        }
+    }
 }
 
 /// Streamed analog of [`run_single_script`]: runs the `pre<x>` → `<x>` →
@@ -3923,7 +4003,7 @@ static AGGREGATE_FLUSH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// [`PipeReaders`]) so a failed thread-spawn never loses the pipe: the policy
 /// can always still drain the stream inline.
 #[derive(Clone)]
-struct DrainPolicy {
+pub(crate) struct DrainPolicy {
     ndjson: bool,
     aggregate: bool,
     is_stderr: bool,
@@ -3952,7 +4032,7 @@ impl DrainPolicy {
     }
 
     /// Drain `stream` to EOF on the CURRENT thread, returning the collected lines.
-    fn run<R: std::io::Read>(&self, stream: R) -> Vec<String> {
+    pub(crate) fn run<R: std::io::Read>(&self, stream: R) -> Vec<String> {
         use std::io::BufRead as _;
         let mut lines = Vec::new();
         for line in std::io::BufReader::new(stream)
@@ -4273,7 +4353,7 @@ fn spawn_script_prefixed(
 ) -> Result<(i32, String)> {
     use std::io::Write;
 
-    let (mut command, display_cmd) = build_script_command(
+    let (invocation, display_cmd) = build_script_command(
         cmd,
         project,
         compat_mode,
@@ -4282,8 +4362,6 @@ fn spawn_script_prefixed(
         StreamMode::Prefixed,
         exec.script_shell,
     )?;
-
-    nub_core::node::spawn::group_on_spawn(&mut command);
 
     // `--reporter=ndjson`: every output site emits a JSON object on stdout instead
     // of the prefixed human line. The package `name` is the manifest name (falling
@@ -4309,52 +4387,67 @@ fn spawn_script_prefixed(
         eprintln!("{cmd_prefix}{display_cmd}");
     }
 
-    let mut child = nub_core::node::spawn::spawn_with_eagain_retry(&mut command)?;
-    // Relay docker stop / Ctrl-C to the streamed child's whole process group too
-    // (workspace `-r` runs) — the `sh -c` won't pass a forwarded signal to node.
-    nub_core::node::spawn::track_child_group(child.id());
-    let mut output_buf = String::new();
-
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-
+    // Per-stream policies (shared by both execution paths). In aggregate mode the
+    // drains COLLECT prefixed lines instead of emitting them live; the parent
+    // flushes the buffered blocks once, below.
     let prefix_out = format_stream_prefix(prefix, script_name, color_idx);
-    let prefix_err = prefix_out.clone();
+    let out_policy = DrainPolicy {
+        ndjson,
+        aggregate,
+        is_stderr: false,
+        prefix: prefix_out.clone(),
+        name: pkg_name.clone(),
+        script: script_name.to_string(),
+    };
+    let err_policy = DrainPolicy {
+        ndjson,
+        aggregate,
+        is_stderr: true,
+        prefix: prefix_out,
+        name: pkg_name.clone(),
+        script: script_name.to_string(),
+    };
 
-    let (name_out, script_out) = (pkg_name.clone(), script_name.to_string());
-    let (name_err, script_err) = (pkg_name.clone(), script_name.to_string());
+    // Spawn + drain both pipes concurrently (never deadlocks), yielding the exit
+    // code and the collected (prefixed) lines. The native path spawns a real
+    // shell child and drains its pipes via `PipeReaders`; the emulator runs
+    // deno_task_shell on a current-thread runtime, draining its pipes on threads.
+    let (exit_code, out_lines, err_lines) = match invocation {
+        ScriptInvocation::Native(mut command) => {
+            nub_core::node::spawn::group_on_spawn(&mut command);
+            let mut child = nub_core::node::spawn::spawn_with_eagain_retry(&mut command)?;
+            // Relay docker stop / Ctrl-C to the streamed child's whole process
+            // group too (workspace `-r` runs) — the `sh -c` won't pass a forwarded
+            // signal to node.
+            nub_core::node::spawn::track_child_group(child.id());
+            let stdout = child.stdout.take();
+            let stderr = child.stderr.take();
+            // `PipeReaders` drains both pipes CONCURRENTLY and never deadlocks —
+            // stdout on its own thread + stderr inline normally, or both
+            // interleaved on one thread via `poll(2)` when OS thread-create EAGAIN
+            // forces the inline fallback (the `nub ci` exit-101 family, where a
+            // bare `thread::spawn` would panic/abort).
+            let (out_lines, err_lines) = PipeReaders {
+                stdout,
+                stderr,
+                out_policy,
+                err_policy,
+            }
+            .drain();
+            let status = child.wait()?;
+            nub_core::node::spawn::untrack_child();
+            (
+                nub_core::node::spawn::exit_code_from_status(&status),
+                out_lines,
+                err_lines,
+            )
+        }
+        ScriptInvocation::Emulated { body, env, cwd } => {
+            crate::shell_emulator::run_prefixed(&body, env, cwd, out_policy, err_policy)?
+        }
+    };
 
-    // In aggregate mode the drains collect prefixed lines instead of emitting
-    // them live; the parent flushes the buffered blocks once, below. `PipeReaders`
-    // drains both pipes CONCURRENTLY and never deadlocks — stdout on its own
-    // thread + stderr inline normally, or both interleaved on one thread via
-    // `poll(2)` when OS thread-create EAGAIN forces the inline fallback (the
-    // `nub ci` exit-101 family, where a bare `thread::spawn` would panic/abort).
-    let (out_lines, err_lines) = PipeReaders {
-        stdout,
-        stderr,
-        out_policy: DrainPolicy {
-            ndjson,
-            aggregate,
-            is_stderr: false,
-            prefix: prefix_out,
-            name: name_out,
-            script: script_out,
-        },
-        err_policy: DrainPolicy {
-            ndjson,
-            aggregate,
-            is_stderr: true,
-            prefix: prefix_err,
-            name: name_err,
-            script: script_err,
-        },
-    }
-    .drain();
-
-    let status = child.wait()?;
-    nub_core::node::spawn::untrack_child();
-    let exit_code = nub_core::node::spawn::exit_code_from_status(&status);
+    let mut output_buf = String::new();
     if ndjson {
         emit_ndjson(
             "end",

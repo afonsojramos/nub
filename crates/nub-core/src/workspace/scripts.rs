@@ -394,10 +394,37 @@ pub fn script_shell(project_root: &Path) -> Option<String> {
     npmrc_value(project_root, "script-shell")
 }
 
+/// Whether package scripts run through the bundled POSIX-subset shell emulator
+/// (`deno_task_shell`) rather than the platform's native `sh`/`cmd`.
+///
+/// DEFAULT ON — nub's deliberate divergence from pnpm, whose `shellEmulator`
+/// defaults off. Routing every platform through one engine gives scripts the
+/// same POSIX behavior on Windows as on Unix. Only an explicit falsey value
+/// opts back out to the native shell; `--script-shell` / `.npmrc script-shell`
+/// still win over both (resolved by the caller). Env (`npm_config_shell_emulator`,
+/// what a parent PM exports) takes precedence over `.npmrc`, matching npm's
+/// config layering; both the pnpm-style `shell-emulator` and the camelCase
+/// `shellEmulator` `.npmrc` spellings are honored.
+pub fn shell_emulator(project_root: &Path) -> bool {
+    let explicit = env::var("npm_config_shell_emulator")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .or_else(|| npmrc_value(project_root, "shell-emulator"))
+        .or_else(|| npmrc_value(project_root, "shellEmulator"));
+    match explicit {
+        Some(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "false" | "0" | "no" | "off"
+        ),
+        None => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         ScriptSelection, bin_path, find_bin, npm_env, npmrc_value, script_shell, select_scripts,
+        shell_emulator,
     };
     use std::fs;
 
@@ -527,6 +554,32 @@ mod tests {
         assert!(npmrc_value(&tmp, "nub-no-such-key").is_none());
 
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn shell_emulator_defaults_on_and_reads_explicit_opt_out() {
+        // Hermetic to a project `.npmrc` so a maintainer's `~/.npmrc` can't sway
+        // it (project entries win over user-level in `npmrc_value`). The env
+        // override is exercised e2e, not here, to avoid mutating a process global.
+        let base = std::env::temp_dir().join(format!("nub-shellemu-{}", std::process::id()));
+
+        let on = base.join("on");
+        fs::create_dir_all(&on).unwrap();
+        fs::write(on.join(".npmrc"), "shell-emulator=true\n").unwrap();
+        assert!(shell_emulator(&on));
+
+        let off = base.join("off");
+        fs::create_dir_all(&off).unwrap();
+        fs::write(off.join(".npmrc"), "shell-emulator=false\n").unwrap();
+        assert!(!shell_emulator(&off));
+
+        // The camelCase spelling is honored too.
+        let off_camel = base.join("off-camel");
+        fs::create_dir_all(&off_camel).unwrap();
+        fs::write(off_camel.join(".npmrc"), "shellEmulator = 0\n").unwrap();
+        assert!(!shell_emulator(&off_camel));
+
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]
