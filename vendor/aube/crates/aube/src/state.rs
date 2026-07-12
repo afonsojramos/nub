@@ -571,19 +571,29 @@ fn member_lockfiles_stale(project_dir: &Path, state: &FreshnessState) -> Option<
 
 /// Detect a workspace member added since the last install. Complements
 /// [`package_jsons_stale`], which only revisits members it *recorded* (so it
-/// catches an edited or deleted member but never a newly-added one). Every
-/// current member's manifest is keyed the way the state file records it —
-/// `relative_path_or_original` of the member's `package.json`, matching
-/// [`collect_package_json_hashes_from_manifests`] — and a member whose key is
-/// absent from `package_json_hashes` is new. Returns `Some(reason)` on the
-/// first new member, `None` when every current member was already recorded.
+/// catches an edited or deleted member but never a newly-added one). Each
+/// current member is keyed exactly the way [`collect_package_json_hashes_from_manifests`]
+/// records it — the root-as-member (`packages: ['.']`) under `.`, every other
+/// member under `<rel>/package.json` — and a member whose key is absent from
+/// `package_json_hashes` is new. Returns `Some(reason)` on the first new
+/// member, `None` when every current member was already recorded.
 /// Non-workspace projects enumerate to nothing and no-op.
 fn new_workspace_member(project_dir: &Path, state: &FreshnessState) -> Option<String> {
     let members = aube_workspace::find_workspace_packages(project_dir).unwrap_or_default();
     for member_dir in &members {
-        let manifest_key = relative_path_or_original(&member_dir.join("package.json"), project_dir);
+        let rel = relative_path_or_original(member_dir, project_dir);
+        // A workspace that lists its own root (`packages: ['.']`) yields an
+        // empty rel for the root member, recorded under "." — mirror that
+        // special-case so the root never reads as a spurious "new member"
+        // and churns the warm path on every install.
+        let is_root = rel.is_empty() || rel == ".";
+        let manifest_key = if is_root {
+            ".".to_string()
+        } else {
+            relative_path_or_original(&member_dir.join("package.json"), project_dir)
+        };
         if !state.package_json_hashes.contains_key(&manifest_key) {
-            let dir_key = relative_path_or_original(member_dir, project_dir);
+            let dir_key = if is_root { ".".to_string() } else { rel };
             return Some(format!("{dir_key} is a new workspace member"));
         }
     }
@@ -2141,6 +2151,54 @@ mod tests {
             new_workspace_member(&dir, &state),
             Some("apps/web is a new workspace member".to_string())
         );
+    }
+
+    #[test]
+    fn new_workspace_member_root_as_member_does_not_churn() {
+        // A workspace that lists its own root (`packages: ['.']`, the pnpm
+        // pattern where the root is itself a package members depend on) must
+        // not read the root as a spurious "new member": the root is recorded
+        // under "." but enumerates with an empty rel, so a naive
+        // `<rel>/package.json` key would never match and bust the warm path on
+        // every install.
+        let dir = temp_project_dir("new-member-root-as-member");
+        std::fs::write(
+            dir.join("pnpm-workspace.yaml"),
+            "packages:\n  - '.'\n  - 'apps/*'\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"name":"root","private":true}"#,
+        )
+        .unwrap();
+        let app = dir.join("apps/server");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(app.join("package.json"), r#"{"name":"server"}"#).unwrap();
+
+        let mut package_json_hashes = BTreeMap::new();
+        package_json_hashes.insert(".".to_string(), hash_file(&dir.join("package.json")));
+        package_json_hashes.insert(
+            "apps/server/package.json".to_string(),
+            hash_file(&app.join("package.json")),
+        );
+        let state = super::FreshnessState {
+            lockfile_hash: String::new(),
+            lockfile_snapshot_name: None,
+            member_lockfile_hashes: BTreeMap::new(),
+            member_lockfile_meta: BTreeMap::new(),
+            package_json_hashes,
+            package_json_meta: BTreeMap::new(),
+            section_filtered: false,
+            settings_hash: String::new(),
+            dep_build_policy_hash: String::new(),
+            package_json_shape_digests: BTreeMap::new(),
+            layout: None,
+            unreviewed_builds: Vec::new(),
+        };
+
+        // Root + apps/server both recorded → fresh (no churn on the root).
+        assert_eq!(new_workspace_member(&dir, &state), None);
     }
 
     #[test]
