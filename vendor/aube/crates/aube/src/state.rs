@@ -379,6 +379,22 @@ fn check_needs_install_compute(
     }
     drop(_diag_pjs);
 
+    // `package_jsons_stale` only revisits members recorded at the last
+    // install, so a member added *since* has no recorded manifest hash and
+    // is invisible to it. Under `sharedWorkspaceLockfile=false` the
+    // `member_lockfiles_stale` check above already busts on a new member,
+    // but the default shared layout records no per-member lockfile state,
+    // so nothing there re-enumerates the workspace — a newly-added member
+    // silently reports "up to date" (nubjs/nub#441). Fill that gap by
+    // re-enumerating current members whenever no per-member lockfile state
+    // was recorded (shared layout, and a per-project layout that had no
+    // members last install); the non-empty case is already covered above.
+    if state.member_lockfile_hashes.is_empty()
+        && let Some(reason) = new_workspace_member(project_dir, &state)
+    {
+        return Some(reason);
+    }
+
     if state.section_filtered {
         return Some(
             "previous install omitted dependency sections; auto-installing full graph".into(),
@@ -548,6 +564,27 @@ fn member_lockfiles_stale(project_dir: &Path, state: &FreshnessState) -> Option<
     for key in state.member_lockfile_hashes.keys() {
         if !seen.contains(key) {
             return Some(format!("{key} was removed from the workspace"));
+        }
+    }
+    None
+}
+
+/// Detect a workspace member added since the last install. Complements
+/// [`package_jsons_stale`], which only revisits members it *recorded* (so it
+/// catches an edited or deleted member but never a newly-added one). Every
+/// current member's manifest is keyed the way the state file records it —
+/// `relative_path_or_original` of the member's `package.json`, matching
+/// [`collect_package_json_hashes_from_manifests`] — and a member whose key is
+/// absent from `package_json_hashes` is new. Returns `Some(reason)` on the
+/// first new member, `None` when every current member was already recorded.
+/// Non-workspace projects enumerate to nothing and no-op.
+fn new_workspace_member(project_dir: &Path, state: &FreshnessState) -> Option<String> {
+    let members = aube_workspace::find_workspace_packages(project_dir).unwrap_or_default();
+    for member_dir in &members {
+        let manifest_key = relative_path_or_original(&member_dir.join("package.json"), project_dir);
+        if !state.package_json_hashes.contains_key(&manifest_key) {
+            let dir_key = relative_path_or_original(member_dir, project_dir);
+            return Some(format!("{dir_key} is a new workspace member"));
         }
     }
     None
@@ -1449,8 +1486,9 @@ mod tests {
     use super::{
         InstallLayoutMode, InstallLayoutState, InstallState, InstalledPackageState,
         collect_package_json_hashes_from_manifests, empty_blake3_hash, fresh_state_file, hash_file,
-        hash_settings, install_state_file, member_lockfiles_stale, read_or_migrate_fresh_state,
-        relative_path_or_original, remove_state, verify_install_layout,
+        hash_settings, install_state_file, member_lockfiles_stale, new_workspace_member,
+        read_or_migrate_fresh_state, relative_path_or_original, remove_state,
+        verify_install_layout,
     };
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
@@ -2044,6 +2082,64 @@ mod tests {
         assert_eq!(
             member_lockfiles_stale(&dir, &state),
             Some("packages/b was removed from the workspace".to_string())
+        );
+    }
+
+    #[test]
+    fn new_workspace_member_busts_warm_path_on_shared_layout() {
+        // The default `sharedWorkspaceLockfile=true` layout records no
+        // per-member lockfile state, so `member_lockfiles_stale` never runs
+        // and a member added after the last install is otherwise invisible
+        // to the warm path (nubjs/nub#441). `new_workspace_member` fills the
+        // gap by re-enumerating current members against the recorded manifest
+        // hashes — keyed by the member's `package.json` path, matching
+        // `collect_package_json_hashes_from_manifests`.
+        let dir = temp_project_dir("new-workspace-member");
+        std::fs::write(dir.join("pnpm-workspace.yaml"), "packages:\n  - 'apps/*'\n").unwrap();
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"name":"root","private":true}"#,
+        )
+        .unwrap();
+        let write_member = |name: &str| {
+            let d = dir.join("apps").join(name);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("package.json"), format!("{{\"name\":\"{name}\"}}")).unwrap();
+        };
+        write_member("server");
+
+        // State from the last install: only the root and `apps/server` are
+        // recorded, keyed by their package.json paths. No member lockfile
+        // state (shared layout).
+        let mut package_json_hashes = BTreeMap::new();
+        package_json_hashes.insert(".".to_string(), hash_file(&dir.join("package.json")));
+        package_json_hashes.insert(
+            "apps/server/package.json".to_string(),
+            hash_file(&dir.join("apps/server/package.json")),
+        );
+        let state = super::FreshnessState {
+            lockfile_hash: String::new(),
+            lockfile_snapshot_name: None,
+            member_lockfile_hashes: BTreeMap::new(),
+            member_lockfile_meta: BTreeMap::new(),
+            package_json_hashes,
+            package_json_meta: BTreeMap::new(),
+            section_filtered: false,
+            settings_hash: String::new(),
+            dep_build_policy_hash: String::new(),
+            package_json_shape_digests: BTreeMap::new(),
+            layout: None,
+            unreviewed_builds: Vec::new(),
+        };
+
+        // Every current member was recorded → fresh.
+        assert_eq!(new_workspace_member(&dir, &state), None);
+
+        // Adding `apps/web` after the last install busts the warm path.
+        write_member("web");
+        assert_eq!(
+            new_workspace_member(&dir, &state),
+            Some("apps/web is a new workspace member".to_string())
         );
     }
 
