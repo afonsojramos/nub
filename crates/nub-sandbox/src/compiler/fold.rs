@@ -530,6 +530,17 @@ fn push_net_rule(
         });
         return Ok(());
     }
+    // Reject an unknown angle-bracket token loudly — `<...>` is not a legal hostname
+    // char, so a `<privat>` typo must error, not silently fold to a literal host that
+    // matches nothing (which would fail-OPEN a private-range deny the author intended).
+    if target.starts_with('<') || target.ends_with('>') {
+        return Err(CompileError::shape(
+            path,
+            &format!(
+                "`{target}` is not a recognized net target — the only symbolic net target is `<private>` (alias `<local>`), which re-permits the RFC1918 / IPv6-ULA private ranges"
+            ),
+        ));
+    }
     let net_target = if target.contains('/') {
         match target.parse::<ipnet::IpNet>() {
             Ok(net) => NetTarget::Cidr(net),

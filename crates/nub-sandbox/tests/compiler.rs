@@ -1065,6 +1065,46 @@ fn env_key_brace_alternation_is_a_shape_error() {
 }
 
 #[test]
+fn net_private_symbolic_target_folds_and_gates_the_opt_in() {
+    use nub_sandbox::matcher::host::net_allows_private;
+    let ctx = common::ctx(true, &[]);
+
+    // `<private>` (and its `<local>` alias) fold to NetTarget::Private and set the opt-in.
+    for tok in ["<private>", "<local>"] {
+        let p = compile(&json!({ "net": [tok] }), &ctx).unwrap();
+        assert_eq!(p.net.rules.len(), 1);
+        assert!(matches!(p.net.rules[0].target, NetTarget::Private), "{tok}");
+        assert!(
+            net_allows_private(&p.net),
+            "{tok} must set the private opt-in"
+        );
+    }
+
+    // A bare `*` allow-all does NOT set the opt-in — the private ranges stay blocked.
+    let p = compile(&json!({ "net": ["*"] }), &ctx).unwrap();
+    assert!(
+        !net_allows_private(&p.net),
+        "`*` must NOT re-open the private ranges"
+    );
+
+    // `!<private>` after an opt-in reclose it (last-match-wins on the token).
+    let p = compile(&json!({ "net": ["<private>", "!<private>"] }), &ctx).unwrap();
+    assert!(
+        !net_allows_private(&p.net),
+        "a later `!<private>` must reclose the opt-in"
+    );
+
+    // An unknown angle-bracket token is a loud shape error, not a silent no-match host.
+    match compile(&json!({ "net": ["<privat>"] }), &ctx).unwrap_err() {
+        CompileError::Shape { path, message } => {
+            assert_eq!(path, "net.0");
+            assert!(message.contains("recognized net target"), "{message}");
+        }
+        other => panic!("expected Shape, got {other:?}"),
+    }
+}
+
+#[test]
 fn net_leading_wildcard_and_bare_star_still_accepted() {
     // D11 must not over-reject: the two valid wildcard forms compile.
     let ctx = common::ctx(true, &[]);
