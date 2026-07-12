@@ -24,37 +24,46 @@ Two kinds of residual appear here:
 
 ## Network
 
-### Egress SSRF: cloud-metadata / link-local blocked; broad RFC1918 is a posture call (partly open by design)
+### Egress SSRF: cloud-metadata / link-local AND RFC1918 blocked by default; `<private>` opt-in
 
 The loopback egress proxy resolves an allowed host and connects to the resolved IP, so an
 allowed hostname whose DNS points at an internal address — or an attacker DNS-*rebinding*
 an allowed domain to one between validation and connect — could reach an off-limits
-address. Two halves:
+address. Three halves:
 
-- **CLOSED — cloud-metadata / link-local + rebinding.** The proxy fails closed at the
-  outbound connect on the IMDS / link-local surface: IPv4 `169.254.0.0/16` (incl. the
-  `169.254.169.254` metadata endpoint), IPv6 link-local `fe80::/10`, and the AWS IPv6 IMDS
-  `fd00:ec2::254` — regardless of what the policy admits. IPv4-in-IPv6 encodings
-  (`::ffff:169.254.169.254`, `::169.254.169.254`) are unmapped before classification, and
-  integer/octal/hex host forms are moot because classification runs on the RESOLVED
-  `IpAddr`, not the child's token. Rebinding is pinned out: the host is resolved exactly
-  once and the connect targets that same address — no re-resolution between check and
-  connect. See `proxy/mod.rs` (`is_blocked_egress_ip`, `connect_upstream`).
-- **OPEN BY DESIGN (maintainer posture call) — broad RFC1918 private ranges.** `10/8`,
-  `172.16/12`, and `192.168/16` are NOT blocked by default. Blocking them wholesale breaks
-  legitimate private-host allowlisting and collides with the deliberate loopback carve
-  (the proxy's own listener and loopback upstreams must stay reachable), so it is a
-  separate posture decision rather than folded into this guard. The seam is clean: a
-  policy/config toggle can extend `is_blocked_egress_ip` to the private ranges when the
-  maintainer decides the default. Until then, private-range egress is admitted iff the
-  active policy admits the host.
-- **OPEN residual (impractical) — NAT64 / 6to4 IPv6 embeddings of link-local.** A
-  link-local address wrapped in the NAT64 well-known prefix (`64:ff9b::169.254.169.254`)
-  or 6to4 (`2002:a9fe:a9fe::`) is NOT unwrapped, so it dodges the block. Reaching IMDS this
-  way needs a NAT64/6to4 *translating gateway* on-path routing to a link-local target —
-  absent in a normal cloud environment — so it is not a practical metadata reach. Left
-  unblocked rather than partly-covered because only the well-known prefixes are detectable
-  (a network-specific NAT64 `/96` is not), and partial coverage would misrepresent the
+- **CLOSED (hard, no opt-out) — cloud-metadata / link-local + rebinding.** The proxy fails
+  closed at the outbound connect on the IMDS / link-local surface: IPv4 `169.254.0.0/16`
+  (incl. the `169.254.169.254` metadata endpoint), IPv6 link-local `fe80::/10`, and the AWS
+  IPv6 IMDS `fd00:ec2::254` — regardless of what the policy admits, and NOT re-opened by the
+  `<private>` opt-in below (the AWS IPv6 IMDS sits inside ULA but is caught by this hard tier
+  first). IPv4-in-IPv6 encodings (`::ffff:169.254.169.254`, `::169.254.169.254`) are unmapped
+  before classification, and integer/octal/hex host forms are moot because classification
+  runs on the RESOLVED `IpAddr`, not the child's token. Rebinding is pinned out: the host is
+  resolved exactly once and the connect targets that same address — no re-resolution between
+  check and connect. See `proxy/mod.rs` (`is_hard_blocked_ip`, `connect_upstream`).
+- **CLOSED by default, `<private>` opt-in — broad RFC1918 / IPv6 ULA.** `10/8`, `172.16/12`,
+  `192.168/16`, and IPv6 ULA `fc00::/7` are BLOCKED by default at the outbound connect, even
+  when the policy admits the host (SSRF fail-closed, following Codex's block-by-default
+  posture for agent-driven code). A project re-permits them with the explicit symbolic net
+  target `<private>` (alias `<local>`), e.g. `net: ["<private>", "10.0.0.5"]` to reach a
+  local service. A bare wildcard `*` does NOT re-open the private ranges — only the explicit
+  `<private>` target does (mirrors Codex's non-wildcard local-allowlist). The opt-in is a
+  policy-level flag (`net_allows_private`) that lifts the private tier of the SSRF guard.
+  A raw private-range CIDR (`net: ["192.168.0.0/16"]`) admits at gate 1 but does NOT by
+  itself lift the SSRF tier — the `<private>` token is what unlocks it. To narrow WHICH
+  private hosts are reachable, compose `<private>` (unlock) with last-match-wins denies at
+  gate 1: `net: ["<private>", "!10.0.0.0/8"]` reaches all private ranges except `10/8`.
+  Loopback (`127/8`, `::1`) is in NEITHER tier — the proxy's own listener + loopback
+  upstreams stay reachable unconditionally. See `proxy/mod.rs` (`is_private_range`,
+  `net_allows_private`) and `NetTarget::Private`.
+- **OPEN residual (impractical) — NAT64 / 6to4 IPv6 embeddings of link-local AND private
+  ranges.** A link-local or RFC1918/ULA address wrapped in the NAT64 well-known prefix
+  (`64:ff9b::169.254.169.254`, `64:ff9b::10.0.0.1`) or 6to4 (`2002:a9fe:a9fe::`,
+  `2002:0a00:0001::`) is NOT unwrapped, so it dodges both tiers of the block. Reaching an
+  internal target this way needs a NAT64/6to4 *translating gateway* on-path routing to it —
+  absent in a normal cloud environment — so it is not a practical reach. Left unblocked
+  rather than partly-covered because only the well-known prefixes are detectable (a
+  network-specific NAT64 `/96` is not), and partial coverage would misrepresent the
   guarantee. Same `is_blocked_egress_ip` seam if the threat model later wants it.
 
 ### Linux per-host egress: the port-scoped `ConnectTcp` residual (CLOSED via seccomp user_notify)

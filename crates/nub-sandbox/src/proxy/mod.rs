@@ -58,6 +58,15 @@ pub enum Decision {
 /// policy ([`StaticDecider`]); the build-jail thread swaps in an interactive prompt.
 pub trait GrantDecider: Send + Sync + 'static {
     fn decide(&self, host: &Host) -> Decision;
+
+    /// Whether the policy EXPLICITLY opted into private-range (RFC1918 / IPv6-ULA)
+    /// egress via a `<private>` target. Consulted by the SSRF guard to lift the
+    /// default private-range block on the resolved upstream IP. Defaults to `false`
+    /// (fail-closed: a decider that hasn't opted in keeps private egress blocked), so
+    /// the interactive/build-jail decider stays safe without overriding this.
+    fn allows_private(&self) -> bool {
+        false
+    }
 }
 
 /// The static-policy decider: evaluates a resolved [`NetPolicy`] last-match-wins via
@@ -84,6 +93,10 @@ impl GrantDecider for StaticDecider {
         } else {
             Decision::Deny
         }
+    }
+
+    fn allows_private(&self) -> bool {
+        crate::matcher::host::net_allows_private(&self.policy)
     }
 }
 
@@ -229,6 +242,9 @@ fn handle_conn(
     token: &str,
 ) -> io::Result<()> {
     stream.set_read_timeout(Some(CLIENT_HELLO_TIMEOUT))?;
+    // Whether the policy opted into private-range egress (governs the SSRF guard's
+    // private tier only). Computed once per connection from the static decider.
+    let allow_private = decider.allows_private();
     // Token gate FIRST: an unauthenticated caller is answered (407 / SOCKS auth-fail)
     // and dropped before any host decision. `?` propagates the auth error → connection
     // closed (fail-closed).
@@ -261,7 +277,7 @@ fn handle_conn(
     if let Some(engine) = mitm.as_ref() {
         match terminate_host.as_deref() {
             Some(host) if engine.should_terminate(host) => {
-                let _ = mitm::terminate(engine, stream, prelude, host, req.port);
+                let _ = mitm::terminate(engine, stream, prelude, host, req.port, allow_private);
                 return Ok(());
             }
             // `proxy: "terminate"` but this connection carries no host to terminate (no
@@ -274,7 +290,7 @@ fn handle_conn(
     }
 
     // Connection tier — connect upstream, replay the buffered prelude, blind-splice.
-    let upstream = connect_upstream(&req.host, req.port)?;
+    let upstream = connect_upstream(&req.host, req.port, allow_private)?;
     stream.set_read_timeout(None)?;
     upstream.set_read_timeout(None)?;
     let mut up = upstream;
@@ -346,17 +362,31 @@ fn finalize_scan(buf: &[u8], decider: &dyn GrantDecider) -> (Vec<u8>, bool, Opti
 
 /// Egress addresses the proxy must NEVER connect to, even when policy admits the host.
 ///
-/// SSRF / DNS-rebinding guard. An allowed hostname that resolves — or an attacker's DNS
-/// rebinds — to the cloud-metadata / link-local surface is refused at the connect. It
-/// covers IPv4 link-local `169.254.0.0/16` (incl. the `169.254.169.254` IMDS endpoint),
-/// IPv6 link-local `fe80::/10`, and the AWS IPv6 IMDS `fd00:ec2::254`; an IPv4-in-IPv6
-/// form (`::ffff:169.254.169.254`, `::169.254.169.254`) is unmapped to its embedded v4
-/// FIRST so the encoding can't smuggle a metadata address past as an IPv6 literal. All
-/// integer/octal/hex host encodings are already normalized away here because we classify
-/// the RESOLVED [`IpAddr`], not the child-supplied token. Loopback is deliberately NOT
-/// blocked (the proxy's own carve is loopback, and a legit upstream may be); broad RFC1918
-/// private-range blocking is a separate maintainer posture call (see LIMITATIONS.md).
-fn is_blocked_egress_ip(ip: IpAddr) -> bool {
+/// SSRF / DNS-rebinding guard, two tiers on the RESOLVED [`IpAddr`] (so integer/octal/hex
+/// host encodings are already normalized away — we classify the address, not the token):
+///
+/// - HARD block (never opt-out-able, [`is_hard_blocked_ip`]): the cloud-metadata /
+///   link-local surface — IPv4 link-local `169.254.0.0/16` (incl. the `169.254.169.254`
+///   IMDS endpoint), IPv6 link-local `fe80::/10`, and the AWS IPv6 IMDS `fd00:ec2::254`.
+///   An IPv4-in-IPv6 form (`::ffff:169.254.169.254`, `::169.254.169.254`) is unmapped to
+///   its embedded v4 first so the encoding can't smuggle a metadata address past.
+/// - PRIVATE block (default-on, lifted by an explicit `<private>` allow): RFC1918
+///   `10/8`+`172.16/12`+`192.168/16` and IPv6 ULA `fc00::/7` ([`is_private_range`]).
+///   `allow_private` is `true` only when the policy names `<private>` — a bare `*` does
+///   not lift it. The AWS IPv6 IMDS lives inside ULA but is caught by the HARD tier first,
+///   so `<private>` re-opens the private ranges WITHOUT re-opening the metadata endpoint.
+///
+/// Loopback (`127/8`, `::1`) is deliberately in NEITHER tier: it is the proxy's own carve
+/// and a legit upstream may be loopback, so it is always reachable.
+fn is_blocked_egress_ip(ip: IpAddr, allow_private: bool) -> bool {
+    if is_hard_blocked_ip(ip) {
+        return true;
+    }
+    !allow_private && crate::matcher::host::is_private_range(ip)
+}
+
+/// The always-blocked cloud-metadata / link-local surface (no policy opt-out).
+fn is_hard_blocked_ip(ip: IpAddr) -> bool {
     const AWS_IMDS_V6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254);
     match ip {
         IpAddr::V4(v4) => v4.is_link_local(),
@@ -378,17 +408,19 @@ fn is_blocked_egress_ip(ip: IpAddr) -> bool {
 /// no second resolution between the check and the connect, so DNS cannot swap in a
 /// metadata IP after validation. A resolved address on the blocked surface is skipped
 /// (fail-closed); a host that resolves ONLY to blocked addresses yields the block error.
-fn connect_upstream(host: &Host, port: u16) -> io::Result<TcpStream> {
+/// `allow_private` (derived from the policy's `<private>` opt-in) governs only the
+/// private-range tier; the metadata/link-local block is unconditional.
+fn connect_upstream(host: &Host, port: u16, allow_private: bool) -> io::Result<TcpStream> {
     let addrs: Vec<SocketAddr> = match host {
         Host::Ip(ip) => vec![SocketAddr::new(*ip, port)],
         Host::Name(name) => (name.as_str(), port).to_socket_addrs()?.collect(),
     };
     let mut last_err = io::Error::other("no address resolved");
     for addr in addrs {
-        if is_blocked_egress_ip(addr.ip()) {
+        if is_blocked_egress_ip(addr.ip(), allow_private) {
             last_err = io::Error::new(
                 io::ErrorKind::PermissionDenied,
-                "egress to a link-local/metadata address is blocked",
+                "egress to a metadata/link-local or private-range address is blocked",
             );
             continue;
         }
@@ -482,44 +514,79 @@ mod tests {
 
     #[test]
     fn blocks_metadata_and_link_local_egress() {
-        let blocked = [
+        // The HARD tier — always blocked, regardless of the private opt-in.
+        let hard = [
             "169.254.169.254",        // AWS/GCP/Azure IMDS (IPv4 link-local)
             "169.254.0.1",            // link-local edge
             "fe80::1",                // IPv6 link-local
             "fe80::a9fe:a9fe",        // IPv6 link-local, arbitrary suffix
             "febf::1",                // fe80::/10 upper edge
-            "fd00:ec2::254",          // AWS IPv6 IMDS
+            "fd00:ec2::254",          // AWS IPv6 IMDS (inside ULA, but hard-blocked)
             "::ffff:169.254.169.254", // IPv4-mapped metadata (encoding smuggle)
             "::169.254.169.254",      // IPv4-compat metadata (encoding smuggle)
         ];
-        for ip in blocked {
+        for ip in hard {
+            let ip: IpAddr = ip.parse().unwrap();
             assert!(
-                is_blocked_egress_ip(ip.parse().unwrap()),
-                "{ip} must be classified as blocked egress"
+                is_blocked_egress_ip(ip, false),
+                "{ip} must be blocked (private disallowed)"
+            );
+            assert!(
+                is_blocked_egress_ip(ip, true),
+                "{ip} must STAY blocked even with the private opt-in (hard tier)"
             );
         }
-        // NOT blocked: loopback (the proxy carve + loopback upstreams), public, and —
-        // deliberately, pending the maintainer posture call — RFC1918 private ranges.
-        let allowed = [
+        // Loopback + public are in NEITHER tier — always reachable.
+        for ip in [
             "127.0.0.1",
             "::1",
             "8.8.8.8",
             "203.0.113.10",
             "2606:4700:4700::1111",
-            "10.0.0.1",
-            "172.16.0.1",
-            "192.168.1.1", // RFC1918: NOT blocked in this change
+        ] {
+            let ip: IpAddr = ip.parse().unwrap();
+            assert!(!is_blocked_egress_ip(ip, false), "{ip} must be reachable");
+            assert!(!is_blocked_egress_ip(ip, true), "{ip} must be reachable");
+        }
+    }
+
+    #[test]
+    fn rfc1918_and_ula_blocked_by_default_but_opt_in_reachable() {
+        // The PRIVATE tier: blocked when `<private>` is NOT opted in, reachable when it is.
+        let private = [
+            "10.0.0.1",           // 10/8
+            "10.255.255.254",     // 10/8 edge
+            "172.16.0.1",         // 172.16/12 lower edge
+            "172.31.255.254",     // 172.16/12 upper edge
+            "192.168.1.1",        // 192.168/16
+            "fc00::1",            // ULA lower edge
+            "fdff:ffff::1",       // ULA upper edge (fc00::/7)
+            "::ffff:10.0.0.1",    // IPv4-mapped RFC1918 (encoding smuggle)
+            "::ffff:192.168.0.1", // IPv4-mapped RFC1918
         ];
-        for ip in allowed {
+        for ip in private {
+            let ip: IpAddr = ip.parse().unwrap();
             assert!(
-                !is_blocked_egress_ip(ip.parse().unwrap()),
-                "{ip} must NOT be classified as blocked egress"
+                is_blocked_egress_ip(ip, false),
+                "{ip} must be BLOCKED by default (no <private> opt-in)"
+            );
+            assert!(
+                !is_blocked_egress_ip(ip, true),
+                "{ip} must be REACHABLE once <private> is opted in"
+            );
+        }
+        // Boundary negatives: 172.15/172.32 are OUTSIDE 172.16/12 → public, never private.
+        for ip in ["172.15.255.255", "172.32.0.0", "11.0.0.1", "192.167.0.1"] {
+            let ip: IpAddr = ip.parse().unwrap();
+            assert!(
+                !is_blocked_egress_ip(ip, false),
+                "{ip} is public, not private"
             );
         }
     }
 
     #[test]
-    fn connect_upstream_denies_link_local_but_reaches_allowed_target() {
+    fn connect_upstream_blocks_by_tier_but_reaches_allowed_target() {
         // Negative control: an allowed (non-blocked) target actually connects.
         let echo = TcpListener::bind((IpAddr::from([127, 0, 0, 1]), 0)).unwrap();
         let port = echo.local_addr().unwrap().port();
@@ -527,15 +594,56 @@ mod tests {
             let _ = echo.accept();
         });
         assert!(
-            connect_upstream(&Host::Ip(IpAddr::from([127, 0, 0, 1])), port).is_ok(),
-            "an allowed target must still connect through the guard"
+            connect_upstream(&Host::Ip(IpAddr::from([127, 0, 0, 1])), port, false).is_ok(),
+            "loopback must still connect through the guard"
         );
 
-        // The guard denies a metadata target immediately (PermissionDenied), without
-        // attempting the connect — so a live metadata endpoint would never be reached.
-        let err = connect_upstream(&Host::Ip("169.254.169.254".parse().unwrap()), 80)
-            .expect_err("link-local egress must be blocked");
+        // Metadata is denied immediately (PermissionDenied), even with the private opt-in.
+        let err = connect_upstream(&Host::Ip("169.254.169.254".parse().unwrap()), 80, true)
+            .expect_err("metadata egress must be blocked even with <private>");
         assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+
+        // RFC1918 is denied without the opt-in, allowed with it.
+        let err = connect_upstream(&Host::Ip("192.168.1.1".parse().unwrap()), 80, false)
+            .expect_err("RFC1918 egress must be blocked by default");
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn allows_private_only_on_explicit_target_not_wildcard() {
+        // A bare `*` allow-all does NOT re-open the private ranges.
+        let d = StaticDecider::new(net(vec![host("*", Effect::Allow)], Effect::Deny));
+        assert!(!d.allows_private(), "`*` must NOT set the private opt-in");
+
+        // An explicit `<private>` allow does.
+        let priv_rule = |e| NetRule {
+            target: NetTarget::Private,
+            effect: e,
+        };
+        let d = StaticDecider::new(net(vec![priv_rule(Effect::Allow)], Effect::Deny));
+        assert!(d.allows_private(), "`<private>` must set the opt-in");
+
+        // Last-match-wins: `<private>` then `!<private>` turns it back off.
+        let d = StaticDecider::new(net(
+            vec![priv_rule(Effect::Allow), priv_rule(Effect::Deny)],
+            Effect::Deny,
+        ));
+        assert!(
+            !d.allows_private(),
+            "a later `!<private>` must reclose the opt-in"
+        );
+
+        // The `<private>` target admits an RFC1918 IP literal at gate 1 (matcher).
+        let d = StaticDecider::new(net(vec![priv_rule(Effect::Allow)], Effect::Deny));
+        assert_eq!(
+            d.decide(&Host::Ip("10.1.2.3".parse().unwrap())),
+            Decision::Allow
+        );
+        assert_eq!(
+            d.decide(&Host::Ip("8.8.8.8".parse().unwrap())),
+            Decision::Deny,
+            "a public IP is NOT admitted by <private>"
+        );
     }
 
     #[test]

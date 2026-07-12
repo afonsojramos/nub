@@ -125,6 +125,7 @@ pub(super) fn terminate(
     prelude: Vec<u8>,
     host: &str,
     port: u16,
+    allow_private: bool,
 ) -> io::Result<()> {
     // A brokered host reached over a NON-TLS or unmintable channel must fail closed —
     // never inject a credential onto an unverified wire (SRT's allowPlaintextInject
@@ -154,7 +155,8 @@ pub(super) fn terminate(
     http1::normalize_for_forward(&mut req);
 
     // The upstream leg: REAL TLS to the REAL server, verified against REAL roots.
-    let upstream_tcp = super::connect_upstream(&super::Host::Name(host.to_string()), port)?;
+    let upstream_tcp =
+        super::connect_upstream(&super::Host::Name(host.to_string()), port, allow_private)?;
     let server_name = rustls::pki_types::ServerName::try_from(host.to_string())
         .map_err(|_| io::Error::other("invalid upstream server name for TLS termination"))?;
     let mut uconn = rustls::ClientConnection::new(engine.client_config.clone(), server_name)

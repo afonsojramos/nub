@@ -6,7 +6,7 @@
 //! fewer footguns than TLS's single-label wildcard (.fray/sandbox.md matcher spec).
 
 use crate::policy::{Effect, NetPolicy, NetRule, NetTarget};
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 
 /// A compiled last-match-wins matcher over a [`NetPolicy`]'s rules.
 pub struct HostMatcher<'a> {
@@ -37,6 +37,7 @@ impl<'a> HostMatcher<'a> {
             let hit = match &rule.target {
                 NetTarget::Host(pat) => host_glob_matches(pat, host),
                 NetTarget::Cidr(net) => ip.is_some_and(|ip| net.contains(&ip)),
+                NetTarget::Private => ip.is_some_and(is_private_range),
             };
             if hit {
                 winner = rule.effect;
@@ -95,4 +96,42 @@ pub fn host_pattern_is_valid(pattern: &str) -> bool {
         return !rest.is_empty() && !rest.starts_with('.') && !rest.contains('*');
     }
     !pattern.contains('*')
+}
+
+/// The RFC1918 IPv4 private ranges (`10/8`, `172.16/12`, `192.168/16`) plus IPv6 ULA
+/// (`fc00::/7`) — the `<private>` class the egress proxy blocks by default. Loopback
+/// (`127/8`, `::1`) and link-local are deliberately NOT here: loopback is the proxy's
+/// own carve, and link-local is the separate always-blocked SSRF surface. An IPv4-mapped
+/// / IPv4-compatible IPv6 form is classified on its embedded v4, so a v4 private address
+/// cannot be smuggled past as a v6 literal.
+pub fn is_private_range(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => is_private_v4(v4),
+        IpAddr::V6(v6) => match v6.to_ipv4() {
+            Some(v4) => is_private_v4(v4),
+            // fc00::/7 (ULA) hand-rolled: the top 7 bits are `1111 110`.
+            None => (v6.segments()[0] & 0xfe00) == 0xfc00,
+        },
+    }
+}
+
+fn is_private_v4(v4: Ipv4Addr) -> bool {
+    // `Ipv4Addr::is_private` is exactly 10/8 + 172.16/12 + 192.168/16.
+    v4.is_private()
+}
+
+/// Whether the policy EXPLICITLY opted into private-range egress via a `<private>`
+/// target (last-match-wins over `<private>` allow/deny entries). A bare `*` allow-all
+/// does NOT set this — the private class stays blocked unless the user names it, mirroring
+/// Codex's `is_explicit_local_allowlisted` wildcard rejection. Independent of `enforce`:
+/// a non-enforcing (`net: true`) policy carries no `<private>` rule, so private stays
+/// blocked there too.
+pub fn net_allows_private(policy: &NetPolicy) -> bool {
+    let mut opted_in = false;
+    for rule in &policy.rules {
+        if matches!(rule.target, NetTarget::Private) {
+            opted_in = matches!(rule.effect, Effect::Allow);
+        }
+    }
+    opted_in
 }
