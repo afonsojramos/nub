@@ -4,7 +4,7 @@
 mod common;
 
 use nub_sandbox::compiler::{CompileError, compile};
-use nub_sandbox::policy::{Effect, EnvFormat, Inspection, NetTarget};
+use nub_sandbox::policy::{Effect, EnvFormat, Inspection, NetTarget, TmpMode};
 use serde_json::json;
 
 // ── wrapper trichotomy ────────────────────────────────────────────────────────
@@ -64,6 +64,102 @@ fn absent_granular_axis_floors_complete_statement() {
         p.env.withheld.contains(&"ANYTHING".to_string()),
         "the stripped ambient var is recorded withheld"
     );
+}
+
+#[test]
+fn tmp_mode_folds_from_the_tmp_key() {
+    let ctx = common::ctx(true, &[]);
+    // `<tmp>` is the private-dir sentinel: a truthy permission → Private (fresh per-run dir),
+    // `false` → Deny. Either sets the TmpMode and emits NO ordinary fs rule (the backend owns
+    // the per-run dir + shared-tmp denial). The rest of the fs axis folds normally alongside.
+    let p = compile(&json!({ "fs": { "./": "r", "<tmp>": "rw" } }), &ctx).unwrap();
+    assert_eq!(p.fs.tmp, TmpMode::Private);
+    assert_eq!(
+        compile(&json!({ "fs": { "<tmp>": true } }), &ctx)
+            .unwrap()
+            .fs
+            .tmp,
+        TmpMode::Private
+    );
+    // `"r"` on a fresh empty dir is degenerate, so it too maps to Private (rw).
+    assert_eq!(
+        compile(&json!({ "fs": { "<tmp>": "r" } }), &ctx)
+            .unwrap()
+            .fs
+            .tmp,
+        TmpMode::Private
+    );
+    assert_eq!(
+        compile(&json!({ "fs": { "<tmp>": false } }), &ctx)
+            .unwrap()
+            .fs
+            .tmp,
+        TmpMode::Deny
+    );
+    // Absent `<tmp>` stays Shared (no tmp confinement); Shared is unreachable via the sentinel.
+    assert_eq!(
+        compile(&json!({ "fs": ["./"] }), &ctx).unwrap().fs.tmp,
+        TmpMode::Shared
+    );
+    // A bogus value on `<tmp>` (including the dropped `"private"`/`"deny"` keywords) is rejected.
+    assert!(matches!(
+        compile(&json!({ "fs": { "<tmp>": "private" } }), &ctx),
+        Err(CompileError::Shape { .. })
+    ));
+
+    // A `<tmp>/subpath` key maps INTO the private dir (→ Private mode), and — the fix — emits
+    // NO ordinary fs rule pointing at the shared host tmp (`/tmp`).
+    let sub = compile(&json!({ "fs": { "./": "r", "<tmp>/scratch": "rw" } }), &ctx).unwrap();
+    assert_eq!(sub.fs.tmp, TmpMode::Private);
+    assert!(
+        sub.fs
+            .rules
+            .entries
+            .iter()
+            .all(|e| !e.matcher.as_str().contains("/tmp")),
+        "`<tmp>/scratch` must not leak an fs rule into the shared host tmp"
+    );
+    // Array form: a `<tmp>` / `<tmp>/…` entry sets Private; a `!`-negated one sets Deny.
+    assert_eq!(
+        compile(&json!({ "fs": ["./", "<tmp>/scratch"] }), &ctx)
+            .unwrap()
+            .fs
+            .tmp,
+        TmpMode::Private
+    );
+    assert_eq!(
+        compile(&json!({ "fs": ["./", "!<tmp>"] }), &ctx)
+            .unwrap()
+            .fs
+            .tmp,
+        TmpMode::Deny
+    );
+    // A backslash subpath is a subpath too (path-separator), → Private.
+    assert_eq!(
+        compile(&json!({ "fs": { "<tmp>\\scratch": "rw" } }), &ctx)
+            .unwrap()
+            .fs
+            .tmp,
+        TmpMode::Private
+    );
+    // A `<tmp>` prefix with a NON-separator suffix (`<tmp>*`, `<tmp>x`) would otherwise leak
+    // into the shared host tmp via `expand_symbolic`, so it is a hard shape error — object AND
+    // array form. (`<tmpx>`, having no `<tmp>` prefix, stays a normal literal path.)
+    for bad in [
+        json!({ "fs": { "<tmp>*": "rw" } }),
+        json!({ "fs": { "<tmp>x": "r" } }),
+    ] {
+        assert!(
+            matches!(compile(&bad, &ctx), Err(CompileError::Shape { .. })),
+            "malformed `<tmp>` suffix must be a shape error, not a shared-tmp leak"
+        );
+    }
+    assert!(matches!(
+        compile(&json!({ "fs": ["<tmp>*"] }), &ctx),
+        Err(CompileError::Shape { .. })
+    ));
+    // `<tmpx>` is NOT a `<tmp>` sentinel — a normal path, folds without error.
+    assert!(compile(&json!({ "fs": { "<tmpx>": "r" } }), &ctx).is_ok());
 }
 
 #[test]

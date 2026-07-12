@@ -345,3 +345,159 @@ fn generous_read_still_denies_dotenv_and_ssh() {
         "ssh denied"
     );
 }
+
+// ── the `.env*` default-deny (Feature 2) ──────────────────────────────────────
+// Reads of any `.env*`-basename file are denied by DEFAULT on every read-granting
+// fs policy — including the OBJECT form (which never spliced `"..."`) — and the deny
+// beats a broad dir-allow regardless of order, yet yields to an EXPLICIT exact-file
+// allow (informed consent). Verified at the compiler+matcher (engine-pure) layer,
+// the shared cross-backend contract.
+
+fn read_denied(surface: serde_json::Value, path: &str) -> bool {
+    use nub_sandbox::compiler::compile;
+    let ctx = common::ctx(true, &[]);
+    let policy = compile(&surface, &ctx).unwrap();
+    let m = PathMatcher::new(&policy.fs.rules);
+    matches!(
+        m.decide(&common::homes().project.join(path)).effect,
+        Effect::Deny
+    )
+}
+
+#[test]
+fn object_form_dir_allow_still_denies_dotenv() {
+    use serde_json::json;
+    // The core gap: an object-form `{ "./": "r" }` grants the project but must NOT
+    // expose `<proj>/.env` — the object form never spliced the secret set, so before
+    // Feature 2 this leaked. `src/index.ts` stays readable.
+    assert!(read_denied(json!({ "fs": { "./": "r" } }), ".env"));
+    assert!(read_denied(
+        json!({ "fs": { "./": "r" } }),
+        "sub/.env.local"
+    ));
+    assert!(!read_denied(json!({ "fs": { "./": "r" } }), "src/index.ts"));
+    // Array-form allowlist, same guarantee.
+    assert!(read_denied(json!({ "fs": ["./"] }), ".env"));
+}
+
+#[test]
+fn dotenv_deny_beats_a_trailing_broad_allow() {
+    use serde_json::json;
+    // The `["...", "./"]` footgun: a trailing dir-allow re-matches `<proj>/.env` last,
+    // so under pure last-match it would re-expose it. The `.env*` deny is injected AFTER
+    // every band-1 rule, so it wins regardless of authored order.
+    assert!(read_denied(json!({ "fs": ["...", "./"] }), ".env"));
+    assert!(read_denied(json!({ "fs": ["./", "..."] }), ".env"));
+}
+
+#[test]
+fn exact_file_allow_overrides_the_dotenv_deny_but_a_dir_allow_does_not() {
+    use nub_sandbox::compiler::compile;
+    use nub_sandbox::policy::FsAccess;
+    use serde_json::json;
+    // Naming the exact file grants it (informed consent); a sibling `.env` stays denied.
+    let ctx = common::ctx(true, &[]);
+    let policy = compile(
+        &json!({ "fs": { "./": "r", "./.env.production": "r" } }),
+        &ctx,
+    )
+    .unwrap();
+    let m = PathMatcher::new(&policy.fs.rules);
+    let proj = common::homes().project;
+    let d = m.decide(&proj.join(".env.production"));
+    assert!(
+        matches!(d.effect, Effect::Allow) && matches!(d.access, FsAccess::Read),
+        "the exact-file allow grants <proj>/.env.production"
+    );
+    assert!(
+        matches!(m.decide(&proj.join(".env")).effect, Effect::Deny),
+        "a sibling .env the user did NOT name stays denied"
+    );
+    // A GLOB allow of the same shape is NOT an exact-file allow and does NOT override.
+    assert!(read_denied(
+        json!({ "fs": { "./": "r", "./.env*": "r" } }),
+        ".env"
+    ));
+    // An explicit exact-path DENY after an exact allow stays denied (user's last word).
+    assert!(read_denied(
+        json!({ "fs": ["./", "./.env", "!./.env"] }),
+        ".env"
+    ));
+}
+
+#[test]
+fn fully_relaxed_fs_still_reads_dotenv_escape_hatch() {
+    use nub_sandbox::compiler::compile;
+    use serde_json::json;
+    // `fs: true` / `sandbox: false` is the explicit total-relaxation escape hatch — the
+    // default `.env*` deny does NOT apply to it (it is not a directory allowlist).
+    for surface in [json!({ "fs": true }), json!(false)] {
+        let ctx = common::ctx(true, &[]);
+        let policy = compile(&surface, &ctx).unwrap();
+        let m = PathMatcher::new(&policy.fs.rules);
+        assert!(
+            matches!(
+                m.decide(&common::homes().project.join(".env")).effect,
+                Effect::Allow
+            ),
+            "relaxed fs reads .env ({surface})"
+        );
+    }
+}
+
+#[test]
+fn dotenv_deny_matches_the_env_basename_prefix_at_any_depth() {
+    use serde_json::json;
+    // Basename-prefix `.env`: the dotfile, dotted variants, direnv's `.envrc`, and a
+    // `.env.d/` directory's contents — all denied, at the root and nested.
+    for p in [
+        ".env",
+        ".env.local",
+        ".env.production",
+        ".envrc",
+        "sub/.env",
+        "packages/app/.env.test",
+        ".env.d/secret",
+    ] {
+        assert!(read_denied(json!({ "fs": { "./": "r" } }), p), "{p} denied");
+    }
+    // A non-`.env`-prefixed dotfile is NOT swept.
+    assert!(!read_denied(json!({ "fs": { "./": "r" } }), ".gitignore"));
+}
+
+#[test]
+fn env_prefixed_directory_allow_does_not_reexpose_its_contents() {
+    use serde_json::json;
+    // THE SUB-DIRECTORY BYPASS: a `.env*`-NAMED directory is a secret container, and its
+    // contents are covered by the `.env*/**` subtree deny. An exact allow of the DIRECTORY
+    // (or its glob subtree) must NOT re-expose those contents — only a `.env*` LEAF file is
+    // re-grantable (the subtree deny is ordered after the exact-file allows). This is the
+    // regression guard for the band-3 subtree-twin over-grant.
+    for (surface, leaked) in [
+        (json!({ "fs": { "./.env.d": "r" } }), ".env.d/prod"),
+        (json!({ "fs": { "./.env.d": "r" } }), ".env.d/nested/deep"),
+        (
+            json!({ "fs": { "./.environments": "r" } }),
+            ".environments/prod.env",
+        ),
+        // A glob subtree allow of a `.env*` dir is a glob (not an exact FILE) → no override.
+        (json!({ "fs": { "./.env.d/**": "r" } }), ".env.d/prod"),
+        // array (rw) directory allow — same guarantee.
+        (json!({ "fs": ["./.env.d"] }), ".env.d/prod"),
+    ] {
+        assert!(
+            read_denied(surface.clone(), leaked),
+            "{leaked} must stay denied under {surface}"
+        );
+    }
+    // An exact-file allow of a `.env*` FILE inside a subdir still grants THAT one file.
+    assert!(!read_denied(
+        json!({ "fs": { "./": "r", "./sub/.env.local": "r" } }),
+        "sub/.env.local"
+    ));
+    // …but a sibling `.env` in the same subdir stays denied.
+    assert!(read_denied(
+        json!({ "fs": { "./": "r", "./sub/.env.local": "r" } }),
+        "sub/.env"
+    ));
+}

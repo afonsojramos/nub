@@ -331,11 +331,26 @@ impl View {
     /// The write view: only an `Allow` carrying `ReadWrite` grants write; a
     /// read-only allow or a deny caps it. Base is always deny (the caller gates on
     /// `write_confines`, so a relaxed axis never reaches here).
+    ///
+    /// The builtin `.env*` denies are a READ deny only ("writes follow the normal
+    /// write-deny-default") — so they are DROPPED from the write projection. Keeping
+    /// them would make a depth-independent deny "reach into" every rw subtree and force
+    /// a write CARVE, which on allow-only Landlock cannot re-grant a NEW file in the
+    /// carved dir — breaking new-file creation under a broad rw grant for zero write
+    /// security (a `.env*` file's read-exfil is already closed by the read carve, which
+    /// is rename-safe: a carved dir grants only its enumerated children, so renaming
+    /// `.env` to a fresh name yields no read grant). A USER-authored `!.env` deny is
+    /// NOT builtin and still caps write normally.
     fn write(set: &FsRuleSet) -> Self {
-        Self::project(set, Effect::Deny, |r| match (r.effect, r.access) {
-            (Effect::Allow, FsAccess::ReadWrite) => Effect::Allow,
-            _ => Effect::Deny,
-        })
+        Self::project_where(
+            set,
+            Effect::Deny,
+            |r| match (r.effect, r.access) {
+                (Effect::Allow, FsAccess::ReadWrite) => Effect::Allow,
+                _ => Effect::Deny,
+            },
+            |r| !(r.effect == Effect::Deny && is_builtin_env_glob(r.matcher.as_str())),
+        )
     }
 
     /// The essential-dir carve view: an implicit-allow base (the loader dir would be
@@ -352,9 +367,23 @@ impl View {
         default_effect: Effect,
         effect_of: impl Fn(&crate::policy::FsRule) -> Effect,
     ) -> Self {
+        Self::project_where(set, default_effect, effect_of, |_| true)
+    }
+
+    /// [`project`] with an entry FILTER — an entry for which `keep` is false is dropped
+    /// from the view entirely (not merely re-effected), so it neither wins a decision
+    /// nor triggers a carve. Used by the write view to drop the read-only builtin
+    /// `.env*` denies.
+    fn project_where(
+        set: &FsRuleSet,
+        default_effect: Effect,
+        effect_of: impl Fn(&crate::policy::FsRule) -> Effect,
+        keep: impl Fn(&crate::policy::FsRule) -> bool,
+    ) -> Self {
         let entries = set
             .entries
             .iter()
+            .filter(|r| keep(r))
             .filter_map(|r| {
                 compile_glob(r.matcher.as_str()).ok().map(|m| Entry {
                     matcher: m,
@@ -470,26 +499,13 @@ fn literal_prefix(glob: &str) -> Prefix {
     }
 }
 
-/// The built-in `.env*` deny globs the compiler splices via `"..."` (must stay in
-/// sync with `compiler::defaults::SECRET_READ_GLOBS`). These are the ONLY denies the
-/// generous-`**` system-dir seeding is allowed to skip — user secrets live in
-/// home/project (always walked), not under `/usr`,`/etc`,…; a USER-authored deny is
-/// never skipped.
-const BUILTIN_ENV_DENY_GLOBS: &[&str] = &[
-    "**/.env",
-    "**/.env.*",
-    "**/.env/**",
-    "**/.env.*/**",
-    ".env",
-    ".env.*",
-    ".env/**",
-    ".env.*/**",
-    "**/.envrc",
-    ".envrc",
-];
-
+/// The built-in `.env*` deny globs the compiler injects on every read-granting policy
+/// (the shared `crate::compiler::ENV_DENY_GLOBS` — single source of truth, no drift).
+/// These are the ONLY denies the generous-`**` system-dir seeding is allowed to skip —
+/// user secrets live in home/project (always walked), not under `/usr`,`/etc`,…; a
+/// USER-authored deny is never skipped.
 fn is_builtin_env_glob(glob: &str) -> bool {
-    BUILTIN_ENV_DENY_GLOBS.contains(&glob)
+    crate::compiler::ENV_DENY_GLOBS.contains(&glob)
 }
 
 /// Whether a glob could match some path inside `dir`'s subtree. Depth-independent
@@ -831,13 +847,15 @@ mod tests {
 
     #[test]
     fn builtin_env_glob_recognition() {
-        assert!(is_builtin_env_glob("**/.env"));
-        assert!(is_builtin_env_glob(".env.*"));
-        // The subtree + direnv additions must be recognized too, or the
-        // generous-`**` seeding would treat them as user denies and over-carve
-        // every system dir (a perf regression on the generous-read path).
-        assert!(is_builtin_env_glob("**/.env/**"));
-        assert!(is_builtin_env_glob("**/.envrc"));
+        // The compiler-injected `.env*` deny set (basename-prefix, leaf + subtree) must
+        // be recognized as builtin, or the generous-`**` seeding would treat it as a
+        // user deny and over-carve every system dir (a perf regression). Kept in sync
+        // via the shared `compiler::ENV_DENY_GLOBS` const, not a local copy.
+        assert!(is_builtin_env_glob("**/.env*"));
+        assert!(is_builtin_env_glob("**/.env*/**"));
+        assert!(is_builtin_env_glob(".env*"));
+        // A user-authored deny (even a `.env`-shaped literal) is NOT the builtin set.
+        assert!(!is_builtin_env_glob("**/.env"));
         assert!(!is_builtin_env_glob("**/*.pem"));
         assert!(!is_builtin_env_glob("/etc/secret"));
     }
@@ -885,6 +903,32 @@ mod tests {
         assert!(
             !essential_dir_needs_carve(&policy, &etc),
             "the built-in .env carve must not force an essential-dir carve"
+        );
+    }
+
+    #[test]
+    fn env_prefixed_directory_allow_does_not_grant_its_secret_contents() {
+        // THE SUB-DIRECTORY BYPASS on Landlock: a `.env*`-NAMED directory is a secret
+        // container. Naming the directory (`{ "./.env.d": "r" }`) keeps the dir LISTABLE
+        // (ReadDir) but must NOT read-grant its `.env*/**`-denied contents — the carve
+        // descends and skips the denied child. The subtree deny (band 2c) is ordered after
+        // the exact-file allows, so no re-emitted directory subtree twin can re-grant them.
+        let f = fixture();
+        let envd = f.proj.join(".env.d");
+        fs::create_dir_all(&envd).unwrap();
+        fs::write(envd.join("prod"), "DIRSECRET").unwrap();
+        let allow = f.proj.join(".env.d").to_str().unwrap().to_string();
+        let d = derive_read_grants(&f.compile(serde_json::json!({ "fs": { allow: "r" } })));
+        assert!(
+            !read_reachable(&d.grants, &envd.join("prod")),
+            "a .env.d directory allow must not read-grant the secret inside it"
+        );
+        // The directory node itself stays listable (a ReadDir, not a subtree read).
+        assert!(
+            d.grants
+                .iter()
+                .any(|g| g.kind == GrantKind::ReadDir && g.path == envd),
+            "the .env.d directory stays listable"
         );
     }
 

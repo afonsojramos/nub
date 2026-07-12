@@ -150,6 +150,11 @@ pub struct Prepared {
     /// `command`.
     #[cfg(target_os = "windows")]
     pub(crate) launch: Option<windows::WindowsLaunch>,
+    /// The fresh per-run PRIVATE tmp dir (`TmpMode::Private`), owned here so it lives for
+    /// the child's whole run and is removed when `Prepared` drops (after the child exits).
+    /// `None` for `Shared`/`Deny`. Held only for its Drop — the backends read its PATH via
+    /// the value threaded into their `apply` before it moves here.
+    pub(crate) _private_tmp: Option<tempfile::TempDir>,
 }
 
 impl Prepared {
@@ -310,14 +315,22 @@ pub fn apply(policy: &SandboxPolicy, spec: CommandSpec) -> Result<Prepared, Degr
     // under a confining fs policy (an explicit read grant — nub infra, not user config).
     let ca_bundle = proxy.as_ref().and_then(|p| p.ca_bundle_path());
 
+    // Create the fresh per-run PRIVATE tmp dir up front (when the policy asks), so its
+    // path is threaded into the backend BEFORE the child profile is built — the backend
+    // grants it rw + points the child's TMPDIR at it + hides the shared system tmp. The
+    // dir is owned by `Prepared` (moved in below) so it outlives the child and is removed
+    // on drop. `None` for Shared/Deny.
+    let private_tmp = make_private_tmp(policy);
+    let tmp_dir = private_tmp.as_ref().map(|d| d.path());
+
     #[cfg(target_os = "macos")]
-    let mut prepared = macos::apply(policy, spec, proxy_port, proxy_token, ca_bundle)?;
+    let mut prepared = macos::apply(policy, spec, proxy_port, proxy_token, ca_bundle, tmp_dir)?;
     #[cfg(target_os = "linux")]
-    let mut prepared = linux::apply(policy, spec, proxy_port, proxy_token, ca_bundle)?;
+    let mut prepared = linux::apply(policy, spec, proxy_port, proxy_token, ca_bundle, tmp_dir)?;
     #[cfg(target_os = "windows")]
-    let mut prepared = windows::apply(policy, spec, proxy_port, proxy_token, ca_bundle)?;
+    let mut prepared = windows::apply(policy, spec, proxy_port, proxy_token, ca_bundle, tmp_dir)?;
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    let mut prepared = generic_apply(policy, spec, proxy_port, proxy_token, ca_bundle)?;
+    let mut prepared = generic_apply(policy, spec, proxy_port, proxy_token, ca_bundle, tmp_dir)?;
 
     // One-line stderr notice when TLS termination ACTUALLY engages — never silent, but
     // never MISLEADING either: suppress it where the backend degraded net (e.g. Windows,
@@ -334,7 +347,29 @@ pub fn apply(policy: &SandboxPolicy, spec: CommandSpec) -> Result<Prepared, Degr
     }
 
     prepared.proxy = proxy;
+    prepared._private_tmp = private_tmp;
     Ok(prepared)
+}
+
+/// Create the fresh per-run private tmp dir for `TmpMode::Private` (else `None`). A
+/// `tempfile::TempDir` under the OS default temp root, removed when it drops (after the
+/// child exits, since `Prepared` owns it). A creation failure yields `None` — the backend
+/// then reports the tmp axis unenforced (fail-safe: it never silently runs the child on
+/// the SHARED tmp while claiming a private one).
+fn make_private_tmp(policy: &SandboxPolicy) -> Option<tempfile::TempDir> {
+    if policy.fs.tmp != crate::policy::TmpMode::Private {
+        return None;
+    }
+    tempfile::Builder::new().prefix("nub-tmp-").tempdir().ok()
+}
+
+/// Point a child's temp-dir env at `dir` (all three conventions: POSIX `TMPDIR`, the
+/// `TMP`/`TEMP` pair Windows + many cross-platform tools read). Set AFTER `env_clear` so
+/// it survives an enforced env scrub.
+fn set_tmp_env(command: &mut Command, dir: &std::path::Path) {
+    for key in ["TMPDIR", "TMP", "TEMP"] {
+        command.env(key, dir);
+    }
 }
 
 /// Env-scrub-only skeleton for an OS with no wired backend. Reports fs and net as
@@ -346,6 +381,7 @@ fn generic_apply(
     proxy_port: Option<u16>,
     proxy_token: Option<&str>,
     ca_bundle: Option<&std::path::Path>,
+    tmp_dir: Option<&std::path::Path>,
 ) -> Result<Prepared, Degradation> {
     let mut command = Command::new(&spec.program);
     command.args(&spec.args);
@@ -366,6 +402,9 @@ fn generic_apply(
     if let Some(bundle) = ca_bundle {
         set_ca_env(&mut command, bundle);
     }
+    if let Some(dir) = tmp_dir {
+        set_tmp_env(&mut command, dir);
+    }
 
     // fs/net: honestly report what the skeleton does not yet enforce. The skeleton has
     // NO OS deny-layer, so even with the proxy running it cannot FORCE the child
@@ -376,6 +415,9 @@ fn generic_apply(
     }
     if policy.net.enforce {
         lost.push("net".to_string());
+    }
+    if let Some(axis) = tmp_lost_axis(policy) {
+        lost.push(axis.to_string());
     }
     let degradation = if lost.is_empty() {
         Degradation::full()
@@ -389,7 +431,24 @@ fn generic_apply(
         command,
         degradation,
         proxy: None,
+        _private_tmp: None,
     })
+}
+
+/// The degradation axis name for a backend that does NOT enforce the requested
+/// [`TmpMode`] — `tmp-private` (a private per-run tmp was requested but the shared
+/// system tmp is not hidden) / `tmp-deny` (tmp was to be denied but is not). `None` for
+/// `Shared` (nothing to enforce). A backend that DOES enforce the mode never calls this;
+/// one that doesn't pushes the axis into `lost` so the caller never mistakes an
+/// unenforced private/deny-tmp for a real one (fail-safe honesty, never silent).
+/// macOS ENFORCES the mode in its SBPL, so it never consults this (hence the cfg).
+#[cfg(not(target_os = "macos"))]
+fn tmp_lost_axis(policy: &SandboxPolicy) -> Option<&'static str> {
+    match policy.fs.tmp {
+        crate::policy::TmpMode::Shared => None,
+        crate::policy::TmpMode::Private => Some("tmp-private"),
+        crate::policy::TmpMode::Deny => Some("tmp-deny"),
+    }
 }
 
 /// Whether the fs policy actually confines anything (a non-relaxed base or any

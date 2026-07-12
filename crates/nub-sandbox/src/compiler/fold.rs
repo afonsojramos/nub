@@ -11,7 +11,7 @@ use super::{CompileCtx, CompileError};
 use crate::matcher::path::expand_symbolic;
 use crate::policy::{
     CanonGlob, CredentialBroker, Effect, EnvFormat, EnvPolicy, EnvRule, FsAccess, FsPolicy, FsRule,
-    FsRuleSet, HeaderInject, NetPolicy, NetRule, NetTarget, Secret,
+    FsRuleSet, HeaderInject, NetPolicy, NetRule, NetTarget, Secret, TmpMode,
 };
 use globset::{GlobBuilder, GlobMatcher};
 use serde_json::Value;
@@ -48,6 +48,16 @@ pub fn fold_fs(
         entries: Vec::new(),
         default_effect: Effect::Deny,
     };
+    // Throwaway-tmp mode. `<tmp>` (and any `<tmp>/subpath`) is a SENTINEL for the specially-
+    // provisioned per-run PRIVATE dir — a subpath maps INTO that dir, never the shared system
+    // tmp — so its value is a plain fs permission: a truthy grant (`"r"`/`"rw"`/`true`) →
+    // `Private` (fresh per-run dir, shared tmp hidden); `false` → `Deny` (no tmp). The backend
+    // owns the private-dir creation + whole-subtree grant + shared-tmp denial at spawn time (the
+    // per-run path is not knowable at compile time), so a `<tmp>`-prefixed entry sets only the
+    // MODE and emits no ordinary fs rule. Shared system tmp is a SEPARATE literal path, reached
+    // only by granting `/tmp` — never via this sentinel; `Shared` (the default when `<tmp>` is
+    // absent) means "no tmp confinement, host tmp per fs rules".
+    let mut tmp = TmpMode::Shared;
     match value {
         // `true` fully relaxes the axis; `false` fully denies it.
         Value::Bool(true) => set.default_effect = Effect::Allow,
@@ -56,12 +66,21 @@ pub fn fold_fs(
             for (i, item) in items.iter().enumerate() {
                 let p = child(path, &i.to_string());
                 let s = as_str(item, &p)?;
+                if let Some(mode) = parse_tmp_mode_array(s, &p)? {
+                    tmp = mode;
+                    continue;
+                }
                 fold_fs_array_entry(s, ctx, parent, &p, &mut set.entries)?;
             }
         }
         Value::Object(map) => {
             for (key, val) in map {
-                fold_fs_object_entry(key, val, ctx, &child(path, key), &mut set.entries)?;
+                let p = child(path, key);
+                if let Some(mode) = parse_tmp_mode(key, val, &p)? {
+                    tmp = mode;
+                    continue;
+                }
+                fold_fs_object_entry(key, val, ctx, &p, &mut set.entries)?;
             }
         }
         _ => {
@@ -71,10 +90,169 @@ pub fn fold_fs(
             ));
         }
     }
-    Ok(FsPolicy {
-        rules: set,
-        tmp: Default::default(),
-    })
+    finalize_env_deny(&mut set);
+    Ok(FsPolicy { rules: set, tmp })
+}
+
+/// A `<tmp>` sentinel malformed by a suffix that is neither empty nor a path separator
+/// (`<tmp>*`, `<tmp>x`). Rejected loud rather than folded: `expand_symbolic` would otherwise
+/// root it at the SHARED host tmp (`<tmp>x` → `<host-tmp>/x`), the exact leak the sentinel
+/// exists to prevent — so any `<tmp>`-prefixed form that is not the sentinel is an error.
+const MALFORMED_TMP_MSG: &str = "malformed `<tmp>` sentinel — use `<tmp>` (a fresh per-run private tmp dir) or `<tmp>/subpath` (a path inside it); `<tmp>` followed by anything else is not a path into the shared system tmp — grant the literal `/tmp` for that";
+
+/// Classify a trimmed key/entry against the `<tmp>` sentinel. A `<tmp>`-prefixed string matches
+/// exactly what `expand_symbolic` roots at the host tmp (`strip_prefix("<tmp>")`), so the guard
+/// MUST cover the whole class or a form it misses leaks into the shared tmp. `<tmp>` or
+/// `<tmp>{/,\}subpath` is the sentinel; any other `<tmp>`-prefixed form is malformed.
+enum TmpKey {
+    Sentinel,
+    Malformed,
+    NotTmp,
+}
+fn classify_tmp_key(k: &str) -> TmpKey {
+    let Some(after) = k.strip_prefix("<tmp>") else {
+        return TmpKey::NotTmp;
+    };
+    if after.is_empty() || after.starts_with(['/', '\\']) {
+        TmpKey::Sentinel
+    } else {
+        TmpKey::Malformed
+    }
+}
+
+/// Fold a `<tmp>`-prefixed key into a tmp MODE. `<tmp>` (and any `<tmp>/subpath`) denotes the
+/// per-run PRIVATE dir — a subpath maps INTO that dir, never the shared system tmp — so the
+/// value is a plain fs permission on it: a truthy grant (`"r"`/`"rw"`/`true`) → `Private`
+/// (provision the fresh dir + grant it rw); `false` → `Deny` (no tmp). Read-only on a fresh
+/// empty dir is degenerate, so `"r"` is treated as `"rw"` — `Private` always grants rw. The
+/// whole private subtree is backend-granted, so a `<tmp>/x` key needs no path rule of its own;
+/// the caller consumes a `Some` and emits nothing. `None` for a normal (non-`<tmp>`) key; a
+/// malformed `<tmp>` suffix is a hard error (it would otherwise leak into the shared host tmp).
+fn parse_tmp_mode(key: &str, val: &Value, path: &str) -> Result<Option<TmpMode>, CompileError> {
+    match classify_tmp_key(key.trim()) {
+        TmpKey::NotTmp => return Ok(None),
+        TmpKey::Malformed => return Err(CompileError::shape(path, MALFORMED_TMP_MSG)),
+        TmpKey::Sentinel => {}
+    }
+    let mode = match val {
+        Value::Bool(true) => TmpMode::Private,
+        Value::Bool(false) => TmpMode::Deny,
+        Value::String(s) if s == "r" || s == "rw" => TmpMode::Private,
+        _ => {
+            return Err(CompileError::shape(
+                path,
+                "`<tmp>` takes an fs permission: \"r\"/\"rw\"/`true` (a fresh per-run private tmp dir, shared system tmp hidden) or `false` (no tmp) — for the shared system tmp, grant the literal path `/tmp`",
+            ));
+        }
+    };
+    Ok(Some(mode))
+}
+
+/// Array-form `<tmp>` sentinel → tmp MODE. A `<tmp>` / `<tmp>/subpath` entry is `Private`
+/// (array grants are rw); a `!`-negated one is `Deny`. `None` for a normal entry; a malformed
+/// `<tmp>` suffix errors, same as the object [`parse_tmp_mode`], so the two agree on the class.
+fn parse_tmp_mode_array(entry: &str, path: &str) -> Result<Option<TmpMode>, CompileError> {
+    let (body, deny) = match entry.trim().strip_prefix('!') {
+        Some(rest) => (rest.trim_start(), true),
+        None => (entry.trim(), false),
+    };
+    match classify_tmp_key(body) {
+        TmpKey::NotTmp => Ok(None),
+        TmpKey::Malformed => Err(CompileError::shape(path, MALFORMED_TMP_MSG)),
+        TmpKey::Sentinel => Ok(Some(if deny {
+            TmpMode::Deny
+        } else {
+            TmpMode::Private
+        })),
+    }
+}
+
+/// Inject the default `.env*` READ-deny at a precedence a broad dir/glob allow can NOT
+/// override but an EXPLICIT exact-file allow can. `.env*` files hold the exact secrets
+/// the sandbox scrubs, so reading them is denied by default on any read-granting fs
+/// policy — including the OBJECT form, which never spliced the `"..."` secret set. The
+/// rule composes with the last-match-wins fs algebra as FOUR ordered bands (backends
+/// stay pure IR replicators — every one evaluates last-match-wins over these entries):
+///   band 1  — the folded user + default entries, unchanged;
+///   band 2a — the `.env*` LEAF deny, appended so it beats every band-1 broad/glob
+///             allow (the `["...", "./"]` footgun where a trailing dir-allow re-exposed
+///             `<proj>/.env` is closed here);
+///   band 3  — the user's EXACT-FILE `.env*` allows re-emitted so they beat band 2a
+///             (informed consent: `{ "./.env.production": "r" }` grants that one file);
+///   band 2c — the `.env*` SUBTREE deny (`**/.env*/**`), appended LAST so it is
+///             unconditionally authoritative for a `.env*`-NAMED DIRECTORY's CONTENTS.
+/// Why the subtree deny goes AFTER the exact-file allows (the sub-directory-bypass fix):
+/// a bare-path allow expands to a leaf grant + a `/**` subtree twin, and a subtree grant
+/// is a SUBPATH on macOS / a ReadSubtree on Linux — so re-emitting the twin of a
+/// `.env*`-prefixed DIRECTORY allow (`{ "./.env.d": "r" }`) would re-expose every secret
+/// under `.env.d/` if the subtree deny preceded it. Ordering the subtree deny last means
+/// an exact-file allow can only re-grant the `.env*` LEAF (a file), never a directory's
+/// denied children — closing the bypass identically on every backend (pure last-match).
+/// A band-1 entry the user later DENIES for that exact path is NOT re-emitted (its
+/// band-1 verdict is Deny), so an explicit `!./.env` stays denied.
+///
+/// Skipped only for a FULLY-relaxed axis (`fs: true` / `sandbox: false` — the explicit
+/// escape hatch) and for a policy that grants no reads at all (a deny-all fs), where the
+/// deny would be inert noise.
+fn finalize_env_deny(set: &mut FsRuleSet) {
+    let fully_relaxed = set.default_effect == Effect::Allow && set.entries.is_empty();
+    let grants_read = set.default_effect == Effect::Allow
+        || set.entries.iter().any(|e| e.effect == Effect::Allow);
+    if fully_relaxed || !grants_read {
+        return;
+    }
+    // Compute band 3 from band 1 BEFORE appending any deny, so the survivor test reflects
+    // the user's own last-match verdict (not the denies we are about to add).
+    let band3 = exact_env_allows_surviving(set);
+    set.entries.extend(defaults::env_deny_leaf_rules()); // band 2a: leaf deny
+    set.entries.extend(band3); // band 3: exact-file allows
+    set.entries.extend(defaults::env_deny_subtree_rules()); // band 2c: subtree deny (LAST)
+}
+
+/// The band-3 survivors: each EXACT-FILE `.env*` allow entry whose band-1 (user)
+/// verdict for its own path is Allow. An exact-file entry is a literal path (or its
+/// `/**` subtree twin) whose basename starts with `.env`; a glob-bearing allow
+/// (`**/.env*`, `./*`) is NOT an exact-file allow and does not override the deny.
+fn exact_env_allows_surviving(set: &FsRuleSet) -> Vec<FsRule> {
+    let mut out = Vec::new();
+    for r in &set.entries {
+        if r.effect != Effect::Allow {
+            continue;
+        }
+        // The literal file identity is the matcher minus a `/**` subtree twin.
+        let literal = r
+            .matcher
+            .as_str()
+            .strip_suffix("/**")
+            .unwrap_or(r.matcher.as_str());
+        if is_glob(literal) || !basename_is_dotenv(literal) {
+            continue;
+        }
+        if band1_verdict_allows(set, literal) {
+            out.push(r.clone());
+        }
+    }
+    out
+}
+
+/// Whether a path's final component's basename starts with `.env` (the deny target).
+fn basename_is_dotenv(path: &str) -> bool {
+    path.rsplit('/').next().unwrap_or(path).starts_with(".env")
+}
+
+/// The band-1 last-match-wins verdict for the concrete `candidate` path over the set's
+/// current (pre-band-2) entries. Pure string glob matching over the canonical IR globs
+/// — deterministic, no filesystem touch (the candidate is already a canonical IR path).
+fn band1_verdict_allows(set: &FsRuleSet, candidate: &str) -> bool {
+    let mut effect = set.default_effect;
+    for r in &set.entries {
+        if let Ok(m) = crate::matcher::path::compile_glob(r.matcher.as_str())
+            && m.is_match(candidate)
+        {
+            effect = r.effect;
+        }
+    }
+    effect == Effect::Allow
 }
 
 fn fold_fs_array_entry(
