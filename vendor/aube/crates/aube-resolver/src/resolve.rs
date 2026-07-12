@@ -187,8 +187,46 @@ impl Resolver {
             "peer-context pass produced {} contextualized packages",
             contextualized.packages.len()
         );
+
+        // Named-registry tarball persistence (pnpm-compat). Frozen installs
+        // skip preprocess, so they'd reconstruct a tarball URL from the DEFAULT
+        // registry — which 404s for a package a `namedRegistries` alias routed
+        // elsewhere. Mark every registry package whose resolved tarball host
+        // differs from its config-derived registry host so the writer always
+        // emits `resolution.tarball`. Comparing against the config-derived host
+        // (not the named route) makes this robust across lockfile REUSE (the
+        // reused pkg's tarball_url round-trips through parse) and correctly
+        // leaves scoped/default-registry packages — whose tarball host already
+        // matches config — untouched. Gated on a populated alias map so
+        // standalone aube (empty map) is byte-identical.
+        if !self.named_registries.is_empty() {
+            for pkg in contextualized.packages.values_mut() {
+                if pkg.local_source.is_none()
+                    && let Some(url) = pkg.tarball_url.as_deref()
+                {
+                    let config_registry = self.client.config_registry_for(pkg.registry_name());
+                    if url_authority(url) != url_authority(&config_registry) {
+                        pkg.force_tarball_url = true;
+                    }
+                }
+            }
+        }
+
         Ok(contextualized)
     }
+}
+
+/// The `host[:port]` authority of an `scheme://authority/…` URL, or `None`
+/// when the string has no `://`. Used to compare a package's resolved tarball
+/// host against its config-derived registry host.
+fn url_authority(url: &str) -> Option<&str> {
+    let after_scheme = url.split_once("://")?.1;
+    Some(
+        after_scheme
+            .split(['/', '?', '#'])
+            .next()
+            .unwrap_or(after_scheme),
+    )
 }
 
 /// Apply the project's `readPackage` hook to each importer manifest in

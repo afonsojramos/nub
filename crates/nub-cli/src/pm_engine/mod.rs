@@ -1665,6 +1665,12 @@ pub(crate) fn engine_brand_preflight() {
         c.synthetic_user_npmrc_entries = bunfig.user;
         c.synthetic_project_npmrc_entries = bunfig.project;
         c.npm_save_prefix_on_bare_exact = npm_save_prefix_on_bare_exact;
+        // pnpm's `namedRegistries` alias routing is a pnpm-compat surface, so it
+        // engages under the same posture as the pnpm-branded config reads
+        // (pnpm incumbent or fresh nub-as-pnpm-drop-in). Distinct EngineContext
+        // bool because that posture defaults `true` in standalone aube, which
+        // would activate the feature there and break default-preservation.
+        c.named_registries_enabled = read_branded_pnpm_config;
     });
     match surface {
         ConfigSurface::NubIdentity(dir) => {

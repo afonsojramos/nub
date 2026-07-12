@@ -844,8 +844,21 @@ where
                     .clone()
                     .unwrap_or_else(|| client.tarball_url(&registry_name, &version));
                 if let Some(lockfile_url) = tarball_url_override.as_deref() {
-                    verify_lockfile_tarball_url(&client, &registry_name, &version, lockfile_url)
-                        .await?;
+                    // The recheck re-fetches the packument via `registry_name`,
+                    // which resolves to the config (DEFAULT/scoped) registry. A
+                    // pnpm `namedRegistries` package lives on a host recorded
+                    // ONLY in the lockfile URL — a frozen install skips the
+                    // resolve that would record the route — so re-fetching would
+                    // hit the wrong registry and 404. Skip the recheck when the
+                    // locked host isn't the one we'd resolve to; the tarball is
+                    // still fetched directly from the persisted URL with
+                    // URL-keyed auth, and the SHA-512 integrity check validates
+                    // the CONTENT, so dropping the URL-consistency recheck is safe.
+                    let config_registry = client.config_registry_for(&registry_name);
+                    if tarball_url_host(lockfile_url) == tarball_url_host(&config_registry) {
+                        verify_lockfile_tarball_url(&client, &registry_name, &version, lockfile_url)
+                            .await?;
+                    }
                 }
 
                 let dl_start = std::time::Instant::now();
@@ -1152,6 +1165,19 @@ fn is_public_npm_registry_tarball(url: &str) -> bool {
         .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
         .as_deref()
         == Some("registry.npmjs.org")
+}
+
+/// Lowercased `host[:port]` of a URL, or `None` when unparseable. Used to
+/// decide whether a locked tarball URL points at the registry we'd resolve
+/// its package to (config-derived) or at a distinct pnpm-`namedRegistries`
+/// host that only the lockfile records.
+fn tarball_url_host(url: &str) -> Option<String> {
+    let parsed = reqwest::Url::parse(url).ok()?;
+    let host = parsed.host_str()?.to_ascii_lowercase();
+    Some(match parsed.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host,
+    })
 }
 
 fn tarball_url_path(url: &str) -> Option<String> {
