@@ -267,7 +267,8 @@ impl std::fmt::Debug for Secret {
     }
 }
 
-/// A net rule targets either a host pattern (glob or literal) or a CIDR block.
+/// A net rule targets a host pattern (glob or literal), a CIDR block, or the
+/// symbolic private-range class.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NetTarget {
@@ -277,6 +278,12 @@ pub enum NetTarget {
     Host(String),
     /// A CIDR block for IP-literal egress.
     Cidr(ipnet::IpNet),
+    /// The symbolic `<private>` (`<local>`) target: the RFC1918 IPv4 ranges
+    /// (`10/8`, `172.16/12`, `192.168/16`) plus IPv6 ULA (`fc00::/7`), which are
+    /// blocked by default at the egress proxy. Only this EXPLICIT target re-permits
+    /// them — a bare `*` does not (mirrors Codex's non-wildcard local-allowlist).
+    /// The always-blocked cloud-metadata / link-local surface is NOT re-opened by it.
+    Private,
 }
 
 // ── environment ──────────────────────────────────────────────────────────────

@@ -3,7 +3,8 @@
 An honest record of what the engine does NOT close, why each residual is bounded, and
 where the fix lives. The sandbox fails safe, not silent: an **axis-level** degradation a
 policy reaches (a per-host net policy with no proxy → coarse deny; per-host Windows egress
-→ coarse deny) is surfaced at runtime via `Degradation`. The **within-axis over-grant**
+without elevation → a fail-CLOSED `Degradation` error, never a silent coarse-degrade) is
+surfaced via `Degradation`. The **within-axis over-grant**
 residuals below are a different class — documented here, NOT signalled: hardlink-to-secret,
 the `/etc` no-deny-carve edge, derive→open TOCTOU, bind-mounted procfs, the macOS
 floating-name move-block shapes, Linux `ConnectTcp` at `ptrace_scope≥2`, and NAT64/6to4.
@@ -23,37 +24,46 @@ Two kinds of residual appear here:
 
 ## Network
 
-### Egress SSRF: cloud-metadata / link-local blocked; broad RFC1918 is a posture call (partly open by design)
+### Egress SSRF: cloud-metadata / link-local AND RFC1918 blocked by default; `<private>` opt-in
 
 The loopback egress proxy resolves an allowed host and connects to the resolved IP, so an
 allowed hostname whose DNS points at an internal address — or an attacker DNS-*rebinding*
 an allowed domain to one between validation and connect — could reach an off-limits
-address. Two halves:
+address. Three halves:
 
-- **CLOSED — cloud-metadata / link-local + rebinding.** The proxy fails closed at the
-  outbound connect on the IMDS / link-local surface: IPv4 `169.254.0.0/16` (incl. the
-  `169.254.169.254` metadata endpoint), IPv6 link-local `fe80::/10`, and the AWS IPv6 IMDS
-  `fd00:ec2::254` — regardless of what the policy admits. IPv4-in-IPv6 encodings
-  (`::ffff:169.254.169.254`, `::169.254.169.254`) are unmapped before classification, and
-  integer/octal/hex host forms are moot because classification runs on the RESOLVED
-  `IpAddr`, not the child's token. Rebinding is pinned out: the host is resolved exactly
-  once and the connect targets that same address — no re-resolution between check and
-  connect. See `proxy/mod.rs` (`is_blocked_egress_ip`, `connect_upstream`).
-- **OPEN BY DESIGN (maintainer posture call) — broad RFC1918 private ranges.** `10/8`,
-  `172.16/12`, and `192.168/16` are NOT blocked by default. Blocking them wholesale breaks
-  legitimate private-host allowlisting and collides with the deliberate loopback carve
-  (the proxy's own listener and loopback upstreams must stay reachable), so it is a
-  separate posture decision rather than folded into this guard. The seam is clean: a
-  policy/config toggle can extend `is_blocked_egress_ip` to the private ranges when the
-  maintainer decides the default. Until then, private-range egress is admitted iff the
-  active policy admits the host.
-- **OPEN residual (impractical) — NAT64 / 6to4 IPv6 embeddings of link-local.** A
-  link-local address wrapped in the NAT64 well-known prefix (`64:ff9b::169.254.169.254`)
-  or 6to4 (`2002:a9fe:a9fe::`) is NOT unwrapped, so it dodges the block. Reaching IMDS this
-  way needs a NAT64/6to4 *translating gateway* on-path routing to a link-local target —
-  absent in a normal cloud environment — so it is not a practical metadata reach. Left
-  unblocked rather than partly-covered because only the well-known prefixes are detectable
-  (a network-specific NAT64 `/96` is not), and partial coverage would misrepresent the
+- **CLOSED (hard, no opt-out) — cloud-metadata / link-local + rebinding.** The proxy fails
+  closed at the outbound connect on the IMDS / link-local surface: IPv4 `169.254.0.0/16`
+  (incl. the `169.254.169.254` metadata endpoint), IPv6 link-local `fe80::/10`, and the AWS
+  IPv6 IMDS `fd00:ec2::254` — regardless of what the policy admits, and NOT re-opened by the
+  `<private>` opt-in below (the AWS IPv6 IMDS sits inside ULA but is caught by this hard tier
+  first). IPv4-in-IPv6 encodings (`::ffff:169.254.169.254`, `::169.254.169.254`) are unmapped
+  before classification, and integer/octal/hex host forms are moot because classification
+  runs on the RESOLVED `IpAddr`, not the child's token. Rebinding is pinned out: the host is
+  resolved exactly once and the connect targets that same address — no re-resolution between
+  check and connect. See `proxy/mod.rs` (`is_hard_blocked_ip`, `connect_upstream`).
+- **CLOSED by default, `<private>` opt-in — broad RFC1918 / IPv6 ULA.** `10/8`, `172.16/12`,
+  `192.168/16`, and IPv6 ULA `fc00::/7` are BLOCKED by default at the outbound connect, even
+  when the policy admits the host (SSRF fail-closed, following Codex's block-by-default
+  posture for agent-driven code). A project re-permits them with the explicit symbolic net
+  target `<private>` (alias `<local>`), e.g. `net: ["<private>", "10.0.0.5"]` to reach a
+  local service. A bare wildcard `*` does NOT re-open the private ranges — only the explicit
+  `<private>` target does (mirrors Codex's non-wildcard local-allowlist). The opt-in is a
+  policy-level flag (`net_allows_private`) that lifts the private tier of the SSRF guard.
+  A raw private-range CIDR (`net: ["192.168.0.0/16"]`) admits at gate 1 but does NOT by
+  itself lift the SSRF tier — the `<private>` token is what unlocks it. To narrow WHICH
+  private hosts are reachable, compose `<private>` (unlock) with last-match-wins denies at
+  gate 1: `net: ["<private>", "!10.0.0.0/8"]` reaches all private ranges except `10/8`.
+  Loopback (`127/8`, `::1`) is in NEITHER tier — the proxy's own listener + loopback
+  upstreams stay reachable unconditionally. See `proxy/mod.rs` (`is_private_range`,
+  `net_allows_private`) and `NetTarget::Private`.
+- **OPEN residual (impractical) — NAT64 / 6to4 IPv6 embeddings of link-local AND private
+  ranges.** A link-local or RFC1918/ULA address wrapped in the NAT64 well-known prefix
+  (`64:ff9b::169.254.169.254`, `64:ff9b::10.0.0.1`) or 6to4 (`2002:a9fe:a9fe::`,
+  `2002:0a00:0001::`) is NOT unwrapped, so it dodges both tiers of the block. Reaching an
+  internal target this way needs a NAT64/6to4 *translating gateway* on-path routing to it —
+  absent in a normal cloud environment — so it is not a practical reach. Left unblocked
+  rather than partly-covered because only the well-known prefixes are detectable (a
+  network-specific NAT64 `/96` is not), and partial coverage would misrepresent the
   guarantee. Same `is_blocked_egress_ip` seam if the threat model later wants it.
 
 ### Linux per-host egress: the port-scoped `ConnectTcp` residual (CLOSED via seccomp user_notify)
@@ -103,18 +113,50 @@ an inbound listener remains creatable on an unpredictable port. Explicit `bind()
   for full inbound closure. Same full-close as above (seccomp `user_notify` / netns).
   Documented in `backend/linux.rs` (`apply_landlock`).
 
-### Windows per-host egress is not wired (coarse deny holds)
+### Windows per-host egress + MITM: opt-in elevated "strict Windows" tier
 
-Windows has proven coarse egress-deny (no `internetClient` capability blocks all egress,
-loopback included), but not per-host. An AppContainer child cannot reach the loopback
-proxy without a registered loopback exemption (`NetworkIsolationSetAppContainerConfig`),
-which this phase does not wire.
+Per-host net (Q21) and the MITM/credential-brokering tier (Q22) enforce on Windows the
+same way as macOS/Linux — the confined child's sole egress is nub's loopback proxy — but
+reaching that proxy needs a step the other platforms don't. An AppContainer child is
+WFP-blocked from ALL loopback regardless of capability, and the only lift
+(`NetworkIsolationSetAppContainerConfig`, a per-run AC-SID loopback exemption) requires
+administrator. So per-host/MITM on Windows is an **opt-in elevated tier**; coarse on/off
+(allow-all or deny-all, which need no proxy) stays the unprivileged default, unchanged.
 
-- **Why bounded:** fail-safe — a per-host allow policy degrades to coarse **deny**, not
-  to open egress, and reports a `net-per-host` `Degradation`. Nothing is silently
-  allowed.
-- **Where fixed:** wire the loopback exemption so the child can reach the proxy —
-  build-jail thread or a later hardening slot.
+- **How it enforces (elevated):** before spawn the backend registers the per-run unique AC
+  SID in the machine-wide loopback-exemption list (a read-modify-write that never clobbers
+  other apps' entries), keeps `internetClient` WITHHELD so the exemption opens loopback
+  ONLY — nub's proxy is the child's sole egress — and tears the exemption down when the
+  child exits (RAII, alongside the ACE/profile teardown). MITM rides the same proxy: the
+  ephemeral CA reaches the child through the CA-env bundle, exactly as on mac/Linux.
+- **The widening tradeoff (bounded).** A loopback exemption is not scoped to the proxy
+  port — for the run's lifetime the exempted child can reach EVERY loopback listener (a
+  local DB on `127.0.0.1:5432`, a Docker daemon, an SSH-agent pipe, …), not just nub's
+  proxy. Narrowing it to only the proxy port would need admin WFP filters, which nub does
+  not install. The widening is BOUNDED to the ephemeral per-run AC SID and removed on exit,
+  so it never persists past the sandboxed child's own lifetime. One consequence to note:
+  if a loopback listener is itself an OPEN FORWARDER with external reach (a user's own
+  local proxy, an SSRF-able localhost service), a hostile child could relay egress through
+  it and sidestep the per-host allowlist — the same local-forwarder caveat that applies to
+  any localhost-reachable sandbox, now in scope on the elevated Windows tier because the
+  child can reach all of loopback (macOS/Linux keep loopback closed except the proxy port).
+- **Fail-CLOSED, never silent.** A policy that REQUIRES the proxy (any per-host rule, or a
+  MITM/`inject` broker) on a host where the exemption cannot be registered — nub not
+  elevated, or the write fails — surfaces a clear error naming the elevation requirement
+  and does NOT coarse-degrade an allow-list into a deny-all. A coarse-only policy needs no
+  elevation and is unaffected.
+- **Crash-leak (bounded).** A nub that dies without running teardown — including a hard
+  kill via `TerminateProcess`, where the `ProfileGuard` RAII `Drop` also doesn't run, so
+  the AppContainer profile leaks alongside it — leaks one orphaned exemption entry for its
+  per-run AC SID. The SID is unique per run (`nub_sbx_{pid}_{nonce}_{ctr}`), so no future
+  child is ever created under the orphaned exemption — the stale entry exempts no live
+  process, it only accretes an unused list row. (A subsequent nub run re-reads the list
+  and would preserve, not reuse, the orphan; it is inert until the machine's exemption list
+  is manually pruned.)
+- **Prior art:** Codex and SRT hit the same wall and answer it the same way — per-host net
+  on Windows is an elevated setup with unprivileged reuse, never unprivileged outright.
+  (`backend/windows.rs` `plan_net` / `WindowsLaunch::run`; `tests/windows_enforcement.rs`
+  `net_tier`.)
 
 ### MITM tier: credential-brokering residuals (INFO, doc-only)
 
@@ -131,8 +173,14 @@ residuals:
   Brokering protects the secret from the child's environment and its outbound view, not
   from a reflecting upstream — only broker to upstreams trusted not to reflect
   credentials back.
-- **Port-agnostic broker scoping.** A literal broker host matches regardless of port —
+- **Port-agnostic broker scoping.** A broker host matches regardless of port —
   brokering configured for `api.example.com` applies to that host on any port.
+- **Wildcard broker scoping is the user's own risk.** A broker host accepts the same
+  universal host-glob syntax as any net rule (`*.example.com`, bare `*`); it brokers to
+  the client-supplied SNI of every matching host. Pointing a broker at too broad a
+  wildcard can hand the credential to an attacker-owned subdomain that presents a valid
+  real cert — identical exposure to any over-broad wildcard net allow, out of the threat
+  model and un-warned (maintainer decision). Scope the wildcard to hosts you trust.
 
 ## Launcher-handoff items (engine correct; launcher must complete the guarantee)
 
@@ -275,6 +323,11 @@ Each is documented in code at the site noted; none is silently mis-reported.
   hardlink created *outside* the sandbox beforehand. Fix: none clean at the Landlock layer
   (the inode was legitimately named twice). Regression test:
   `hardlink_to_denied_secret_leaks_via_alias`.
+- **macOS hardlink-to-secret (same class as the Linux residual above).** Seatbelt file-read
+  rules are path-pattern based, like Landlock's, so the same alias holds: a pre-existing
+  same-uid hardlink to a secret, at a name the deny never targets, reads through the shared
+  inode. Bounded the same way — requires a hardlink created outside the sandbox beforehand;
+  fix: none clean at the Seatbelt layer either (the inode was legitimately named twice).
 - **Linux derive→open TOCTOU.** Grant derivation canonicalizes paths on the host, then
   the kernel enforces at `open()` later; a path swapped in between could shift a target.
   Bounded: a same-uid local race within the confined tree. (Inherent to a canonicalize-

@@ -1161,6 +1161,46 @@ fn env_key_brace_alternation_is_a_shape_error() {
 }
 
 #[test]
+fn net_private_symbolic_target_folds_and_gates_the_opt_in() {
+    use nub_sandbox::matcher::host::net_allows_private;
+    let ctx = common::ctx(true, &[]);
+
+    // `<private>` (and its `<local>` alias) fold to NetTarget::Private and set the opt-in.
+    for tok in ["<private>", "<local>"] {
+        let p = compile(&json!({ "net": [tok] }), &ctx).unwrap();
+        assert_eq!(p.net.rules.len(), 1);
+        assert!(matches!(p.net.rules[0].target, NetTarget::Private), "{tok}");
+        assert!(
+            net_allows_private(&p.net),
+            "{tok} must set the private opt-in"
+        );
+    }
+
+    // A bare `*` allow-all does NOT set the opt-in — the private ranges stay blocked.
+    let p = compile(&json!({ "net": ["*"] }), &ctx).unwrap();
+    assert!(
+        !net_allows_private(&p.net),
+        "`*` must NOT re-open the private ranges"
+    );
+
+    // `!<private>` after an opt-in reclose it (last-match-wins on the token).
+    let p = compile(&json!({ "net": ["<private>", "!<private>"] }), &ctx).unwrap();
+    assert!(
+        !net_allows_private(&p.net),
+        "a later `!<private>` must reclose the opt-in"
+    );
+
+    // An unknown angle-bracket token is a loud shape error, not a silent no-match host.
+    match compile(&json!({ "net": ["<privat>"] }), &ctx).unwrap_err() {
+        CompileError::Shape { path, message } => {
+            assert_eq!(path, "net.0");
+            assert!(message.contains("recognized net target"), "{message}");
+        }
+        other => panic!("expected Shape, got {other:?}"),
+    }
+}
+
+#[test]
 fn net_leading_wildcard_and_bare_star_still_accepted() {
     // D11 must not over-reject: the two valid wildcard forms compile.
     let ctx = common::ctx(true, &[]);
@@ -1231,21 +1271,53 @@ fn host_only_policy_stays_connection_tier_no_mitm() {
 }
 
 #[test]
-fn wildcard_broker_is_rejected_as_a_laundering_guard() {
-    // A wildcard broker would inject the credential to any matching subdomain — including
-    // an attacker-owned one. Only a literal host is allowed.
+fn wildcard_broker_is_accepted_and_scopes_via_the_universal_matcher() {
+    // A wildcard broker host is admitted (maintainer decision) and matches EXACTLY what
+    // the same pattern matches as a net rule — the runtime `broker_for` selects it via
+    // `host_glob_matches`, so proving the matcher's verdict here proves inject-selection.
+    use nub_sandbox::matcher::host::host_glob_matches;
     let ctx = common::ctx(true, &[]);
-    for host in ["*.example.com", "*"] {
-        let err = compile(
-            &json!({ "net": { host: { "inject": { "Authorization": "Bearer x" } } } }),
+    let p = compile(
+        &json!({ "net": { "*.example.com": { "inject": { "Authorization": "Bearer secret" } } } }),
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(p.net.brokers.len(), 1);
+    assert_eq!(p.net.brokers[0].host, "*.example.com");
+    // The wildcard host is implicitly allowed and engages TLS inspection.
+    assert!(p.net.rules.iter().any(
+        |r| matches!(&r.target, NetTarget::Host(h) if h == "*.example.com")
+            && matches!(r.effect, Effect::Allow)
+    ));
+    assert!(matches!(p.net.inspection, Inspection::TlsInspect));
+    // Injects for the apex and any-depth subdomain; NOT for a sibling / suffix-confusable.
+    let broker_host = &p.net.brokers[0].host;
+    assert!(host_glob_matches(broker_host, "example.com"));
+    assert!(host_glob_matches(broker_host, "a.example.com"));
+    assert!(host_glob_matches(broker_host, "a.b.example.com"));
+    assert!(!host_glob_matches(broker_host, "evil.com"));
+    assert!(!host_glob_matches(broker_host, "notexample.com"));
+    assert!(!host_glob_matches(broker_host, "example.com.evil.com"));
+    // A bare `*` broker is likewise accepted (same universal syntax, the user's own risk).
+    assert!(
+        compile(
+            &json!({ "net": { "*": { "inject": { "Authorization": "Bearer x" } } } }),
             &ctx,
         )
-        .unwrap_err();
-        assert!(
-            matches!(err, CompileError::Shape { .. }),
-            "wildcard broker `{host}` must be rejected"
-        );
-    }
+        .is_ok()
+    );
+}
+
+#[test]
+fn cidr_broker_is_rejected_no_http_layer() {
+    // Brokering is an HTTP-header capability; a CIDR has no host to terminate/inject on.
+    let ctx = common::ctx(true, &[]);
+    let err = compile(
+        &json!({ "net": { "10.0.0.0/8": { "inject": { "Authorization": "Bearer x" } } } }),
+        &ctx,
+    )
+    .unwrap_err();
+    assert!(matches!(err, CompileError::Shape { .. }));
 }
 
 #[test]
@@ -1297,4 +1369,79 @@ fn crlf_in_an_inject_value_is_rejected() {
     )
     .unwrap_err();
     assert!(matches!(err, CompileError::Shape { .. }));
+}
+
+// ── fs $(…) command substitution ───────────────────────────────────────────────
+
+#[test]
+fn fs_substitution_resolves_and_grants_whole_and_embedded() {
+    // A `$(…)` fs path resolves at load time and flows into the matcher exactly as
+    // a literal would: whole-value (object key), embedded in a larger path, and the
+    // array form (ReadWrite). The stub `store path` → `/home/u/.store`.
+    use nub_sandbox::matcher::PathMatcher;
+    use nub_sandbox::policy::FsAccess;
+    let ctx = common::ctx(true, &[]);
+
+    let obj = compile(&json!({ "fs": { "$(store path)": "rw" } }), &ctx).unwrap();
+    let d = PathMatcher::new(&obj.fs.rules).decide(&common::homes().home.join(".store/x"));
+    assert!(matches!(d.effect, Effect::Allow) && matches!(d.access, FsAccess::ReadWrite));
+
+    let emb = compile(&json!({ "fs": { "$(store path)/v3": "r" } }), &ctx).unwrap();
+    let d = PathMatcher::new(&emb.fs.rules).decide(&common::homes().home.join(".store/v3/pkg"));
+    assert!(matches!(d.effect, Effect::Allow) && matches!(d.access, FsAccess::Read));
+
+    let arr = compile(&json!({ "fs": ["$(store path)"] }), &ctx).unwrap();
+    let d = PathMatcher::new(&arr.fs.rules).decide(&common::homes().home.join(".store/y"));
+    assert!(matches!(d.effect, Effect::Allow) && matches!(d.access, FsAccess::ReadWrite));
+
+    // `$(…)` resolution is UNCONDITIONAL — nub has no trust axis to gate on, so the
+    // `ctx` trust flag does not change whether a command runs.
+    let untrusted = compile(
+        &json!({ "fs": ["$(store path)"] }),
+        &common::ctx(false, &[]),
+    )
+    .unwrap();
+    let d = PathMatcher::new(&untrusted.fs.rules).decide(&common::homes().home.join(".store/z"));
+    assert!(matches!(d.effect, Effect::Allow));
+}
+
+#[test]
+fn fs_substitution_failure_empty_and_multiline_fail_closed() {
+    // Fail-CLOSED corners: a non-zero exit, empty output (would fail-OPEN to a
+    // whole-fs grant), and multi-line output are each a hard compile error naming
+    // the substitution — never a silently-dropped or wrong grant.
+    let ctx = common::ctx(true, &[]);
+    for (surface, needle) in [
+        (json!({ "fs": ["$(fail)"] }), "failure"),
+        (json!({ "fs": ["$(empty path)"] }), "empty"),
+        (json!({ "fs": ["$(two paths)"] }), "multi-line"),
+    ] {
+        match compile(&surface, &ctx).unwrap_err() {
+            CompileError::Substitution { message, .. } => {
+                assert!(message.contains(needle), "{message} (want {needle})");
+            }
+            other => panic!("expected a substitution error for {surface}, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn fs_substitution_deny_prefix_and_unterminated() {
+    // `!$(…)` resolves the DENY target (the `!` is stripped before the command
+    // runs, so its output is a path, never a smuggled operator); an unterminated
+    // `$(` is named, not shipped as a literal path.
+    use nub_sandbox::matcher::PathMatcher;
+    let ctx = common::ctx(true, &[]);
+
+    let deny = compile(&json!({ "fs": [".", "!$(store path)"] }), &ctx).unwrap();
+    let d = PathMatcher::new(&deny.fs.rules).decide(&common::homes().home.join(".store/secret"));
+    assert!(
+        matches!(d.effect, Effect::Deny),
+        "!$(…) denies the resolved path"
+    );
+
+    match compile(&json!({ "fs": ["$(store path"] }), &ctx).unwrap_err() {
+        CompileError::Substitution { message, .. } => assert!(message.contains("closing")),
+        other => panic!("expected an unterminated-substitution error, got {other:?}"),
+    }
 }

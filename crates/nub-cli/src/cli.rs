@@ -2656,8 +2656,15 @@ fn run_sandboxed(policy_file: &str, program: Option<&str>, args: &[String]) -> R
     }
 
     let spec = nub_sandbox::CommandSpec::new(program).args(prog_args.iter().map(String::as_str));
-    let prepared = nub_sandbox::apply(&policy, spec)
-        .map_err(|d| anyhow::anyhow!("sandbox could not be applied (fail-closed): {d:?}"))?;
+    let prepared = nub_sandbox::apply(&policy, spec).map_err(|d| {
+        // Surface the fail-closed reason cleanly (e.g. Windows per-host/MITM needing
+        // elevation), not a Debug dump — this is the user-facing error.
+        let detail = d
+            .reason
+            .clone()
+            .unwrap_or_else(|| format!("could not enforce {}", d.lost.join(", ")));
+        anyhow::anyhow!("sandbox could not be applied (fail-closed): {detail}")
+    })?;
     if let Some(warning) = prepared.degradation.warning() {
         eprintln!("warning: {warning}");
     }

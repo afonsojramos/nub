@@ -110,7 +110,16 @@ fn fs_covers(outer: &str, inner: &str) -> bool {
 /// net: `outer` covers `inner` iff equal, `*` (all hosts), or a `*.suffix` glob
 /// whose suffix `inner` is / ends under.
 fn net_covers(outer: &str, inner: &str) -> bool {
-    if outer == inner || outer == "*" {
+    if outer == inner {
+        return true;
+    }
+    // A symbolic target (`<private>` / `<local>`) is its own class: no host glob,
+    // including a bare `*`, covers it — that is precisely why `*` does not re-open the
+    // private ranges. Only an equal token (handled above) shadows it.
+    if inner.starts_with('<') {
+        return false;
+    }
+    if outer == "*" {
         return true;
     }
     if let Some(suffix) = outer.strip_prefix("*.") {

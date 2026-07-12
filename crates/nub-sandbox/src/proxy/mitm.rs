@@ -125,6 +125,7 @@ pub(super) fn terminate(
     prelude: Vec<u8>,
     host: &str,
     port: u16,
+    allow_private: bool,
 ) -> io::Result<()> {
     // A brokered host reached over a NON-TLS or unmintable channel must fail closed —
     // never inject a credential onto an unverified wire (SRT's allowPlaintextInject
@@ -154,7 +155,8 @@ pub(super) fn terminate(
     http1::normalize_for_forward(&mut req);
 
     // The upstream leg: REAL TLS to the REAL server, verified against REAL roots.
-    let upstream_tcp = super::connect_upstream(&super::Host::Name(host.to_string()), port)?;
+    let upstream_tcp =
+        super::connect_upstream(&super::Host::Name(host.to_string()), port, allow_private)?;
     let server_name = rustls::pki_types::ServerName::try_from(host.to_string())
         .map_err(|_| io::Error::other("invalid upstream server name for TLS termination"))?;
     let mut uconn = rustls::ClientConnection::new(engine.client_config.clone(), server_name)
@@ -454,6 +456,30 @@ pub(super) mod http1 {
             assert!(!wire.to_ascii_lowercase().contains("keep-alive"));
             assert!(wire.contains("Content-Length: 5"));
             assert!(wire.ends_with("\r\n\r\nhello"));
+        }
+
+        #[test]
+        fn wildcard_broker_terminates_and_injects_only_for_matching_hosts() {
+            // A `*.example.com` broker fires `broker_for`/`should_terminate` for the apex
+            // and any-depth subdomain, and NOT for a sibling — the runtime selection uses
+            // the same universal host-glob matcher as net allow/deny.
+            let broker = crate::policy::CredentialBroker {
+                host: "*.example.com".to_string(),
+                injects: vec![inject("Authorization", "Bearer REAL-SECRET")],
+            };
+            let engine = super::super::MitmEngine::new(vec![broker], false)
+                .expect("MITM engine needs a populated native root store");
+            assert!(engine.should_terminate("example.com"));
+            assert!(engine.should_terminate("api.example.com"));
+            assert!(engine.should_terminate("a.b.example.com"));
+            assert_eq!(
+                engine
+                    .broker_for("api.example.com")
+                    .map(|i| i[0].value.expose()),
+                Some("Bearer REAL-SECRET")
+            );
+            assert!(!engine.should_terminate("evil.com"));
+            assert!(engine.broker_for("example.com.evil.com").is_none());
         }
 
         #[test]

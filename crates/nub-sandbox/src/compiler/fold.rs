@@ -276,8 +276,10 @@ fn fold_fs_array_entry(
         Some(rest) => (rest, Effect::Deny),
         None => (s, Effect::Allow),
     };
-    // Array grants are ReadWrite; denies deny both.
-    push_fs_rules(pattern, effect, FsAccess::ReadWrite, ctx, out);
+    // `$(…)` resolves AFTER the `!` strip so a command's stdout is a path, never a
+    // deny operator it could smuggle in. Array grants are ReadWrite; denies deny both.
+    let pattern = resolve_fs_path(pattern, ctx, path)?;
+    push_fs_rules(&pattern, effect, FsAccess::ReadWrite, ctx, out);
     Ok(())
 }
 
@@ -317,7 +319,10 @@ fn fold_fs_object_entry(
             ));
         }
     };
-    push_fs_rules(key, effect, access, ctx, out);
+    // Resolve `$(…)` in the path key AFTER validating the access value, so an
+    // invalid `val` errors before any command runs (no wasted exec side effect).
+    let pattern = resolve_fs_path(key, ctx, path)?;
+    push_fs_rules(&pattern, effect, access, ctx, out);
     Ok(())
 }
 
@@ -346,6 +351,48 @@ fn push_fs_rules(
             effect,
             access,
         });
+    }
+}
+
+/// Resolve any `$(…)` command substitution in an fs PATH at config-LOAD time, via
+/// the shared [`resolve`] machinery: the command runs once and its stdout becomes
+/// the path, whole or embedded (`"$(pnpm store path)/v3"`), then flows into
+/// [`push_fs_rules`] exactly as a literal would (symbolic-expand + subtree-glob +
+/// canonicalize).
+///
+/// Fail-CLOSED corners — a resolved grant must never silently surprise. A command
+/// FAILURE surfaces via `resolve_with` as a hard [`CompileError::Substitution`]
+/// naming it. EMPTY output errors: an empty path would expand to a whole-fs `**`
+/// grant (fail-OPEN). MULTI-LINE output errors rather than silently truncating to a
+/// line that could grant the wrong subtree. Trailing whitespace is trimmed so a
+/// path is clean; interior whitespace is a legitimate path character and preserved.
+fn resolve_fs_path(raw: &str, ctx: &CompileCtx, path: &str) -> Result<String, CompileError> {
+    if resolve::has_substitution(raw) {
+        let resolved = resolve::resolve_with(raw, ctx.runner.as_ref())
+            .map_err(|e| CompileError::substitution(path, &e))?;
+        let resolved = resolved.trim_end().to_string();
+        if resolved.is_empty() {
+            return Err(CompileError::substitution(
+                path,
+                "`$(…)` produced empty output — expected a filesystem path",
+            ));
+        }
+        if resolved.contains(['\n', '\r']) {
+            return Err(CompileError::substitution(
+                path,
+                "`$(…)` produced multi-line output — a filesystem path must be a single line",
+            ));
+        }
+        Ok(resolved)
+    } else if resolve::has_open_substitution(raw) {
+        // A `$(` with no balanced close — name it rather than ship shell-looking
+        // text as a literal path (the same footgun the env path guards against).
+        Err(CompileError::substitution(
+            path,
+            resolve::UNTERMINATED_SUBST_MSG,
+        ))
+    } else {
+        Ok(raw.to_string())
     }
 }
 
@@ -500,9 +547,11 @@ fn fold_net_rule_object(
             "a net rule object must contain `inject` (credential brokering) — it is the only per-host capability in this cut",
         )
     })?;
-    // Reject an unbrokerable host BEFORE it becomes an allow rule: a CIDR can't carry
-    // HTTP header injection, and a wildcard would hand the credential to any matching
-    // subdomain (including an attacker-owned one — laundering).
+    // Reject a CIDR BEFORE it becomes an allow rule — it can't carry HTTP header
+    // injection. Wildcard/glob broker hosts ARE accepted and match via the same
+    // universal host-glob matcher as net allow/deny (maintainer decision): a
+    // `*.example.com` broker brokers exactly the hosts it would allow, at the user's
+    // own risk (see `validate_broker_host`).
     validate_broker_host(host, path)?;
     let injects = parse_inject(inject, ctx, &child(path, "inject"))?;
     push_net_rule(host, Effect::Allow, path, &mut policy.rules)?;
@@ -513,22 +562,19 @@ fn fold_net_rule_object(
     Ok(())
 }
 
-/// A broker host must be a single LITERAL hostname. No CIDR (no HTTP layer) and — the
-/// security-critical rule — no wildcard: a `*.example.com` broker mints + injects to the
-/// CLIENT-SUPPLIED SNI, so a child connecting to an attacker-owned `evil.example.com`
-/// (with a valid real cert) would receive the `example.com` credential (laundering). A
-/// user needing several hosts lists each one explicitly.
+/// A broker host is any valid net host pattern — a literal, or the SAME universal
+/// host-glob syntax used for net allow/deny (`*.example.com`, bare `*`). Only a CIDR is
+/// rejected: brokering is an HTTP-header capability with no CIDR form. Wildcards are
+/// intentionally permitted (maintainer decision): a `*.example.com` broker mints +
+/// injects to the CLIENT-SUPPLIED SNI, so it brokers exactly the hosts the same pattern
+/// would allow as a net rule — including, if the user points it at a too-broad wildcard,
+/// an attacker-owned subdomain. That laundering-to-a-misconfigured-wildcard is the user's
+/// own risk (identical to any wildcard net allow), out of the threat model — no warning.
 fn validate_broker_host(pattern: &str, path: &str) -> Result<(), CompileError> {
     if pattern.contains('/') {
         return Err(CompileError::shape(
             path,
-            "credential brokering targets a host, not a CIDR — name a literal hostname",
-        ));
-    }
-    if pattern.contains('*') {
-        return Err(CompileError::shape(
-            path,
-            "credential brokering requires a LITERAL host — a wildcard would hand the credential to any matching subdomain (including an attacker's); list each host explicitly",
+            "credential brokering targets a host, not a CIDR — name a hostname (a literal or a `*.` wildcard)",
         ));
     }
     if !crate::matcher::host::host_pattern_is_valid(pattern) {
@@ -648,6 +694,28 @@ fn push_net_rule(
             path,
             &format!(
                 "`{target}` is not a valid host pattern — brace alternation `{{a,b}}` is not supported; list hosts separately (a wildcard is only a bare `*` or a leading `*.` subdomain)"
+            ),
+        ));
+    }
+    // The symbolic private-range opt-in (`<private>`, alias `<local>`): the ONLY way to
+    // re-permit the RFC1918 / IPv6-ULA ranges the egress proxy blocks by default. Matched
+    // BEFORE the CIDR/host split so the angle-bracket token is not mistaken for a literal
+    // host (which would silently match nothing).
+    if target == "<private>" || target == "<local>" {
+        out.push(NetRule {
+            target: NetTarget::Private,
+            effect,
+        });
+        return Ok(());
+    }
+    // Reject an unknown angle-bracket token loudly — `<...>` is not a legal hostname
+    // char, so a `<privat>` typo must error, not silently fold to a literal host that
+    // matches nothing (which would fail-OPEN a private-range deny the author intended).
+    if target.starts_with('<') || target.ends_with('>') {
+        return Err(CompileError::shape(
+            path,
+            &format!(
+                "`{target}` is not a recognized net target — the only symbolic net target is `<private>` (alias `<local>`), which re-permits the RFC1918 / IPv6-ULA private ranges"
             ),
         ));
     }
