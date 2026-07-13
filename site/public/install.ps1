@@ -46,16 +46,35 @@ $Exe = "$BinDir\nub.exe"
 # node_modules + native addon) and JIT-extracts it to the user cache on first run.
 # The archive ships bin\ plus a vestigial empty runtime\ (kept only to satisfy the
 # sidecar-era `nub upgrade`; the binary ignores it — see release.yml).
-$Url = "https://github.com/nubjs/nub/releases/download/v$Version/nub-$Target.zip"
+$ArchiveName = "nub-$Target.zip"
+$Url = "https://github.com/nubjs/nub/releases/download/v$Version/$ArchiveName"
+$ChecksumUrl = "$Url.sha256"
 Write-Host "Downloading from $Url..."
 
 $TmpZip = Join-Path $env:TEMP "nub-$Target-$PID.zip"
+$TmpChecksum = Join-Path $env:TEMP "nub-$Target-$PID.zip.sha256"
 # Suppress the per-chunk progress bar — it re-renders on every received byte
 # and dominates the total download time in PowerShell.
 $prevProgressPreference = $ProgressPreference
 try {
     $ProgressPreference = 'SilentlyContinue'
     Invoke-WebRequest -Uri $Url -OutFile $TmpZip -UseBasicParsing
+    Invoke-WebRequest -Uri $ChecksumUrl -OutFile $TmpChecksum -UseBasicParsing
+
+    # The sidecar detects corrupt, truncated, stale-cache, or mismatched assets. It
+    # is not an independent authenticity check because both files share an origin.
+    $ChecksumBytes = [System.IO.File]::ReadAllBytes($TmpChecksum)
+    $ChecksumText = [System.Text.Encoding]::ASCII.GetString($ChecksumBytes)
+    $ChecksumPattern = "\A(?<Digest>[0-9A-Fa-f]{64})  $([regex]::Escape($ArchiveName))`n\z"
+    if ($ChecksumText -cnotmatch $ChecksumPattern) {
+        throw "Malformed checksum from: $ChecksumUrl"
+    }
+    $ExpectedSha256 = $Matches["Digest"]
+    $ActualSha256 = (Get-FileHash -LiteralPath $TmpZip -Algorithm SHA256).Hash
+    if (-not [string]::Equals($ActualSha256, $ExpectedSha256, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Checksum mismatch for $Url (expected $ExpectedSha256, got $ActualSha256). Refusing to install a corrupt or mismatched archive."
+    }
+
     # Replace any prior nub artifacts for a clean upgrade. In the default ~\.nub —
     # which nub owns outright — drop the whole bin\ and a stale runtime\ from a
     # pre-single-binary install. A user-supplied NUB_INSTALL_DIR may hold unrelated
@@ -68,11 +87,12 @@ try {
     }
     Expand-Archive -Path $TmpZip -DestinationPath $InstallDir -Force
 } catch {
-    Write-Error "Failed to download/extract nub: $_"
+    Write-Error "Failed to download/verify/extract nub: $_"
     exit 1
 } finally {
     $ProgressPreference = $prevProgressPreference
     if (Test-Path $TmpZip) { Remove-Item -Force $TmpZip }
+    if (Test-Path $TmpChecksum) { Remove-Item -Force $TmpChecksum }
 }
 
 if (-not (Test-Path $Exe)) {

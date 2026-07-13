@@ -32,6 +32,50 @@ error() { echo -e "${Red}error${Color_Off}: $*" >&2; exit 1; }
 info() { echo -e "${Dim}$*${Color_Off}"; }
 success() { echo -e "${Green}$*${Color_Off}"; }
 
+parse_sha256_sidecar() {
+    local sidecar=$1
+    local archive_name=$2
+    local expected_size actual_size
+
+    expected_size=$((67 + ${#archive_name}))
+    actual_size=$(wc -c < "$sidecar" | tr -d '[:space:]') || return 1
+    [[ "$actual_size" == "$expected_size" ]] || return 1
+
+    LC_ALL=C awk -v name="$archive_name" '
+        NR != 1 { exit 1 }
+        {
+            digest = substr($0, 1, 64)
+            if (length(digest) != 64 || digest ~ /[^0-9A-Fa-f]/ ||
+                substr($0, 65, 2) != "  " || substr($0, 67) != name) {
+                exit 1
+            }
+            print tolower(digest)
+        }
+        END { if (NR != 1) exit 1 }
+    ' "$sidecar"
+}
+
+sha256_file() {
+    local file=$1
+    local output digest
+
+    if command -v sha256sum >/dev/null 2>&1 && output=$(sha256sum "$file" 2>/dev/null); then
+        digest=$(printf '%s\n' "$output" | LC_ALL=C awk 'NR == 1 && length($1) == 64 && $1 !~ /[^0-9A-Fa-f]/ { print tolower($1); exit }')
+        if [[ -n "$digest" ]]; then
+            printf '%s\n' "$digest"
+            return 0
+        fi
+    fi
+    if command -v shasum >/dev/null 2>&1 && output=$(shasum -a 256 "$file" 2>/dev/null); then
+        digest=$(printf '%s\n' "$output" | LC_ALL=C awk 'NR == 1 && length($1) == 64 && $1 !~ /[^0-9A-Fa-f]/ { print tolower($1); exit }')
+        if [[ -n "$digest" ]]; then
+            printf '%s\n' "$digest"
+            return 0
+        fi
+    fi
+    return 1
+}
+
 # --- Platform detection ---
 
 platform=$(uname -ms)
@@ -101,13 +145,30 @@ mkdir -p "$bin_dir" || error "Failed to create install directory: $bin_dir"
 # The archive ships bin/ plus a vestigial empty runtime/ (kept only to satisfy the
 # sidecar-era `nub upgrade`; the binary ignores ~/.nub/runtime — see release.yml).
 # (Windows is handled by install.ps1 above, so $target is always darwin/linux.)
-url="https://github.com/nubjs/nub/releases/download/v${version}/nub-${target}.tar.gz"
+archive_name="nub-${target}.tar.gz"
+url="https://github.com/nubjs/nub/releases/download/v${version}/${archive_name}"
+checksum_url="${url}.sha256"
 
 tmp_archive=$(mktemp) || error "Failed to create temp file"
-trap 'rm -f "$tmp_archive"' EXIT
+tmp_checksum=$(mktemp) || { rm -f "$tmp_archive"; error "Failed to create temp file"; }
+trap 'rm -f "$tmp_archive" "$tmp_checksum"' EXIT
 
 curl --fail --location --progress-bar --output "$tmp_archive" "$url" ||
     error "Failed to download nub from: $url"
+curl --fail --location --progress-bar --output "$tmp_checksum" "$checksum_url" ||
+    error "Failed to download checksum from: $checksum_url"
+
+# The sidecar detects corrupt, truncated, stale-cache, or mismatched assets. It
+# is not an independent authenticity check because both files share an origin.
+if ! expected_sha256=$(parse_sha256_sidecar "$tmp_checksum" "$archive_name"); then
+    error "Malformed checksum from: $checksum_url"
+fi
+if ! actual_sha256=$(sha256_file "$tmp_archive"); then
+    error "No usable SHA-256 tool found (install sha256sum or shasum)"
+fi
+if [[ "$actual_sha256" != "$expected_sha256" ]]; then
+    error "Checksum mismatch for $url (expected $expected_sha256, got $actual_sha256). Refusing to install a corrupt or mismatched archive."
+fi
 
 # Replace any prior nub artifacts for a clean upgrade. In the default ~/.nub —
 # which nub owns outright — drop the whole bin/ and a stale runtime/ from a
