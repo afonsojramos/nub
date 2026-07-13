@@ -284,7 +284,7 @@ fn is_js_file(p: &Path) -> bool {
         return false;
     }
     let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    crate::manifest::is_js_like(name)
+    crate::manifest::is_js_like(name) || crate::manifest::is_sfc_like(name)
 }
 
 /// Lexically normalize `.`/`..` segments WITHOUT touching the filesystem (we do
@@ -336,7 +336,8 @@ impl IndexSource {
     /// True if `rel` is a JS-like file present in the index — the index analogue
     /// of `is_js_file` (name check + existence), which the fs ladder relies on.
     fn contains_js(&self, rel: &str) -> bool {
-        crate::manifest::is_js_like(rel) && self.files.contains_key(rel)
+        (crate::manifest::is_js_like(rel) || crate::manifest::is_sfc_like(rel))
+            && self.files.contains_key(rel)
     }
 
     /// Index analogue of [`fs_resolve`], step-for-step: exact → `base.<ext>` →
@@ -541,6 +542,44 @@ mod tests {
             .find(|r| r.package == "main-dep")
             .unwrap();
         assert!(main.from_main && !main.from_subpath, "main-graph dep");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn astro_sfc_subpath_reexport_reaches_type_only_backend() {
+        // Mirrors astro-icon: a `./components` subpath re-exports an `.astro` whose
+        // frontmatter type-imports an undeclared backend (`astro`). With SFC
+        // resolution + type capture the backend must surface as
+        // from_subpath && !from_main, so it classifies as a subpath adapter and
+        // gets project-local materialization under GVS (nub#450).
+        let root = scratch("astro-sfc");
+        fs::create_dir_all(root.join("components")).unwrap();
+        fs::write(
+            root.join("components/index.ts"),
+            r#"export { default as Icon } from "./Icon.astro";"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("components/Icon.astro"),
+            "---\nimport type { HTMLAttributes } from \"astro/types\";\n---\n<svg/>",
+        )
+        .unwrap();
+        let w = walk(
+            &root,
+            &[Entry {
+                path: "components/index.ts".to_string(),
+                kind: EntryKind::Subpath,
+            }],
+        );
+        let astro = w
+            .references
+            .iter()
+            .find(|r| r.package == "astro")
+            .expect("astro reached via .astro re-export");
+        assert!(
+            astro.from_subpath && !astro.from_main,
+            "subpath-only backend"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 

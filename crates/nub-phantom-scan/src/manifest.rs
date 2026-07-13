@@ -222,7 +222,7 @@ fn normalize_rel(p: &str) -> String {
 /// costs a resolver probe. The `is_js_like`-only gate this replaced dropped
 /// extensionless mains outright → `files_analyzed: 0` → every phantom missed.
 fn is_entry_candidate(path: &str) -> bool {
-    is_js_like(path) || extension(path).is_none()
+    is_js_like(path) || is_sfc_like(path) || extension(path).is_none()
 }
 
 /// A JS-like runtime file (extension we can parse for imports). Excludes `.json`,
@@ -235,6 +235,17 @@ pub fn is_js_like(path: &str) -> bool {
         extension(path),
         Some("js" | "cjs" | "mjs" | "jsx" | "ts" | "tsx" | "mts" | "cts")
     )
+}
+
+/// A single-file component (Astro/Vue/Svelte) whose imports live in a
+/// frontmatter / `<script>` block. Under the global virtual store a backend it
+/// imports there — even for TYPES ONLY — still needs project-local
+/// materialization: the package's realpath escapes into the shared store, so a
+/// type-checker's upward `node_modules` walk can't reach the hoisted backend
+/// otherwise (nub#450). The graph walk resolves these and `extract` reads their
+/// script region.
+pub fn is_sfc_like(path: &str) -> bool {
+    matches!(extension(path), Some("astro" | "vue" | "svelte"))
 }
 
 fn extension(path: &str) -> Option<&str> {
@@ -289,6 +300,27 @@ mod tests {
             super::EntryKind::Subpath
         );
         assert!(!m.entry_points.iter().any(|e| e.path.contains(".d.ts")));
+    }
+
+    #[test]
+    fn direct_sfc_export_is_collected_as_entry() {
+        // A package publishing an .astro/.vue/.svelte directly (not via a JS
+        // re-export) must still be scanned, or its type-only phantoms are missed
+        // under GVS (nub#450, codex review P1).
+        let raw = br#"{
+            "name": "pkg",
+            "exports": { "./Icon": "./components/Icon.astro", "./Widget": "./Widget.vue" }
+        }"#;
+        let m = Manifest::parse(raw).unwrap();
+        assert_eq!(
+            m.entry_points
+                .iter()
+                .find(|e| e.path == "components/Icon.astro")
+                .unwrap()
+                .kind,
+            super::EntryKind::Subpath
+        );
+        assert!(m.entry_points.iter().any(|e| e.path == "Widget.vue"));
     }
 
     #[test]
