@@ -160,7 +160,8 @@ impl<'a> Visit<'a> for SpecVisitor {
             // an inline all-`type` named import is likewise erased. A bare
             // `import "x"` (side effect) and any value specifier are runtime.
             Statement::ImportDeclaration(decl)
-                if self.capture_types || (!decl.import_kind.is_type() && import_has_value(decl)) =>
+                if self.capture_types
+                    || (!decl.import_kind.is_type() && import_has_value(decl)) =>
             {
                 self.record(&decl.source.value, RefKind::StaticImport);
             }
@@ -246,7 +247,10 @@ fn astro_frontmatter(source: &str) -> String {
     let Some(after) = s.strip_prefix("---") else {
         return String::new();
     };
-    let Some(body) = after.strip_prefix("\r\n").or_else(|| after.strip_prefix('\n')) else {
+    let Some(body) = after
+        .strip_prefix("\r\n")
+        .or_else(|| after.strip_prefix('\n'))
+    else {
         return String::new();
     };
     match body.find("\n---") {
@@ -264,7 +268,7 @@ fn script_blocks(source: &str) -> String {
     let mut rest = source.as_str();
     while let Some(open) = rest.find("<script") {
         let after = &rest[open..];
-        let Some(gt) = after.find('>') else { break };
+        let Some(gt) = open_tag_end(after) else { break };
         let body_start = open + gt + 1;
         let Some(close) = rest[body_start..].find("</script>") else {
             break;
@@ -274,6 +278,28 @@ fn script_blocks(source: &str) -> String {
         rest = &rest[body_start + close + "</script>".len()..];
     }
     out
+}
+
+/// Index of the `>` that closes an open tag, skipping any `>` inside a quoted
+/// attribute value — Vue 3.3 `<script setup generic="T extends Record<string, X>">`
+/// carries one, and a naive `find('>')` would slice the body mid-attribute.
+fn open_tag_end(s: &str) -> Option<usize> {
+    let mut quote: Option<u8> = None;
+    for (i, &b) in s.as_bytes().iter().enumerate() {
+        match quote {
+            Some(q) => {
+                if b == q {
+                    quote = None;
+                }
+            }
+            None => match b {
+                b'"' | b'\'' => quote = Some(b),
+                b'>' => return Some(i),
+                _ => {}
+            },
+        }
+    }
+    None
 }
 
 /// Remove `<!-- … -->` comment spans (best-effort textual strip; a phantom scan
@@ -468,11 +494,33 @@ mod tests {
         // A commented-out <script> must not be parsed as real component code, or
         // its imports would false-flag a phantom and force a needless disk eject.
         let vue = "<template><div/></template>\n<!-- <script>import 'ghost';</script> -->\n<script setup lang=\"ts\">\nimport type { Foo } from \"real-backend\";\n</script>\n";
-        let names: Vec<_> = extract("Comp.vue", vue).into_iter().map(|o| o.spec).collect();
-        assert!(names.iter().any(|s| s == "real-backend"), "real <script> scanned");
+        let names: Vec<_> = extract("Comp.vue", vue)
+            .into_iter()
+            .map(|o| o.spec)
+            .collect();
+        assert!(
+            names.iter().any(|s| s == "real-backend"),
+            "real <script> scanned"
+        );
         assert!(
             !names.iter().any(|s| s == "ghost"),
             "commented <script> ignored: {names:?}"
+        );
+    }
+
+    #[test]
+    fn generic_script_setup_attribute_with_gt_is_sliced_correctly() {
+        // Vue 3.3 generics: the open tag carries a `>` inside the attribute
+        // value; the body must start after the real tag end or the parse is
+        // garbled and the block's imports are silently missed.
+        let vue = "<script setup lang=\"ts\" generic=\"T extends Record<string, unknown>\">\nimport type { Foo } from \"generic-backend\";\n</script>\n";
+        let names: Vec<_> = extract("Comp.vue", vue)
+            .into_iter()
+            .map(|o| o.spec)
+            .collect();
+        assert!(
+            names.iter().any(|s| s == "generic-backend"),
+            "generic <script setup> body scanned: {names:?}"
         );
     }
 
