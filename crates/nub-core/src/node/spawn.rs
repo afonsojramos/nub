@@ -298,16 +298,39 @@ impl Drop for ForegroundGuard {
 }
 
 /// Put the spawned child in its own process group (`setpgid(0, 0)` at exec) so
-/// [`track_child_group`] can signal the whole subtree. No-op off Unix.
+/// [`track_child_group`] can signal the whole subtree. On Linux, additionally
+/// arm `PR_SET_PDEATHSIG(SIGTERM)` as the kernel-side backstop for signals the
+/// forwarder structurally cannot relay: SIGKILL on the Nub leader (Playwright's
+/// default `webServer` teardown, `docker kill`, CI cancellation, the OOM killer)
+/// is never delivered to userspace, so the forward thread never runs and the
+/// `sh -c` subtree would run on orphaned (#463). With the pdeathsig armed the
+/// kernel itself TERMs the child when Nub's spawning thread dies, no matter how.
+/// No-op off Unix; macOS has no pdeathsig equivalent, so it keeps the
+/// forwarding-only behavior (the group forward covers every catchable signal).
 pub fn group_on_spawn(cmd: &mut Command) {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        // SAFETY: setpgid(0, 0) only repoints the child's own process-group id
-        // between fork and exec — async-signal-safe, touches no parent state.
+        // Captured BEFORE fork: the child's TOCTOU re-check below must compare
+        // getppid() against the REAL parent, not a post-fork read that would
+        // already name the reaper if the parent died between fork and prctl.
+        #[cfg(target_os = "linux")]
+        let parent = unsafe { libc::getpid() };
+        // SAFETY: setpgid(0, 0) / prctl / getppid / raise between fork and exec
+        // are all async-signal-safe and touch no parent state.
         unsafe {
-            cmd.pre_exec(|| {
+            cmd.pre_exec(move || {
                 libc::setpgid(0, 0);
+                #[cfg(target_os = "linux")]
+                {
+                    libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+                    // The pdeathsig only fires for deaths AFTER registration; if
+                    // the parent died in the fork→prctl window, deliver the same
+                    // signal ourselves instead of running on orphaned.
+                    if libc::getppid() != parent {
+                        libc::raise(libc::SIGTERM);
+                    }
+                }
                 Ok(())
             });
         }
