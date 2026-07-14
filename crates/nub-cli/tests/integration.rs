@@ -742,14 +742,11 @@ fn urlpattern_available() {
 
 #[test]
 fn web_locks_spec_behavior() {
-    // Web Locks works to the spec under nub on every supported Node: the hand-rolled
-    // polyfill below 24.5, native at/above. The fixture asserts steal, option/name
-    // validation, reader/writer fairness, AbortSignal, and core mutual exclusion —
-    // every assertion holds on BOTH paths, so this is a true differential test (a
-    // regression on either turns it red). On the 18.19–20.x compat legs it also proves
-    // the navigator backfill hosts navigator.locks. Verified against the WPT web-locks
-    // suite (68/68 of the runnable subtests, matching native Node) across 18.19/20.19/
-    // 22.15/24.4 at implementation time.
+    // The fixture asserts shared Web Locks behavior across the hand-rolled polyfill
+    // below Node 24.5 and native Web Locks at/above it. For known native Node Web IDL
+    // conversion divergences, it requires the spec behavior on the polyfill tier and
+    // records the native result separately. On the 18.19–20.x compat legs it also
+    // proves the navigator backfill hosts navigator.locks.
     let (stdout, stderr, code) = run_nub("web-locks", "main.mjs");
     assert_eq!(
         code, 0,
