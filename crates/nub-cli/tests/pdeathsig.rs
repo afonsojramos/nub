@@ -44,11 +44,11 @@ fn sigkill_on_nub_leader_terminates_the_script_child() {
     let pid_file = dir.join("child.pid");
     let mut child_pid: Option<i32> = None;
     for _ in 0..100 {
-        if let Ok(s) = std::fs::read_to_string(&pid_file) {
-            if let Ok(pid) = s.trim().parse::<i32>() {
-                child_pid = Some(pid);
-                break;
-            }
+        if let Ok(s) = std::fs::read_to_string(&pid_file)
+            && let Ok(pid) = s.trim().parse::<i32>()
+        {
+            child_pid = Some(pid);
+            break;
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
