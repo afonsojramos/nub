@@ -197,13 +197,16 @@ fn collect_entry_points(v: &Value) -> Vec<Entry> {
     }
     if type_targets.is_empty() {
         // No explicit type surface → TS's defaults: each Main entry's colocated
-        // `.d.ts` (`x.js` → `x.d.ts`) plus the root `index.d.ts`. Only when no
-        // explicit `types` exists — an authoritative field must not be shadowed by
-        // a synthesized root that may not exist.
+        // declaration (`x.js` → `x.d.ts`, `./dist` → `./dist/index.d.ts`) plus the
+        // root `index.d.ts`. The Types-surface resolver stems the runtime extension
+        // and re-appends `.d.ts` (see `graph::dts_stem`), so the RAW main path is
+        // passed through and resolves to its declaration — no path rewrite here.
+        // Only synthesized when no explicit `types` exists; an authoritative field
+        // must not be shadowed by a default that may not exist.
         let colocated: Vec<String> = out
             .iter()
             .filter(|e| e.kind == EntryKind::Main)
-            .map(|e| swap_to_dts(&e.path))
+            .map(|e| e.path.clone())
             .collect();
         type_targets.extend(colocated);
         type_targets.push("index.d.ts".to_string());
@@ -237,17 +240,6 @@ fn collect_export_types(node: &Value, out: &mut Vec<String>) {
         }
         _ => {}
     }
-}
-
-/// `./dist/index.js` → `./dist/index.d.ts` (TS colocated-types default). A path
-/// with no recognized JS extension gets `.d.ts` appended.
-fn swap_to_dts(path: &str) -> String {
-    for ext in [".js", ".cjs", ".mjs", ".jsx", ".ts", ".tsx", ".mts", ".cts"] {
-        if let Some(stem) = path.strip_suffix(ext) {
-            return format!("{stem}.d.ts");
-        }
-    }
-    format!("{path}.d.ts")
 }
 
 /// Recursively collect every relative-path leaf of an `exports` subtree, carrying

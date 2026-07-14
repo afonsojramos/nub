@@ -324,6 +324,61 @@ mod tests {
     }
 
     #[test]
+    fn type_walk_does_not_leak_runtime_imports_from_a_js_sibling() {
+        // Finding-1 regression: a `.d.ts` re-exports `./widgets`, and the standard
+        // compiled layout ships BOTH `widgets.js` and `widgets.d.ts`. The type walk
+        // must resolve `./widgets` to `widgets.d.ts` (NOT `widgets.js`), so
+        // `widgets.js`'s runtime `require('react')` is NOT captured as a type-peer
+        // (no spurious eject) and the real `widgets.d.ts` IS walked.
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static SEQ: AtomicU32 = AtomicU32::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "nub-phantom-dtsleak-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("package.json"),
+            r#"{"name":"ui-lib","main":"./index.js","peerDependencies":{"react":"*"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("index.js"),
+            "module.exports = require('./widgets');",
+        )
+        .unwrap();
+        fs::write(root.join("index.d.ts"), "export * from './widgets';\n").unwrap();
+        // widgets.js runtime-requires react; widgets.d.ts does NOT type-import it.
+        fs::write(
+            root.join("widgets.js"),
+            "const React = require('react');\nmodule.exports = {};",
+        )
+        .unwrap();
+        fs::write(
+            root.join("widgets.d.ts"),
+            "import type { Backend } from 'the-backend';\nexport declare const Widget: Backend;\n",
+        )
+        .unwrap();
+
+        let r = scan_extracted(&root).unwrap();
+        assert!(
+            !r.type_coupled_peers.contains(&"react".to_string()),
+            "react (runtime-only, in widgets.js) must NOT leak into type_coupled_peers: {:?}",
+            r.type_coupled_peers
+        );
+        // The real widgets.d.ts WAS walked: its undeclared type import surfaced.
+        assert!(
+            r.targets.iter().any(|t| t.name == "the-backend"),
+            "widgets.d.ts should be walked from the type surface: {:?}",
+            r.targets
+        );
+        assert_eq!(scan_index(&index_of(&root)).unwrap(), r);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn clean_package_has_no_phantom() {
         let root =
             std::env::temp_dir().join(format!("nub-phantom-scan-clean-{}", std::process::id()));
