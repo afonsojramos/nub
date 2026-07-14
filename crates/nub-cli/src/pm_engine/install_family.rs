@@ -1474,21 +1474,6 @@ fn run_engine(
     yarn_gated: bool,
     output: &super::output::OutputFlags,
 ) -> Result<i32> {
-    // Pre-install phantom backfill (flag-gated STRICT no-op by default): scan any
-    // already-cached resolved package that has no verdict sidecar yet, BEFORE the
-    // engine links. The extract hook only fires on a genuine tarball fetch, so a
-    // package served from a WARM store (or whose sidecar was GC'd) would otherwise
-    // reach the closure with no sidecar and never seed an eject; this closes that
-    // gap on THIS install. Rooted at the lockfile's dir (else the cwd). See
-    // `crate::dynamic_phantom::backfill_from_lockfile`.
-    crate::dynamic_phantom::backfill_from_lockfile(
-        session
-            .detected
-            .as_ref()
-            .map(|d| d.dir.as_path())
-            .unwrap_or(session.cwd.as_path()),
-    );
-
     // Hold the output guard only across the engine run (so `--silent` suppresses
     // the progress/summary written during install) and drop it before the match
     // below, so a final error report still reaches the real stderr.
