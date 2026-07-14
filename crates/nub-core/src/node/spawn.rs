@@ -303,8 +303,11 @@ impl Drop for ForegroundGuard {
 /// forwarder structurally cannot relay: SIGKILL on the Nub leader (Playwright's
 /// default `webServer` teardown, `docker kill`, CI cancellation, the OOM killer)
 /// is never delivered to userspace, so the forward thread never runs and the
-/// `sh -c` subtree would run on orphaned (#463). With the pdeathsig armed the
-/// kernel itself TERMs the child when Nub's spawning thread dies, no matter how.
+/// child subtree would run on orphaned (#463). This guards BOTH callers: the
+/// `nub run` script child (`sh -c` subtree) and the `nub <file>` file-run
+/// `node` leaf — the orphan exposure is identical. With the pdeathsig armed
+/// the kernel itself TERMs the child when Nub's spawning thread dies, no
+/// matter how.
 /// No-op off Unix; macOS has no pdeathsig equivalent, so it keeps the
 /// forwarding-only behavior (the group forward covers every catchable signal).
 pub fn group_on_spawn(cmd: &mut Command) {
