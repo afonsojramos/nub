@@ -13,6 +13,9 @@ const config = {
       { source: '/docs/files', destination: '/docs/runtime', permanent: true },
       { source: '/docs/running-scripts', destination: '/docs/run', permanent: true },
       { source: '/docs/managing-node', destination: '/docs/node', permanent: true },
+      // setup-nub + docker folded into the Deployment section (2026-07-14).
+      { source: '/docs/setup-nub', destination: '/docs/deployment/github-action', permanent: true },
+      { source: '/docs/docker', destination: '/docs/deployment/docker', permanent: true },
       // Guides moved from /docs/guides/* to the top-level /guides/* route.
       { source: '/docs/guides/:path*', destination: '/guides/:path*', permanent: true },
     ];
