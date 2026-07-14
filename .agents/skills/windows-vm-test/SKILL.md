@@ -5,6 +5,8 @@ description: >-
   Windows 11 ARM64 QEMU/HVF VM when its external disk and runbook are present.
   Use for interactive win32-arm64 or Windows-on-ARM x64-emulation checks; use
   ci-adhoc-test for true x64-native behavior or when the local VM is unavailable.
+metadata:
+  internal: true
 ---
 
 # Windows VM testing

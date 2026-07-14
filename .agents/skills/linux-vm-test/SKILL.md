@@ -5,6 +5,8 @@ description: >-
   Linux-specific sandbox, kernel, distro, architecture, package, or runtime
   behavior that Docker cannot reproduce faithfully. Selects persistent Lima
   for source-mounted iteration or ephemeral Tart for clean-image reproduction.
+metadata:
+  internal: true
 ---
 
 # Linux VM testing
