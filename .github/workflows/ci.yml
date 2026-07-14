@@ -172,7 +172,7 @@ jobs:
       # --all-features enables `embed-runtime`, whose build.rs bakes the integrity
       # digest of runtime/addons/nub-native.node (gitignored — built locally / staged
       # in release.yml) and fails loud if it's absent. Stage a placeholder so the lint
-      # build's three-entrypoint set is complete; clippy never runs the binary.
+      # build's four-entrypoint set is complete; clippy never runs the binary.
       - name: Stage placeholder addon for the embed-runtime lint build
         run: |
           mkdir -p runtime/addons
@@ -209,7 +209,7 @@ jobs:
   # request as c_int on musl vs c_ulong on glibc; fixed to `as _` so inference picks the
   # per-target type. It was test-only, so the released musl binary was never affected.)
   # The addon is gitignored (built locally
-  # / staged in release.yml), so a placeholder is staged so build.rs's three-entrypoint
+  # / staged in release.yml), so a placeholder is staged so build.rs's four-entrypoint
   # hash set is complete; it is never dlopen'd here (the tests verify hash CONSISTENCY —
   # baked == extracted — not native loading).
   embed-runtime:

@@ -146,6 +146,13 @@ libc.workspace = true
 # (pm_engine/mod.rs::with_fd_captured). Without it the substitution silently
 # breaks and the default registry is never surfaced on Windows.
 libc.workspace = true
+# Expand 8.3 path components before auto-discovered env files reach Node's
+# Windows watcher. Node 24's bundled libuv aborts when an event path and watched
+# directory use short and long spellings of the same directory.
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+] }
 
 [lints]
 workspace = true
