@@ -90,14 +90,14 @@ Yes — Linux (x64, arm64), macOS (x64, arm64), Windows (x64). Same platforms th
 
 ## How do I use it in CI / GitHub Actions?
 
-Swap `actions/setup-node` for [`nubjs/setup-nub`](/docs/setup-nub):
+Swap `actions/setup-node` for [`nubjs/setup-nub`](/docs/deployment/github-action):
 
 ```diff
 - - uses: actions/setup-node@v4
 + - uses: nubjs/setup-nub@v0
 ```
 
-The action installs the Nub CLI onto the runner, and from there Nub provisions the project's pinned Node itself. It also pre-provisions a warm-up Node version and caches Nub's store across runs. See the [GitHub Action](/docs/setup-nub) page for the full input surface.
+The action installs the Nub CLI onto the runner, and from there Nub provisions the project's pinned Node itself. It also pre-provisions a warm-up Node version and caches Nub's store across runs. See the [GitHub Action](/docs/deployment/github-action) page for the full input surface.
 
 ## Does it replace my package manager?
 

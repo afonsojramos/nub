@@ -289,7 +289,7 @@ Use `node` directly to run a built, already-transpiled server bundle; reach for 
 
 ## CI and Dependabot
 
-- **CI setup:** replace a Bun setup action with Nub's. See the [setup-nub](/docs/setup-nub) page for the GitHub Action.
+- **CI setup:** replace a Bun setup action with Nub's. See the [setup-nub](/docs/deployment/github-action) page for the GitHub Action.
 - **Dependabot / Renovate:** these bots do not have native Nub support. Use `package-ecosystem: "npm"` so the bot understands your manifest, and add a workflow step that runs `nub install` after the bot's update to regenerate the lockfile in Nub's format. A bot that bumps `package.json` but cannot regenerate the lockfile will otherwise leave the two out of sync.
 
 ## Supply-chain cooldown (`minimumReleaseAge`)

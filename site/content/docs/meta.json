@@ -12,7 +12,8 @@
     "plugins",
     "faq",
     "---",
-    "setup-nub",
-    "docker"
+    "[Guides](/guides)",
+    "---",
+    "deployment"
   ]
 }
