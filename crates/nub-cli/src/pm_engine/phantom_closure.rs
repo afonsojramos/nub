@@ -111,15 +111,25 @@ fn expand(graph: &LockfileGraph, seed_names: &[String]) -> DiskMaterializePlan {
     )
 }
 
+/// One dynamically-flagged importer the planner may seed. Two INDEPENDENT reasons
+/// to eject, either sufficient: an undeclared-phantom carrier (`targets`, the
+/// runtime + `.d.ts`-undeclared class) and/or a `.d.ts` peer-type carrier
+/// (`type_peers`, nub#450). `dep_path`/`name` locate it in the graph.
+pub(super) struct FlaggedImporter {
+    pub dep_path: String,
+    pub name: String,
+    pub targets: Vec<String>,
+    pub type_peers: Vec<String>,
+}
+
 /// Pure planner: resolved graph + flat seed + dynamic phantom flags → graph-aware
 /// materialization plan. See the module docs for the two rungs. `flags` is each
-/// surviving-candidate importer's `(dep_path, name, undeclared-target-names)`,
-/// supplied by [`dynamic_phantom_flags`] in production and injected directly in
-/// tests.
+/// surviving-candidate importer, supplied by [`dynamic_phantom_flags`] in
+/// production and injected directly in tests.
 fn plan_from_flags(
     graph: &LockfileGraph,
     seed_names: &[String],
-    flags: &[(String, String, Vec<String>)],
+    flags: &[FlaggedImporter],
 ) -> DiskMaterializePlan {
     // Drop the version-BLIND `vite` name-seed and decide vite version-aware here.
     // The embedder default (mod.rs) seeds the literal `vite` for ANY direct-dep
@@ -164,9 +174,32 @@ fn plan_from_flags(
     // linker builds over the ejected set (see `aube_linker::link_hidden_hoist`)
     // then resolves every undeclared phantom for those members via Node's walk-up,
     // so no per-importer target hoist is recorded.
-    for (dep_path, name, targets) in flags {
-        if should_seed(targets, &direct_dep_names(dep_path, graph), is_top_level) {
-            seed_names_set.insert(name.as_str());
+    for flag in flags {
+        // (a) Undeclared phantoms — the existing runtime + `.d.ts`-undeclared class.
+        // Guard on non-empty targets: `should_seed` returns SEED for an empty target
+        // set (its "can't prove safe" default), which is correct for a phantom flag
+        // that lost its targets but WRONG for a pure type-peer flag (no undeclared
+        // phantom at all) — that must seed only via path (b).
+        let seed_for_targets = !flag.targets.is_empty()
+            && should_seed(
+                &flag.targets,
+                &direct_dep_names(&flag.dep_path, graph),
+                is_top_level,
+            );
+        // (b) `.d.ts` peer-type coupling (nub#450): a declared peer imported from
+        // the type surface breaks the type-checker only when the peer's types come
+        // from a SEPARATE top-level `@types/<peer>` the store realpath can't reach.
+        // Ejecting the importer makes its realpath project-local so the collective
+        // hidden tree provides `@types/<peer>`. Gate on the `@types/<peer>` actually
+        // being a top-level package: this both makes the eject load-bearing and
+        // BOUNDS it to the peer-typed set (a peer that ships its own types, e.g.
+        // `vue`, has no top-level `@types/vue`, so it never seeds — GVS stays on).
+        let seed_for_type_peers = flag
+            .type_peers
+            .iter()
+            .any(|peer| is_top_level(&types_package_name(peer)));
+        if seed_for_targets || seed_for_type_peers {
+            seed_names_set.insert(flag.name.as_str());
         }
     }
 
@@ -244,7 +277,7 @@ fn plan_from_flags(
 /// installs the hook only when armed, so this gate is belt-and-suspenders; the
 /// pure planning logic is tested through [`plan_from_flags`] with injected flags,
 /// so the unit tests never reach this store-IO path.
-fn dynamic_phantom_flags(graph: &LockfileGraph) -> Vec<(String, String, Vec<String>)> {
+fn dynamic_phantom_flags(graph: &LockfileGraph) -> Vec<FlaggedImporter> {
     if !enabled() {
         return Vec::new();
     }
@@ -277,13 +310,33 @@ fn dynamic_phantom_flags(graph: &LockfileGraph) -> Vec<(String, String, Vec<Stri
             // `cached_or_scan_verdict` scans + caches here so the decision is
             // correct at the point the resolved graph + CAS index are both in hand.
             let result = crate::dynamic_phantom::cached_or_scan_verdict(&sidecar_dir, &index)?;
-            if !result.has_unguarded_phantom {
+            // A package flags for EITHER an undeclared phantom (`targets`) OR a
+            // `.d.ts` peer-type coupling (`type_coupled_peers`, nub#450). react-pdf
+            // has NO undeclared phantom — only the react peer typed in its `.d.ts` —
+            // so gating on `has_unguarded_phantom` alone would drop it.
+            if !result.has_unguarded_phantom && result.type_coupled_peers.is_empty() {
                 return None;
             }
             let targets: Vec<String> = result.targets.into_iter().map(|t| t.name).collect();
-            Some((dep_path.clone(), pkg.name.clone(), targets))
+            Some(FlaggedImporter {
+                dep_path: dep_path.clone(),
+                name: pkg.name.clone(),
+                targets,
+                type_peers: result.type_coupled_peers,
+            })
         })
         .collect()
+}
+
+/// The DefinitelyTyped package name for a runtime package: `react` → `@types/react`,
+/// and a scoped `@scope/name` → `@types/scope__name` (the `__` mangling). This is
+/// the package whose top-level presence makes a `.d.ts` peer-type eject
+/// load-bearing (nub#450).
+fn types_package_name(pkg: &str) -> String {
+    match pkg.strip_prefix('@').and_then(|r| r.split_once('/')) {
+        Some((scope, name)) => format!("@types/{scope}__{name}"),
+        None => format!("@types/{pkg}"),
+    }
 }
 
 /// Whether a dynamically-flagged package must SEED the closure — the precision
@@ -406,6 +459,43 @@ mod tests {
         xs.iter().map(|s| s.to_string()).collect()
     }
 
+    /// A flagged importer carrying undeclared phantom `targets` (no peer-types).
+    fn flag(dep_path: &str, name: &str, targets: &[&str]) -> FlaggedImporter {
+        FlaggedImporter {
+            dep_path: dep_path.to_string(),
+            name: name.to_string(),
+            targets: targets.iter().map(|s| s.to_string()).collect(),
+            type_peers: Vec::new(),
+        }
+    }
+
+    /// A flagged importer carrying only `.d.ts` type-coupled peers (nub#450).
+    fn type_flag(dep_path: &str, name: &str, type_peers: &[&str]) -> FlaggedImporter {
+        FlaggedImporter {
+            dep_path: dep_path.to_string(),
+            name: name.to_string(),
+            targets: Vec::new(),
+            type_peers: type_peers.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    /// Register `names` as the root importer's direct deps — what `is_top_level`
+    /// reads (the `@types/<peer>` presence gate for the type-peer eject).
+    fn top_level(g: &mut LockfileGraph, names: &[&str]) {
+        g.importers.insert(
+            ".".to_string(),
+            names
+                .iter()
+                .map(|n| aube_lockfile::DirectDep {
+                    name: n.to_string(),
+                    dep_path: format!("{n}@0.0.0"),
+                    dep_type: aube_lockfile::DepType::Dev,
+                    specifier: None,
+                })
+                .collect(),
+        );
+    }
+
     // Rung-1 vite seeding is independent of the dynamic source, so these inject
     // an EMPTY flag set and exercise the pure planner (`plan_from_flags`) end to
     // end — no host-store IO.
@@ -523,10 +613,10 @@ mod tests {
             ("@hookform/resolvers@1.0.0", "@hookform/resolvers", &[]),
             ("zod@3.0.0", "zod", &[]),
         ]);
-        let flags = vec![(
-            "@hookform/resolvers@1.0.0".to_string(),
-            "@hookform/resolvers".to_string(),
-            vec!["zod".to_string()],
+        let flags = vec![flag(
+            "@hookform/resolvers@1.0.0",
+            "@hookform/resolvers",
+            &["zod"],
         )];
         let plan = plan_from_flags(&g, &[], &flags);
         let names: HashSet<&str> = plan.names.iter().map(String::as_str).collect();
@@ -672,11 +762,7 @@ mod tests {
             ("core@1.0.0", "core", &[("datastructures", "2.0.0")]),
             ("datastructures@2.0.0", "datastructures", &[]),
         ]);
-        let flags = vec![(
-            "basic@1.0.0".to_string(),
-            "basic".to_string(),
-            vec!["datastructures".to_string()],
-        )];
+        let flags = vec![flag("basic@1.0.0", "basic", &["datastructures"])];
         let plan = plan_from_flags(&g, &[], &flags);
         let names: HashSet<&str> = plan.names.iter().map(String::as_str).collect();
         assert!(
@@ -695,16 +781,80 @@ mod tests {
             ("adapter@1.0.0", "adapter", &[("helper", "1.0.0")]),
             ("helper@1.0.0", "helper", &[]),
         ]);
-        let flags = vec![(
-            "adapter@1.0.0".to_string(),
-            "adapter".to_string(),
-            vec!["helper".to_string()],
-        )];
+        let flags = vec![flag("adapter@1.0.0", "adapter", &["helper"])];
         let plan = plan_from_flags(&g, &[], &flags);
         assert!(
             plan.names.is_empty(),
             "a depth-1-satisfied phantom target stays skipped: {:?}",
             plan.names
         );
+    }
+
+    // Type-coupled peers (nub#450): the `.d.ts` peer-type eject path.
+
+    #[test]
+    fn type_peer_ejects_only_when_types_pkg_is_top_level() {
+        // react-pdf shape: it declares `react` a peer and imports it from its
+        // `.d.ts`. The eject is load-bearing ONLY because the project has a
+        // top-level `@types/react` the store realpath can't otherwise reach.
+        let mut g = graph(&[
+            ("@react-pdf/renderer@4.5.1", "@react-pdf/renderer", &[]),
+            ("@types/react@18.3.0", "@types/react", &[]),
+        ]);
+        top_level(&mut g, &["@react-pdf/renderer", "react", "@types/react"]);
+        let flags = vec![type_flag(
+            "@react-pdf/renderer@4.5.1",
+            "@react-pdf/renderer",
+            &["react"],
+        )];
+        let plan = plan_from_flags(&g, &[], &flags);
+        let names: HashSet<&str> = plan.names.iter().map(String::as_str).collect();
+        assert!(
+            names.contains("@react-pdf/renderer"),
+            "peer-type importer seeds when @types/react is top-level: {names:?}"
+        );
+    }
+
+    #[test]
+    fn type_peer_does_not_eject_without_top_level_types_pkg() {
+        // A self-typed peer (vue ships its own types → no `@types/vue` in the tree)
+        // must NOT eject — this is the bound that keeps GVS on for the common case.
+        let mut g = graph(&[
+            ("some-vue-lib@1.0.0", "some-vue-lib", &[]),
+            ("vue@3.5.0", "vue", &[]),
+        ]);
+        // vue is top-level but ships its own types → NO `@types/vue` in the tree.
+        top_level(&mut g, &["some-vue-lib", "vue"]);
+        let flags = vec![type_flag("some-vue-lib@1.0.0", "some-vue-lib", &["vue"])];
+        let plan = plan_from_flags(&g, &[], &flags);
+        assert!(
+            plan.names.is_empty(),
+            "no top-level @types/vue → no eject (GVS stays on): {:?}",
+            plan.names
+        );
+    }
+
+    #[test]
+    fn type_peer_handles_scoped_types_mangling() {
+        // A scoped peer's DefinitelyTyped name mangles the slash: `@scope/pkg` →
+        // `@types/scope__pkg`. The top-level check must use the mangled name.
+        let mut g = graph(&[
+            ("uses-babel@1.0.0", "uses-babel", &[]),
+            ("@types/babel__core@7.0.0", "@types/babel__core", &[]),
+        ]);
+        top_level(&mut g, &["uses-babel", "@types/babel__core"]);
+        let flags = vec![type_flag(
+            "uses-babel@1.0.0",
+            "uses-babel",
+            &["@babel/core"],
+        )];
+        let plan = plan_from_flags(&g, &[], &flags);
+        let names: HashSet<&str> = plan.names.iter().map(String::as_str).collect();
+        assert!(
+            names.contains("uses-babel"),
+            "scoped @types/scope__name mangling drives the seed: {names:?}"
+        );
+        assert_eq!(types_package_name("@babel/core"), "@types/babel__core");
+        assert_eq!(types_package_name("react"), "@types/react");
     }
 }

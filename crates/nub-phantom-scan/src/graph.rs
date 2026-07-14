@@ -23,9 +23,14 @@ use nub_phantom_core::extract::{Occurrence, extract};
 use nub_phantom_core::specifier::{self, SpecKind};
 
 /// Provenance bit: reached from the main surface (`main`/`bin`/`exports."."`).
-const FROM_MAIN: u8 = 0b01;
+const FROM_MAIN: u8 = 0b001;
 /// Provenance bit: reached from a non-`.` `exports` subpath (the adapter surface).
-const FROM_SUBPATH: u8 = 0b10;
+const FROM_SUBPATH: u8 = 0b010;
+/// Provenance bit: reached from the `.d.ts` TYPE surface (`types`/`typings`/an
+/// `exports` `types` condition/`index.d.ts`). A type-position peer import carries
+/// this and NOT the runtime bits, so `@types/<peer>` reachability (nub#450) is
+/// separable from a runtime require of the same peer.
+const FROM_TYPES: u8 = 0b100;
 
 /// A bare-specifier reference collected from a reachable file.
 #[derive(Debug, Clone)]
@@ -43,6 +48,10 @@ pub struct Reference {
     /// `<pkg>/<subpath>`" adapter surface. A hard phantom reachable ONLY from a
     /// subpath (not main) is the subpath-adapter class.
     pub from_subpath: bool,
+    /// Reachable from the `.d.ts` TYPE surface. A DECLARED PEER reached only via
+    /// this surface is the nub#450 peer-type class: its `@types/<peer>` must be
+    /// project-local for the type-checker's realpath walk to reach it.
+    pub from_types: bool,
 }
 
 /// Result of the reachable-module walk.
@@ -96,6 +105,7 @@ fn walk_generic<S: FileSource>(source: &S, entry_points: &[Entry]) -> Walk {
             let bit = match ep.kind {
                 EntryKind::Main => FROM_MAIN,
                 EntryKind::Subpath => FROM_SUBPATH,
+                EntryKind::Types => FROM_TYPES,
             };
             if add_flags(&mut flags, &resolved, bit) {
                 queue.push_back(resolved);
@@ -147,6 +157,7 @@ fn walk_generic<S: FileSource>(source: &S, entry_points: &[Entry]) -> Walk {
                     soft: occ.soft,
                     from_main: fflags & FROM_MAIN != 0,
                     from_subpath: fflags & FROM_SUBPATH != 0,
+                    from_types: fflags & FROM_TYPES != 0,
                 });
             }
         }
@@ -188,8 +199,15 @@ fn add_flags<K: Ord + Clone>(flags: &mut BTreeMap<K, u8>, key: &K, bit: u8) -> b
 /// the cap is a hard robustness requirement, not a nicety.
 const MAX_RESOLVE_DEPTH: u32 = 16;
 
-/// Node-style resolution extensions, in priority order.
-const RESOLVE_EXTS: [&str; 8] = ["js", "cjs", "mjs", "jsx", "ts", "tsx", "mts", "cts"];
+/// Node-style resolution extensions, in priority order. The runtime JS
+/// extensions come first (so a `./foo` with both `foo.js` and `foo.d.ts` picks
+/// the JS); the `.d.ts` declaration extensions follow so a TYPE-surface walk (a
+/// `.d.ts` re-exporting `./internal`) resolves its `.d.ts` graph (nub#450). A
+/// declaration file carries only type imports, so admitting it on the runtime
+/// ladder is inert where a `.js` exists.
+const RESOLVE_EXTS: [&str; 11] = [
+    "js", "cjs", "mjs", "jsx", "ts", "tsx", "mts", "cts", "d.ts", "d.mts", "d.cts",
+];
 
 // --- Filesystem-backed source (extracted tree) ---------------------------------
 
@@ -284,7 +302,9 @@ fn is_js_file(p: &Path) -> bool {
         return false;
     }
     let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    crate::manifest::is_js_like(name) || crate::manifest::is_sfc_like(name)
+    crate::manifest::is_js_like(name)
+        || crate::manifest::is_sfc_like(name)
+        || crate::manifest::is_dts_like(name)
 }
 
 /// Lexically normalize `.`/`..` segments WITHOUT touching the filesystem (we do
@@ -336,7 +356,9 @@ impl IndexSource {
     /// True if `rel` is a JS-like file present in the index — the index analogue
     /// of `is_js_file` (name check + existence), which the fs ladder relies on.
     fn contains_js(&self, rel: &str) -> bool {
-        (crate::manifest::is_js_like(rel) || crate::manifest::is_sfc_like(rel))
+        (crate::manifest::is_js_like(rel)
+            || crate::manifest::is_sfc_like(rel)
+            || crate::manifest::is_dts_like(rel))
             && self.files.contains_key(rel)
     }
 

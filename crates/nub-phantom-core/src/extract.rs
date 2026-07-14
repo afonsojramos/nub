@@ -70,6 +70,17 @@ pub fn extract(path: &str, source: &str) -> Vec<Occurrence> {
         let ts = SourceType::from_path("_.mts").unwrap_or_else(|_| SourceType::mjs());
         return parse_and_visit(&script, ts, true);
     }
+    // A `.d.ts` (`.d.mts`/`.d.cts`) is a package's TYPE surface. Its imports are
+    // type-position by nature (`import * as React from 'react'`, `import type …`),
+    // yet under the global virtual store they still drive TS's resolution: the
+    // package's realpath escapes into the shared store, so a type import of a
+    // top-level-only backend (`@types/react`, `astro/types`) fails to resolve
+    // (nub#450). So a declaration file is parsed with type imports KEPT, exactly
+    // like an SFC script region. Plain `.js`/`.ts` still drop type-only imports.
+    if is_dts(path) {
+        let ts = SourceType::from_path("_.mts").unwrap_or_else(|_| SourceType::mjs());
+        return parse_and_visit(source, ts, true);
+    }
     let source_type = SourceType::from_path(path).unwrap_or_else(|_| SourceType::mjs());
     parse_and_visit(source, source_type, false)
 }
@@ -226,6 +237,13 @@ fn import_has_value(decl: &oxc_ast::ast::ImportDeclaration<'_>) -> bool {
 /// is inline-`type`.
 fn export_named_has_value(decl: &oxc_ast::ast::ExportNamedDeclaration<'_>) -> bool {
     decl.specifiers.is_empty() || decl.specifiers.iter().any(|s| !s.export_kind.is_type())
+}
+
+/// A TypeScript declaration file (`.d.ts`/`.d.mts`/`.d.cts`) — a package's type
+/// surface, parsed with type imports kept (see [`extract`]).
+fn is_dts(path: &str) -> bool {
+    let file = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    file.ends_with(".d.ts") || file.ends_with(".d.mts") || file.ends_with(".d.cts")
 }
 
 /// The analyzable script region of a single-file component, or `None` for a
@@ -532,6 +550,26 @@ mod tests {
             .map(|o| o.spec)
             .collect();
         assert!(names.is_empty(), "type-only import in .ts still dropped");
+    }
+
+    #[test]
+    fn dts_keeps_type_surface_imports() {
+        // A declaration file's imports are type-position but still drive TS
+        // resolution under GVS (nub#450): both the value-syntax `import * as React`
+        // and a `import type` are kept, and a relative type re-export.
+        let dts = "import * as React from 'react';\nimport type { FormApi } from '@tanstack/form-core';\nexport type { Foo } from './internal';\n";
+        for path in ["index.d.ts", "dist/index.d.mts", "types.d.cts"] {
+            let names: Vec<_> = extract(path, dts).into_iter().map(|o| o.spec).collect();
+            assert!(names.iter().any(|s| s == "react"), "{path}: react kept");
+            assert!(
+                names.iter().any(|s| s == "@tanstack/form-core"),
+                "{path}: type-only import kept"
+            );
+            assert!(
+                names.iter().any(|s| s == "./internal"),
+                "{path}: relative type re-export kept (walked for .d.ts graph)"
+            );
+        }
     }
 
     #[test]
