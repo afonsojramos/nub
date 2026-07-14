@@ -296,7 +296,7 @@ pub(crate) fn phantom_cache_dir() -> Option<PathBuf> {
 /// after upgrade; harmless and expected (the whole point is to pick up the better
 /// verdict). Just bump the number when the scanner logic changes — the coupling
 /// is structural, nothing else to remember.
-pub(crate) const PHANTOM_SCANNER_VERSION: u32 = 2;
+pub(crate) const PHANTOM_SCANNER_VERSION: u32 = 4;
 
 /// THE single source of truth for a phantom sidecar's location: the versioned
 /// subdir `<phantom_cache_dir>/s<PHANTOM_SCANNER_VERSION>/<fingerprint>.json`.
