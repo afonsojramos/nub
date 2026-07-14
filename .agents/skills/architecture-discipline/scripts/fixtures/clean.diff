@@ -1,0 +1,8 @@
+diff --git a/crates/nub-core/src/value.rs b/crates/nub-core/src/value.rs
+--- a/crates/nub-core/src/value.rs
++++ b/crates/nub-core/src/value.rs
+@@ -3,0 +4,4 @@
++fn normalize(value: &str) -> &str {
++    value.trim()
++}
++

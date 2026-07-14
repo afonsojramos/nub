@@ -1,0 +1,4 @@
+interface:
+  display_name: "Architecture Discipline"
+  short_description: "Design complete, minimal, maintainable systems"
+  default_prompt: "Use $architecture-discipline to design the smallest complete architecture for this subsystem."
