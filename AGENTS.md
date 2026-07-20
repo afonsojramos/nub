@@ -213,6 +213,7 @@ Feature-specific harnesses that encode this loop live under `tests/<feature>/` â
 
 **Quality over velocity. Always.** Don't move fast, check boxes, and ship stubs as complete implementations. The specific failure modes:
 
+- **Do not overengineer.** Solve the demonstrated problem at its actual scale. Do not introduce generalized infrastructure, extra abstraction, speculative hardening, or adjacent cleanup without evidence that the added complexity earns its cost; when evaluating recommendations, "not worth doing" is a valid and preferred verdict.
 - **Never mark a task `[x]` without verifying the behavior end-to-end.** Running `cargo test` is necessary but not sufficient. If the task says "implement per-line stream prefixing matching pnpm," you must run `nub -r --stream run build` on a real fixture and compare the output to `pnpm -r --stream run build`. A green test suite with a stubbed implementation is worse than an unchecked task.
 - **Never claim "parity" without evidence.** "Complete workspace parity with pnpm" means every flag, every edge case, every output format. If you haven't tested a flag, don't mark it done. If the implementation is a simplified version, say so explicitly in the task note â€” don't use language like "implemented" for something that's "scaffolded."
 - **Name what you actually built.** If you shipped `Stdio::inherit()` with a header line, that's not "stream prefixing." If you partitioned into fixed batches, that's not "work-stealing." Use precise language so the next reader knows the actual state.
