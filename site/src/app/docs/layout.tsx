@@ -3,10 +3,6 @@ import type { ReactNode } from 'react';
 import type { Node as TreeNode, Root as TreeRoot } from 'fumadocs-core/page-tree';
 import { baseOptions } from '@/lib/layout.shared';
 import { source } from '@/lib/source';
-import {
-  explicitIndexChild,
-  groupPackageMetaManager,
-} from '@/lib/docs-tree';
 
 /* Pages that map to a concrete command get a subtle, right-aligned mono chip
    in the sidebar — descriptive label on the left, the command on the right. */
@@ -41,7 +37,10 @@ function styleNode(node: TreeNode): TreeNode {
     // find it by its source file, promote it to the header, and drop that
     // duplicate child so the folder name isn't repeated beneath itself. A
     // command chip is added below when the promoted page maps to a command.
-    const indexChild = explicitIndexChild(node);
+    const indexChild = node.children.find(
+      (c): c is Extract<TreeNode, { type: 'page' }> =>
+        c.type === 'page' && /(^|\/)index\.mdx?$/.test(c.$ref ?? ''),
+    );
     const folderUrl = node.index?.url ?? indexChild?.url;
     const isDuplicateIndex = (c: TreeNode) =>
       !node.index && c.type === 'page' && c.url === folderUrl;
@@ -86,7 +85,7 @@ export default function Layout({ children }: { children: ReactNode }) {
 
   const tree: TreeRoot = {
     ...source.pageTree,
-    children: groupPackageMetaManager(source.pageTree.children).map(styleNode),
+    children: source.pageTree.children.map(styleNode),
   };
 
   return (

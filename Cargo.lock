@@ -2658,7 +2658,7 @@ dependencies = [
 
 [[package]]
 name = "nub-cli"
-version = "0.4.5"
+version = "0.4.13"
 dependencies = [
  "anyhow",
  "aube",
@@ -2667,6 +2667,7 @@ dependencies = [
  "aube-lockfile",
  "aube-manifest",
  "aube-registry",
+ "aube-resolver",
  "aube-scripts",
  "aube-settings",
  "aube-store",
@@ -2700,11 +2701,12 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "nub-core"
-version = "0.4.5"
+version = "0.4.13"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2713,6 +2715,7 @@ dependencies = [
  "dirs-next",
  "dotenvy",
  "flate2",
+ "getrandom 0.3.4",
  "glob-match",
  "libc",
  "liblzma",
@@ -2720,6 +2723,7 @@ dependencies = [
  "reqwest 0.12.28",
  "rustc-hash",
  "ruzstd",
+ "same-file",
  "semver",
  "serde",
  "serde_json",
@@ -2729,13 +2733,14 @@ dependencies = [
  "tar",
  "thiserror 2.0.18",
  "tracing",
+ "windows-sys 0.61.2",
  "zip",
  "zstd",
 ]
 
 [[package]]
 name = "nub-phantom-core"
-version = "0.4.5"
+version = "0.4.13"
 dependencies = [
  "oxc_allocator",
  "oxc_ast",
@@ -2746,7 +2751,7 @@ dependencies = [
 
 [[package]]
 name = "nub-phantom-scan"
-version = "0.4.5"
+version = "0.4.13"
 dependencies = [
  "nub-phantom-core",
  "serde",
