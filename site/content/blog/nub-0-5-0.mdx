@@ -1,0 +1,75 @@
+---
+title: "Nub 0.5.0"
+description: A TypeScript-first project scaffold, create templates that answer with Nub commands, and a batch of package manager fixes.
+author: The Nub Team
+date: 2026-07-22
+---
+
+Nub 0.5.0 ships `nub init` — one command scaffolds a TypeScript project that runs and typechecks immediately:
+
+```console
+$ nub init -y
+created my-app
+  package.json
+  tsconfig.json
+  index.ts
+  .gitignore
+  README.md
+  .git/ initialized
+
+devDependencies:
++ @nubjs/types@0.5.0
++ @types/node@26.1.1
++ typescript@7.0.2
+
+next: nub index.ts
+```
+
+## nub init
+
+The scaffold installs `typescript@^7`, `@types/node@^26`, and `@nubjs/types` as devDependencies, so the editor and `tsc --noEmit` work immediately. Nub transpiles at run time, so the tsconfig is `noEmit` and the project has zero runtime dependencies. The tsconfig targets Node's own TypeScript semantics — `nodenext` resolution, `verbatimModuleSyntax`, `strict` plus `noUncheckedIndexedAccess` and `exactOptionalPropertyTypes`, targeting `es2024`.
+
+In a terminal, init asks three questions — name, TypeScript or JavaScript, git — each with a sensible default; `-y` skips them, non-interactive environments auto-default, and existing files are never overwritten without `--force`. The [init docs](/docs/init) have the full surface.
+
+## Create templates that answer with Nub commands
+
+For framework templates, `nub create` runs the ecosystem's `create-*` scaffolders (`vue` → `create-vue`), and scaffolders that detect the invoking package manager now answer in kind:
+
+```console
+$ nub create vue my-app --default
+
+└  Done. Now run:
+
+   cd my-app
+   nub install
+   nub run dev
+```
+
+Detection has landed in create-vue ([vuejs/create-vue#1066](https://github.com/vuejs/create-vue/pull/1066)) and Nuxt ([nuxt/cli#1360](https://github.com/nuxt/cli/pull/1360)), with PRs open across the ecosystem. On Nub's side, `nub create` and `nub dlx` children now see the `npm_config_user_agent` these scaffolders sniff ([#529](https://github.com/nubjs/nub/pull/529)).
+
+## nubx returns to npx parity
+
+`nubx <name>` no longer tries file and script resolution first — it resolves the `node_modules/.bin` chain and falls back to the registry on a miss, exactly as npx does. Files are `nub <file>`, scripts are `nub run <script>`. ([#525](https://github.com/nubjs/nub/pull/525))
+
+## Package manager
+
+Top-level `packageExtensions` in the root manifest is now honored in Nub-native projects — it was already supported in pnpm- and npm-compatibility mode ([#507](https://github.com/nubjs/nub/pull/507), [#509](https://github.com/nubjs/nub/pull/509)). Alongside it, a batch of correctness fixes:
+
+| Area | What changed | PR |
+| --- | --- | --- |
+| `nub update` | Accepts dist-tag specs (`nub update pkg@beta`) | [#516](https://github.com/nubjs/nub/pull/516) |
+| Hoisted linker | Workspace-spanning hoisted planning for `nodeLinker=hoisted` | [#511](https://github.com/nubjs/nub/pull/511) |
+| `approve-builds` | Runs the approved build scripts instead of only recording approval | [#503](https://github.com/nubjs/nub/pull/503) |
+| `dedupe` | Workspace link packages no longer appear in the dedupe diff | [#502](https://github.com/nubjs/nub/pull/502) |
+| `publish` | Scope is preserved in the publish attachment key and tarball URI | [#478](https://github.com/nubjs/nub/pull/478) |
+| Registry traffic | Dist-tag resolution is cached and metadata fetches slimmed | [#505](https://github.com/nubjs/nub/pull/505) |
+
+## Fixes and platforms
+
+- `nub watch` forwards an explicit `--env-file` to the watched Node so restarts re-read it ([#510](https://github.com/nubjs/nub/pull/510)).
+- A macOS group-reaper watcher prevents SIGKILL of Nub's process group from orphaning the workload ([#504](https://github.com/nubjs/nub/pull/504)).
+- `nub upgrade` supports the self-owned channel on Windows ([#506](https://github.com/nubjs/nub/pull/506)).
+- Node installs stream extraction during download and overlap the checksum fetch ([#508](https://github.com/nubjs/nub/pull/508)).
+- Source builds work on Android/Termux without a JVM ([#501](https://github.com/nubjs/nub/pull/501)).
+
+The [full release notes](https://github.com/nubjs/nub/releases/tag/v0.5.0) list every change in this release.
