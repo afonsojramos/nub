@@ -1123,6 +1123,21 @@ pub fn run() -> Result<i32> {
 
     let argv0 = Argv0::detect();
 
+    // The engine's lazy node-gyp shims re-invoke `current_exe()` with this hidden
+    // verb mid-lifecycle-script, and `current_exe()` carries whatever NAME nub is
+    // running under — a PM shim when the install was driven through one. Force the
+    // `nub` identity so the verb resolves exactly as it does under argv0 `nub`;
+    // left to the argv0 match below, a shim-named re-invocation instead hands the
+    // verb to the PM engine (`ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL`), runs it as a
+    // SCRIPT under `node`, or — under `nubx` — tries to FETCH it from the registry
+    // as a package name. Same argv0-coupling class as the parent-death watcher
+    // above; that one wants the minimal short-circuit, this one wants the full
+    // `run_nub` path (its bootstrap relies on the guards above).
+    if !matches!(argv0, Argv0::Nub) && env::args().nth(1).as_deref() == Some("__node-gyp-bootstrap")
+    {
+        return run_nub();
+    }
+
     match argv0 {
         Argv0::Nubx => run_nubx(),
         Argv0::Node => run_as_node(),
