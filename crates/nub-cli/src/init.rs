@@ -245,12 +245,34 @@ fn git_init(cwd: &Path) -> bool {
     }
 }
 
-/// npm-valid name from arbitrary input: lowercase, whitespace → `-`, keep
-/// `[a-z0-9-_.~]`, no leading `.`/`_`/`-`. Empty result = invalid input (the
-/// caller falls back or re-prompts).
+/// npm-valid name from arbitrary input. A scoped name (`@scope/pkg`) sanitizes
+/// per-part, preserving `@` and `/`; a bare `@scope` with no package part is
+/// invalid (empty result = the caller falls back or re-prompts), rather than
+/// silently mangling to `scope`. Anything else sanitizes as one token.
 fn sanitize_name(raw: &str) -> String {
+    let raw = raw.trim();
+    if raw.starts_with('@') {
+        return match raw.strip_prefix('@').and_then(|r| r.split_once('/')) {
+            Some((scope, pkg)) => {
+                let (scope, pkg) = (sanitize_part(scope), sanitize_part(pkg));
+                if scope.is_empty() || pkg.is_empty() {
+                    String::new()
+                } else {
+                    let mut s = format!("@{scope}/{pkg}");
+                    s.truncate(214);
+                    s
+                }
+            }
+            None => String::new(),
+        };
+    }
+    sanitize_part(raw)
+}
+
+/// One name segment: lowercase, whitespace → `-`, keep `[a-z0-9-_.~]`, no
+/// leading `.`/`_`/`-`. Empty result = invalid input.
+fn sanitize_part(raw: &str) -> String {
     let mut s: String = raw
-        .trim()
         .to_lowercase()
         .chars()
         .map(|c| if c.is_whitespace() { '-' } else { c })
@@ -274,6 +296,17 @@ mod tests {
         assert_eq!(sanitize_name("__weird$name!"), "weirdname");
         assert_eq!(sanitize_name("ok-name_1.2~x"), "ok-name_1.2~x");
         assert_eq!(sanitize_name("🎉🎉"), "");
+    }
+
+    #[test]
+    fn sanitize_scoped_names_sanitize_per_part_and_reject_bare_scopes() {
+        assert_eq!(sanitize_name("@scope/pkg"), "@scope/pkg");
+        assert_eq!(sanitize_name("@My Org/My App"), "@my-org/my-app");
+        // A bare `@scope` (no package part) is invalid — never mangle to
+        // `scope`, and a scope that sanitizes to nothing is invalid too.
+        assert_eq!(sanitize_name("@scope"), "");
+        assert_eq!(sanitize_name("@/pkg"), "");
+        assert_eq!(sanitize_name("@🎉/pkg"), "");
     }
 
     #[test]
