@@ -120,7 +120,7 @@ pub(crate) fn run_init(opts: InitOptions) -> Result<i32> {
     files.push((entry, "console.log(\"Hello from Nub\");\n".to_string()));
     files.push((
         ".gitignore",
-        "node_modules\n.env*\n*.log\n.DS_Store\n".to_string(),
+        "node_modules\n.env\n.env.local\n.env.*.local\n*.log\n.DS_Store\n".to_string(),
     ));
     files.push(("README.md", format!("# {name}\n")));
 
