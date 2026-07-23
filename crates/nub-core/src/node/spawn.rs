@@ -322,7 +322,7 @@ pub fn untrack_child() {
 /// own-group-without-tcsetpgrp path (correct for non-interactive children).
 #[cfg(unix)]
 #[must_use]
-pub fn foreground_child(child_pid: u32) -> Option<ForegroundGuard> {
+fn foreground_child(child_pid: u32) -> Option<ForegroundGuard> {
     // SAFETY: pure FFI reads; STDIN_FILENO is always valid in this process.
     let stdin_is_tty = unsafe { libc::isatty(libc::STDIN_FILENO) } == 1;
     if !stdin_is_tty {
@@ -509,6 +509,11 @@ pub fn spawn_group_reaper(child_pid: u32) -> Option<GroupReaper> {
             libc::close(write_fd);
         }
     };
+    // `current_exe()` is whatever NAME nub is running under — for any workload
+    // spawned through nub's own PATH shim that is `node`, not `nub`. The verb
+    // below is therefore dispatched in `cli::run()` ABOVE argv0 detection; when
+    // it hung off the `nub`-only argv0 arm, a shim-named re-invocation ran
+    // `__pdeath-watch` as a SCRIPT and spawned another watcher per level (regression from #504).
     let Ok(exe) = std::env::current_exe() else {
         close_both();
         return None;
@@ -703,7 +708,7 @@ pub struct SpawnConfig<'a> {
 
 /// The result of spawning a Node process.
 pub struct SpawnResult {
-    pub status: ExitStatus,
+    status: ExitStatus,
 }
 
 /// Spawn Node with Nub's augmentation pipeline.
@@ -2019,7 +2024,7 @@ fn should_neutralize_localstorage(
 /// internal `__NUB_*` plumbing var, NOT a user knob — explicitly permitted by the
 /// brand boundary. The preload deletes it after reading so it does not leak to
 /// grandchild processes.
-pub(crate) const NEUTRALIZE_LOCALSTORAGE_ENV: &str = "__NUB_NEUTRALIZE_LOCALSTORAGE";
+const NEUTRALIZE_LOCALSTORAGE_ENV: &str = "__NUB_NEUTRALIZE_LOCALSTORAGE";
 
 /// Carries the running binary's version (`env!("CARGO_PKG_VERSION")`) to the
 /// preload, which publishes it as `process.versions.nub` — the universal
@@ -2031,7 +2036,7 @@ pub(crate) const NEUTRALIZE_LOCALSTORAGE_ENV: &str = "__NUB_NEUTRALIZE_LOCALSTOR
 /// permitted by the brand boundary. Unlike the localStorage signal it is NOT
 /// deleted by the preload, so it inherits into augmented descendants (which run
 /// the same preload via NODE_OPTIONS) and they advertise the marker too.
-pub(crate) const VERSION_ENV: &str = "__NUB_VERSION";
+const VERSION_ENV: &str = "__NUB_VERSION";
 
 /// Tells nub's fast-tier preload to register its module hooks via the ASYNC
 /// loader-worker path (`module.register`) instead of the sync
@@ -2042,7 +2047,7 @@ pub(crate) const VERSION_ENV: &str = "__NUB_VERSION";
 /// (like [`VERSION_ENV`]) so every child in a tsx run composes async. An internal
 /// `__NUB_*` plumbing var, NOT a user knob — explicitly permitted by the brand
 /// boundary.
-pub(crate) const FORCE_ASYNC_TIER_ENV: &str = "__NUB_FORCE_ASYNC_TIER";
+const FORCE_ASYNC_TIER_ENV: &str = "__NUB_FORCE_ASYNC_TIER";
 
 /// Node versions where the async `module.register` loader's `resolveSync`/
 /// `loadSync` are unimplemented stubs that throw `ERR_METHOD_NOT_IMPLEMENTED`.
@@ -2053,7 +2058,7 @@ pub(crate) const FORCE_ASYNC_TIER_ENV: &str = "__NUB_FORCE_ASYNC_TIER";
 /// inclusive; 24.11.1+/25.2+/26 are fine. Refs nodejs/node#59666. (A later 22.x
 /// that backported the fix would be over-covered here — harmless, since the
 /// async tier composes correctly on every version.)
-pub(crate) fn node_hook_compose_broken(v: &super::version::NodeVersion) -> bool {
+fn node_hook_compose_broken(v: &super::version::NodeVersion) -> bool {
     use super::version::NodeVersion;
     *v >= NodeVersion::new(22, 15, 0) && *v <= NodeVersion::new(24, 11, 0)
 }
@@ -2064,7 +2069,7 @@ pub(crate) fn node_hook_compose_broken(v: &super::version::NodeVersion) -> bool 
 /// argv[0]) so an env-prefixed/compound script (`NODE_ENV=prod tsx x`) is still
 /// caught; a rare false positive (a literal `echo tsx`) only makes that one
 /// process use nub's async tier, which is always correct — never a crash.
-pub(crate) fn child_hosts_async_loader<'a>(tokens: impl IntoIterator<Item = &'a str>) -> bool {
+fn child_hosts_async_loader<'a>(tokens: impl IntoIterator<Item = &'a str>) -> bool {
     tokens.into_iter().any(|tok| {
         let flag = tok.split_once('=').map_or(tok, |(f, _)| f);
         if matches!(flag, "--import" | "--loader" | "--experimental-loader") {
@@ -2208,12 +2213,6 @@ fn to_file_url(path: &str, windows: bool) -> String {
         // Drive: C:/a/b -> file:///C:/a/b
         format!("file:///{forward}")
     }
-}
-
-/// Public path -> `file://` URL conversion for the current platform. Used wherever
-/// nub injects `--import <url>` for the preload.
-pub fn path_to_file_url(path: &str) -> String {
-    to_file_url(path, cfg!(windows))
 }
 
 /// How nub injects its preload, chosen BY TIER. The fast tier (Node 22.15+) loads a
@@ -2369,23 +2368,51 @@ fn find_preload(nub_binary: &Path) -> Option<String> {
         })
     }
 
-    // Dev / feature-off: walk up from the binary's directory to find
-    // runtime/preload.mjs (the in-repo, live-editable sidecar).
+    // Dev / feature-off: locate runtime/preload.mjs (the in-repo, live-editable
+    // sidecar) by two independent routes, so a dev binary augments identically to
+    // CI no matter which target dir the build landed in.
+    //
+    // Route 1 — walk up from the binary's directory. Hits the sidecar when the
+    // target dir sits under the repo (a plain `cargo build` into `<repo>/target`,
+    // which is what CI does).
+    //
+    // Route 2 — the source tree that COMPILED this binary (`CARGO_MANIFEST_DIR` →
+    // `<repo>/runtime`). A build routed to a target dir with no `runtime/` ancestor
+    // — the shared cross-worktree dir (`~/.cache/nub/shared-target`) that
+    // `scripts/rust-build.sh` uses on the fast path — has no sidecar to walk to, so
+    // route 1 fails and the binary would otherwise run WHOLLY un-augmented. That
+    // silent local/CI behavior split is exactly the gap that let a
+    // lifecycle-augmentation hang survive the whole suite (#528); route 2 is
+    // layout-agnostic and closes it.
+    //
+    // Both routes compile ONLY here: the shipped binary is built with
+    // `embed-runtime` and resolves its preload from the embedded blob above, never
+    // reaching this branch — so the compile-time source path can never leak into a
+    // released nub.
     #[cfg(not(feature = "embed-runtime"))]
     {
-        let mut dir = nub_binary.parent()?.to_path_buf();
-        for _ in 0..5 {
-            let candidate = dir.join("runtime").join("preload.mjs");
-            if candidate.is_file() {
-                // Strip the `\\?\` verbatim prefix `fs::canonicalize` adds on Windows so
-                // the path is usable in NODE_PATH and convertible to a valid file:// URL.
-                return candidate.to_str().map(|s| strip_verbatim(s, cfg!(windows)));
-            }
-            if !dir.pop() {
-                break;
+        if let Some(mut dir) = nub_binary.parent().map(Path::to_path_buf) {
+            for _ in 0..5 {
+                let candidate = dir.join("runtime").join("preload.mjs");
+                if candidate.is_file() {
+                    // Strip the `\\?\` verbatim prefix `fs::canonicalize` adds on Windows so
+                    // the path is usable in NODE_PATH and convertible to a valid file:// URL.
+                    return candidate.to_str().map(|s| strip_verbatim(s, cfg!(windows)));
+                }
+                if !dir.pop() {
+                    break;
+                }
             }
         }
-        tracing::warn!("preload not found relative to nub binary");
+        // `canonicalize` doubles as the existence check and resolves the `../..`
+        // (and any symlink) so NODE_OPTIONS / the file:// URL carry a clean absolute
+        // path, matching route 1's output shape.
+        let source_preload =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../runtime/preload.mjs");
+        if let Ok(canon) = fs::canonicalize(&source_preload) {
+            return canon.to_str().map(|s| strip_verbatim(s, cfg!(windows)));
+        }
+        tracing::warn!("preload not found relative to nub binary or source root");
         None
     }
 }
@@ -2442,7 +2469,7 @@ const REAP_LEGACY_ENTRY_CAP: usize = 256;
 /// a directory scan + per-entry `stat`, which is exactly the synchronous cost the
 /// latency-sensitive run path must not pay. Drive it ONLY off the thread via
 /// [`spawn_stale_shim_reaper`], which detaches it so the run never waits on it.
-pub fn reap_stale_shims() {
+fn reap_stale_shims() {
     reap_stale_shims_in(&env::temp_dir(), std::process::id(), pid_is_alive);
 }
 

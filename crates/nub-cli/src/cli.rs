@@ -155,6 +155,24 @@ fn emit_ndjson_summary(passed: usize, failed: usize) {
 /// dependency spun up a thread during init (A19). Set once; never mutated after.
 static ENV_FILE_VARS: OnceLock<HashMap<String, String>> = OnceLock::new();
 
+/// Raw (unexpanded, un-stripped) merge of the explicit `--env-file` contents —
+/// the values Node's own `--env-file` parser delivers. The watch path forwards
+/// the explicit files to the watched Node (#479) and compares [`ENV_FILE_VARS`]
+/// against this map to inject only keys whose `${VAR}` expansion changed the
+/// raw value (see [`watch_inject_vars`]); every plain var is left to Node's
+/// re-read so it live-reloads across restarts.
+static ENV_FILE_VARS_RAW: OnceLock<HashMap<String, String>> = OnceLock::new();
+
+/// Explicit `--env-file` / `--env-file-if-exists` paths in command-line order
+/// (absolutized against the scan-time cwd — the directory `read_env_file`
+/// resolved them from), tagged with the if-exists flavor. Retained for the
+/// watch path, which forwards them to the watched Node as `--env-file*` args
+/// so Node watches each file and every restarted child re-reads it (#479);
+/// the parsed values in [`ENV_FILE_VARS`] alone would freeze at their startup
+/// snapshot because the long-lived watch supervisor never restarts. Non-watch
+/// paths never read this.
+static ENV_FILE_PATHS: OnceLock<Vec<(PathBuf, bool)>> = OnceLock::new();
+
 /// Whether at least one `--env-file` flag was present on the command line.
 /// Distinct from `ENV_FILE_VARS` being empty: a user may pass `--env-file` to an
 /// empty file (zero vars) yet still have signalled intent. When set, nub's eager
@@ -271,25 +289,58 @@ fn watch_inject_vars<'a>(
         .collect()
 }
 
-/// Render an auto-discovered watch env file for Node's platform-specific watcher.
-/// Node 20.11 on Linux rejects absolute `--env-file` paths even when the file
-/// exists. Node 24's Windows watcher also aborts when an argv path contains an
-/// 8.3 component (for example `RUNNER~1`) but the filesystem event arrives with
-/// the long spelling. Keep Windows absolute and expand only short components;
-/// make Unix cwd-relative without canonicalizing so symlink and watch identity
-/// stay unchanged.
-fn watch_env_file_arg(path: &Path, cwd: &Path, windows: bool) -> Result<String> {
+/// Whether the watch path forwards the explicit `--env-file` flags to the
+/// watched Node (#479): the pinned Node must accept every flag flavor present —
+/// `--env-file` landed in 20.6.0, `--env-file-if-exists` in 22.9.0. All-or-
+/// nothing per run: mixing forwarded and injected explicit files would corrupt
+/// last-writer-wins precedence. Below the floor the watch path falls back to
+/// whole-map injection (values freeze at startup — the pre-#479 behavior).
+fn should_forward_explicit_env_files(
+    version: &nub_core::node::version::NodeVersion,
+    explicit: &[(PathBuf, bool)],
+) -> bool {
+    use nub_core::node::version::NodeVersion;
+    if explicit.is_empty() {
+        return false;
+    }
+    let needs_if_exists = explicit.iter().any(|(_, if_exists)| *if_exists);
+    *version >= NodeVersion::new(20, 6, 0)
+        && (!needs_if_exists || *version >= NodeVersion::new(22, 9, 0))
+}
+
+/// Render a forwarded watch env file (auto-discovered or explicit) for Node's
+/// platform-specific watcher. Node 20.11 on Linux rejects absolute `--env-file`
+/// paths even when the file exists. Node 24's Windows watcher also aborts when
+/// an argv path contains an 8.3 component (for example `RUNNER~1`) but the
+/// filesystem event arrives with the long spelling. Keep Windows absolute and
+/// expand only short components; make Unix cwd-relative without canonicalizing
+/// so symlink and watch identity stay unchanged. `if_exists` picks the
+/// `--env-file-if-exists` spelling (and tolerates an absent file, which that
+/// flag's semantics allow).
+fn watch_env_file_arg(path: &Path, cwd: &Path, windows: bool, if_exists: bool) -> Result<String> {
+    let flag = if if_exists {
+        "--env-file-if-exists"
+    } else {
+        "--env-file"
+    };
     if !path.is_absolute() || !cwd.is_absolute() {
         bail!("watch env-file paths and cwd must be absolute");
     }
 
     if windows {
-        let path = windows_long_watch_path(path)?;
+        // GetLongPathNameW fails on a nonexistent path; an absent if-exists
+        // target is legal (Node silently no-ops), so forward it verbatim — an
+        // unwatchable file has no event for the 8.3-spelling mismatch to bite.
+        let path = if if_exists && !path.exists() {
+            path.to_path_buf()
+        } else {
+            windows_long_watch_path(path)?
+        };
         let path = path
             .to_str()
             .context("watch env-file path is not valid UTF-8")?;
         let path = strip_windows_verbatim_prefix(path);
-        return Ok(format!("--env-file={path}"));
+        return Ok(format!("{flag}={path}"));
     }
 
     for (parent_count, ancestor) in cwd.ancestors().enumerate() {
@@ -307,7 +358,7 @@ fn watch_env_file_arg(path: &Path, cwd: &Path, windows: bool) -> Result<String> 
         let relative = relative
             .to_str()
             .context("watch env-file relative path is not valid UTF-8")?;
-        return Ok(format!("--env-file={relative}"));
+        return Ok(format!("{flag}={relative}"));
     }
 
     bail!(
@@ -771,7 +822,9 @@ pub enum Command {
         #[arg(short = 'q', long)]
         quiet: bool,
 
-        /// Accepted for `npx` parity; a no-op — nubx never prompts before fetching.
+        /// Consent up-front to the implicit registry fetch (`npx -y`): skips the
+        /// first-fetch prompt and is the escape hatch out of the CI / non-TTY
+        /// fail-closed default.
         #[arg(short = 'y', long)]
         yes: bool,
 
@@ -1028,6 +1081,26 @@ pub enum ColorWhen {
 
 /// Top-level entry point. Returns the process exit code.
 pub fn run() -> Result<i32> {
+    // The macOS parent-death watcher (#480) re-invokes `current_exe()` with this
+    // hidden verb — and `current_exe()` is whatever NAME nub is running under,
+    // which for any workload spawned through nub's own PATH shim is `node`, not
+    // `nub`. Dispatching it here, BEFORE `Argv0::detect()`, is what makes the
+    // verb argv0-independent. Routing it through the argv0 match instead let
+    // `Argv0::Node` treat `__pdeath-watch` as a SCRIPT to run, which spawned a
+    // workload — and therefore another watcher — per level, an unbounded
+    // self-replicating chain that exhausted the process table (regression from #504).
+    //
+    // Landing above the guards below is also deliberate: the watcher must not
+    // reclaim or reap PATH shim dirs, which belong to the nub that spawned it.
+    #[cfg(unix)]
+    {
+        let mut args = env::args().skip(1);
+        if args.next().as_deref() == Some("__pdeath-watch") {
+            let rest: Vec<String> = args.collect();
+            return Ok(nub_core::node::spawn::run_pdeath_watch(&rest));
+        }
+    }
+
     // Reclaim the active PATH shim temp dir exactly once, on return. The shim
     // is created lazily/idempotently by the spawn paths and is process-wide; it
     // must outlive every — possibly parallel — child, so
@@ -1051,6 +1124,21 @@ pub fn run() -> Result<i32> {
     nub_core::node::spawn::spawn_stale_shim_reaper();
 
     let argv0 = Argv0::detect();
+
+    // The engine's lazy node-gyp shims re-invoke `current_exe()` with this hidden
+    // verb mid-lifecycle-script, and `current_exe()` carries whatever NAME nub is
+    // running under — a PM shim when the install was driven through one. Force the
+    // `nub` identity so the verb resolves exactly as it does under argv0 `nub`;
+    // left to the argv0 match below, a shim-named re-invocation instead hands the
+    // verb to the PM engine (`ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL`), runs it as a
+    // SCRIPT under `node`, or — under `nubx` — tries to FETCH it from the registry
+    // as a package name. Same argv0-coupling class as the parent-death watcher
+    // above; that one wants the minimal short-circuit, this one wants the full
+    // `run_nub` path (its bootstrap relies on the guards above).
+    if !matches!(argv0, Argv0::Nub) && env::args().nth(1).as_deref() == Some("__node-gyp-bootstrap")
+    {
+        return run_nub();
+    }
 
     match argv0 {
         Argv0::Nubx => run_nubx(),
@@ -1376,6 +1464,11 @@ fn run_nub() -> Result<i32> {
     let mut rest: Vec<String> = Vec::new();
     let mut subcommand_found = false;
     let mut env_file_vars: std::collections::HashMap<String, String> = Default::default();
+    // Parallel raw (pre-expansion) merge + the flag paths themselves, retained
+    // for the watch path's --env-file forwarding (#479). See ENV_FILE_VARS_RAW /
+    // ENV_FILE_PATHS.
+    let mut env_file_raw_vars: std::collections::HashMap<String, String> = Default::default();
+    let mut env_file_paths: Vec<(PathBuf, bool)> = Vec::new();
     // Tracks whether any `--env-file` flag appeared, independent of whether it
     // yielded vars (an empty file still counts as intent). Drives suppression of
     // the eager `.env*` auto-discovery.
@@ -1488,17 +1581,35 @@ fn run_nub() -> Result<i32> {
                 };
                 if !file_path.is_empty() {
                     let path = std::path::Path::new(&file_path);
+                    // Absolutize against the CURRENT cwd — the directory
+                    // read_env_file resolves the relative path from right below
+                    // (this scan runs before any `--cwd` chdir) — so the watch
+                    // path's forwarding names the same file the parse read.
+                    let abs_path = if path.is_absolute() {
+                        Some(path.to_path_buf())
+                    } else {
+                        env::current_dir().ok().map(|d| d.join(path))
+                    };
                     // `--env-file-if-exists`: a non-existent file is a silent no-op
                     // (Node's whole reason for the flag). A file that DOES exist but
                     // can't be read still surfaces the error, matching Node — only
                     // the missing-file case is suppressed.
                     if if_exists && !path.exists() {
-                        // silent no-op
+                        // Silent no-op for values — but still retained for watch
+                        // forwarding: Node's own `--env-file-if-exists` no-ops on
+                        // an absent file too, and a restarted child picks the file
+                        // up if it appears later (parity).
+                        if let Some(abs) = abs_path {
+                            env_file_paths.push((abs, if_exists));
+                        }
                     } else if let Some(content) =
                         // read_env_file refuses non-regular files (e.g. /dev/zero) and
                         // oversized files, so a hostile --env-file can't hang or OOM.
                         nub_core::workspace::env::read_env_file(path)
                     {
+                        if let Some(abs) = abs_path {
+                            env_file_paths.push((abs, if_exists));
+                        }
                         // Route through parse_env (not dotenvy directly) so the
                         // explicit --env-file flag strips backtick-quoted values
                         // like Node's parser, matching the .env auto-load path.
@@ -1508,9 +1619,13 @@ fn run_nub() -> Result<i32> {
                             // variables defined in previous files" (doc/api/cli.md).
                             // Shell env still wins over all of them — enforced later
                             // in `overlay_env_file_vars` (skips keys already set).
+                            env_file_raw_vars.insert(k.clone(), v.clone());
                             env_file_vars.insert(k, v);
                         }
                     } else {
+                        // Warn-and-continue (softer than Node's hard error) — and do
+                        // NOT retain the path: forwarding an unreadable file would
+                        // turn the warning into a per-restart child error under watch.
                         eprintln!("nub: cannot read env file: {file_path}");
                     }
                 }
@@ -1551,14 +1666,14 @@ fn run_nub() -> Result<i32> {
             _ => {
                 // Check if this is the first positional and matches a subcommand
                 // (nub-native, a verb registered to the embedded PM engine, or
-                // a hidden re-entry verb: the engine's lazy node-gyp shims and
-                // the macOS parent-death watcher both re-invoke current_exe()
-                // with theirs).
+                // the engine's hidden node-gyp re-entry verb — its lazy shims
+                // re-invoke current_exe() with it mid-lifecycle-script). The
+                // parent-death watcher's verb is handled in `run()`, above
+                // argv0 dispatch, so it never reaches here.
                 if rest.is_empty()
                     && !arg.starts_with('-')
                     && (SUBCOMMANDS.contains(&arg.as_str())
                         || arg == "__node-gyp-bootstrap"
-                        || (cfg!(unix) && arg == "__pdeath-watch")
                         || crate::pm_engine::lookup_verb(arg).is_some())
                 {
                     subcommand_found = true;
@@ -1606,6 +1721,13 @@ fn run_nub() -> Result<i32> {
     // dep threads during init. Shell-wins / `.env`-override precedence is applied
     // at each spawn site via overlay_env_file_vars / apply_env_file_vars.
     let _ = ENV_FILE_VARS.set(env_file_vars);
+    // Raw values + flag paths for the watch path's --env-file forwarding (#479).
+    // The raw map deliberately keeps denied keys: watch_inject_vars iterates the
+    // stripped ENV_FILE_VARS side, so a denied key is never injected, and the
+    // forwarded file's copy is neutralized by the watch env guard's placeholder
+    // pinning (Node's --env-file never overrides an already-set var).
+    let _ = ENV_FILE_VARS_RAW.set(env_file_raw_vars);
+    let _ = ENV_FILE_PATHS.set(env_file_paths);
     // Record flag presence so the run/watch paths can suppress eager `.env*`
     // auto-discovery when the user named explicit env file(s).
     let _ = ENV_FILE_PRESENT.set(env_file_present);
@@ -1981,14 +2103,6 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
         return crate::pm_engine::run_node_gyp_bootstrap(&rest[1..]);
     }
 
-    // The macOS parent-death watcher (#480) re-invokes current_exe() with this
-    // hidden verb; intercept before clap and run the minimal watcher loop
-    // directly (see nub_core::node::spawn::spawn_group_reaper).
-    #[cfg(unix)]
-    if subcommand == "__pdeath-watch" {
-        return Ok(nub_core::node::spawn::run_pdeath_watch(&rest[1..]));
-    }
-
     // Compatibility alias: npm and pnpm treat `install <pkg>` / `i <pkg>` (and
     // the global form `install -g <pkg>`) as a package add. Route that shape
     // through the engine's `add` implementation, translating npm save/spec/
@@ -2275,28 +2389,17 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
                     &ws_opts,
                 )
             } else {
-                // Unified-runner resolution chain: file → script → (bin →
-                // registry). The file/script tiers are nub's addition over npx's
-                // bins-only model; the bin→registry tail lives in
-                // `run_exec_with_dlx`. The order matches `run`/`mux` so a token
-                // means the same thing on every nub surface (file > script > bin),
-                // and scripts beat bins. A `-p`/`--package` spec is an explicit
-                // "fetch this package", so it skips local resolution entirely
-                // (npx behaves the same — a local bin never shadows `-p`).
-                if package.is_empty()
-                    && let Some(result) = nubx_resolve_local(&bin, node, &args)
-                {
-                    result
-                } else {
-                    let dlx_flags = NubxDlxFlags {
-                        package,
-                        // `--no` is npx's alias for `--no-install`: refuse to fetch.
-                        no_install: no_install || no_fetch,
-                        quiet,
-                        yes,
-                    };
-                    run_exec_with_dlx(&bin, node, &args, Some(&dlx_flags))
-                }
+                // Local bin → registry, npx's model. `run_exec_with_dlx` owns the
+                // tail: it resolves `node_modules/.bin` first and only a miss reaches
+                // the consent-gated fetch.
+                let dlx_flags = NubxDlxFlags {
+                    package,
+                    // `--no` is npx's alias for `--no-install`: refuse to fetch.
+                    no_install: no_install || no_fetch,
+                    quiet,
+                    yes,
+                };
+                run_exec_with_dlx(&bin, node, &args, Some(&dlx_flags))
             }
         }
         Some(Command::Init {
@@ -2406,24 +2509,25 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
 }
 
 fn run_nubx() -> Result<i32> {
-    // nubx is a PURE PASS-THROUGH runner: locate the SUBJECT token, decide its TIER
-    // by precedence (file > script > bin > registry), then hand the RAW remaining
-    // argv to that tier's existing runner unchanged. Subject location is asymmetric
-    // — the open-ended Node/FILE tier scans a baked Node arity table while the
-    // closed nub-owned tiers resolve through clap (the `Nubx` grammar, or a
-    // re-dispatch to `nub run`). The classifier is `crate::nubx_resolve::classify`;
-    // this function only maps each route to its runner. See that module for why the
-    // two mechanisms are needed (clap fails-closed on a future Node flag).
+    // `nubx <bin> [args...]` is nub's `npx`: a locally-installed bin runs out of
+    // `node_modules/.bin` with no network, and a local miss falls back to fetching
+    // the tool and running it. Resolution is BINS-ONLY — a file is `nub <file>`, a
+    // script is `nub run <script>`. (nubx briefly resolved those tiers too; that was
+    // reverted, so a bare token here is always a bin/package name.)
+    //
+    // The registry fallthrough is IMPLICIT, so it is consent-gated where it happens
+    // in `run_exec_with_dlx`: prompt once per spec in a terminal, fail closed in CI
+    // and any non-TTY, `-y` to bypass. Explicit `nub dlx` skips the gate entirely.
+    //
+    // Three-position rule: a flag BEFORE the bin (`nubx --node eslint`, `nubx -p
+    // left-pad pad`) is nubx's; a flag AFTER it reaches the bin verbatim.
     let mut args: Vec<String> = env::args().skip(1).collect();
 
-    // `--help`/`--version` are nubx's own flags only when they appear BEFORE the
-    // subject (the three-position rule: a flag after the subject reaches the
-    // resolved runner verbatim — `nubx eslint --help` is eslint's help). When no
-    // subject has been seen yet and one of these leading flags appears, honor it
-    // like `nub --help`/`nub --version`.
+    // `--help`/`--version` are nubx's own only BEFORE the bin positional — after it
+    // they belong to the bin (`nubx eslint --help` is eslint's help).
     for arg in &args {
         if arg == "--" || !arg.starts_with('-') {
-            break; // subject (or its `--` separator) — stop scanning
+            break; // bin positional (or its `--` separator) — stop scanning
         }
         match arg.as_str() {
             "--help" | "-h" => {
@@ -2438,15 +2542,12 @@ fn run_nubx() -> Result<i32> {
         }
     }
 
-    // `--no-env-file` in the LEADING region. Because it WINS over `--env-file`,
-    // and the standalone-nubx File tier would otherwise FORWARD a leading
-    // `--env-file`/`--env-file-if-exists` to Node (which loads it), the whole
-    // `--env-file*` family is stripped alongside `--no-env-file` — otherwise
-    // `--no-env-file` fails to win on this surface (the Nub-entry path already
-    // captures those flags itself, so the leak is nubx-only). Both scans below
-    // account for the space-form value token so a flag's value is never taken as
-    // the subject; the leading-only scope preserves a post-subject occurrence as
-    // the program's own arg.
+    // `--no-env-file` in the LEADING region. The `Nubx` clap grammar carries no
+    // env-file flags, so this family has to be consumed here or clap rejects it as
+    // unknown. `--no-env-file` WINS over `--env-file`, so the whole `--env-file*`
+    // family is stripped alongside it. Both scans account for the space-form value
+    // token so a flag's value is never mistaken for the bin; the leading-only scope
+    // preserves a post-bin occurrence as the program's own arg.
     let is_env_file_value_flag = |a: &str| a == "--env-file" || a == "--env-file-if-exists";
     let mut no_env_file_seen = false;
     let mut idx = 0;
@@ -2492,88 +2593,20 @@ fn run_nubx() -> Result<i32> {
         args = stripped;
     }
 
-    let cwd = env::current_dir().ok();
-    // `is_script` is injected so the classifier stays filesystem-light: it reports
-    // whether a bare subject is a package.json script (the script tier, which beats
-    // bins and re-dispatches to `nub run` for the full run-flag surface).
-    let is_script = |token: &str| {
-        cwd.as_deref()
-            .and_then(nub_core::workspace::detect::detect_project)
-            .and_then(|p| nub_core::workspace::scripts::resolve_script(&p.manifest, token))
-            .is_some()
-    };
-
-    match crate::nubx_resolve::classify(&args, cwd.as_deref(), &is_script) {
-        // FILE/Node tier — a file subject, an `-e`/`--eval`/`--print` eval, or stdin.
-        // Delegate the raw argv (nub's `--node` already stripped) to the file runner;
-        // Node binds flags-vs-entry. This is the headline #224 fix: a leading Node
-        // flag (`--inspect`, `--import x`, `-e`) now reaches Node instead of
-        // clap-erroring.
-        crate::nubx_resolve::NubxRoute::File { compat, argv } => {
-            run_file_with_compat(&argv, compat)
-        }
-        // SCRIPT tier — re-dispatch the original argv through `nub run`, whose full
-        // grammar (`--if-present`, `--filter`, `--reporter`, …) the `Nubx` grammar
-        // lacks. The subject was confirmed a script, so `run` resolves it directly.
-        crate::nubx_resolve::NubxRoute::Script => {
-            let mut rest = vec!["run".to_string()];
-            rest.extend(args);
-            dispatch_subcommand(rest)
-        }
-        // BIN / REGISTRY / workspace-bin tier, a `-p`-forced fetch, or no subject —
-        // the existing `Nubx` clap dispatch. Arm the DLX fallback (a local miss
-        // fetches-and-runs, gated) exactly as before.
-        crate::nubx_resolve::NubxRoute::Owned => {
-            if args.is_empty() || args.iter().all(|a| a.starts_with('-') && a != "--") {
-                bail!(
-                    "nubx: missing binary name\nUsage: nubx [-p <spec>] [--node] [--no-install] <bin> [args...]"
-                );
-            }
-            NUBX_DLX_FALLBACK.store(true, Ordering::Relaxed);
-            let mut rest = vec!["nubx".to_string()];
-            rest.extend(args);
-            dispatch_subcommand(rest)
-        }
-    }
-}
-
-/// The local tiers of `nubx`'s unified resolution chain — FILE then SCRIPT —
-/// tried before the bin → registry tail in [`run_exec_with_dlx`]. Returns
-/// `Some(result)` when a tier matched and ran; `None` to fall through. Only the
-/// bare single-tool path reaches here (`-p` and the workspace flags never do).
-///
-/// Precedence is file > script, matching `run`/`mux` so a token resolves the same
-/// way on every nub surface; scripts then beat bins in the tail. The local tiers
-/// never touch the network — only a full local miss reaches the gated registry.
-fn nubx_resolve_local(token: &str, compat_mode: bool, args: &[String]) -> Option<Result<i32>> {
-    let cwd = env::current_dir().ok()?;
-
-    // FILE tier: a path-shaped token, or a file by that exact name in cwd. The
-    // verbatim-existence check (not extension sniffing) runs an extensionless
-    // `./cli` or a bare `index.ts` when it is a real file — mirroring `mux`. A
-    // path-shaped token is a file *intent* even when missing: let the file runner
-    // emit the not-found rather than misread `./foo` as a script/bin/package.
-    if crate::nubx_resolve::is_path_shaped(token) || cwd.join(token).is_file() {
-        let mut file_args = Vec::with_capacity(args.len() + 1);
-        file_args.push(token.to_string());
-        file_args.extend(args.iter().cloned());
-        return Some(run_file_with_compat(&file_args, compat_mode));
+    if args.is_empty() || args.iter().all(|a| a.starts_with('-') && a != "--") {
+        // No bin name at all (empty, or only leading flags like `nubx --node`).
+        bail!(
+            "nubx: missing binary name\nUsage: nubx [-p <spec>] [--node] [--no-install] <bin> [args...]"
+        );
     }
 
-    // SCRIPT tier: a package.json script named exactly `token`, run through the
-    // same single-script path `nub run <script>` uses (lifecycle hooks + the
-    // `$ <cmd>` echo intact). Scripts beat bins — consistency with run/mux, and a
-    // colliding script is far easier to rename than a dependency's `.bin` name.
-    let project = nub_core::workspace::detect::detect_project(&cwd)?;
-    let cmd = nub_core::workspace::scripts::resolve_script(&project.manifest, token)?;
-    Some(run_single_script(
-        token,
-        &cmd,
-        &project,
-        compat_mode,
-        args,
-        &ScriptExecOpts::default(),
-    ))
+    // Arm the registry fallback for the exec path below — `nub exec` itself stays
+    // no-network, so only the `nubx` entry point can reach the gated registry tier.
+    NUBX_DLX_FALLBACK.store(true, Ordering::Relaxed);
+
+    let mut rest = vec!["nubx".to_string()];
+    rest.extend(args);
+    dispatch_subcommand(rest)
 }
 
 fn run_as_node() -> Result<i32> {
@@ -3670,9 +3703,9 @@ fn run_single_script(
     exec: &ScriptExecOpts,
 ) -> Result<i32> {
     // Pre-run dependency-freshness gate (#252) for direct callers that bypass
-    // `run_script` — the `nubx`/`nub x` script tier (`nubx_resolve_local`). A
-    // `nub run` already gated at `run_script`, and a workspace fan-out gated at
-    // its root, so the once-per-process latch makes this a no-op there.
+    // `run_script`. A `nub run` already gated at `run_script`, and a workspace
+    // fan-out gated at its root, so the once-per-process latch makes this a no-op
+    // there.
     if let Some(code) = crate::verify_deps::gate(&project.root, compat_mode) {
         return Ok(code);
     }
@@ -4660,12 +4693,20 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
             .map(|p| nub_core::workspace::env::discover_env_files(&p.root))
             .unwrap_or_default()
     };
+    // Explicit `--env-file` flags forward to the watched Node too (#479), so
+    // each file is watched and re-read per restart exactly like the autos —
+    // these are the candidates; the per-version gate lives below.
+    let explicit_env_files: &[(PathBuf, bool)] = if env_file_present && !no_env_file {
+        ENV_FILE_PATHS.get().map(|v| v.as_slice()).unwrap_or(&[])
+    } else {
+        &[]
+    };
     // A raw env-file path arms the child guard for the watch lifetime. Validate
     // its serialized ambient state before Node discovery: an uncached
     // `node --version` probe inherits NODE_OPTIONS, so waiting until command
     // assembly would let invalid bytes fail with an unrelated Node error first.
     if !compat_mode
-        && !env_file_paths.is_empty()
+        && (!env_file_paths.is_empty() || !explicit_env_files.is_empty())
         && env::var_os("NODE_OPTIONS").is_some_and(|value| value.to_str().is_none())
     {
         bail!("watch env-file filtering requires NODE_OPTIONS to be valid UTF-8");
@@ -4736,12 +4777,27 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     // single read (rather than `load_env_files` + a second `load_env_files_raw`)
     // avoids re-parsing every file twice and closes the TOCTOU window where a file
     // changing between two reads could spuriously inject a plain var.
+    // Forward the explicit `--env-file` files only when the pinned Node accepts
+    // every flag flavor present (#479). All-or-nothing: mixing forwarded and
+    // injected explicit files would corrupt last-writer-wins precedence (an
+    // injected earlier file, arriving via the inherited env, would beat a
+    // forwarded later one — Node's `--env-file` never overrides an already-set
+    // var). Below the gate, fall back to whole-map injection: values freeze at
+    // their startup snapshot (the pre-#479 behavior — degraded, never broken).
+    let forward_explicit = should_forward_explicit_env_files(&node.version, explicit_env_files);
     let raw_env = if env_file_present || no_env_file {
-        // `--env-file` suppresses auto-discovery: no auto `--env-file` args reach
-        // Node, so injection is the only delivery channel — leave `raw_env` empty
-        // so the inject loop injects every var (see `watch_inject_vars`). Under
-        // `--no-env-file` `merge_child_env` returns empty, so nothing is injected.
-        HashMap::new()
+        if forward_explicit {
+            // The explicit files reach Node as `--env-file` args below, so the
+            // inject loop must skip everything Node delivers identically — hand
+            // it the raw (unexpanded) explicit merge, same as the auto path.
+            ENV_FILE_VARS_RAW.get().cloned().unwrap_or_default()
+        } else {
+            // No `--env-file` args reach Node, so injection is the only delivery
+            // channel — leave `raw_env` empty so the inject loop injects every
+            // var (see `watch_inject_vars`). Under `--no-env-file`
+            // `merge_child_env` returns empty, so nothing is injected.
+            HashMap::new()
+        }
     } else {
         project
             .as_ref()
@@ -4790,7 +4846,15 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     for path in env_file_paths.iter().rev() {
         // `cmd` inherits `cwd`; the helper chooses the path form required by the
         // platform watcher without changing cwd or file precedence.
-        node_args.push(watch_env_file_arg(path, &cwd, cfg!(windows))?);
+        node_args.push(watch_env_file_arg(path, &cwd, cfg!(windows), false)?);
+    }
+    // Explicit `--env-file` files forward in USER order — no reverse: Node is
+    // last-writer-wins and nub's parse across repeated flags is last-wins too,
+    // so the orders already agree (#479).
+    if forward_explicit {
+        for (path, if_exists) in explicit_env_files {
+            node_args.push(watch_env_file_arg(path, &cwd, cfg!(windows), *if_exists)?);
+        }
     }
 
     if let Some(preload) = &preload_path {
@@ -4820,8 +4884,11 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     // older bundled versions abort on the mismatch. Align only this raw-env
     // watch path's supervisor cwd; GetLongPathNameW preserves symlink/junction
     // identity and non-Windows behavior stays byte-for-byte unchanged.
+    // Whether ANY env file (auto-discovered or explicit) reaches Node as a raw
+    // `--env-file` arg — the trigger for the per-child guard machinery below.
+    let any_env_forwarded = !env_file_paths.is_empty() || forward_explicit;
     #[cfg(windows)]
-    if !env_file_paths.is_empty() {
+    if any_env_forwarded {
         cmd.current_dir(windows_long_watch_path(&cwd)?);
     }
     // Inject ONLY the .env* vars whose `${VAR}` expansion changed the raw value
@@ -4832,14 +4899,15 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     for (k, v) in watch_inject_vars(&env_vars, &raw_env) {
         cmd.env(k, v);
     }
-    // Node receives the auto-discovered files as raw `--env-file` paths and
-    // re-reads them in each watched child. Keep canonical placeholders in the
-    // preload-free supervisor so startup consumers cannot act on file values;
-    // an early child-only `--require` then removes every non-ambient denied
-    // spelling and restores the sanitized ambient NODE_OPTIONS before user
-    // preloads run. Arming by path presence, rather than current contents, keeps
-    // edits made after startup behind the same boundary.
-    if !env_file_paths.is_empty() {
+    // Node receives the forwarded files (auto-discovered + explicit) as raw
+    // `--env-file` paths and re-reads them in each watched child. Keep canonical
+    // placeholders in the preload-free supervisor so startup consumers cannot
+    // act on file values; an early child-only `--require` then removes every
+    // non-ambient denied spelling and restores the sanitized ambient
+    // NODE_OPTIONS before user preloads run. Arming by path presence, rather
+    // than current contents, keeps edits made after startup behind the same
+    // boundary.
+    if any_env_forwarded {
         if node_options_os.is_some() && node_options.is_none() {
             bail!("watch env-file filtering requires NODE_OPTIONS to be valid UTF-8");
         }
@@ -7999,11 +8067,11 @@ fn shim_plan(
             };
             // A name-only pin (devEngines.packageManager without a version)
             // constrains the NAME, not the version — prefer the user's own
-            // matching PM on PATH: zero network (a spec like "latest" or a
-            // lockfile family re-resolves against the registry on EVERY
-            // invocation) and no run-to-run drift as new versions publish.
-            // Provision the lockfile-implied family / registry latest only on
-            // a true PATH miss.
+            // matching PM on PATH: zero network (a lockfile-family range still
+            // re-resolves against the registry per invocation; "latest" is
+            // TTL-cached but pays a resolve on expiry) and no run-to-run drift
+            // as new versions publish. Provision the lockfile-implied family /
+            // registry latest only on a true PATH miss.
             if pin.version.is_none() {
                 let shim_dir = shim::shim_dir()?;
                 if let Some(system) = shim::find_system_pm(invoked.as_str(), &shim_dir) {
@@ -8048,12 +8116,15 @@ fn shim_plan(
                     env: Vec::new(),
                 });
             }
-            // True PATH miss: provision a dynamic default of the INVOKED PM —
+            // True PATH miss: run a dynamic default of the INVOKED PM —
             // announced, never a baked version, and the shim never writes a pin.
+            // "using", not "provisioning": with the dist-tag TTL cache a warm
+            // call resolves and execs with zero network, and the install path
+            // prints its own Installing…/Installed… lines when it does run.
             let root = shim_lockfile_root(cwd);
             let (spec, why) = dynamic_default_spec(invoked.pm(), &root)?;
             eprintln!(
-                "nub: no {} on PATH — provisioning {}@{spec} ({why}); one-time default, no pin written",
+                "nub: no {} on PATH — using {}@{spec} ({why}); one-time default, no pin written",
                 invoked.as_str(),
                 invoked.pm()
             );
@@ -8499,8 +8570,9 @@ mod tests {
             "an expansion-changed var must be injected with its expanded value; got {injected:?}"
         );
 
-        // Explicit `--env-file` case: `raw_env` is empty (Node gets no `--env-file`
-        // args), so injection is the only delivery channel — inject everything.
+        // Below-floor fallback (explicit `--env-file` on a Node without the flag):
+        // `raw_env` is empty — no `--env-file` args reach Node, so injection is
+        // the only delivery channel and everything is injected (frozen).
         let all: HashMap<_, _> = watch_inject_vars(&env_vars, &HashMap::new())
             .into_iter()
             .map(|(k, v)| (k.as_str(), v.as_str()))
@@ -8516,21 +8588,86 @@ mod tests {
     fn watch_env_file_arg_is_relative_to_the_watcher_cwd() {
         let root = std::env::temp_dir().join("nub-watch-env-arg-root");
         assert_eq!(
-            watch_env_file_arg(&root.join(".env"), &root, false).unwrap(),
+            watch_env_file_arg(&root.join(".env"), &root, false, false).unwrap(),
             "--env-file=.env"
         );
 
         let member = root.join("packages").join("app");
         let one_level = Path::new("..").join(".env.local");
         assert_eq!(
-            watch_env_file_arg(&root.join("packages").join(".env.local"), &member, false,).unwrap(),
+            watch_env_file_arg(
+                &root.join("packages").join(".env.local"),
+                &member,
+                false,
+                false
+            )
+            .unwrap(),
             format!("--env-file={}", one_level.to_str().unwrap())
         );
         let two_levels = Path::new("..").join("..").join(".env");
         assert_eq!(
-            watch_env_file_arg(&root.join(".env"), &member, false).unwrap(),
+            watch_env_file_arg(&root.join(".env"), &member, false, false).unwrap(),
             format!("--env-file={}", two_levels.to_str().unwrap())
         );
+    }
+
+    #[test]
+    fn watch_env_file_arg_spells_the_if_exists_flag() {
+        let root = std::env::temp_dir().join("nub-watch-env-arg-if-exists");
+        // Unix: same cwd-relative form, if-exists spelling (#479).
+        assert_eq!(
+            watch_env_file_arg(&root.join("custom.env"), &root, false, true).unwrap(),
+            "--env-file-if-exists=custom.env"
+        );
+        // Windows: an ABSENT if-exists target must not fail long-path expansion —
+        // Node itself silently no-ops on it, so the arg forwards verbatim.
+        let arg = watch_env_file_arg(&root.join("missing.env"), &root, true, true).unwrap();
+        assert!(arg.starts_with("--env-file-if-exists="), "{arg}");
+        assert!(arg.ends_with("missing.env"), "{arg}");
+    }
+
+    #[test]
+    fn explicit_env_file_forwarding_gates_on_node_version() {
+        use nub_core::node::version::NodeVersion;
+        let plain = vec![(PathBuf::from("/p/custom.env"), false)];
+        let if_exists = vec![(PathBuf::from("/p/custom.env"), true)];
+        let mixed = vec![
+            (PathBuf::from("/p/a.env"), false),
+            (PathBuf::from("/p/b.env"), true),
+        ];
+
+        // No explicit files → nothing to forward.
+        assert!(!should_forward_explicit_env_files(
+            &NodeVersion::new(26, 0, 0),
+            &[]
+        ));
+        // `--env-file` needs Node 20.6.0.
+        assert!(!should_forward_explicit_env_files(
+            &NodeVersion::new(20, 5, 0),
+            &plain
+        ));
+        assert!(should_forward_explicit_env_files(
+            &NodeVersion::new(20, 6, 0),
+            &plain
+        ));
+        // `--env-file-if-exists` needs Node 22.9.0 — and one if-exists flag
+        // gates the whole set (all-or-nothing preserves precedence).
+        assert!(!should_forward_explicit_env_files(
+            &NodeVersion::new(22, 8, 0),
+            &if_exists
+        ));
+        assert!(should_forward_explicit_env_files(
+            &NodeVersion::new(22, 9, 0),
+            &if_exists
+        ));
+        assert!(!should_forward_explicit_env_files(
+            &NodeVersion::new(21, 0, 0),
+            &mixed
+        ));
+        assert!(should_forward_explicit_env_files(
+            &NodeVersion::new(26, 0, 0),
+            &mixed
+        ));
     }
 
     #[test]
@@ -8540,7 +8677,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(&path, "A=1\n").unwrap();
-        let arg = watch_env_file_arg(&path, &root, true).unwrap();
+        let arg = watch_env_file_arg(&path, &root, true, false).unwrap();
         let _ = std::fs::remove_dir_all(&root);
 
         assert!(arg.starts_with("--env-file="), "{arg}");
@@ -8593,8 +8730,10 @@ mod tests {
     #[test]
     fn watch_env_file_arg_rejects_relative_inputs() {
         let absolute = std::env::temp_dir().join("nub-watch-env-arg-absolute");
-        assert!(watch_env_file_arg(Path::new(".env"), &absolute, false).is_err());
-        assert!(watch_env_file_arg(&absolute.join(".env"), Path::new("project"), true).is_err());
+        assert!(watch_env_file_arg(Path::new(".env"), &absolute, false, false).is_err());
+        assert!(
+            watch_env_file_arg(&absolute.join(".env"), Path::new("project"), true, false).is_err()
+        );
     }
 
     #[cfg(unix)]
@@ -8607,19 +8746,19 @@ mod tests {
         let ancestor = base.join(&non_utf8);
         let cwd = ancestor.join("member");
         assert_eq!(
-            watch_env_file_arg(&ancestor.join(".env"), &cwd, false).unwrap(),
+            watch_env_file_arg(&ancestor.join(".env"), &cwd, false, false).unwrap(),
             format!("--env-file={}", Path::new("..").join(".env").display())
         );
 
         let non_utf8_file = cwd.join(std::ffi::OsString::from_vec(vec![b'.', 0xff]));
         assert!(
-            watch_env_file_arg(&non_utf8_file, &cwd, false)
+            watch_env_file_arg(&non_utf8_file, &cwd, false, false)
                 .unwrap_err()
                 .to_string()
                 .contains("not valid UTF-8")
         );
         assert!(
-            watch_env_file_arg(&non_utf8_file, &cwd, true)
+            watch_env_file_arg(&non_utf8_file, &cwd, true, false)
                 .unwrap_err()
                 .to_string()
                 .contains("not valid UTF-8")

@@ -967,14 +967,18 @@ fn apply_config_scope(
     // Scope the override sources to the role's dialect.
     let tagged = config_scope::gather_tagged_overrides(&manifest);
     let (effective, ignored) = config_scope::scope_overrides(role, major, minor, &tagged);
+    // Scope packageExtensions the same way: the top-level home is nub's neutral
+    // surface, honored only under nub identity and dropped under a compat role
+    // whose incumbent ignores it (see `scope_package_extensions`).
+    let (effective_pe, pe_ignored) = config_scope::scope_package_extensions(role, &manifest);
 
-    // Register the scoped source as the engine's sole override source, and
-    // the trusted-deps toggle (only bun honors `trustedDependencies`). Both
-    // are idempotent OnceLocks.
+    // Register the scoped sources as the engine's sole override / packageExtensions
+    // sources, and the trusted-deps toggle (only bun honors `trustedDependencies`).
     let trusted = config_scope::honors_trusted_dependencies(role);
     aube_util::update_engine_context(|c| {
         c.embedder_overrides = Some(effective);
         c.trusted_dependencies_honored = trusted;
+        c.embedder_package_extensions = Some(effective_pe);
     });
 
     if noise == ConfigScopeNoise::Warn {
@@ -986,6 +990,8 @@ fn apply_config_scope(
         {
             return Err(catalog_unsupported_error(role, &spec));
         }
+        let mut ignored = ignored;
+        ignored.extend(pe_ignored);
         emit_scope_warnings(role, &ignored);
 
         // Curated unsupported-config scan: FATAL-abort on the genuinely-hard
@@ -1379,18 +1385,31 @@ fn augmentation_to_lifecycle_overlay(
 /// Install nub's runtime augmentation onto the engine's lifecycle-script spawn
 /// env (via aube's generic [`aube::set_script_settings`] overlay), so dependency
 /// build scripts run under the project's provisioned + augmented Node — the same
-/// env `nub run` / `nub exec` give scripts. No-op (overlay stays default-empty,
-/// behavior preserved) when augmentation can't be computed (compat / re-entrant
-/// / broken install). Called once per command from [`engine_session`].
+/// env `nub run` / `nub exec` give scripts. The overlay stays default-empty
+/// (behavior preserved) when augmentation can't be computed (compat /
+/// re-entrant / broken install); the resolved Node *version* is published to the
+/// engine either way. Called once per command from [`engine_session`].
 fn apply_lifecycle_augmentation(cwd: &Path) {
-    let Ok(nub_binary) = nub_core::node::spawn::current_nub_binary() else {
-        return;
-    };
     // The project's Node — pin-aware (`.nvmrc`/`.node-version`/`engines`), NOT
     // the ambient PATH node. This resolved version drives flag injection and its
     // path pins npm_node_execpath. Mirrors build_script_command's discovery.
-    let node = nub_core::node::discovery::discover_node(cwd)
-        .unwrap_or_else(|_| nub_core::node::discovery::ResolvedNode::fallback());
+    let discovered = nub_core::node::discovery::discover_node(cwd);
+    // Published ABOVE the early returns: the engine keys its GVS virtual-store
+    // paths — and validates `engines.node` — off this version, so it has to name
+    // the Node dependency build scripts actually compile against. That stays the
+    // project's pin under `--node` / NODE_COMPAT, which disable augmentation but
+    // not version provisioning. Otherwise aube probes the ambient PATH node and
+    // two majors silently share one store entry. Deliberately left unset when
+    // discovery FAILS: build scripts then fall back to a bare `node`, so the
+    // PATH probe is the honest answer and a fabricated version would not be.
+    if let Ok(node) = &discovered {
+        let version = node.version.to_string();
+        aube_util::update_engine_context(|c| c.runtime_node_version = Some(version));
+    }
+    let Ok(nub_binary) = nub_core::node::spawn::current_nub_binary() else {
+        return;
+    };
+    let node = discovered.unwrap_or_else(|_| nub_core::node::discovery::ResolvedNode::fallback());
     let pnp_ctx = nub_core::pnp::detect(cwd);
     let Some(aug) = nub_core::node::spawn::compute_augmentation_env(
         &nub_binary,
@@ -1693,6 +1712,13 @@ pub(crate) fn engine_brand_preflight() {
         // bool because that posture defaults `true` in standalone aube, which
         // would activate the feature there and break default-preservation.
         c.named_registries_enabled = read_branded_pnpm_config;
+        // nub treats packageExtensions as a checksummed, drift-enforced config
+        // like pnpm: it stamps `packageExtensionsChecksum` on its own generic
+        // lockfile (nub.lock) and re-resolves / frozen-fails on a mismatch.
+        // Unconditional (not surface-gated) — harmless under lockfile kinds that
+        // carry no checksum (npm/yarn/bun locks), where stored and computed both
+        // resolve to `None`. Standalone aube leaves the default `false`.
+        c.enforce_package_extensions_checksum = true;
     });
     match surface {
         ConfigSurface::NubIdentity(dir) => {
