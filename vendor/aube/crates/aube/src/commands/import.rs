@@ -52,7 +52,7 @@ pub async fn run(args: ImportArgs) -> miette::Result<()> {
         ));
     }
 
-    let (mut graph, kind) = match aube_lockfile::parse_for_import(&cwd, &manifest) {
+    let (graph, kind) = match aube_lockfile::parse_for_import(&cwd, &manifest) {
         Ok(pair) => pair,
         Err(aube_lockfile::Error::NotFound(_)) => {
             return Err(miette!(
@@ -65,29 +65,11 @@ pub async fn run(args: ImportArgs) -> miette::Result<()> {
         }
     };
 
-    // A suffix-less source (npm / bun) carries no peer-context suffixes and no
-    // mirrored peer edges, but install treats aube-lock.yaml as an already
-    // peer-resolved incumbent and skips its peer pass — writing the parsed graph
-    // verbatim would leave store-resident packages with no sibling peer links at
-    // runtime (#453). Same pass, gating, and rationale as the pnpm-lock import
-    // path in nub's install_family (#471): hoist → apply with pnpm-default peer
-    // options → strip the hoist scaffolding; `filter_graph` intentionally
-    // omitted so the imported lockfile stays cross-platform; yarn excluded
-    // because yarn.lock records no per-entry `peerDependencies`.
-    if matches!(
-        kind,
-        aube_lockfile::LockfileKind::Npm
-            | aube_lockfile::LockfileKind::NpmShrinkwrap
-            | aube_lockfile::LockfileKind::Bun
-    ) {
-        let (hoisted, auto_installed) = aube_resolver::hoist_auto_installed_peers(graph);
-        graph = aube_resolver::apply_peer_contexts(
-            hoisted,
-            &aube_resolver::PeerContextOptions::default(),
-        )
+    // install treats aube-lock.yaml as an already peer-resolved incumbent, so a
+    // suffix-less source (npm / bun) has to be contextualized here or the
+    // written lockfile is missing peer edges nothing downstream restores (#453).
+    let graph = aube_resolver::peer_pass_for_import(graph, kind)
         .map_err(|e| miette!("peer-context pass failed: {e}"))?;
-        aube_resolver::remove_auto_installed_peers(&mut graph, &auto_installed);
-    }
 
     let pkg_count = graph.packages.len();
     aube_lockfile::write_lockfile(&cwd, &graph, &manifest)

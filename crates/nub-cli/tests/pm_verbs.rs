@@ -651,15 +651,21 @@ fn import_writes_peer_suffixes_for_bun_lock_source() {
         lock.contains("ajv-keywords@3.5.2(ajv@6.12.6)"),
         "bun-sourced import must carry the peer-context suffix: {lock}"
     );
-    // Only the snapshots section carries the suffixed key (the packages
-    // section's resolution key stays bare), so the split yields two parts.
+    // Bound the check to ajv-keywords' OWN snapshot block: split on its
+    // suffixed key (unique to the snapshots section — the packages key stays
+    // bare), then cut at the blank line that separates snapshot entries. The
+    // whole-file remainder would let a peer edge that landed on the wrong
+    // snapshot still pass.
     let snapshot = lock
         .split("ajv-keywords@3.5.2(ajv@6.12.6):")
         .nth(1)
+        .unwrap_or("")
+        .split("\n\n")
+        .next()
         .unwrap_or("");
     assert!(
         snapshot.contains("ajv: 6.12.6"),
-        "resolved peer must be mirrored into dependencies: {snapshot}"
+        "resolved peer must be mirrored into ajv-keywords' snapshot deps: {snapshot}"
     );
 }
 
