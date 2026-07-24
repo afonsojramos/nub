@@ -125,7 +125,10 @@ pub(crate) fn run_init(opts: InitOptions) -> Result<i32> {
     files.push((entry, "console.log(\"Hello from Nub\");\n".to_string()));
     files.push((
         ".gitignore",
-        "node_modules\n.env\n.env.local\n.env.*.local\n*.log\n.DS_Store\n".to_string(),
+        // Ignore every env file, then re-admit the committed template: the
+        // negation is what keeps `.env.example` tracked without un-ignoring
+        // `.env.production`/`.env.development`, which routinely hold secrets.
+        "node_modules\n.env*\n!.env.example\n*.log\n.DS_Store\n".to_string(),
     ));
     files.push(("README.md", format!("# {name}\n")));
 
@@ -252,21 +255,33 @@ fn git_init(cwd: &Path) -> bool {
 }
 
 /// npm-valid name from arbitrary input. A scoped name (`@scope/pkg`) sanitizes
-/// per-part, preserving `@` and `/`; a bare `@scope` with no package part is
-/// invalid (empty result = the caller falls back or re-prompts), rather than
-/// silently mangling to `scope`. Anything else sanitizes as one token.
+/// per-part, preserving `@` and `/`; a bare `@scope`, a second `/`, or a part
+/// that sanitizes to nothing is invalid (empty result = the caller falls back
+/// or re-prompts), rather than silently mangling to `scope`/`@a/bc`. Anything
+/// else sanitizes as one token.
 fn sanitize_name(raw: &str) -> String {
     let raw = raw.trim();
     if raw.starts_with('@') {
         return match raw.strip_prefix('@').and_then(|r| r.split_once('/')) {
+            // An npm name carries at most one `/`. A second one is malformed
+            // input, not something to splice away: `@a/b/c` must not become
+            // `@a/bc`, the same silent-mangle this function exists to stop.
+            Some((_, pkg)) if pkg.contains('/') => String::new(),
             Some((scope, pkg)) => {
-                let (scope, pkg) = (sanitize_part(scope), sanitize_part(pkg));
+                let (scope, mut pkg) = (sanitize_part(scope), sanitize_part(pkg));
                 if scope.is_empty() || pkg.is_empty() {
-                    String::new()
-                } else {
-                    let mut s = format!("@{scope}/{pkg}");
-                    s.truncate(214);
-                    s
+                    return String::new();
+                }
+                // npm caps the whole name at 214, and the budget comes off the
+                // package part on purpose: truncating the assembled string can
+                // cut the `/` off and yield a bare `@scope` — precisely the
+                // invalid shape rejected above.
+                match 214usize.checked_sub(scope.len() + "@/".len()) {
+                    Some(budget) if budget > 0 => {
+                        pkg.truncate(budget);
+                        format!("@{scope}/{pkg}")
+                    }
+                    _ => String::new(),
                 }
             }
             None => String::new(),
@@ -279,6 +294,7 @@ fn sanitize_name(raw: &str) -> String {
 /// leading `.`/`_`/`-`. Empty result = invalid input.
 fn sanitize_part(raw: &str) -> String {
     let mut s: String = raw
+        .trim()
         .to_lowercase()
         .chars()
         .map(|c| if c.is_whitespace() { '-' } else { c })
@@ -308,11 +324,30 @@ mod tests {
     fn sanitize_scoped_names_sanitize_per_part_and_reject_bare_scopes() {
         assert_eq!(sanitize_name("@scope/pkg"), "@scope/pkg");
         assert_eq!(sanitize_name("@My Org/My App"), "@my-org/my-app");
+        // Whitespace hugging the separator belongs to neither part.
+        assert_eq!(sanitize_name("@scope / pkg"), "@scope/pkg");
         // A bare `@scope` (no package part) is invalid — never mangle to
         // `scope`, and a scope that sanitizes to nothing is invalid too.
         assert_eq!(sanitize_name("@scope"), "");
         assert_eq!(sanitize_name("@/pkg"), "");
         assert_eq!(sanitize_name("@🎉/pkg"), "");
+        // A second `/` is malformed input, not a mangle-to-fit case.
+        assert_eq!(sanitize_name("@a/b/c"), "");
+        assert_eq!(sanitize_name("@scope/pkg/"), "");
+    }
+
+    #[test]
+    fn scoped_length_cap_spends_its_budget_on_the_package_part() {
+        // Truncating the assembled name could cut off the `/` and leave a bare
+        // `@scope`; the cap has to fall on the package part instead.
+        let long = sanitize_name(&format!("@{}/{}", "a".repeat(200), "b".repeat(200)));
+        assert_eq!(long.len(), 214);
+        assert!(
+            long.starts_with(&format!("@{}/", "a".repeat(200))),
+            "{long}"
+        );
+        // A scope so long that no package part fits is invalid, not truncated.
+        assert_eq!(sanitize_name(&format!("@{}/pkg", "a".repeat(213))), "");
     }
 
     #[test]
