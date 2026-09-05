@@ -1590,6 +1590,62 @@ pub fn serialize_json_with_indent<T: serde::Serialize>(
         .map_err(|e| serde_json::Error::io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))
 }
 
+/// The surface style of an existing JSON manifest: indent unit, line-ending
+/// flavor, and trailing-newline state. Reproducing all three keeps an
+/// `update`/`add`/settings edit diffing as the changed keys rather than as a
+/// whole-file reformat. Deliberately the UNION of what the reference PMs
+/// preserve, since each drops one: npm reproduces the indent and line ending
+/// but always appends a final newline, pnpm reproduces the indent and the
+/// trailing-newline state but never CRLF.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JsonStyle {
+    pub indent: String,
+    pub crlf: bool,
+    pub trailing_newline: bool,
+}
+
+impl Default for JsonStyle {
+    /// The style used when there is no original to imitate (a manifest created
+    /// from scratch): two-space indent, LF, trailing newline.
+    fn default() -> Self {
+        JsonStyle {
+            indent: "  ".to_string(),
+            crlf: false,
+            trailing_newline: true,
+        }
+    }
+}
+
+/// Detect the [`JsonStyle`] of an existing JSON document. Indent detection is
+/// [`detect_json_indent`]; a raw `\r\n` can only be a line terminator (JSON
+/// escapes a carriage return inside a string), so its presence marks the file
+/// CRLF.
+pub fn detect_json_style(raw: &str) -> JsonStyle {
+    JsonStyle {
+        indent: detect_json_indent(raw).to_string(),
+        crlf: raw.contains("\r\n"),
+        trailing_newline: raw.ends_with('\n'),
+    }
+}
+
+/// Serialize `value` as pretty JSON in `style`: [`serialize_json_with_indent`]
+/// for the body, then the source's line ending and trailing-newline state.
+pub fn serialize_json_with_style<T: serde::Serialize>(
+    value: &T,
+    style: &JsonStyle,
+) -> Result<String, serde_json::Error> {
+    let mut out = serialize_json_with_indent(value, &style.indent)?;
+    if style.crlf {
+        // The serialized body carries no `\r` of its own, so the replace is
+        // exact.
+        out = out.replace('\n', "\r\n");
+    }
+    if style.trailing_newline {
+        out.push_str(if style.crlf { "\r\n" } else { "\n" });
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1630,6 +1686,31 @@ mod tests {
             serialize_json_with_indent(&val, "\t").unwrap(),
             "{\n\t\"name\": \"foo\",\n\t\"version\": \"1.0.0\"\n}"
         );
+    }
+
+    #[test]
+    fn detect_json_style_reads_line_endings_and_trailing_newline() {
+        let style = detect_json_style("{\r\n    \"name\": \"x\"\r\n}");
+        assert_eq!(style.indent, "    ");
+        assert!(style.crlf);
+        assert!(!style.trailing_newline);
+
+        // Nothing to imitate — no indented line, LF, ends with a newline.
+        assert_eq!(detect_json_style("{}\n"), JsonStyle::default());
+    }
+
+    #[test]
+    fn serialize_json_with_style_round_trips_the_source_shape() {
+        let original =
+            "{\r\n\t\"name\": \"x\",\r\n\t\"dependencies\": {\r\n\t\t\"a\": \"^1.0.0\"\r\n\t}\r\n}";
+        let value: serde_json::Value = serde_json::from_str(original).unwrap();
+        let rewritten = serialize_json_with_style(&value, &detect_json_style(original)).unwrap();
+        assert_eq!(rewritten, original);
+
+        // A CRLF source's *trailing* newline is `\r\n` too.
+        let with_eof = format!("{original}\r\n");
+        let rewritten = serialize_json_with_style(&value, &detect_json_style(&with_eof)).unwrap();
+        assert_eq!(rewritten, with_eof);
     }
 
     fn parse(json: &str) -> PackageJson {

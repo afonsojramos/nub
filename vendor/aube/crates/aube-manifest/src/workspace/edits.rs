@@ -40,7 +40,7 @@ pub fn remove_setting_entry(cwd: &Path, key: &str, entry_key: &str) -> Result<bo
         return Ok(false);
     }
     let raw = std::fs::read_to_string(&path).map_err(|e| crate::Error::Io(path.clone(), e))?;
-    let indent = crate::detect_json_indent(&raw).to_string();
+    let style = crate::detect_json_style(&raw);
     let mut value = crate::parse_json::<serde_json::Value>(&path, raw)?;
     let obj = value.as_object_mut().ok_or_else(|| {
         crate::Error::YamlParse(path.clone(), "package.json is not an object".to_string())
@@ -70,9 +70,8 @@ pub fn remove_setting_entry(cwd: &Path, key: &str, entry_key: &str) -> Result<bo
         return Ok(existed);
     }
 
-    let mut out = crate::serialize_json_with_indent(&value, &indent)
+    let out = crate::serialize_json_with_style(&value, &style)
         .map_err(|e| crate::Error::YamlParse(path.clone(), format!("failed to serialize: {e}")))?;
-    out.push('\n');
     std::fs::write(&path, out).map_err(|e| crate::Error::Io(path, e))?;
     Ok(existed)
 }
@@ -103,7 +102,7 @@ where
 {
     let path = cwd.join("package.json");
     let raw = std::fs::read_to_string(&path).map_err(|e| crate::Error::Io(path.clone(), e))?;
-    let indent = crate::detect_json_indent(&raw).to_string();
+    let style = crate::detect_json_style(&raw);
     let mut value = crate::parse_json::<serde_json::Value>(&path, raw)?;
 
     let obj = value.as_object_mut().ok_or_else(|| {
@@ -228,9 +227,8 @@ where
         return Ok(());
     }
 
-    let mut out = crate::serialize_json_with_indent(&value, &indent)
+    let out = crate::serialize_json_with_style(&value, &style)
         .map_err(|e| crate::Error::YamlParse(path.clone(), format!("failed to serialize: {e}")))?;
-    out.push('\n');
     std::fs::write(&path, out).map_err(|e| crate::Error::Io(path, e))?;
     Ok(())
 }
@@ -274,6 +272,7 @@ pub fn add_to_pnpm_only_built_dependencies(
 
     let path = cwd.join("package.json");
     let raw = std::fs::read_to_string(&path).map_err(|e| crate::Error::Io(path.clone(), e))?;
+    let style = crate::detect_json_style(&raw);
     let mut value = crate::parse_json::<serde_json::Value>(&path, raw)?;
     let obj = value.as_object_mut().ok_or_else(|| {
         crate::Error::YamlParse(path.clone(), "package.json is not an object".to_string())
@@ -305,9 +304,8 @@ pub fn add_to_pnpm_only_built_dependencies(
     if *obj == before {
         return Ok(());
     }
-    let mut out = serde_json::to_string_pretty(&value)
+    let out = crate::serialize_json_with_style(&value, &style)
         .map_err(|e| crate::Error::YamlParse(path.clone(), format!("failed to serialize: {e}")))?;
-    out.push('\n');
     std::fs::write(&path, out).map_err(|e| crate::Error::Io(path, e))?;
     Ok(())
 }
@@ -339,6 +337,7 @@ pub fn set_pnpm_allow_builds_entries(
 
     let path = cwd.join("package.json");
     let raw = std::fs::read_to_string(&path).map_err(|e| crate::Error::Io(path.clone(), e))?;
+    let style = crate::detect_json_style(&raw);
     let mut json = crate::parse_json::<serde_json::Value>(&path, raw)?;
     let obj = json.as_object_mut().ok_or_else(|| {
         crate::Error::YamlParse(path.clone(), "package.json is not an object".to_string())
@@ -364,9 +363,8 @@ pub fn set_pnpm_allow_builds_entries(
     if *obj == before {
         return Ok(());
     }
-    let mut out = serde_json::to_string_pretty(&json)
+    let out = crate::serialize_json_with_style(&json, &style)
         .map_err(|e| crate::Error::YamlParse(path.clone(), format!("failed to serialize: {e}")))?;
-    out.push('\n');
     std::fs::write(&path, out).map_err(|e| crate::Error::Io(path, e))?;
     Ok(())
 }
@@ -691,5 +689,33 @@ mod tests {
         );
         // The non-chosen `aube` namespace is scrubbed of `allowBuilds`.
         assert!(obj.get("aube").and_then(|a| a.get("allowBuilds")).is_none());
+    }
+
+    /// A settings edit reproduces the manifest's own surface style, so it
+    /// diffs as the changed keys rather than as a CRLF→LF whole-file rewrite.
+    #[test]
+    fn setting_edit_preserves_tabs_crlf_and_a_missing_trailing_newline() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_manifest(tmp.path(), "{\r\n\t\"name\": \"x\"\r\n}");
+
+        edit_setting_map(tmp.path(), "allowBuilds", |m| {
+            m.insert("esbuild".to_string(), serde_json::Value::Bool(true));
+        })
+        .unwrap();
+
+        let raw = std::fs::read_to_string(tmp.path().join("package.json")).unwrap();
+        // Positive control: every style assertion below also holds on a file
+        // nobody rewrote, so prove the write happened first.
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            parsed["aube"]["allowBuilds"]["esbuild"],
+            serde_json::Value::Bool(true)
+        );
+        assert!(raw.starts_with("{\r\n\t\"name\""), "style lost:\n{raw:?}");
+        assert!(
+            !raw.contains("\n  \""),
+            "reindented to two spaces:\n{raw:?}"
+        );
+        assert!(raw.ends_with('}'), "trailing newline added:\n{raw:?}");
     }
 }
