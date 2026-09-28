@@ -1022,25 +1022,41 @@ mod tests {
 
     #[test]
     fn pnpm_native_placeholders_resolve_to_node_launchers() {
-        let meta = serde_json::json!({
-            "name": "pnpm",
-            "version": "12.0.0",
-            "bin": { "pnpm": "pnpm", "pnpx": "pnpx" },
-            "dist": {
-                "tarball": "https://registry.npmjs.org/pnpm/-/pnpm-12.0.0.tgz",
-                "integrity": "sha512-deadbeef"
+        for prefix in ["", "./"] {
+            let meta = serde_json::json!({
+                "name": "pnpm",
+                "version": "12.0.0",
+                "bin": {
+                    "pnpm": format!("{prefix}pnpm"),
+                    "pnpx": format!("{prefix}pnpx")
+                },
+                "dist": {
+                    "tarball": "https://registry.npmjs.org/pnpm/-/pnpm-12.0.0.tgz",
+                    "integrity": "sha512-deadbeef"
+                }
+            });
+            let dist = resolve_dist_from_version_manifest(&meta).unwrap();
+            assert_eq!(dist.bin_subpath, PathBuf::from("bin/pnpm.mjs"));
+            for entry in ["pnpm", "pnpx"] {
+                assert_eq!(
+                    named_bin_subpath(&meta, entry),
+                    Some(PathBuf::from(format!("bin/{entry}.mjs"))),
+                    "{entry} must use the Node launcher, not the native placeholder"
+                );
             }
-        });
-        let dist = resolve_dist_from_version_manifest(&meta).unwrap();
-        assert_eq!(dist.bin_subpath, PathBuf::from("bin/pnpm.mjs"));
-        for entry in ["pnpm", "pnpx"] {
+            assert_eq!(named_bin_subpath(&meta, "missing"), None);
+
+            let single = serde_json::json!({
+                "name": "pnpm",
+                "bin": format!("{prefix}pnpm")
+            });
+            assert_eq!(bin_subpath(&single), Some(PathBuf::from("bin/pnpm.mjs")));
             assert_eq!(
-                named_bin_subpath(&meta, entry),
-                Some(PathBuf::from(format!("bin/{entry}.mjs"))),
-                "{entry} must use the Node launcher, not the native placeholder"
+                named_bin_subpath(&single, "pnpm"),
+                Some(PathBuf::from("bin/pnpm.mjs"))
             );
+            assert_eq!(named_bin_subpath(&single, "pnpx"), None);
         }
-        assert_eq!(named_bin_subpath(&meta, "missing"), None);
 
         let other = serde_json::json!({
             "name": "other",
