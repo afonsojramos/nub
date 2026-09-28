@@ -546,6 +546,8 @@ fn pnpm_12_cached_shims_run_the_node_launchers() {
             &proj,
             &[
                 ("PATH", path.as_str()),
+                ("HOME", work.to_str().unwrap()),
+                ("XDG_CONFIG_HOME", work.to_str().unwrap()),
                 ("XDG_CACHE_HOME", cache.to_str().unwrap()),
             ],
         );
